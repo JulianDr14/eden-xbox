@@ -13,12 +13,23 @@
 #include "core/core.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/svc.h"
+#include "core/hle/kernel/svc/svc_debug_string.h"
 #include "core/memory.h"
 
 namespace Kernel::Svc {
 
 constexpr auto MAX_MSG_TIME = std::chrono::milliseconds(250);
 const auto MAX_MSG_SIZE = 0x1000;
+
+namespace {
+std::mutex g_debug_observer_mutex;
+DebugStringObserver g_debug_observer;
+} // namespace
+
+void SetDebugStringObserver(DebugStringObserver observer) {
+    std::lock_guard lock(g_debug_observer_mutex);
+    g_debug_observer = std::move(observer);
+}
 
 /// Used to output a message on a debug hardware unit - does nothing on a retail unit
 Result OutputDebugString(Core::System& system, u64 address, u64 len) {
@@ -59,14 +70,34 @@ Result OutputDebugString(Core::System& system, u64 address, u64 len) {
             flusher_data.msg_cv.notify_all();
         });
     }
+    // Only pay the per-call copy when a debug-string observer is actually installed (the headless
+    // UWP boot frontend installs one to watch for the JIT-liveness sentinel; normal builds do not).
+    bool has_observer;
+    {
+        std::lock_guard observer_lock(g_debug_observer_mutex);
+        has_observer = static_cast<bool>(g_debug_observer);
+    }
+    std::string observed_chunk;
     {
         std::lock_guard lock(flusher_data.msg_mutex);
         const auto old_size = flusher_data.msg_buffer.size();
         flusher_data.msg_buffer.resize(old_size + len);
         GetCurrentMemory(system.Kernel()).ReadBlock(address, flusher_data.msg_buffer.data() + old_size, len);
         flusher_data.last_msg_time = std::chrono::steady_clock::now();
+        if (has_observer) {
+            // Capture the chunk while we hold the buffer; the flusher thread may clear it after we
+            // release this lock.
+            observed_chunk.assign(flusher_data.msg_buffer.data() + old_size, len);
+        }
     }
     flusher_data.msg_cv.notify_one();
+    if (has_observer) {
+        // Notify outside the message lock to avoid holding two locks across the callback.
+        std::lock_guard observer_lock(g_debug_observer_mutex);
+        if (g_debug_observer) {
+            g_debug_observer(observed_chunk);
+        }
+    }
     R_SUCCEED();
 }
 
