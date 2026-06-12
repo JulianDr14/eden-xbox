@@ -250,6 +250,15 @@ if (WIN32)
     target_link_libraries(common PRIVATE LLVM::Demangle)
 endif()
 
+# Xbox/UWP AppContainer: HostMemory (host_memory.cpp) must use the sandbox-legal *FromApp
+# placeholder-memory APIs. CMAKE_SYSTEM_NAME=WindowsStore (set by the uwp-x64 preset) is the reliable
+# build signal: the Store-CRT vcvars environment still compiles under the DESKTOP_APP partition, so
+# the source's WINAPI_FAMILY_APP check alone does not fire. Define the project flag so the *FromApp
+# path is active for the console target. Desktop builds are unaffected.
+if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    target_compile_definitions(common PRIVATE YUZU_UWP_APPCONTAINER=1)
+endif()
+
 if(ANDROID)
     # For ASharedMemory_create
     target_link_libraries(common PRIVATE android)
