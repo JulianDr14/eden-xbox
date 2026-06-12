@@ -89,6 +89,28 @@ namespace Common {
 #define MEM_PRESERVE_PLACEHOLDER 0x00000002
 #endif
 
+// On the Xbox/UWP AppContainer the placeholder virtual-memory APIs used for the emulated DRAM must go
+// through the sandbox-legal *FromApp variants. The signatures of VirtualAlloc2FromApp and
+// MapViewOfFile3FromApp match their base versions (we just resolve a different export); only the file
+// mapping differs (CreateFileMappingFromApp has no extended-parameter form, so it takes the page
+// protection OR'd with SEC_COMMIT directly). VirtualFree/VirtualFreeEx/UnmapViewOfFile2/CloseHandle
+// are permitted in the AppContainer and are left unchanged.
+//
+// Auto-detected from the Windows SDK app-family partition (a UWP/WindowsStore CMake target defines
+// WINAPI_FAMILY == WINAPI_FAMILY_APP); force it for a desktop compile/run check with
+// -DYUZU_UWP_APPCONTAINER. The *FromApp exports also exist on desktop Win10+, so the forced build is
+// runtime-valid there too.
+// VirtualProtectFromApp is resolved dynamically (like the other kernelbase entry points below)
+// rather than called directly: a direct call would pull in the UWP/onecore import library, whereas
+// GetProcAddress keeps this translation unit free of link-time dependencies on the target's link set.
+// The plain desktop path keeps calling VirtualProtect directly, so it is byte-for-byte unchanged.
+#if defined(YUZU_UWP_APPCONTAINER) || (defined(WINAPI_FAMILY) && WINAPI_FAMILY == WINAPI_FAMILY_APP)
+#define HOST_MEMORY_USE_FROM_APP 1
+#define HOST_MEMORY_VIRTUAL_PROTECT pfn_VirtualProtectFromApp
+#else
+#define HOST_MEMORY_VIRTUAL_PROTECT VirtualProtect
+#endif
+
 using PFN_CreateFileMapping2 = _Ret_maybenull_ HANDLE(WINAPI*)(
     _In_ HANDLE File, _In_opt_ SECURITY_ATTRIBUTES* SecurityAttributes, _In_ ULONG DesiredAccess,
     _In_ ULONG PageProtection, _In_ ULONG AllocationAttributes, _In_ ULONG64 MaximumSize,
@@ -111,6 +133,16 @@ using PFN_MapViewOfFile3 = _Ret_maybenull_ PVOID(WINAPI*)(
 using PFN_UnmapViewOfFile2 = BOOL(WINAPI*)(_In_ HANDLE Process, _In_ PVOID BaseAddress,
                                            _In_ ULONG UnmapFlags);
 
+// AppContainer-legal file mapping. Unlike CreateFileMapping2 it has no extended-parameter form; the
+// page protection carries SEC_COMMIT directly (the same shape as classic CreateFileMapping).
+using PFN_CreateFileMappingFromApp = _Ret_maybenull_ HANDLE(WINAPI*)(
+    _In_ HANDLE File, _In_opt_ PSECURITY_ATTRIBUTES SecurityAttributes, _In_ ULONG PageProtection,
+    _In_ ULONG64 MaximumSize, _In_opt_ PCWSTR Name);
+
+// VirtualProtectFromApp — identical shape to VirtualProtect; resolved by name under the AppContainer.
+using PFN_VirtualProtect = BOOL(WINAPI*)(_In_ LPVOID Address, _In_ SIZE_T Size,
+                                         _In_ DWORD NewProtection, _Out_ PDWORD OldProtection);
+
 template <typename T>
 static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn) {
     if (!dll.GetSymbol(name, &pfn)) {
@@ -128,15 +160,27 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to load Kernelbase.dll");
             throw std::bad_alloc{};
         }
+#ifdef HOST_MEMORY_USE_FROM_APP
+        GetFuncAddress(kernelbase_dll, "CreateFileMappingFromApp", pfn_CreateFileMappingFromApp);
+        GetFuncAddress(kernelbase_dll, "VirtualAlloc2FromApp", pfn_VirtualAlloc2);
+        GetFuncAddress(kernelbase_dll, "MapViewOfFile3FromApp", pfn_MapViewOfFile3);
+        GetFuncAddress(kernelbase_dll, "VirtualProtectFromApp", pfn_VirtualProtectFromApp);
+#else
         GetFuncAddress(kernelbase_dll, "CreateFileMapping2", pfn_CreateFileMapping2);
         GetFuncAddress(kernelbase_dll, "VirtualAlloc2", pfn_VirtualAlloc2);
         GetFuncAddress(kernelbase_dll, "MapViewOfFile3", pfn_MapViewOfFile3);
+#endif
         GetFuncAddress(kernelbase_dll, "UnmapViewOfFile2", pfn_UnmapViewOfFile2);
 
         // Allocate backing file map
+#ifdef HOST_MEMORY_USE_FROM_APP
+        backing_handle = pfn_CreateFileMappingFromApp(
+            INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_COMMIT, backing_size, nullptr);
+#else
         backing_handle =
             pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ,
                                    PAGE_READWRITE, SEC_COMMIT, backing_size, nullptr, nullptr, 0);
+#endif
         if (!backing_handle) {
             LOG_CRITICAL(HW_Memory, "Failed to allocate {} MiB of backing memory",
                          backing_size >> 20);
@@ -214,7 +258,8 @@ public:
             const size_t offset = (std::max)(it->lower(), virtual_offset);
             const size_t protect_length = (std::min)(it->upper(), virtual_end) - offset;
             DWORD old_flags{};
-            if (!VirtualProtect(virtual_base + offset, protect_length, new_flags, &old_flags)) {
+            if (!HOST_MEMORY_VIRTUAL_PROTECT(virtual_base + offset, protect_length, new_flags,
+                                             &old_flags)) {
                 LOG_CRITICAL(HW_Memory, "Failed to change virtual memory protect rules");
             }
             ++it;
@@ -382,9 +427,11 @@ private:
 
     DynamicLibrary kernelbase_dll;
     PFN_CreateFileMapping2 pfn_CreateFileMapping2{};
+    PFN_CreateFileMappingFromApp pfn_CreateFileMappingFromApp{};
     PFN_VirtualAlloc2 pfn_VirtualAlloc2{};
     PFN_MapViewOfFile3 pfn_MapViewOfFile3{};
     PFN_UnmapViewOfFile2 pfn_UnmapViewOfFile2{};
+    PFN_VirtualProtect pfn_VirtualProtectFromApp{};
 
     std::mutex placeholder_mutex;                                 ///< Mutex for placeholders
     boost::icl::separate_interval_set<size_t> placeholders;       ///< Mapped placeholders
