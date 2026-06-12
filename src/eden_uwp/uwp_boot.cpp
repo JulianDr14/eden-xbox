@@ -121,10 +121,14 @@ int RunHeadlessBoot(const std::string& nro_path) {
 } // namespace EdenXbox
 
 // ============================================================================================
-// UWP entry point: a CoreApplication IFrameworkView whose Run() drives RunHeadlessBoot() against an
-// NRO staged in the app's sandboxed local storage (ApplicationData::Current().LocalFolder()\boot.nro).
+// UWP entry point: a CoreApplication IFrameworkView whose Run() drives RunHeadlessBoot() against the
+// homebrew NRO bundled in the package install location (Package.InstalledLocation\boot.nro). Reading
+// the fixed GATE-2 payload from the read-only install dir keeps the MSIX self-contained — no
+// Device-Portal file-push or LocalState chicken-and-egg. (Eden's log still writes to the writable
+// LocalFolder; see common/fs/path_util.cpp under YUZU_UWP_APPCONTAINER.)
 // ============================================================================================
 #include <winrt/Windows.ApplicationModel.Core.h>
+#include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.UI.Core.h>
@@ -145,11 +149,11 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
     void Uninitialize() {}
 
     void Run() {
-        // The homebrew NRO is staged into the app's writable local folder (sideloaded alongside the
-        // package, or pushed via Device Portal). UTF-8 the WinRT path for Eden's filesystem layer.
-        const auto local_folder =
-            Windows::Storage::ApplicationData::Current().LocalFolder().Path();
-        const std::string nro_path = winrt::to_string(local_folder) + "\\boot.nro";
+        // Read the bundled NRO from the package install location (read-only, always present once the
+        // appx is installed). UTF-8 the WinRT path for Eden's filesystem layer.
+        const auto install_path =
+            Windows::ApplicationModel::Package::Current().InstalledLocation().Path();
+        const std::string nro_path = winrt::to_string(install_path) + "\\boot.nro";
         EdenXbox::RunHeadlessBoot(nro_path);
     }
 };
