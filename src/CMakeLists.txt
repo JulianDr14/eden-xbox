@@ -274,6 +274,11 @@ if (ENABLE_QT)
     add_subdirectory(yuzu)
 endif()
 
+# Xbox/UWP headless boot frontend (Phase 2, toward GATE 2). Only for the WindowsStore target.
+if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    add_subdirectory(eden_uwp)
+endif()
+
 if (ENABLE_WEB_SERVICE)
     add_subdirectory(web_service)
 endif()
