@@ -11,6 +11,18 @@
 #ifdef _WIN32
 #    define WIN32_LEAN_AND_MEAN
 #    include <windows.h>
+// On the Xbox/UWP AppContainer the plain Virtual* APIs are unavailable for JIT memory; the
+// sandbox-legal *FromApp variants must be used instead, and emitting executable pages additionally
+// requires the `codeGeneration` restricted capability in the package manifest. The function shapes
+// are identical, so we just select the symbol. RWX is never grantable under the AppContainer, so
+// DYNARMIC_UWP_APPCONTAINER always implies DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT (W^X) — see CMakeLists.
+#    if defined(DYNARMIC_UWP_APPCONTAINER)
+#        define DYNARMIC_VIRTUAL_ALLOC   VirtualAllocFromApp
+#        define DYNARMIC_VIRTUAL_PROTECT VirtualProtectFromApp
+#    else
+#        define DYNARMIC_VIRTUAL_ALLOC   VirtualAlloc
+#        define DYNARMIC_VIRTUAL_PROTECT VirtualProtect
+#    endif
 #else
 #    include <sys/mman.h>
 #endif
@@ -65,7 +77,7 @@ class CustomXbyakAllocator : public Xbyak::Allocator {
 public:
 #ifdef _WIN32
     uint8_t* alloc(size_t size) override {
-        void* p = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_READWRITE);
+        void* p = DYNARMIC_VIRTUAL_ALLOC(nullptr, size, MEM_RESERVE, PAGE_READWRITE);
         if (p == nullptr) {
             using Xbyak::Error;
             XBYAK_THROW(Xbyak::ERR_CANT_ALLOC);
@@ -132,7 +144,10 @@ CustomXbyakAllocator s_allocator;
 void ProtectMemory(const void* base, size_t size, bool is_executable) {
 #    ifdef _WIN32
     DWORD oldProtect = 0;
-    VirtualProtect(const_cast<void*>(base), size, is_executable ? PAGE_EXECUTE_READ : PAGE_READWRITE, &oldProtect);
+    // The is_executable→PAGE_EXECUTE_READ transition is the call that requires the `codeGeneration`
+    // capability under the AppContainer (VirtualProtectFromApp); the W^X invariant means we only ever
+    // hold RW or RX, never RWX.
+    DYNARMIC_VIRTUAL_PROTECT(const_cast<void*>(base), size, is_executable ? PAGE_EXECUTE_READ : PAGE_READWRITE, &oldProtect);
 #    else
     static const size_t pageSize = sysconf(_SC_PAGESIZE);
     const size_t iaddr = reinterpret_cast<size_t>(base);
@@ -295,8 +310,11 @@ void BlockOfCode::EnsureMemoryCommitted([[maybe_unused]] size_t codesize) {
     if (committed_size < size_ + codesize) {
         committed_size = std::min<size_t>(maxSize_, committed_size + codesize);
 #    ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
-        VirtualAlloc(top_, committed_size, MEM_COMMIT, PAGE_READWRITE);
+        // W^X: commit read-write only; ProtectMemory() flips pages to RX before execution.
+        DYNARMIC_VIRTUAL_ALLOC(top_, committed_size, MEM_COMMIT, PAGE_READWRITE);
 #    else
+        // RWX fast path — desktop only. Never compiled under DYNARMIC_UWP_APPCONTAINER, which
+        // forces DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT on (the AppContainer never grants RWX).
         VirtualAlloc(top_, committed_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 #    endif
     }

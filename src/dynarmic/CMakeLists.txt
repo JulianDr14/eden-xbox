@@ -25,7 +25,12 @@ endif()
 # Dynarmic project options
 option(DYNARMIC_ENABLE_CPU_FEATURE_DETECTION "Turning this off causes dynarmic to assume the host CPU doesn't support anything later than SSE3" ON)
 
-if (PLATFORM_OPENBSD OR PLATFORM_DRAGONFLY OR PLATFORM_NETBSD)
+# Xbox / UWP AppContainer target: JIT pages must be allocated/protected via the *FromApp APIs and
+# emitting executable memory requires the `codeGeneration` manifest capability. RWX is never grantable
+# in the sandbox, so this implies W^X (no-execute support) unconditionally.
+option(DYNARMIC_UWP_APPCONTAINER "Build dynarmic for the Xbox/UWP AppContainer (Virtual*FromApp + forced W^X)" OFF)
+
+if (PLATFORM_OPENBSD OR PLATFORM_DRAGONFLY OR PLATFORM_NETBSD OR DYNARMIC_UWP_APPCONTAINER)
     set(REQUIRE_WX ON)
 else()
     set(REQUIRE_WX OFF)

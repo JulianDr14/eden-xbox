@@ -14,10 +14,14 @@
 #include "dynarmic/backend/x64/hostloc.h"
 #include "dynarmic/common/spin_lock.h"
 
-#ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
-static const auto default_cg_mode = Xbyak::DontSetProtectRWE;
+#ifdef DYNARMIC_UWP_APPCONTAINER
+#    include <intrin.h>  // _InterlockedExchange / _mm_pause — non-JIT AppContainer spin lock
 #else
+#    ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
+static const auto default_cg_mode = Xbyak::DontSetProtectRWE;
+#    else
 static const auto default_cg_mode = nullptr; //Allow RWE
+#    endif
 #endif
 
 namespace Dynarmic {
@@ -74,6 +78,8 @@ void EmitSpinLockUnlock(Xbyak::CodeGenerator& code, Xbyak::Reg64 ptr, Xbyak::Reg
     code.mfence();
 }
 
+#ifndef DYNARMIC_UWP_APPCONTAINER
+
 namespace {
 struct SpinLockImpl {
     void Initialize() noexcept;
@@ -116,5 +122,25 @@ void SpinLock::Unlock() noexcept {
     std::call_once(flag, &SpinLockImpl::GlobalInitialize);
     impl->unlock(&storage);
 }
+
+#else  // DYNARMIC_UWP_APPCONTAINER
+
+// The Xbox/UWP AppContainer forbids the bare Xbyak::CodeGenerator path used above: it allocates
+// executable memory through Xbyak's default Virtual* allocator (not the *FromApp variants), which
+// faults in the sandbox. The host-side lock is trivial, so we emit nothing and spin on the same
+// `volatile int storage` with an interlocked exchange + pause — identical semantics to the JIT's
+// xchg/pause. The guest-facing EmitSpinLockLock/EmitSpinLockUnlock above are unaffected; they emit
+// into the W^X-managed BlockOfCode, which already goes through the *FromApp path.
+void SpinLock::Lock() noexcept {
+    while (_InterlockedExchange(reinterpret_cast<volatile long*>(&storage), 1) != 0) {
+        _mm_pause();
+    }
+}
+
+void SpinLock::Unlock() noexcept {
+    _InterlockedExchange(reinterpret_cast<volatile long*>(&storage), 0);
+}
+
+#endif  // DYNARMIC_UWP_APPCONTAINER
 
 }  // namespace Dynarmic
