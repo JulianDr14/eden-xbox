@@ -1,0 +1,38 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "uwp-x64",
+      "displayName": "Xbox UWP / AppContainer (x64, headless core)",
+      "description": "Configures Eden's core stack (common/core/dynarmic/video_core/...) for the Xbox UWP/WindowsStore (AppContainer) target. Desktop frontends are off; dynarmic builds in its W^X + Virtual*FromApp mode. Headless: the Null renderer is chosen at runtime (Vulkan stays compiled). IMPORTANT: run from a 'vcvarsall.bat x64 uwp' shell so cl/link target the Store CRT (see docs/uwp_build.md). The Ninja generator avoids the VS-instance lookup the VS generator requires.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-uwp",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "WindowsStore",
+        "CMAKE_SYSTEM_VERSION": "10.0",
+        "CMAKE_BUILD_TYPE": "Release",
+        "ENABLE_QT": "OFF",
+        "ENABLE_QT_TRANSLATION": "OFF",
+        "YUZU_CMD": "OFF",
+        "YUZU_ROOM": "OFF",
+        "YUZU_ROOM_STANDALONE": "OFF",
+        "ENABLE_CUBEB": "OFF",
+        "ENABLE_LIBUSB": "OFF",
+        "ENABLE_WEB_SERVICE": "OFF",
+        "USE_DISCORD_PRESENCE": "OFF",
+        "ENABLE_OPENGL": "OFF",
+        "YUZU_TESTS": "OFF",
+        "DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT": "ON",
+        "DYNARMIC_UWP_APPCONTAINER": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "uwp-x64",
+      "configurePreset": "uwp-x64",
+      "description": "Build the Eden core stack for UWP. Add --target <core|dynarmic|common|video_core> to scope."
+    }
+  ]
+}
