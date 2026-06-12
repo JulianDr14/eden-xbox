@@ -22,6 +22,12 @@ build CORE's JIT/memory work and the eventual headless-boot frontend validate ag
   component (`Microsoft.VisualStudio.ComponentGroup.UWP.VC`) and a Windows 10/11 SDK.
 - CMake ≥ 3.25 and Ninja (both ship with VS 2022 under
   `Common7/IDE/CommonExtensions/Microsoft/CMake/`).
+- **Native Windows perl + nasm** (e.g. `winget install StrawberryPerl.StrawberryPerl`
+  and `winget install NASM.NASM`). This target builds OpenSSL **from source** (see the
+  OpenSSL note below); OpenSSL's MSVC Configure needs a native perl (MSYS/git perl
+  mangles paths) and nasm for its asm. Put `C:\Strawberry\perl\bin` on PATH **before**
+  any MSYS perl, and **do not** add `C:\Strawberry\c\bin` (it bundles an old CMake that
+  shadows the VS one).
 
 ## Why Ninja (not the Visual Studio generator)
 
@@ -73,11 +79,14 @@ routes its JIT alloc/protect through `VirtualAllocFromApp`/`VirtualProtectFromAp
   runtime AppContainer still requires the `*FromApp` variants; that swap is tracked in
   CORE's HostMemory work. A stricter `WINAPI_FAMILY_APP` per-target pass can be layered
   on later to catch direct desktop-API calls at compile time.
-- **OpenSSL at exe-link (boot appx).** Static libs build fine, but linking the final
-  AppContainer exe hits the bundled **`openssl-ci` prebuilt, which is `/MT`** (static
-  CRT) — it injects `LIBCMT` and collides with the `/MD` Store-CRT app (everything else
-  is `/MD`, forced by `CMAKE_MSVC_RUNTIME_LIBRARY` at the top level). OpenSSL is pervasive
-  (≈12 core crypto/content TUs), so it can't be dropped; the fix is a `/MD` OpenSSL for
-  this target (build from source rather than the `/MT` prebuilt). Tracked separately.
+- **OpenSSL is built from source here (not the `/MT` prebuilt).** The bundled
+  `openssl-ci` prebuilt is `/MT` and injects `LIBCMT`, which collides with the `/MD`
+  Store-CRT app at exe link (everything else is `/MD`, forced by
+  `CMAKE_MSVC_RUNTIME_LIBRARY`). OpenSSL is pervasive (≈12 core crypto/content TUs), so
+  it can't be dropped. The top-level CMake therefore defaults `YUZU_USE_BUNDLED_OPENSSL=OFF`
+  for `WindowsStore`, building OpenSSL from source — it inherits `/MD` and configures with
+  OpenSSL's `-UWP` target. Verified: it links into a `/MD` UWP exe with no `LIBCMT`
+  conflict. **Exe-link note:** OpenSSL pulls `ws2_32`/`crypt32`/`user32` (the last for its
+  fatal-error/service-detection code) — add those to the final appx exe's link set.
 - **The desktop build is unaffected** — this is a separate preset/binary dir; the normal
   desktop configure is unchanged.
