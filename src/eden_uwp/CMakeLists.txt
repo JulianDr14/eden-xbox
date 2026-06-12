@@ -8,14 +8,19 @@
 add_executable(eden-uwp WIN32
     headless_emu_window.h
     uwp_boot.cpp
+    vma_impl.cpp
 )
 
 # core transitively pulls common/video_core/audio_core/hid_core/dynarmic etc.; name the ones we touch
-# directly so the dependency graph is explicit.
-target_link_libraries(eden-uwp PRIVATE common core video_core audio_core)
+# directly so the dependency graph is explicit. frontend_common provides PlayTimeManager (pulled by
+# core's NS query service).
+target_link_libraries(eden-uwp PRIVATE common core video_core audio_core frontend_common)
 
 # WinRT (CoreApplication, IFrameworkView, ApplicationData) comes from the Store umbrella import lib.
 target_link_libraries(eden-uwp PRIVATE WindowsApp.lib)
+
+# Win32 networking used by core's network_interface (ConvertLengthToIpv4Mask etc.).
+target_link_libraries(eden-uwp PRIVATE iphlpapi ws2_32)
 
 # The HostMemory *FromApp path keys off this for the common headers it includes here too.
 target_compile_definitions(eden-uwp PRIVATE YUZU_UWP_APPCONTAINER=1)
@@ -26,6 +31,12 @@ if (MSVC)
     target_compile_options(eden-uwp PRIVATE /EHsc)
     # AppContainer executable: required for a sideloadable UWP package.
     target_link_options(eden-uwp PRIVATE /APPCONTAINER)
+    # STOPGAP (track for removal): the bundled OpenSSL (libcrypto_static.lib) is a prebuilt /MT static
+    # lib and injects /DEFAULTLIB:LIBCMT, which the dynamic store CRT doesn't provide. Ignoring it lets
+    # OpenSSL's CRT symbols resolve against the app's /MD MSVCRT (single CRT in one binary). The proper
+    # fix is building bundled OpenSSL /MD for the UWP target (YUZU_USE_BUNDLED_OPENSSL — DEVOPS); drop
+    # this line once that lands.
+    target_link_options(eden-uwp PRIVATE /NODEFAULTLIB:LIBCMT)
 endif()
 
 # ── STATUS / remaining work (WIP, not ready to merge) ─────────────────────────────────────────────
