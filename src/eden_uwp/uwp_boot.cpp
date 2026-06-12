@@ -15,9 +15,12 @@
 // house rule) issues svcOutputDebugString with the exact sentinel below; Eden's SVC handler logs
 // OutputDebugString, so observing this line is positive proof the JIT decoded + executed guest code.
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <string>
-#include <thread>
+#include <string_view>
 
 #include "common/logging.h"
 #include "common/settings.h"
@@ -25,6 +28,7 @@
 #include "core/cpu_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
+#include "core/hle/kernel/svc/svc_debug_string.h" // Kernel::Svc::SetDebugStringObserver
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "video_core/gpu.h"
@@ -70,6 +74,19 @@ int RunHeadlessBoot(const std::string& nro_path) {
         return 2;
     }
 
+    // Install the JIT-liveness observer BEFORE running any guest code: it watches every guest
+    // svcOutputDebugString chunk for the sentinel and signals the wait below. Cheap no-op for any
+    // write that isn't the sentinel; zero cost in builds that never install an observer.
+    std::mutex live_mutex;
+    std::condition_variable live_cv;
+    std::atomic<bool> jit_alive{false};
+    Kernel::Svc::SetDebugStringObserver([&](std::string_view chunk) {
+        if (chunk.find(JIT_LIVENESS_SENTINEL) != std::string_view::npos) {
+            jit_alive.store(true, std::memory_order_release);
+            live_cv.notify_all();
+        }
+    });
+
     // Start the GPU host thread (null renderer — no device) and release the CPU manager.
     system.GPU().Start();
     system.GetCpuManager().OnGpuReady();
@@ -77,18 +94,28 @@ int RunHeadlessBoot(const std::string& nro_path) {
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
     void(system.Run());
 
-    // Headless: no window event loop. Run a bounded window for the guest to reach its first SVC and
-    // emit the liveness sentinel, then tear down.
-    // TODO(GATE-2): replace the bounded sleep with the SVC-OutputDebugString detection hook agreed
-    // with QA — return 0 only when JIT_LIVENESS_SENTINEL is observed. This build establishes the
-    // frontend target; the detection hook + homebrew NRO staging are the next step toward GATE 2.
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    // Headless: no window event loop. Wait for the guest to execute through the JIT and emit the
+    // sentinel; the timeout is only a backstop (a hung/failed boot), not the success path.
+    constexpr auto kLivenessTimeout = std::chrono::seconds(30);
+    {
+        std::unique_lock lock(live_mutex);
+        live_cv.wait_for(lock, kLivenessTimeout,
+                         [&] { return jit_alive.load(std::memory_order_acquire); });
+    }
+    const bool alive = jit_alive.load(std::memory_order_acquire);
 
+    Kernel::Svc::SetDebugStringObserver(nullptr); // detach before teardown
     void(system.Pause());
     system.ShutdownMainProcess();
 
-    LOG_INFO(Frontend, "Headless boot finished; liveness sentinel = '{}'", JIT_LIVENESS_SENTINEL);
-    return 0;
+    if (alive) {
+        LOG_INFO(Frontend, "Headless boot: JIT liveness CONFIRMED ('{}' observed).",
+                 JIT_LIVENESS_SENTINEL);
+        return 0;
+    }
+    LOG_CRITICAL(Frontend, "Headless boot: JIT-liveness sentinel '{}' not observed within timeout.",
+                 JIT_LIVENESS_SENTINEL);
+    return 3;
 }
 
 } // namespace EdenXbox
