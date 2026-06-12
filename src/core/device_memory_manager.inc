@@ -548,7 +548,12 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
     const size_t page_end = Common::DivCeil(addr + size, Memory::YUZU_PAGESIZE);
     size_t page = addr >> Memory::YUZU_PAGEBITS;
     auto [asid, base_vaddress] = ExtractCPUBacking(page);
-    auto* memory_device_inter = registered_processes[asid.id];
+    // An unmapped/untracked page yields asid.id == 0; if no process is registered (e.g. the page's
+    // backing was never resolved, or a bare manager as in the unit tests) registered_processes is
+    // empty, so operator[] would be out-of-bounds on the deque. Treat an unregistered asid as "no
+    // device interface" — every use of memory_device_inter below is already null-guarded.
+    auto* memory_device_inter =
+        asid.id < registered_processes.size() ? registered_processes[asid.id] : nullptr;
     const auto release_pending = [&] {
         if (uncache_bytes > 0) {
             if (memory_device_inter != nullptr) {
@@ -578,7 +583,9 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
 
         if (asid.id != asid_2.id) [[unlikely]] {
             release_pending();
-            memory_device_inter = registered_processes[asid_2.id];
+            memory_device_inter = asid_2.id < registered_processes.size()
+                                      ? registered_processes[asid_2.id]
+                                      : nullptr;
         }
 
         if (vpage != old_vpage + 1) [[unlikely]] {
