@@ -353,6 +353,7 @@ add_library(core STATIC
     hle/kernel/svc/svc_condition_variable.cpp
     hle/kernel/svc/svc_debug.cpp
     hle/kernel/svc/svc_debug_string.cpp
+    hle/kernel/svc/svc_debug_string.h
     hle/kernel/svc/svc_device_address_space.cpp
     hle/kernel/svc/svc_event.cpp
     hle/kernel/svc/svc_exception.cpp
