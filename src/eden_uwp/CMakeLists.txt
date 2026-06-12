@@ -19,8 +19,9 @@ target_link_libraries(eden-uwp PRIVATE common core video_core audio_core fronten
 # WinRT (CoreApplication, IFrameworkView, ApplicationData) comes from the Store umbrella import lib.
 target_link_libraries(eden-uwp PRIVATE WindowsApp.lib)
 
-# Win32 networking used by core's network_interface (ConvertLengthToIpv4Mask etc.).
-target_link_libraries(eden-uwp PRIVATE iphlpapi ws2_32)
+# Win32 networking used by core's network_interface (ConvertLengthToIpv4Mask etc.), plus crypt32 +
+# user32 which the from-source OpenSSL pulls (cert store + its fatal-error/service-detection code).
+target_link_libraries(eden-uwp PRIVATE iphlpapi ws2_32 crypt32 user32)
 
 # The HostMemory *FromApp path keys off this for the common headers it includes here too.
 target_compile_definitions(eden-uwp PRIVATE YUZU_UWP_APPCONTAINER=1)
@@ -31,24 +32,11 @@ if (MSVC)
     target_compile_options(eden-uwp PRIVATE /EHsc)
     # AppContainer executable: required for a sideloadable UWP package.
     target_link_options(eden-uwp PRIVATE /APPCONTAINER)
-    # STOPGAP (track for removal): the bundled OpenSSL (libcrypto_static.lib) is a prebuilt /MT static
-    # lib and injects /DEFAULTLIB:LIBCMT, which the dynamic store CRT doesn't provide. Ignoring it lets
-    # OpenSSL's CRT symbols resolve against the app's /MD MSVCRT (single CRT in one binary). The proper
-    # fix is building bundled OpenSSL /MD for the UWP target (YUZU_USE_BUNDLED_OPENSSL — DEVOPS); drop
-    # this line once that lands.
+    # CRT bridge for the two bundled prebuilt deps that are /MT and have NO from-source path on Windows:
+    # ffmpeg (Eden disables YUZU_USE_EXTERNAL_FFMPEG on WIN32) and SDL3. They inject /DEFAULTLIB:LIBCMT,
+    # which the /MD Store-CRT app can't satisfy; ignoring it forces their CRT symbols onto the app's
+    # single /MD MSVCRT. OpenSSL + sirit are already proper from-source /MD (CMakeLists WindowsStore
+    # blocks), so this redirect now covers only ffmpeg/SDL3. PROPER FIX (DEVOPS hardening): a /MD ffmpeg
+    # for UWP (+ from-source /MD SDL3) so this line can be dropped.
     target_link_options(eden-uwp PRIVATE /NODEFAULTLIB:LIBCMT)
 endif()
-
-# ── STATUS / remaining work (WIP, not ready to merge) ─────────────────────────────────────────────
-# This target COMPILES against the uwp-x64 toolchain; the final exe LINK is not yet clean. Findings
-# from the first UWP exe link (the first ever done — library builds don't resolve these):
-#   1. CRT conflict: bundled OpenSSL (libcrypto_static.lib) is built /MT and injects /DEFAULTLIB:LIBCMT,
-#      colliding with the /MD app. Real fix: build bundled OpenSSL /MD for the UWP target
-#      (YUZU_USE_BUNDLED_OPENSSL — DEVOPS/bundled-deps), not a /NODEFAULTLIB hack.
-#   2. Link-completeness: still-unresolved externals point at deps yuzu_cmd pulls that need adding here
-#      — frontend_common (PlayTime), the VMA implementation TU (GPUOpen::VulkanMemoryAllocator is PUBLIC
-#      on video_core but its impl symbols don't resolve under the UWP build — needs investigation),
-#      and platform libs (iphlpapi, ws2_32). To finalize once the toolchain env is correct.
-#   3. Toolchain env: a true Store-CRT link needs the x64_uwp vcvars environment; the dev box's VS
-#      install is incomplete (vswhere missing → vcvarsall falls back to desktop x64). VS-install repair
-#      (DEVOPS, likely needs a reboot) is the gating item for a deployable Store binary.
