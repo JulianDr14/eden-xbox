@@ -148,6 +148,14 @@ using PFN_VirtualProtect = BOOL(WINAPI*)(_In_ LPVOID Address, _In_ SIZE_T Size,
 using PFN_VirtualAllocFromApp = _Ret_maybenull_ PVOID(WINAPI*)(
     _In_opt_ PVOID BaseAddress, _In_ SIZE_T Size, _In_ ULONG AllocationType, _In_ ULONG Protection);
 
+// Vectored-exception-handler APIs. Resolved by name (not called directly) so the binary does not hard-
+// import api-ms-win-core-errorhandling-l1-1-1.dll — an api-set the Xbox AppContainer loader does not
+// expose, which would make the app fail to ACTIVATE (no process, no crash dump). Kernelbase exports
+// both by name, so they resolve at runtime even though the api-set is absent.
+using PFN_AddVectoredExceptionHandler =
+    PVOID(WINAPI*)(_In_ ULONG First, _In_ PVECTORED_EXCEPTION_HANDLER Handler);
+using PFN_RemoveVectoredExceptionHandler = ULONG(WINAPI*)(_In_ PVOID Handle);
+
 template <typename T>
 static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn) {
     if (!dll.GetSymbol(name, &pfn)) {
@@ -170,6 +178,8 @@ namespace {
 std::atomic<u8*> g_backing_base{nullptr};
 std::atomic<size_t> g_backing_size{0};
 PFN_VirtualAllocFromApp g_pfn_virtual_alloc_from_app{nullptr};
+PFN_AddVectoredExceptionHandler g_pfn_add_veh{nullptr};
+PFN_RemoveVectoredExceptionHandler g_pfn_remove_veh{nullptr};
 void* g_backing_veh{nullptr};
 
 constexpr size_t BACKING_COMMIT_GRANULARITY = 64 * 1024; // commit in 64 KiB chunks to limit faults
@@ -233,6 +243,10 @@ public:
         // the handler below commits 64 KiB chunks on first touch, charging only the touched working
         // set while the full 4 GiB stays reserved (kernel memory-pool layout unchanged).
         GetFuncAddress(kernelbase_dll, "VirtualAllocFromApp", g_pfn_virtual_alloc_from_app);
+        // Resolve the VEH APIs by name (see typedef note) so we do not hard-import the errorhandling
+        // api-set the Xbox loader lacks — a direct call there makes the app fail to activate on-console.
+        GetFuncAddress(kernelbase_dll, "AddVectoredExceptionHandler", g_pfn_add_veh);
+        GetFuncAddress(kernelbase_dll, "RemoveVectoredExceptionHandler", g_pfn_remove_veh);
         backing_base = static_cast<u8*>(
             g_pfn_virtual_alloc_from_app(nullptr, backing_size, MEM_RESERVE, PAGE_READWRITE));
         if (backing_base == nullptr) {
@@ -241,7 +255,7 @@ public:
         }
         g_backing_base.store(backing_base, std::memory_order_release);
         g_backing_size.store(backing_size, std::memory_order_release);
-        g_backing_veh = AddVectoredExceptionHandler(/*first=*/1, BackingDemandCommitHandler);
+        g_backing_veh = g_pfn_add_veh(/*first=*/1, BackingDemandCommitHandler);
         if (g_backing_veh == nullptr) {
             Release();
             LOG_CRITICAL(HW_Memory, "Failed to install backing demand-commit handler");
@@ -359,8 +373,8 @@ private:
 #ifdef HOST_MEMORY_USE_FROM_APP
         // UWP: private demand-committed backing, no section handle and no fastmem arena. Tear down the
         // demand-commit handler first, then release the private reservation (committed pages included).
-        if (g_backing_veh != nullptr) {
-            RemoveVectoredExceptionHandler(g_backing_veh);
+        if (g_backing_veh != nullptr && g_pfn_remove_veh != nullptr) {
+            g_pfn_remove_veh(g_backing_veh);
             g_backing_veh = nullptr;
         }
         g_backing_base.store(nullptr, std::memory_order_release);
