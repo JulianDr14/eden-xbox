@@ -127,9 +127,11 @@ int RunHeadlessBoot(const std::string& nro_path) {
 // Device-Portal file-push or LocalState chicken-and-egg. (Eden's log still writes to the writable
 // LocalFolder; see common/fs/path_util.cpp under YUZU_UWP_APPCONTAINER.)
 // ============================================================================================
+#include <atomic>
 #include <fstream>
+#include <thread>
 
-#include <windows.h> // OutputDebugStringA/W (sets the target-arch macros winnt.h needs)
+#include <windows.h> // OutputDebugStringA/W + ::Sleep (sets the target-arch macros winnt.h needs)
 
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.h>
@@ -170,28 +172,49 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
 
     void Run() {
         WriteDiag("BootView::Run entered");
-        std::string nro_path;
-        try {
-            // Bundled NRO from the read-only package install location.
-            const auto install_path =
-                Windows::ApplicationModel::Package::Current().InstalledLocation().Path();
-            nro_path = winrt::to_string(install_path) + "\\boot.nro";
-            WriteDiag("resolved NRO path: " + nro_path);
-        } catch (...) {
-            WriteDiag("FAILED resolving Package.InstalledLocation");
+
+        // A UWP app MUST activate its CoreWindow and pump the dispatcher, or the OS terminates it a
+        // couple seconds after launch (no crash, no dump - exactly the "flashes then closes" symptom).
+        // The hello-world/triangle apps survive because they render (activate + pump); this headless
+        // boot did neither. Activate the (blank, Null-renderer) window, run the blocking boot on a
+        // worker thread, and keep the UI thread pumping so the OS sees an activated, responsive app.
+        CoreWindow window = CoreWindow::GetForCurrentThread();
+        window.Activate();
+
+        std::atomic<bool> done{false};
+        std::thread worker([&done]() {
+            std::string nro_path;
+            try {
+                // Bundled NRO from the read-only package install location.
+                const auto install_path =
+                    Windows::ApplicationModel::Package::Current().InstalledLocation().Path();
+                nro_path = winrt::to_string(install_path) + "\\boot.nro";
+                WriteDiag("resolved NRO path: " + nro_path);
+            } catch (...) {
+                WriteDiag("FAILED resolving Package.InstalledLocation");
+            }
+            // Capture any early throw to the diag file instead of a silent exit.
+            try {
+                WriteDiag("calling RunHeadlessBoot");
+                const int rc = EdenXbox::RunHeadlessBoot(nro_path);
+                WriteDiag("RunHeadlessBoot returned " + std::to_string(rc));
+            } catch (winrt::hresult_error const& e) {
+                WriteDiag("winrt::hresult_error: " + winrt::to_string(e.message()));
+            } catch (std::exception const& e) {
+                WriteDiag(std::string("std::exception: ") + e.what());
+            } catch (...) {
+                WriteDiag("unknown exception in RunHeadlessBoot");
+            }
+            done.store(true);
+        });
+
+        CoreDispatcher dispatcher = window.Dispatcher();
+        while (!done.load()) {
+            dispatcher.ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
+            ::Sleep(50);
         }
-        // Wrap the boot so an early throw is captured to the diag file instead of a silent ~1s exit.
-        try {
-            WriteDiag("calling RunHeadlessBoot");
-            const int rc = EdenXbox::RunHeadlessBoot(nro_path);
-            WriteDiag("RunHeadlessBoot returned " + std::to_string(rc));
-        } catch (winrt::hresult_error const& e) {
-            WriteDiag("winrt::hresult_error: " + winrt::to_string(e.message()));
-        } catch (std::exception const& e) {
-            WriteDiag(std::string("std::exception: ") + e.what());
-        } catch (...) {
-            WriteDiag("unknown exception in RunHeadlessBoot");
-        }
+        worker.join();
+        WriteDiag("boot worker joined; exiting");
     }
 };
 
