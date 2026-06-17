@@ -346,6 +346,18 @@ fs::path GetExeDirectory() {
 }
 
 fs::path GetAppDataRoamingDirectory() {
+#if defined(YUZU_UWP_APPCONTAINER)
+    // The Xbox/UWP AppContainer does not provide shell32 (SHGetKnownFolderPath); a hard import of it
+    // fails app activation at the loader, before any code runs. The app's private writable storage is
+    // the WinRT LocalFolder (same place the UWP user dir resolves, per Reinitialize above), so use
+    // that and never import shell32. Guarded like the other WinRT call in this file.
+    try {
+        return fs::path(std::wstring_view(
+            winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path()));
+    } catch (...) {
+        return GetExeDirectory();
+    }
+#else
     PWSTR appdata_roaming_path = nullptr;
 
     SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appdata_roaming_path);
@@ -359,6 +371,7 @@ fs::path GetAppDataRoamingDirectory() {
     }
 
     return fs_appdata_roaming_path;
+#endif
 }
 
 #else

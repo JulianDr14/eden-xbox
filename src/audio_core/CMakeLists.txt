@@ -245,7 +245,7 @@ if(ANDROID)
 
     target_link_libraries(audio_core PRIVATE oboe)
     target_compile_definitions(audio_core PUBLIC HAVE_OBOE)
-else()
+elseif(NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
     target_sources(audio_core PRIVATE
         sink/sdl3_sink.cpp
         sink/sdl3_sink.h)
@@ -253,5 +253,9 @@ else()
     target_link_libraries(audio_core PRIVATE SDL3::SDL3)
     target_compile_definitions(audio_core PRIVATE HAVE_SDL3)
 endif()
+# Xbox/UWP AppContainer: deliberately NO audio device backend. The headless boot uses the null sink
+# (audio_core/sink/null_sink.h, always built). Linking SDL3 here would drag its entire desktop
+# windowing/input stack (GDI32/SHELL32/USER32/IMM32/SETUPAPI/HID/WINMM) into the app — none of which
+# the AppContainer provides — so the package fails to activate at load. (CORE: headless dep-strip.)
 
 create_target_directory_groups(audio_core)
