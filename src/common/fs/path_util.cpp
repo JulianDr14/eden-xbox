@@ -119,9 +119,18 @@ public:
         // sandbox-redirected, so use the app's private LocalFolder (ApplicationData
         // LocalState). It is always writable and is pullable over Device Portal - which
         // is how QA retrieves eden_log.txt to assert the GATE-2 liveness sentinel.
-        eden_path = fs::path(std::wstring_view(
-                        winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path())) /
-                    EDEN_DIR;
+        // GUARDED: this is reached from Common::Log::Initialize() - the first thing the boot
+        // frontend does - so a WinRT throw here would crash the app before any log exists.
+        // Catch it, fall back to the (read-only) exe dir, and leave a debugger breadcrumb.
+        try {
+            eden_path = fs::path(std::wstring_view(
+                            winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path())) /
+                        EDEN_DIR;
+        } catch (...) {
+            OutputDebugStringW(L"[eden-uwp] path_util: ApplicationData.LocalFolder() threw; "
+                               L"falling back to exe dir\n");
+            eden_path = GetExeDirectory() / PORTABLE_DIR;
+        }
         eden_path_cache = eden_path / CACHE_DIR;
         eden_path_config = eden_path / CONFIG_DIR;
         // No %AppData% legacy-path migration under the sandbox.

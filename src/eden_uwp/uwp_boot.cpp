@@ -127,6 +127,10 @@ int RunHeadlessBoot(const std::string& nro_path) {
 // Device-Portal file-push or LocalState chicken-and-egg. (Eden's log still writes to the writable
 // LocalFolder; see common/fs/path_util.cpp under YUZU_UWP_APPCONTAINER.)
 // ============================================================================================
+#include <fstream>
+
+#include <windows.h> // OutputDebugStringA/W (sets the target-arch macros winnt.h needs)
+
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
@@ -139,6 +143,22 @@ using namespace Windows::UI::Core;
 
 namespace {
 
+// Best-effort startup diagnostics that survive an early crash (before Eden's own logging is up):
+// append to a pullable file in the app's LocalFolder AND emit on the debugger channel. This is how we
+// see *where* the headless boot fails on-console when no eden_log.txt and no crash dump are produced.
+void WriteDiag(const std::string& msg) {
+    const std::string line = "[eden-uwp] " + msg + "\n";
+    OutputDebugStringA(line.c_str());
+    try {
+        const std::string local =
+            winrt::to_string(Windows::Storage::ApplicationData::Current().LocalFolder().Path());
+        std::ofstream f(local + "\\eden_uwp_diag.txt", std::ios::app);
+        f << line;
+    } catch (...) {
+        OutputDebugStringW(L"[eden-uwp] WriteDiag: could not write diag file\n");
+    }
+}
+
 struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
     IFrameworkView CreateView() {
         return *this;
@@ -149,18 +169,35 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
     void Uninitialize() {}
 
     void Run() {
-        // Read the bundled NRO from the package install location (read-only, always present once the
-        // appx is installed). UTF-8 the WinRT path for Eden's filesystem layer.
-        const auto install_path =
-            Windows::ApplicationModel::Package::Current().InstalledLocation().Path();
-        const std::string nro_path = winrt::to_string(install_path) + "\\boot.nro";
-        EdenXbox::RunHeadlessBoot(nro_path);
+        WriteDiag("BootView::Run entered");
+        std::string nro_path;
+        try {
+            // Bundled NRO from the read-only package install location.
+            const auto install_path =
+                Windows::ApplicationModel::Package::Current().InstalledLocation().Path();
+            nro_path = winrt::to_string(install_path) + "\\boot.nro";
+            WriteDiag("resolved NRO path: " + nro_path);
+        } catch (...) {
+            WriteDiag("FAILED resolving Package.InstalledLocation");
+        }
+        // Wrap the boot so an early throw is captured to the diag file instead of a silent ~1s exit.
+        try {
+            WriteDiag("calling RunHeadlessBoot");
+            const int rc = EdenXbox::RunHeadlessBoot(nro_path);
+            WriteDiag("RunHeadlessBoot returned " + std::to_string(rc));
+        } catch (winrt::hresult_error const& e) {
+            WriteDiag("winrt::hresult_error: " + winrt::to_string(e.message()));
+        } catch (std::exception const& e) {
+            WriteDiag(std::string("std::exception: ") + e.what());
+        } catch (...) {
+            WriteDiag("unknown exception in RunHeadlessBoot");
+        }
     }
 };
 
 } // namespace
 
-int __stdcall wWinMain(void*, void*, wchar_t*, int) {
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     winrt::init_apartment();
     CoreApplication::Run(winrt::make<BootView>());
     return 0;
