@@ -39,12 +39,17 @@ if (MSVC)
     # blocks), so this redirect now covers only ffmpeg/SDL3. PROPER FIX (DEVOPS hardening): a /MD ffmpeg
     # for UWP (+ from-source /MD SDL3) so this line can be dropped.
     target_link_options(eden-uwp PRIVATE /NODEFAULTLIB:LIBCMT)
-    # core/internal_network/wifi_scanner.cpp statically imports the WiFi extension API set
-    # (ext-ms-win-networking-wlanapi), which the Xbox AppContainer does NOT provide -> a hard import of
-    # it makes the app fail to ACTIVATE before any code runs (observed: ~1s close, no log, no dump).
-    # The headless boot never scans WiFi, so delay-load it: the loader resolves it only on first call
-    # (which never happens here), so activation succeeds. delayimp.lib provides the delay-load helper.
-    target_link_options(eden-uwp PRIVATE "/DELAYLOAD:ext-ms-win-networking-wlanapi-l1-1-0.dll")
+    # Delay-load the imports the Xbox AppContainer may not provide and that a HEADLESS boot never calls,
+    # so a missing one can't fail ACTIVATION (a hard import of an absent DLL = app won't launch, before
+    # any code/log). Covers the WiFi extension API set (wifi_scanner.cpp) + SDL3's desktop device/IME/
+    # timer DLLs (device enumeration is restricted in the Xbox sandbox). The loader binds each only on
+    # first call, which the headless NRO boot never makes; delay-loading present DLLs is harmless.
+    foreach(_dl
+            ext-ms-win-networking-wlanapi-l1-1-0.dll
+            setupapi.dll hid.dll winmm.dll imm32.dll
+            ws2_32.dll iphlpapi.dll crypt32.dll)
+        target_link_options(eden-uwp PRIVATE "/DELAYLOAD:${_dl}")
+    endforeach()
     # delayimp.lib (the /DELAYLOAD helper) ships only in the desktop lib dir, not the Store-CRT LIB
     # path the uwp env points at, so reference it by full path via vcvars' VCToolsInstallDir.
     if (DEFINED ENV{VCToolsInstallDir})
