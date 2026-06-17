@@ -174,8 +174,15 @@ public:
 
         // Allocate backing file map
 #ifdef HOST_MEMORY_USE_FROM_APP
+        // SEC_RESERVE (not SEC_COMMIT) on the Xbox/UWP target: the emulated DRAM is up to 4 GiB, which
+        // exceeds the Series-S Dev-Mode app commit budget, so an eager SEC_COMMIT of the whole backing
+        // fails (bad_alloc before the JIT runs). SEC_RESERVE reserves the full range but commits pages
+        // lazily on first access (demand-zero), so only what the guest actually touches is charged —
+        // a tiny homebrew NRO needs a few MiB. The 4 GiB emulated-DRAM size is unchanged, so the
+        // kernel's memory-pool layout (DramMemoryMap / KSystemControl) is unaffected. (CORE: Series-S
+        // memory clamp; re-evaluate the commit ceiling for real titles in Phase 4.)
         backing_handle = pfn_CreateFileMappingFromApp(
-            INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_COMMIT, backing_size, nullptr);
+            INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_RESERVE, backing_size, nullptr);
 #else
         backing_handle =
             pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ,
