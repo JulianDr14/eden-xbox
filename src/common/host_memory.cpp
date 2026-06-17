@@ -49,6 +49,7 @@
 
 #endif // ^^^ POSIX ^^^
 
+#include <atomic>
 #include <mutex>
 #include <random>
 
@@ -143,6 +144,10 @@ using PFN_CreateFileMappingFromApp = _Ret_maybenull_ HANDLE(WINAPI*)(
 using PFN_VirtualProtect = BOOL(WINAPI*)(_In_ LPVOID Address, _In_ SIZE_T Size,
                                          _In_ DWORD NewProtection, _Out_ PDWORD OldProtection);
 
+// VirtualAllocFromApp — used to demand-commit pages of the SEC_RESERVE backing (see below).
+using PFN_VirtualAllocFromApp = _Ret_maybenull_ PVOID(WINAPI*)(
+    _In_opt_ PVOID BaseAddress, _In_ SIZE_T Size, _In_ ULONG AllocationType, _In_ ULONG Protection);
+
 template <typename T>
 static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn) {
     if (!dll.GetSymbol(name, &pfn)) {
@@ -150,6 +155,49 @@ static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn
         throw std::bad_alloc{};
     }
 }
+
+#ifdef HOST_MEMORY_USE_FROM_APP
+// Demand-commit for the Xbox/UWP backing. The backing section is created SEC_RESERVE (so the full
+// emulated DRAM is reserved but not eagerly committed — an eager 4 GiB SEC_COMMIT busts the Series-S
+// dev-app commit budget). SEC_RESERVE pages are NOT demand-zero auto-committed: the first access to a
+// reserved-but-uncommitted page faults. This vectored handler commits the faulting page's chunk on
+// demand, so only what the guest/kernel actually touches is charged — a tiny homebrew NRO needs a few
+// MiB, while the kernel's full 4 GiB memory-pool layout stays valid. (CORE: Series-S memory.)
+//
+// There is exactly one emulated-DRAM backing (Core::DeviceMemory), so a single file-scope range +
+// committer suffices; the handler is allocation-free and re-entrancy-safe (atomic loads + one commit).
+namespace {
+std::atomic<u8*> g_backing_base{nullptr};
+std::atomic<size_t> g_backing_size{0};
+PFN_VirtualAllocFromApp g_pfn_virtual_alloc_from_app{nullptr};
+void* g_backing_veh{nullptr};
+
+constexpr size_t BACKING_COMMIT_GRANULARITY = 64 * 1024; // commit in 64 KiB chunks to limit faults
+
+LONG NTAPI BackingDemandCommitHandler(EXCEPTION_POINTERS* ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    u8* const base = g_backing_base.load(std::memory_order_acquire);
+    const size_t size = g_backing_size.load(std::memory_order_acquire);
+    if (base == nullptr || g_pfn_virtual_alloc_from_app == nullptr) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const auto fault_addr =
+        reinterpret_cast<u8*>(ep->ExceptionRecord->ExceptionInformation[1]); // [1] = faulting address
+    if (fault_addr < base || fault_addr >= base + size) {
+        return EXCEPTION_CONTINUE_SEARCH; // not our backing — let other handlers run
+    }
+    const size_t offset = static_cast<size_t>(fault_addr - base);
+    const size_t chunk_offset = offset & ~(BACKING_COMMIT_GRANULARITY - 1);
+    const size_t chunk_len = (std::min)(BACKING_COMMIT_GRANULARITY, size - chunk_offset);
+    if (g_pfn_virtual_alloc_from_app(base + chunk_offset, chunk_len, MEM_COMMIT, PAGE_READWRITE)) {
+        return EXCEPTION_CONTINUE_EXECUTION; // page committed — retry the faulting access
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+} // namespace
+#endif
 
 class HostMemory::Impl {
 public:
@@ -211,6 +259,20 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to map {} MiB of virtual memory", backing_size >> 20);
             throw std::bad_alloc{};
         }
+#ifdef HOST_MEMORY_USE_FROM_APP
+        // The backing is SEC_RESERVE (no eager commit). Install a vectored handler that commits
+        // backing pages on first touch, so the kernel/guest can write into the reserved DRAM while
+        // only the touched working set is charged against the Series-S dev-app commit budget.
+        GetFuncAddress(kernelbase_dll, "VirtualAllocFromApp", g_pfn_virtual_alloc_from_app);
+        g_backing_base.store(backing_base, std::memory_order_release);
+        g_backing_size.store(backing_size, std::memory_order_release);
+        g_backing_veh = AddVectoredExceptionHandler(/*first=*/1, BackingDemandCommitHandler);
+        if (g_backing_veh == nullptr) {
+            Release();
+            LOG_CRITICAL(HW_Memory, "Failed to install backing demand-commit handler");
+            throw std::bad_alloc{};
+        }
+#endif
         // Allocate virtual address placeholder
         virtual_base = static_cast<u8*>(pfn_VirtualAlloc2(process, nullptr, virtual_size,
                                                           MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
@@ -287,6 +349,15 @@ public:
 private:
     /// Release all resources in the object
     void Release() {
+#ifdef HOST_MEMORY_USE_FROM_APP
+        // Tear down the demand-commit handler before the backing it guards is unmapped.
+        if (g_backing_veh != nullptr) {
+            RemoveVectoredExceptionHandler(g_backing_veh);
+            g_backing_veh = nullptr;
+        }
+        g_backing_base.store(nullptr, std::memory_order_release);
+        g_backing_size.store(0, std::memory_order_release);
+#endif
         if (!placeholders.empty()) {
             for (const auto& placeholder : placeholders) {
                 if (!pfn_UnmapViewOfFile2(process, virtual_base + placeholder.lower(),
