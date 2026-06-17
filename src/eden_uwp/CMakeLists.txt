@@ -47,7 +47,9 @@ if (MSVC)
     foreach(_dl
             ext-ms-win-networking-wlanapi-l1-1-0.dll
             setupapi.dll hid.dll winmm.dll imm32.dll
-            ws2_32.dll iphlpapi.dll crypt32.dll)
+            ws2_32.dll iphlpapi.dll crypt32.dll
+            user32.dll)  # user32: pulled by from-source OpenSSL's fatal-error MessageBox path,
+                         # never hit on a clean headless boot (per CORE PR #10 follow-up)
         target_link_options(eden-uwp PRIVATE "/DELAYLOAD:${_dl}")
     endforeach()
     # delayimp.lib (the /DELAYLOAD helper) ships only in the desktop lib dir, not the Store-CRT LIB
