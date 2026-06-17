@@ -144,7 +144,7 @@ using PFN_CreateFileMappingFromApp = _Ret_maybenull_ HANDLE(WINAPI*)(
 using PFN_VirtualProtect = BOOL(WINAPI*)(_In_ LPVOID Address, _In_ SIZE_T Size,
                                          _In_ DWORD NewProtection, _Out_ PDWORD OldProtection);
 
-// VirtualAllocFromApp — used to demand-commit pages of the SEC_RESERVE backing (see below).
+// VirtualAllocFromApp — reserves the private DRAM backing and demand-commits its pages (see below).
 using PFN_VirtualAllocFromApp = _Ret_maybenull_ PVOID(WINAPI*)(
     _In_opt_ PVOID BaseAddress, _In_ SIZE_T Size, _In_ ULONG AllocationType, _In_ ULONG Protection);
 
@@ -157,12 +157,12 @@ static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn
 }
 
 #ifdef HOST_MEMORY_USE_FROM_APP
-// Demand-commit for the Xbox/UWP backing. The backing section is created SEC_RESERVE (so the full
-// emulated DRAM is reserved but not eagerly committed — an eager 4 GiB SEC_COMMIT busts the Series-S
-// dev-app commit budget). SEC_RESERVE pages are NOT demand-zero auto-committed: the first access to a
-// reserved-but-uncommitted page faults. This vectored handler commits the faulting page's chunk on
-// demand, so only what the guest/kernel actually touches is charged — a tiny homebrew NRO needs a few
-// MiB, while the kernel's full 4 GiB memory-pool layout stays valid. (CORE: Series-S memory.)
+// Demand-commit for the Xbox/UWP backing. The backing is PRIVATE memory reserved (MEM_RESERVE) but
+// not eagerly committed — an eager 4 GiB commit busts the Series-S dev-app commit budget, and only
+// MEM_PRIVATE pages can be committed on demand (a MEM_MAPPED section view cannot). The first access
+// to a reserved-but-uncommitted page faults; this vectored handler commits the faulting page's chunk
+// on demand, so only what the guest/kernel actually touches is charged — a tiny homebrew NRO needs a
+// few MiB, while the kernel's full 4 GiB memory-pool layout stays valid. (CORE: Series-S memory.)
 //
 // There is exactly one emulated-DRAM backing (Core::DeviceMemory), so a single file-scope range +
 // committer suffices; the handler is allocation-free and re-entrancy-safe (atomic loads + one commit).
@@ -220,22 +220,42 @@ public:
 #endif
         GetFuncAddress(kernelbase_dll, "UnmapViewOfFile2", pfn_UnmapViewOfFile2);
 
-        // Allocate backing file map
+        // Allocate the linear DRAM backing.
 #ifdef HOST_MEMORY_USE_FROM_APP
-        // SEC_RESERVE (not SEC_COMMIT) on the Xbox/UWP target: the emulated DRAM is up to 4 GiB, which
-        // exceeds the Series-S Dev-Mode app commit budget, so an eager SEC_COMMIT of the whole backing
-        // fails (bad_alloc before the JIT runs). SEC_RESERVE reserves the full range but commits pages
-        // lazily on first access (demand-zero), so only what the guest actually touches is charged —
-        // a tiny homebrew NRO needs a few MiB. The 4 GiB emulated-DRAM size is unchanged, so the
-        // kernel's memory-pool layout (DramMemoryMap / KSystemControl) is unaffected. (CORE: Series-S
-        // memory clamp; re-evaluate the commit ceiling for real titles in Phase 4.)
-        backing_handle = pfn_CreateFileMappingFromApp(
-            INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_RESERVE, backing_size, nullptr);
+        // Xbox/UWP: back the emulated DRAM with demand-committable PRIVATE memory, not a file-mapping
+        // section. The section design exists only to alias the backing into virtual_base for fastmem
+        // — which is OFF on UWP (fastmem_arena is always null), so Map()/virtual_base are never used
+        // here (every Map/Unmap/VirtualBasePointer caller is fastmem- or NCE-gated, both off on UWP).
+        // Critically, ONLY MEM_PRIVATE pages can be committed on demand: VirtualAllocFromApp(MEM_COMMIT)
+        // cannot commit pages of a MEM_MAPPED section view in the AppContainer — that is why an earlier
+        // SEC_RESERVE section + demand-commit handler access-violated on-console. So reserve private
+        // address space now (no eager commit — a 4 GiB SEC_COMMIT busts the Series-S dev-app budget);
+        // the handler below commits 64 KiB chunks on first touch, charging only the touched working
+        // set while the full 4 GiB stays reserved (kernel memory-pool layout unchanged).
+        GetFuncAddress(kernelbase_dll, "VirtualAllocFromApp", g_pfn_virtual_alloc_from_app);
+        backing_base = static_cast<u8*>(
+            g_pfn_virtual_alloc_from_app(nullptr, backing_size, MEM_RESERVE, PAGE_READWRITE));
+        if (backing_base == nullptr) {
+            LOG_CRITICAL(HW_Memory, "Failed to reserve {} MiB of backing memory", backing_size >> 20);
+            throw std::bad_alloc{};
+        }
+        g_backing_base.store(backing_base, std::memory_order_release);
+        g_backing_size.store(backing_size, std::memory_order_release);
+        g_backing_veh = AddVectoredExceptionHandler(/*first=*/1, BackingDemandCommitHandler);
+        if (g_backing_veh == nullptr) {
+            Release();
+            LOG_CRITICAL(HW_Memory, "Failed to install backing demand-commit handler");
+            throw std::bad_alloc{};
+        }
+        // No file-mapping section and no fastmem arena on UWP. VirtualBasePointer() returns null;
+        // that is tolerated by all callers (fastmem disabled).
+        backing_handle = nullptr;
+        virtual_base = nullptr;
 #else
+        // Desktop: a file-mapping section aliased into both the linear backing and the fastmem arena.
         backing_handle =
             pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ,
                                    PAGE_READWRITE, SEC_COMMIT, backing_size, nullptr, nullptr, 0);
-#endif
         if (!backing_handle) {
             LOG_CRITICAL(HW_Memory, "Failed to allocate {} MiB of backing memory",
                          backing_size >> 20);
@@ -259,20 +279,6 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to map {} MiB of virtual memory", backing_size >> 20);
             throw std::bad_alloc{};
         }
-#ifdef HOST_MEMORY_USE_FROM_APP
-        // The backing is SEC_RESERVE (no eager commit). Install a vectored handler that commits
-        // backing pages on first touch, so the kernel/guest can write into the reserved DRAM while
-        // only the touched working set is charged against the Series-S dev-app commit budget.
-        GetFuncAddress(kernelbase_dll, "VirtualAllocFromApp", g_pfn_virtual_alloc_from_app);
-        g_backing_base.store(backing_base, std::memory_order_release);
-        g_backing_size.store(backing_size, std::memory_order_release);
-        g_backing_veh = AddVectoredExceptionHandler(/*first=*/1, BackingDemandCommitHandler);
-        if (g_backing_veh == nullptr) {
-            Release();
-            LOG_CRITICAL(HW_Memory, "Failed to install backing demand-commit handler");
-            throw std::bad_alloc{};
-        }
-#endif
         // Allocate virtual address placeholder
         virtual_base = static_cast<u8*>(pfn_VirtualAlloc2(process, nullptr, virtual_size,
                                                           MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
@@ -283,6 +289,7 @@ public:
                          virtual_size >> 30);
             throw std::bad_alloc{};
         }
+#endif
     }
 
     ~Impl() {
@@ -350,14 +357,21 @@ private:
     /// Release all resources in the object
     void Release() {
 #ifdef HOST_MEMORY_USE_FROM_APP
-        // Tear down the demand-commit handler before the backing it guards is unmapped.
+        // UWP: private demand-committed backing, no section handle and no fastmem arena. Tear down the
+        // demand-commit handler first, then release the private reservation (committed pages included).
         if (g_backing_veh != nullptr) {
             RemoveVectoredExceptionHandler(g_backing_veh);
             g_backing_veh = nullptr;
         }
         g_backing_base.store(nullptr, std::memory_order_release);
         g_backing_size.store(0, std::memory_order_release);
-#endif
+        if (backing_base) {
+            if (!VirtualFree(backing_base, 0, MEM_RELEASE)) {
+                LOG_CRITICAL(HW_Memory, "Failed to free backing memory");
+            }
+            backing_base = nullptr;
+        }
+#else
         if (!placeholders.empty()) {
             for (const auto& placeholder : placeholders) {
                 if (!pfn_UnmapViewOfFile2(process, virtual_base + placeholder.lower(),
@@ -383,6 +397,7 @@ private:
         if (!CloseHandle(backing_handle)) {
             LOG_CRITICAL(HW_Memory, "Failed to free backing memory file handle");
         }
+#endif
     }
 
     /// Unmap one placeholder in the given range (partial unmaps are supported)
