@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+  SPDX-License-Identifier: GPL-3.0-or-later
+
+  Package manifest for the Phase-2 / GATE-2 headless boot appx (src/eden_uwp).
+  Sideloaded through the Xbox Device Portal in Dev Mode; see docs/xbox_deploy.md.
+
+  Identity/Publisher must match the signing certificate's subject exactly, or the
+  Device Portal rejects the package. tools/xbox/package-appx.ps1 keeps them in sync.
+-->
+<Package
+    xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+    IgnorableNamespaces="uap">
+
+  <Identity Name="EdenEmuProject.EdenXbox"
+            Publisher="CN=EdenXboxDev"
+            Version="0.2.0.0"
+            ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Eden Xbox (headless boot)</DisplayName>
+    <PublisherDisplayName>Eden Emulator Project</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <!-- Windows.Universal covers the Xbox Series X|S Dev Mode host. MinVersion is the oldest
+         Xbox OS base we target; MaxVersionTested only gates OS-version-dependent behaviour. -->
+    <TargetDeviceFamily Name="Windows.Universal"
+                        MinVersion="10.0.17763.0"
+                        MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <!-- EntryPoint for a plain C++/WinRT CoreApplication app (wWinMain + IFrameworkView, see
+         uwp_boot.cpp) is the conventional "<exe>.App" moniker; there is no activatable class. -->
+    <Application Id="App" Executable="eden-uwp.exe" EntryPoint="eden-uwp.App">
+      <uap:VisualElements
+          DisplayName="Eden Xbox"
+          Description="Headless GATE-2 boot: runs a bundled homebrew NRO through the dynarmic JIT."
+          BackgroundColor="#1C1C1C"
+          Square150x150Logo="Assets\Square150x150Logo.png"
+          Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#1C1C1C" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- THE critical one: codeGeneration unlocks VirtualProtectFromApp / CreateFileMappingFromApp /
+         MapViewOfFileFromApp for the AppContainer. Without it dynarmic cannot mark JIT pages
+         executable and common/host_memory.cpp cannot map the emulated DRAM. -->
+    <Capability Name="codeGeneration" />
+    <!-- core/network_interface + the NS services touch sockets on startup. -->
+    <Capability Name="internetClient" />
+  </Capabilities>
+</Package>
