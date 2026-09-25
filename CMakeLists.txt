@@ -215,6 +215,12 @@ set(BUNDLED_SIRIT_DEFAULT OFF)
 if (MSVC AND NOT (CMAKE_BUILD_TYPE MATCHES "Deb") OR ANDROID)
     set(BUNDLED_SIRIT_DEFAULT ON)
 endif()
+# Xbox UWP/WindowsStore: the bundled sirit prebuilt is /MT and injects LIBCMT, which collides with the
+# /MD Store-CRT app at exe link. Build sirit from source there so it inherits /MD (same fix OpenSSL got
+# in the WindowsStore block below; the boot-appx exe links shader_recompiler → sirit).
+if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    set(BUNDLED_SIRIT_DEFAULT OFF)
+endif()
 
 option(YUZU_USE_BUNDLED_SIRIT "Download bundled sirit" ${BUNDLED_SIRIT_DEFAULT})
 
