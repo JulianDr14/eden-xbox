@@ -40,7 +40,3 @@ C:\Users\juanr\Desktop\Claude\Projects\Eden-Xbox\
 - `src/dynarmic/` (+ Xbyak) — ARM64→x64 JIT. **W^X adaptation lives here** (Phase 2).
 - `src/core/` — HLE, memory, fastmem. **Game-mode memory + fastmem rework** (Phase 2/4).
 - platform/frontend layer — **UWP2Win32 shims + AppContainer file access** (Phase 2).
-
-## House rules (full list in TEAM_GUIDE §7)
-Never commit keys, firmware, or game files. GPLv3: keep source open + attribution intact.
-Distribution is owner-GO only.
