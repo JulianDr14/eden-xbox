@@ -371,6 +371,9 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
                 sampler_handles.push_back(sampler.Handle());
                 sampler_keys.push_back(sampler.Key());
                 image_transitions.emplace_back(view_id, false);
+                if (out.trace_views) {
+                    out.trace_views->push_back(view_id);
+                }
             }
         }
         for (const auto& desc : info.image_descriptors) {

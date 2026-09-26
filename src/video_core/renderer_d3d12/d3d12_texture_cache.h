@@ -4,8 +4,10 @@
 #pragma once
 
 #include <array>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 #include "shader_recompiler/shader_info.h"
@@ -114,6 +116,9 @@ private:
     CpuDescriptorAllocator& dsv_descriptors;
     D3D12_CPU_DESCRIPTOR_HANDLE null_rtv{};
     BlitImageHelper* blit_helper{};
+    /// FORMAT_SUPPORT answers by format, each logged once (see SupportsView).
+    mutable std::mutex format_support_mutex;
+    mutable std::unordered_map<DXGI_FORMAT, D3D12_FEATURE_DATA_FORMAT_SUPPORT> format_support;
 };
 
 class Image : public VideoCommon::ImageBase {
@@ -157,6 +162,9 @@ private:
     [[nodiscard]] CopyLayout Layout(const VideoCommon::BufferImageCopy& copy) const;
     /// False (logged once) when this image's data cannot be transferred yet.
     [[nodiscard]] bool CanTransfer() const;
+    /// Hash and transparency of a CPU-decoded upload (first ones only), to compare machines.
+    void LogConvertedUpload(const u8* data, const CopyLayout& layout,
+                            const VideoCommon::BufferImageCopy& copy) const;
 
     TextureCacheRuntime* runtime{};
     ComPtr<ID3D12Resource> resource;
@@ -278,6 +286,11 @@ public:
         return index < NUM_RT ? color_formats[index] : DXGI_FORMAT_UNKNOWN;
     }
     [[nodiscard]] DXGI_FORMAT DepthFormat() const noexcept { return depth_format; }
+    /// Texture cache image of a render target / the depth buffer; null when absent (draw trace).
+    [[nodiscard]] const Image* ColorImage(size_t index) const noexcept;
+    [[nodiscard]] const Image* DepthImage() const noexcept;
+    /// Guest render targets bound with a view that has no RTV: draws to them are lost.
+    [[nodiscard]] u32 MissingColorMask() const noexcept { return missing_colors; }
     /// Sample count of the attachments.
     [[nodiscard]] u32 Samples() const noexcept { return samples; }
     [[nodiscard]] VideoCommon::Extent2D Extent() const noexcept { return extent; }
@@ -296,6 +309,7 @@ private:
     SlotVector<Image>* images{};
     D3D12_CPU_DESCRIPTOR_HANDLE depth{};
     u32 num_colors{};
+    u32 missing_colors{};
     VideoCommon::Extent2D extent{};
     bool has_stencil{};
     bool is_rescaled{};

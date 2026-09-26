@@ -333,16 +333,32 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
             const auto wait_end = std::chrono::steady_clock::now();
             ID3D12Resource* const image = swapchain.Image(index);
             if (blit_ready && CompositeAccelerated(framebuffer, index)) {
-                // One dump per run, once the guest has had two seconds to settle.
+                // frame.bmp once the guest has had two seconds to settle, then frame_<n>.bmp
+                // every ten seconds or so, to follow a game's progress in a headless run.
                 constexpr u32 DUMP_FRAME = 120;
-                const bool dump = ++accelerated_frames == DUMP_FRAME;
+                constexpr u32 DUMP_INTERVAL = 600;
+                constexpr u32 MAX_DUMPS = 12;
+                ++accelerated_frames;
+                const bool dump = accelerated_frames >= DUMP_FRAME &&
+                                  (accelerated_frames - DUMP_FRAME) % DUMP_INTERVAL == 0 &&
+                                  (accelerated_frames - DUMP_FRAME) / DUMP_INTERVAL < MAX_DUMPS;
                 std::optional<StagingBufferRef> readback;
                 if (dump) {
                     readback = RecordFrameReadback(image);
                 }
                 Present(index);
                 if (readback) {
-                    WriteFrameDump(*readback);
+                    WriteFrameDump(*readback, (accelerated_frames - DUMP_FRAME) / DUMP_INTERVAL);
+                }
+                // Every draw of the frame that ends in frame_1.bmp goes to the log, to compare
+                // a console run with a PC run draw by draw.
+                constexpr u32 TRACED_FRAME = DUMP_FRAME + DUMP_INTERVAL;
+                if (accelerated_frames == TRACED_FRAME - 1) {
+                    LOG_INFO(Render, "D3D12: tracing the draws of frame {}", TRACED_FRAME);
+                    rasterizer.SetDrawTrace(true);
+                } else if (accelerated_frames == TRACED_FRAME) {
+                    rasterizer.SetDrawTrace(false);
+                    LOG_INFO(Render, "D3D12: draw trace of frame {} complete", TRACED_FRAME);
                 }
             } else if (const bool has_image = ReadGuestLayer(framebuffer);
                        blit_ready && has_image) {
@@ -644,7 +660,7 @@ StagingBufferRef RendererD3D12::RecordFrameReadback(ID3D12Resource* image) {
     return readback;
 }
 
-void RendererD3D12::WriteFrameDump(StagingBufferRef& readback) {
+void RendererD3D12::WriteFrameDump(StagingBufferRef& readback, u32 dump_index) {
     scheduler.Finish();
     const u32 width = swapchain.Width();
     const u32 height = swapchain.Height();
@@ -677,7 +693,8 @@ void RendererD3D12::WriteFrameDump(StagingBufferRef& readback) {
     }
     staging_pool.FreeDeferred(readback);
     const std::filesystem::path path =
-        Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "frame.bmp";
+        Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) /
+        (dump_index == 0 ? std::string("frame.bmp") : fmt::format("frame_{}.bmp", dump_index));
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
     if (out) {

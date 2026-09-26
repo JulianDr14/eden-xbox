@@ -122,6 +122,7 @@ u64 Scheduler::KnownGpuTick() const {
     const u64 completed = fence->GetCompletedValue();
     if (completed == UINT64_MAX) {
         // GetCompletedValue returns all ones once the device is removed.
+        device.ReportDeviceRemoved();
         throw std::runtime_error(fmt::format("D3D12: device removed (reason 0x{:08X})",
                                              static_cast<u32>(
                                                  device.Get()->GetDeviceRemovedReason())));
