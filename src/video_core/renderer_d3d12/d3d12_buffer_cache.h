@@ -18,6 +18,13 @@ class Buffer : public VideoCommon::BufferBase {
 public:
     explicit Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams);
     explicit Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr, u64 size_bytes);
+    /// The resource outlives the Buffer until the GPU is done with it.
+    ~Buffer();
+
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
+    Buffer(Buffer&&) noexcept = default;
+    Buffer& operator=(Buffer&&) noexcept;
 
     [[nodiscard]] ID3D12Resource* Handle() const noexcept { return buffer.Get(); }
     [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS Address() const noexcept {
@@ -29,6 +36,7 @@ public:
     void ResetUsageTracking() noexcept { tracker.Reset(); }
 
 private:
+    Scheduler* scheduler{};
     ComPtr<ID3D12Resource> buffer;
     VideoCommon::UsageTracker tracker;
 };

@@ -3,6 +3,7 @@
 
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 #include "common/logging.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -12,11 +13,31 @@
 namespace D3D12 {
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams params)
-    : VideoCommon::BufferBase(params), buffer{runtime.CreateDefaultBuffer(4)}, tracker{4096} {}
+    : VideoCommon::BufferBase(params), scheduler{&runtime.scheduler},
+      buffer{runtime.CreateDefaultBuffer(4)}, tracker{4096} {}
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr, u64 size_bytes)
-    : VideoCommon::BufferBase(cpu_addr, size_bytes),
+    : VideoCommon::BufferBase(cpu_addr, size_bytes), scheduler{&runtime.scheduler},
       buffer{runtime.CreateDefaultBuffer(size_bytes)}, tracker{size_bytes} {}
+
+Buffer::~Buffer() {
+    if (scheduler && buffer) {
+        scheduler->DeferRelease(std::move(buffer));
+    }
+}
+
+Buffer& Buffer::operator=(Buffer&& other) noexcept {
+    if (this != &other) {
+        if (scheduler && buffer) {
+            scheduler->DeferRelease(std::move(buffer));
+        }
+        static_cast<VideoCommon::BufferBase&>(*this) = std::move(other);
+        scheduler = other.scheduler;
+        buffer = std::move(other.buffer);
+        tracker = std::move(other.tracker);
+    }
+    return *this;
+}
 
 BufferCacheRuntime::BufferCacheRuntime(const Device& device_, Scheduler& scheduler_,
                                        StagingBufferPool& staging_)
@@ -44,12 +65,12 @@ void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& buffers) noexcept
     }
 }
 void BufferCacheRuntime::Finish() { scheduler.Finish(); }
-u64 BufferCacheRuntime::GetDeviceLocalMemory() const { return 4ULL * 1024 * 1024 * 1024; }
+u64 BufferCacheRuntime::GetDeviceLocalMemory() const {
+    const u64 budget = device.QueryVideoMemory().Budget;
+    return budget != 0 ? budget : 4ULL * 1024 * 1024 * 1024;
+}
 u64 BufferCacheRuntime::GetDeviceMemoryUsage() const {
-    ComPtr<IDXGIAdapter3> adapter;
-    if (FAILED(device.Factory()->EnumAdapters1(0, reinterpret_cast<IDXGIAdapter1**>(adapter.GetAddressOf())))) return 0;
-    DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-    return SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)) ? info.CurrentUsage : 0;
+    return device.QueryVideoMemory().CurrentUsage;
 }
 StagingBufferRef BufferCacheRuntime::UploadStagingBuffer(size_t size) { return staging.Request(size, MemoryUsage::Upload); }
 StagingBufferRef BufferCacheRuntime::DownloadStagingBuffer(size_t size, bool deferred) { return staging.Request(size, MemoryUsage::Download, deferred); }
@@ -59,6 +80,38 @@ void BufferCacheRuntime::Copy(Buffer* dst, ID3D12Resource* dst_raw, Buffer* src,
                               ID3D12Resource* src_raw,
                               std::span<const VideoCommon::BufferCopy> copies) {
     auto* cmd = scheduler.CommandList();
+    if (dst_raw == src_raw) {
+        // A buffer cannot be COPY_SOURCE and COPY_DEST at once: bounce through a scratch buffer.
+        u64 scratch_size = 0;
+        for (const auto& copy : copies) {
+            scratch_size += copy.size;
+        }
+        if (scratch_size == 0) {
+            return;
+        }
+        ComPtr<ID3D12Resource> scratch = CreateDefaultBuffer(scratch_size);
+        std::vector<VideoCommon::BufferCopy> to_scratch;
+        std::vector<VideoCommon::BufferCopy> from_scratch;
+        u64 offset = 0;
+        for (const auto& copy : copies) {
+            to_scratch.push_back({.src_offset = copy.src_offset, .dst_offset = offset,
+                                  .size = copy.size});
+            from_scratch.push_back({.src_offset = offset, .dst_offset = copy.dst_offset,
+                                    .size = copy.size});
+            offset += copy.size;
+        }
+        Copy(nullptr, scratch.Get(), src, src_raw, to_scratch);
+        const D3D12_RESOURCE_BARRIER to_source{
+            .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            .Transition = {.pResource = scratch.Get(),
+                           .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                           .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
+                           .StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE}};
+        cmd->ResourceBarrier(1, &to_source);
+        Copy(dst, dst_raw, nullptr, scratch.Get(), from_scratch);
+        scheduler.DeferRelease(std::move(scratch));
+        return;
+    }
     for (const auto& copy : copies) {
         cmd->CopyBufferRegion(dst_raw, copy.dst_offset, src_raw, copy.src_offset, copy.size);
         if (dst) dst->MarkUsage(copy.dst_offset, copy.size);

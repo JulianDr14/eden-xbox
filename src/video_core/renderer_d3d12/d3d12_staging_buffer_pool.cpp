@@ -71,9 +71,9 @@ StagingBufferPool::StagingBufferPool(const Device& device_, Scheduler& scheduler
 StagingBufferPool::~StagingBufferPool() = default;
 
 StagingBufferRef StagingBufferPool::Request(size_t size, MemoryUsage usage, bool deferred) {
-    if (size == 0) {
-        throw std::invalid_argument("D3D12: staging request size must not be zero");
-    }
+    // The generic caches may ask for zero bytes (e.g. a download batch with no images); hand out a
+    // minimal allocation rather than throwing on what may be Eden's fence thread.
+    size = std::max<size_t>(size, 1);
     if (!deferred && usage == MemoryUsage::Upload && size <= region_size) {
         return GetStreamBuffer(size);
     }
@@ -107,8 +107,15 @@ StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
 
     const size_t first_region = Region(offset);
     const size_t end_region = Region(offset + size - 1) + 1;
-    if (wrapped && AreRegionsActive(first_region, end_region)) {
-        // Do not stall the CPU when wrapping into memory still consumed by the GPU.
+    // Every region this allocation enters for the first time in this lap may still hold data the
+    // GPU reads from the previous lap - not only after wrapping. The region the iterator is already
+    // in was validated when this lap entered it, so it is skipped.
+    size_t check_begin = first_region;
+    if (!wrapped && iterator > 0 && Region(iterator - 1) == first_region) {
+        ++check_begin;
+    }
+    if (check_begin < end_region && AreRegionsActive(check_begin, end_region)) {
+        // Do not stall the CPU on memory still consumed by the GPU.
         return GetStagingBuffer(size, MemoryUsage::Upload);
     }
 
@@ -132,15 +139,12 @@ StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
 }
 
 bool StagingBufferPool::AreRegionsActive(size_t region_begin, size_t region_end) const {
+    // Strict, as in the Vulkan pool: a region stamped with the tick being recorded is busy too, or a
+    // single command list that laps the ring would overwrite its own unsubmitted uploads. Regions
+    // shared by consecutive allocations in one lap are skipped by the caller instead.
     const u64 gpu_tick = scheduler.KnownGpuTick();
-    const u64 current_tick = scheduler.CurrentTick();
     return std::any_of(sync_ticks.begin() + region_begin, sync_ticks.begin() + region_end,
-                       [gpu_tick, current_tick](u64 sync_tick) {
-                           // Multiple non-overlapping allocations may touch the same coarse region
-                           // while recording one command list. Only an earlier submission blocks
-                           // reuse after the stream wraps.
-                           return sync_tick != current_tick && gpu_tick < sync_tick;
-                       });
+                       [gpu_tick](u64 sync_tick) { return gpu_tick < sync_tick; });
 }
 
 StagingBufferRef StagingBufferPool::GetStagingBuffer(size_t size, MemoryUsage usage,

@@ -3,8 +3,12 @@
 
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <functional>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -19,6 +23,12 @@ namespace D3D12 {
 ///
 /// Command allocators come from a pool and are reused once the tick they recorded is done: an
 /// allocator must not be reset while the GPU still executes its commands.
+///
+/// Threading: commands are recorded straight into one D3D12 list, which is not thread-safe, so only
+/// the recording thread (the GPU thread; whoever last asked for CommandList()) may record or flush.
+/// Other threads - Eden's fence thread - may query and wait on ticks: if they wait on work that is
+/// not submitted yet, they block until the recording thread submits it instead of flushing a list
+/// that thread is still writing to.
 class Scheduler {
 public:
     explicit Scheduler(Device& device);
@@ -27,8 +37,9 @@ public:
     Scheduler(const Scheduler&) = delete;
     Scheduler& operator=(const Scheduler&) = delete;
 
-    /// The list recording work for CurrentTick().
-    [[nodiscard]] ID3D12GraphicsCommandList* CommandList() const {
+    /// The list recording work for CurrentTick(). Marks the caller as the recording thread.
+    [[nodiscard]] ID3D12GraphicsCommandList* CommandList() {
+        recording_thread.store(std::this_thread::get_id(), std::memory_order_relaxed);
         return command_list.Get();
     }
 
@@ -38,18 +49,19 @@ public:
     /// Submits the recorded work and waits for the GPU to finish it.
     void Finish();
 
-    /// Waits until the GPU has passed tick, flushing first if tick is still being recorded.
+    /// Waits until the GPU has passed tick. On the recording thread, flushes first if tick is still
+    /// being recorded; on any other thread, waits for the recording thread to submit it.
     void Wait(u64 tick);
 
     [[nodiscard]] u64 CurrentTick() const noexcept {
-        return current_tick;
+        return current_tick.load(std::memory_order_acquire);
     }
 
     /// Last tick the GPU is known to have completed (refreshed from the fence).
     [[nodiscard]] u64 KnownGpuTick() const;
 
     [[nodiscard]] bool IsFree(u64 tick) const {
-        return tick <= known_gpu_tick || tick <= KnownGpuTick();
+        return tick <= known_gpu_tick.load(std::memory_order_acquire) || tick <= KnownGpuTick();
     }
 
     /// Keeps object alive until the GPU is done with everything recorded so far.
@@ -57,7 +69,17 @@ public:
 
     /// Called right before each submission (e.g. to end open queries or flush barriers).
     void RegisterOnSubmit(std::function<void()>&& func) {
-        on_submit = std::move(func);
+        on_submit.emplace_back(std::move(func));
+    }
+
+    /// Called after the command list has been reset for a new submission.
+    void RegisterOnReset(std::function<void()>&& func) {
+        on_reset.emplace_back(std::move(func));
+    }
+
+    void ClearSubmissionCallbacks() {
+        on_submit.clear();
+        on_reset.clear();
     }
 
     /// Frees retired allocators and released objects; called on every flush and frame.
@@ -70,20 +92,30 @@ private:
     };
 
     ComPtr<ID3D12CommandAllocator> AcquireAllocator();
+    bool IsRecordingThread() const {
+        return recording_thread.load(std::memory_order_relaxed) == std::this_thread::get_id();
+    }
 
     Device& device;
     ComPtr<ID3D12Fence> fence;
-    HANDLE fence_event{};
 
     ComPtr<ID3D12GraphicsCommandList> command_list;
     ComPtr<ID3D12CommandAllocator> current_allocator;
     std::deque<PooledAllocator> allocator_pool;
 
+    std::mutex release_mutex;
     std::deque<std::pair<u64, ComPtr<IUnknown>>> pending_releases;
-    std::function<void()> on_submit;
+    std::vector<std::function<void()>> on_submit;
+    std::vector<std::function<void()>> on_reset;
 
-    u64 current_tick{1};
-    mutable u64 known_gpu_tick{0};
+    /// Serializes submissions; recursive because submit callbacks may end queries.
+    std::recursive_mutex submit_mutex;
+    std::mutex submitted_mutex;
+    std::condition_variable submitted_cv;
+
+    std::atomic<std::thread::id> recording_thread{std::this_thread::get_id()};
+    std::atomic<u64> current_tick{1};
+    mutable std::atomic<u64> known_gpu_tick{0};
 };
 
 } // namespace D3D12

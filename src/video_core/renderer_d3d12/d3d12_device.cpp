@@ -48,6 +48,10 @@ Device::Device() {
     ComPtr<IDXGIAdapter1> found;
     if (SUCCEEDED(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&found)))) {
         adapter = found;
+        // QueryInterface, never a pointer cast: IDXGIAdapter3 adds vtable entries.
+        if (FAILED(adapter.As(&adapter3))) {
+            adapter3.Reset();
+        }
         DXGI_ADAPTER_DESC1 desc{};
         if (SUCCEEDED(adapter->GetDesc1(&desc))) {
             adapter_name = Narrow(desc.Description);
@@ -210,14 +214,20 @@ void Device::LogCapabilities() const {
     }
     LOG_INFO(Render, "D3D12: typed UAV loads:{}", typed_loads);
 
-    ComPtr<IDXGIAdapter3> adapter3;
-    if (adapter && SUCCEEDED(adapter.As(&adapter3))) {
-        DXGI_QUERY_VIDEO_MEMORY_INFO local{};
-        if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
-            LOG_INFO(Render, "D3D12: local video memory budget {} MiB, in use {} MiB",
-                     local.Budget >> 20, local.CurrentUsage >> 20);
-        }
+    if (adapter3) {
+        const DXGI_QUERY_VIDEO_MEMORY_INFO local = QueryVideoMemory();
+        LOG_INFO(Render, "D3D12: local video memory budget {} MiB, in use {} MiB",
+                 local.Budget >> 20, local.CurrentUsage >> 20);
     }
+}
+
+DXGI_QUERY_VIDEO_MEMORY_INFO Device::QueryVideoMemory() const {
+    DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+    if (!adapter3 ||
+        FAILED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+        return {};
+    }
+    return info;
 }
 
 } // namespace D3D12

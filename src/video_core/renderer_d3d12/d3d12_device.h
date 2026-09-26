@@ -44,6 +44,9 @@ public:
         return adapter_name;
     }
 
+    /// Local (device) memory budget and usage; zeroes if the adapter cannot report them.
+    [[nodiscard]] DXGI_QUERY_VIDEO_MEMORY_INFO QueryVideoMemory() const;
+
     /// Signals the queue and returns the value that marks this point.
     u64 Signal();
     /// Blocks until the queue has passed value.
@@ -56,6 +59,7 @@ private:
 
     ComPtr<IDXGIFactory4> factory;
     ComPtr<IDXGIAdapter1> adapter;
+    ComPtr<IDXGIAdapter3> adapter3; ///< same adapter; null if it lacks IDXGIAdapter3
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12Fence> fence;
