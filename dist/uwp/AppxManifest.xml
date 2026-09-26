@@ -31,6 +31,15 @@
     <TargetDeviceFamily Name="Windows.Universal"
                         MinVersion="10.0.17763.0"
                         MaxVersionTested="10.0.22621.0" />
+    <!-- The exe hard-imports the Store CRT (VCRUNTIME140_APP, MSVCP140_APP,
+         MSVCP140_ATOMIC_WAIT_APP, MSVCP140_CODECVT_IDS_APP, VCRUNTIME140_1_APP), which lives in
+         this framework package, not in ours. Undeclared, the app fails to ACTIVATE on-console with
+         a generic launch error and no crash dump. The console needs the matching
+         Microsoft.VCLibs.x64.14.00.appx installed too - upload it as a dependency package in the
+         Device Portal alongside ours. -->
+    <PackageDependency Name="Microsoft.VCLibs.140.00"
+                       MinVersion="14.0.33519.0"
+                       Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
   </Dependencies>
 
   <Resources>

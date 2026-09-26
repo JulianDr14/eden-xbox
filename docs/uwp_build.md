@@ -28,6 +28,28 @@ build CORE's JIT/memory work and the eventual headless-boot frontend validate ag
   mangles paths) and nasm for its asm. Put `C:\Strawberry\perl\bin` on PATH **before**
   any MSYS perl, and **do not** add `C:\Strawberry\c\bin` (it bundles an old CMake that
   shadows the VS one).
+- **`glslangValidator` on PATH.** `video_core/host_shaders` compiles its GLSL to SPIR-V at
+  configure time, and Vulkan stays compiled in this preset, so the configure hard-fails without
+  it. The Vulkan SDK provides it; so do the standalone glslang release archives, which are far
+  smaller (the Vulkan *headers* come from CPM, so the SDK is not otherwise needed). Note that
+  recent glslang releases ship only `glslang.exe` — upstream stopped shipping the
+  `glslangValidator` name that `find_program` looks for, so copy it alongside under that name,
+  exactly as the Vulkan SDK does.
+
+### Shortcut
+
+[`tools/xbox/build-env.bat`](../tools/xbox/build-env.bat) does the whole environment setup below
+in one step and then **verifies** it, which matters because every way of getting it wrong fails
+silently:
+
+```
+tools\xbox\build-env.bat cmake --preset uwp-x64
+tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp
+```
+
+Run it from **cmd or PowerShell**, not Git Bash. With no arguments it leaves an interactive shell
+with the environment set. The rest of this section explains what it does and why, which is worth
+reading when something goes wrong.
 
 ## Why Ninja (not the Visual Studio generator)
 

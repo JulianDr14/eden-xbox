@@ -28,7 +28,7 @@ function Find-SdkTool([string] $name) {
     $roots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "${env:ProgramFiles}\Windows Kits\10\bin")
     $hit = $roots | Where-Object { Test-Path $_ } | ForEach-Object {
         Get-ChildItem $_ -Recurse -Filter $name -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match '\x64\' }
+            Where-Object { $_.DirectoryName -like '*\x64' }
     } | Sort-Object FullName -Descending | Select-Object -First 1
     if (-not $hit) { throw "$name not found. Install the Windows 10/11 SDK (it ships MakeAppx + SignTool)." }
     return $hit.FullName
