@@ -23,7 +23,7 @@ con que los recursos se creen, se suban, se copien y se sincronicen bien.
 |---|---|---|---|
 | 3a.1 | Scheduler | `d3d12_scheduler` | El present usa command lists y ticks; se ve igual y no hay errores de Render. **Pasa en PC y Series (0.2.8.0).** |
 | 3a.2 | Staging pool | `d3d12_staging_buffer_pool` | El frame azul usa un buffer dedicado y el patrón usa el stream; ambos se ven bien y aparecen los dos marcadores en el log. **Pasa en PC; logs de Series correctos en 0.2.9.0, confirmación visual pendiente.** |
-| 3a.3 | Descriptor heaps | `d3d12_descriptor_heap` | El blit usa los heaps offline, el anillo shader-visible y la deduplicación de samplers. **Pendiente después de 3a.2.** |
+| 3a.3 | Descriptor heaps | `d3d12_descriptor_heap` | El blit usa los heaps offline, el anillo shader-visible y la deduplicación de samplers. **Pasa en PC; logs correctos en Series 0.2.10.0, confirmación visual pendiente.** |
 | 3b | Buffer cache runtime | `d3d12_buffer_cache` | Las copias y subidas de buffers funcionan (probado con un homebrew que usa buffers de GPU) |
 | 3c | Texture cache runtime | `d3d12_texture_cache` | Image, ImageView, Sampler y Framebuffer se crean; hay upload y download |
 | 3d | Fences, queries y `RasterizerD3D12` | `d3d12_fence_manager`, `d3d12_query_cache`, `d3d12_rasterizer` | El rasterizador real sustituye al nulo y el homebrew termina (`RunHeadlessBoot returned 0`) |
@@ -181,6 +181,35 @@ Hay dos tipos de heap:
 - **Alternativa:** tener cada sampler único en un slot fijo y pasar índices por root constants
   (bindless de samplers). Necesita SM 6.6 (`SamplerDescriptorHeap`) o índices dinámicos sobre una
   tabla que cubra el heap entero. Lo evaluamos en la Fase 4 junto con la root signature.
+
+### 3a.3: implementación y orden de reserva
+
+- Hay allocators offline paginados para CBV/SRV/UAV, sampler, RTV y DSV. El DSV queda preparado
+  para la caché de texturas de 3c aunque el present todavía no lo consume.
+- El anillo visible tiene 262.144 slots. Agrupa todas las reservas de una command list bajo su tick,
+  retira desde el frente al completar fences y, si no hay espacio contiguo, espera el tick más
+  antiguo. Se valida que ninguna petición supere su capacidad ni el máximo D3D12 de un millón de
+  descriptores visibles CBV/SRV/UAV.
+- El heap visible de samplers usa el máximo fijo de 2048. Las tablas se indexan por el contenido de
+  sus claves; un hit devuelve la tabla existente sin consumir slots. Si se llena, `Finish()` deja
+  el heap sin lectores antes de vaciar el mapa y reutilizarlo.
+- **Orden obligatorio:** obtener primero la tabla de samplers, después reservar/copiar la tabla del
+  anillo, y solo entonces pedir staging y grabar comandos. Ambas reservas pueden enviar/resetear la
+  command list. Reservar después del staging asignaría su vida útil al tick equivocado; vincular
+  heaps antes de reservar perdería el estado con el reset.
+- `SetDescriptorHeaps` se llama con ambos heaps visibles a la vez, después de toda operación capaz
+  de hacer flush. D3D12 deja indefinidas las tablas al inicio de una lista o cuando cambian los
+  heaps, y admite como máximo uno de cada tipo visible.
+
+El gate local registra una página offline RTV (tipo 2), una de sampler (tipo 1), una CBV/SRV/UAV
+(tipo 0), el anillo de 262.144 slots, el heap de 2048 samplers, la primera copia de SRV y tanto la
+creación como el primer hit de la tabla deduplicada. El boot termina con retorno 0 y sin errores de
+Render. La página DSV se crea de forma perezosa cuando 3c solicite su primera vista.
+
+La prueba de Series 0.2.10.0 registró los mismos marcadores: tres páginas offline, anillo de
+262.144 slots, heap de 2048 samplers, primera copia de SRV, creación y primer hit de la tabla de
+sampler. Terminó con retorno 0, sin warnings/errores de Render, device removal ni fallback por CPU.
+Queda pendiente la confirmación visual del usuario.
 
 ## 3a: cómo quedó implementado
 

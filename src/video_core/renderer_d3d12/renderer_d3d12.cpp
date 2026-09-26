@@ -123,6 +123,7 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
       view_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV},
       sampler_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 256},
       rtv_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 256},
+      dsv_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 256},
       descriptor_ring{device.Get(), scheduler, DESCRIPTOR_RING_SIZE},
       sampler_heap{device.Get(), scheduler}, rasterizer{gpu_} {
     ID3D12Device* const dev = device.Get();
@@ -312,11 +313,18 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
             const bool has_image = ReadGuestLayer(framebuffer);
             if (blit_ready && has_image) {
                 PrepareGuestImage(static_cast<u32>(crop_width), static_cast<u32>(crop_height));
+                // Descriptor allocation may flush when a heap wraps. Do it before obtaining
+                // staging memory, whose lifetime is tied to the then-current scheduler tick.
+                constexpr u64 LINEAR_SAMPLER_KEY = 0;
+                const D3D12_GPU_DESCRIPTOR_HANDLE sampler_table =
+                    sampler_heap.GetTable({&LINEAR_SAMPLER_KEY, 1}, {&linear_sampler, 1});
+                const D3D12_GPU_DESCRIPTOR_HANDLE srv_table =
+                    descriptor_ring.Upload({&guest_srv, 1});
                 const StagingBufferRef upload =
                     staging_pool.Request(guest_upload_size, MemoryUsage::Upload);
                 CopyGuestImage(framebuffer, upload.mapped_span.data(),
                                guest_footprint.Footprint.RowPitch);
-                RecordBlit(upload, image, index);
+                RecordBlit(upload, image, index, srv_table, sampler_table);
             } else {
                 const StagingBufferRef upload =
                     staging_pool.Request(upload_size, MemoryUsage::Upload);
@@ -423,7 +431,8 @@ void RendererD3D12::ScaleGuestImage(const Tegra::FramebufferConfig& framebuffer,
 }
 
 void RendererD3D12::RecordBlit(const StagingBufferRef& upload, ID3D12Resource* image,
-                               u32 image_index) {
+                               u32 image_index, D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
+                               D3D12_GPU_DESCRIPTOR_HANDLE sampler_table) {
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
 
     // Upload the guest image.
@@ -466,13 +475,10 @@ void RendererD3D12::RecordBlit(const StagingBufferRef& upload, ID3D12Resource* i
     cmd->RSSetViewports(1, &viewport);
     cmd->RSSetScissorRects(1, &scissor);
 
-    // Descriptor heaps are bound per command list: a reset list starts with none.
+    // Descriptor heaps are command-list state. The allocations were completed before any staging
+    // request or command recording, so no operation below can reset this list before the draw.
     ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
     cmd->SetDescriptorHeaps(2, heaps);
-    const D3D12_GPU_DESCRIPTOR_HANDLE srv_table = descriptor_ring.Upload({&guest_srv, 1});
-    constexpr u64 LINEAR_SAMPLER_KEY = 0;
-    const D3D12_GPU_DESCRIPTOR_HANDLE sampler_table =
-        sampler_heap.GetTable({&LINEAR_SAMPLER_KEY, 1}, {&linear_sampler, 1});
 
     cmd->SetGraphicsRootSignature(blit_root_signature.Get());
     cmd->SetPipelineState(blit_pipeline.Get());

@@ -62,7 +62,9 @@ private:
     void ScaleGuestImage(const Tegra::FramebufferConfig& framebuffer, u8* dst, u32 row_pitch);
 
     /// Records the shader-path upload + draw of the guest texture into the back buffer.
-    void RecordBlit(const StagingBufferRef& upload, ID3D12Resource* image, u32 image_index);
+    void RecordBlit(const StagingBufferRef& upload, ID3D12Resource* image, u32 image_index,
+                    D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
+                    D3D12_GPU_DESCRIPTOR_HANDLE sampler_table);
     /// Records the CPU-path copy of the upload image into the back buffer.
     void RecordCopy(const StagingBufferRef& upload, ID3D12Resource* image);
     /// Submits the recorded frame and presents back buffer image_index.
@@ -78,6 +80,7 @@ private:
     CpuDescriptorAllocator view_descriptors;    ///< offline CBV/SRV/UAV
     CpuDescriptorAllocator sampler_descriptors; ///< offline samplers
     CpuDescriptorAllocator rtv_descriptors;
+    CpuDescriptorAllocator dsv_descriptors;
     DescriptorRing descriptor_ring;
     SamplerHeap sampler_heap;
     Null::RasterizerNull rasterizer;

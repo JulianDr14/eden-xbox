@@ -88,7 +88,7 @@ Qué buscar en esos archivos:
 | 0–2 (boot) | Toolchain UWP, AppContainer, JIT con W^X, boot headless | **Gate 2:** el NRO llega al centinela del JIT en la Series | ✅ |
 | 1 (render) | Renderer D3D12: device, swapchain en el CoreWindow, probe de capacidades, framebuffer del guest vía CPU | **Gate 3:** se ve el patrón en la tele | ✅ 0.2.6.0, commit `cc2ea38d9` |
 | 2 | Shaders SPIR-V → Mesa `spirv_to_dxil` → DXIL firmado con `dxil.dll`; el blit de Eden en la GPU | **Gate 4:** el PSO se crea en la Series con DXIL firmado | ✅ 0.2.7.0 (sin commit todavía) |
-| 3 | Infraestructura del rasterizador; diseño completo en [`xbox_d3d12_phase3.md`](xbox_d3d12_phase3.md) | Uno por sub-fase (3a.1–3d) | 🔨 En curso: scheduler (3a.1) validado en PC y Series con 0.2.8.0; staging (3a.2) pasa en PC y sus logs pasan en Series con 0.2.9.0, pendiente confirmación visual |
+| 3 | Infraestructura del rasterizador; diseño completo en [`xbox_d3d12_phase3.md`](xbox_d3d12_phase3.md) | Uno por sub-fase (3a.1–3d) | 🔨 En curso: 3a.1 validado en PC/Series; 3a.2 y 3a.3 con logs correctos en PC/Series, confirmación visual pendiente |
 | 4 | Pipelines (detalle debajo) | Primer draw 3D de un homebrew | — |
 | 5 | Paridad (detalle debajo) | — | — |
 
@@ -111,6 +111,19 @@ al envolver el ring, que es cuando el cursor puede volver a pisar memoria anteri
 8.294.400 bytes y el patrón usó el stream con peticiones de 3.686.400 bytes. Hubo exactamente un
 marcador de cada ruta, `RunHeadlessBoot returned 0`, cero warnings/errores de Render, cero device
 removed y ningún fallback por CPU. Falta confirmar el resultado visual antes de cerrar el gate.
+
+**Prueba PC de 3a.3:** el present creó páginas offline RTV, sampler y CBV/SRV/UAV; creó el anillo
+shader-visible de 262.144 slots y el heap visible de 2048 samplers; copió el SRV al anillo, guardó
+la tabla del sampler lineal y confirmó su deduplicación en el segundo frame. Terminó con retorno 0
+y sin warnings/errores de Render. La auditoría encontró una trampa importante: reservar una tabla
+puede hacer flush al envolver un heap. Las tablas se reservan ahora antes del staging y de grabar
+comandos, y `SetDescriptorHeaps` se ejecuta después de toda operación capaz de resetear la lista.
+
+**Prueba Series de 3a.3 (0.2.10.0, logs):** se crearon las tres páginas offline usadas por el
+present, el anillo visible de 262.144 slots y el heap visible de 2048 samplers. El SRV se copió al
+anillo, la tabla del sampler se guardó y el segundo frame confirmó su deduplicación. El boot terminó
+en 10,906 s con retorno 0, usando 850 MiB de 5120 MiB, sin warnings/errores de Render, device removed
+ni fallback por CPU. Falta confirmación visual para cerrar formalmente 3a.
 
 **Fase 4.**
 - Una clave tipo `FixedPipelineState` que genera el PSO.

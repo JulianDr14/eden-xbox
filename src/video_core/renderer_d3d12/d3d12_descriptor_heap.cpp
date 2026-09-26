@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <limits>
 #include <stdexcept>
 
 #include <fmt/format.h>
@@ -16,6 +17,22 @@ namespace {
 
 ComPtr<ID3D12DescriptorHeap> CreateHeap(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type,
                                         u32 count, bool shader_visible) {
+    if (count == 0) {
+        throw std::invalid_argument("D3D12: descriptor heap size must not be zero");
+    }
+    if (shader_visible && type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
+        type != D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) {
+        throw std::invalid_argument("D3D12: RTV/DSV heaps cannot be shader visible");
+    }
+    if (shader_visible && type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER &&
+        count > D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE) {
+        throw std::invalid_argument("D3D12: shader-visible sampler heap exceeds 2048 slots");
+    }
+    if (shader_visible && type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
+        count > D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1) {
+        throw std::invalid_argument(
+            "D3D12: shader-visible CBV/SRV/UAV heap exceeds one million slots");
+    }
     const D3D12_DESCRIPTOR_HEAP_DESC desc{
         .Type = type,
         .NumDescriptors = count,
@@ -36,7 +53,11 @@ ComPtr<ID3D12DescriptorHeap> CreateHeap(ID3D12Device* device, D3D12_DESCRIPTOR_H
 CpuDescriptorAllocator::CpuDescriptorAllocator(ID3D12Device* device_,
                                                D3D12_DESCRIPTOR_HEAP_TYPE type_, u32 page_size_)
     : device{device_}, type{type_}, page_size{page_size_},
-      stride{device_->GetDescriptorHandleIncrementSize(type_)} {}
+      stride{device_->GetDescriptorHandleIncrementSize(type_)} {
+    if (page_size == 0) {
+        throw std::invalid_argument("D3D12: offline descriptor page size must not be zero");
+    }
+}
 
 D3D12_CPU_DESCRIPTOR_HANDLE CpuDescriptorAllocator::Allocate() {
     std::scoped_lock lock{mutex};
@@ -64,6 +85,8 @@ void CpuDescriptorAllocator::AddPage() {
         free_list.push_back({base.ptr + static_cast<SIZE_T>(i) * stride});
     }
     pages.push_back(std::move(page));
+    LOG_INFO(Render, "D3D12: offline descriptor page created (type {}, {} slots)",
+             static_cast<u32>(type), page_size);
 }
 
 // --- DescriptorRing ---------------------------------------------------------------------------
@@ -73,7 +96,9 @@ DescriptorRing::DescriptorRing(ID3D12Device* device_, Scheduler& scheduler_, u32
       heap{CreateHeap(device_, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, capacity_, true)},
       cpu_base{heap->GetCPUDescriptorHandleForHeapStart()},
       gpu_base{heap->GetGPUDescriptorHandleForHeapStart()}, capacity{capacity_},
-      stride{device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)} {}
+      stride{device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)} {
+    LOG_INFO(Render, "D3D12: shader-visible descriptor ring ready ({} slots)", capacity);
+}
 
 DescriptorRange DescriptorRing::Allocate(u32 count) {
     if (count == 0 || count > capacity) {
@@ -100,11 +125,19 @@ DescriptorRange DescriptorRing::Allocate(u32 count) {
 
 D3D12_GPU_DESCRIPTOR_HANDLE DescriptorRing::Upload(
     std::span<const D3D12_CPU_DESCRIPTOR_HANDLE> descriptors) {
+    if (descriptors.size() > std::numeric_limits<u32>::max()) {
+        throw std::length_error("D3D12: descriptor upload is too large");
+    }
     const DescriptorRange range = Allocate(static_cast<u32>(descriptors.size()));
     D3D12_CPU_DESCRIPTOR_HANDLE dst = range.cpu;
     for (const D3D12_CPU_DESCRIPTOR_HANDLE src : descriptors) {
         device->CopyDescriptorsSimple(1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         dst.ptr += stride;
+    }
+    if (!logged_upload) {
+        LOG_INFO(Render, "D3D12: descriptor ring upload active ({} descriptors, tick {})",
+                 descriptors.size(), scheduler.CurrentTick());
+        logged_upload = true;
     }
     return range.gpu;
 }
@@ -153,16 +186,25 @@ SamplerHeap::SamplerHeap(ID3D12Device* device_, Scheduler& scheduler_)
       heap{CreateHeap(device_, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, CAPACITY, true)},
       cpu_base{heap->GetCPUDescriptorHandleForHeapStart()},
       gpu_base{heap->GetGPUDescriptorHandleForHeapStart()},
-      stride{device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)} {}
+      stride{device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)} {
+    LOG_INFO(Render, "D3D12: shader-visible sampler heap ready ({} slots)", CAPACITY);
+}
 
 D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
     std::span<const u64> keys, std::span<const D3D12_CPU_DESCRIPTOR_HANDLE> samplers) {
+    if (samplers.size() > std::numeric_limits<u32>::max()) {
+        throw std::length_error("D3D12: sampler table is too large");
+    }
     const u32 count = static_cast<u32>(samplers.size());
     if (count == 0 || count > CAPACITY || keys.size() != samplers.size()) {
         throw std::runtime_error(fmt::format("D3D12: bad sampler table request ({})", count));
     }
     std::vector<u64> key(keys.begin(), keys.end());
     if (const auto it = tables.find(key); it != tables.end()) {
+        if (!logged_reuse) {
+            LOG_INFO(Render, "D3D12: sampler table deduplication active ({} samplers)", count);
+            logged_reuse = true;
+        }
         return {gpu_base.ptr + static_cast<u64>(it->second) * stride};
     }
     if (used + count > CAPACITY) {
@@ -180,6 +222,11 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
     }
     used += count;
     tables.emplace(std::move(key), first);
+    if (!logged_cache) {
+        LOG_INFO(Render, "D3D12: sampler table cached ({} samplers, {} of {} slots used)", count,
+                 used, CAPACITY);
+        logged_cache = true;
+    }
     return {gpu_base.ptr + static_cast<u64>(first) * stride};
 }
 

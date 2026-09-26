@@ -85,6 +85,7 @@ private:
     u32 head{}; ///< next free slot
     u32 tail{}; ///< oldest slot the GPU may still read
     std::deque<std::pair<u64, u32>> in_flight; ///< (tick, end offset), oldest first
+    bool logged_upload{};
 };
 
 /// The one shader-visible sampler heap. D3D12 caps it at 2048 entries on every tier, too few for
@@ -121,6 +122,8 @@ private:
     u32 stride;
     u32 used{};
     std::unordered_map<std::vector<u64>, u32, KeyHash> tables; ///< keys -> first slot
+    bool logged_cache{};
+    bool logged_reuse{};
 };
 
 } // namespace D3D12

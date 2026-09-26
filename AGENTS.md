@@ -24,7 +24,7 @@ detalle técnico está en [`docs/xbox_internal.md`](docs/xbox_internal.md) (cuad
 | 2: shaders SPIR-V→DXIL, blit por GPU | ✅ Gate 4 en la Series (0.2.7.0); **sin commit** |
 | 3a.1: scheduler | ✅ PC y Series (0.2.8.0); sin commit |
 | 3a.2: staging pool | ✅ PC; logs correctos en Series (0.2.9.0), confirmación visual pendiente |
-| 3a.3: descriptor heaps | ⏭ después de 3a.2 |
+| 3a.3: descriptor heaps | ✅ PC; logs correctos en Series (0.2.10.0), confirmación visual pendiente |
 | 3b: runtime de la caché de buffers | ⏭ siguiente |
 | 3c: runtime de la caché de texturas | — |
 | 3d: fences, queries y `RasterizerD3D12` sustituyendo al nulo | — |
