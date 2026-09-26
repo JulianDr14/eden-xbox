@@ -43,6 +43,17 @@ void ThrowIfFailed(HRESULT hr, const char* what) {
     }
 }
 
+namespace removal_tripwire {
+std::atomic_bool removal_tripped{false};
+
+void ReportRemovedAfter(HRESULT reason, const std::string& what) {
+    if (!removal_tripped.exchange(true)) {
+        LOG_CRITICAL(Render, "D3D12: device removed (reason 0x{:08X}) right after {}",
+                     static_cast<u32>(reason), what);
+    }
+}
+} // namespace removal_tripwire
+
 Device::Device() {
     ThrowIfFailed(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
     // The debug layer (D3D12SDKLayers.dll, the "Graphics Tools" optional feature) is a PC-only aid:
@@ -55,13 +66,18 @@ Device::Device() {
         } else {
             LOG_WARNING(Render, "D3D12: debug layer requested but not installed");
         }
-        // DRED (part of the runtime, not the SDK layers): on a device removal, the last GPU
-        // operations of each command list and the faulting address (ReportDeviceRemoved).
+    }
+    // DRED (part of the runtime, not the SDK layers, so also on the console): on a device removal,
+    // the last GPU operations of each command list and the faulting address (ReportDeviceRemoved).
+    // Its cost is small next to what a removal on the console costs to diagnose without it.
+    {
         ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
             dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             LOG_INFO(Render, "D3D12: DRED breadcrumbs and page faults on");
+        } else {
+            LOG_INFO(Render, "D3D12: DRED not available");
         }
     }
     // Feature level 11.0 is all Xbox Series UWP offers; desktop GPUs accept it too.
@@ -206,17 +222,21 @@ void Device::ReportDeviceRemoved() {
 
     ComPtr<ID3D12DeviceRemovedExtendedData> dred;
     if (FAILED(device.As(&dred))) {
-        LOG_CRITICAL(Render, "D3D12: no DRED data (enable renderer_debug to record it)");
+        LOG_CRITICAL(Render, "D3D12: no DRED data on this device");
         return;
     }
     D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs{};
     if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs))) {
+        u32 lists = 0;
+        u32 unfinished = 0;
         for (const D3D12_AUTO_BREADCRUMB_NODE* node = breadcrumbs.pHeadAutoBreadcrumbNode;
              node != nullptr; node = node->pNext) {
+            ++lists;
             const u32 completed = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
             if (completed >= node->BreadcrumbCount) {
                 continue; // this list finished on the GPU
             }
+            ++unfinished;
             // The operations around the first one that did not complete.
             std::string ops;
             const u32 first = completed > 6 ? completed - 6 : 0;
@@ -230,6 +250,10 @@ void Device::ReportDeviceRemoved() {
             LOG_CRITICAL(Render, "D3D12 DRED: list with {} ops stopped after {}:{}",
                          node->BreadcrumbCount, completed, ops);
         }
+        // Every recorded list done means the GPU was not the one that failed: a CPU-side call
+        // with parameters the driver rejects did (see the "right after" line of CheckRemovedAfter).
+        LOG_CRITICAL(Render, "D3D12 DRED: {} command lists recorded, {} unfinished", lists,
+                     unfinished);
     }
     D3D12_DRED_PAGE_FAULT_OUTPUT page_fault{};
     if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&page_fault)) && page_fault.PageFaultVA != 0) {

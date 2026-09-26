@@ -446,6 +446,13 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
     ThrowIfFailed(runtime->device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
                   D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource)),
                   "Create texture cache image");
+    CheckRemovedAfter(runtime->device.Get(), [&] {
+        return fmt::format("creating image {} ({} dim {} {}x{}x{} levels {} samples {} flags 0x{:x})",
+                           info_.format, static_cast<u32>(desc.Format),
+                           static_cast<u32>(desc.Dimension), desc.Width, desc.Height,
+                           desc.DepthOrArraySize, desc.MipLevels, desc.SampleDesc.Count,
+                           static_cast<u32>(desc.Flags));
+    });
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     runtime->device.Get()->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, nullptr,
                                                  nullptr);
@@ -934,6 +941,12 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
                 rtv_desc.Texture2DArray = {base_level, base_layer, layers, 0};
             }
             runtime->device.Get()->CreateRenderTargetView(image, &rtv_desc, rtv);
+            CheckRemovedAfter(runtime->device.Get(), [&] {
+                return fmt::format("RTV of {} (format {} dim {} level {} layers {}+{})",
+                                   info.format, static_cast<u32>(rtv_desc.Format),
+                                   static_cast<u32>(rtv_desc.ViewDimension), base_level,
+                                   base_layer, layers);
+            });
         } else {
             WarnOnce(logged_view_format, "view format {} cannot be a render target", info.format);
         }
@@ -954,6 +967,12 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
             dsv_desc.Texture2DArray = {base_level, base_layer, layers};
         }
         runtime->device.Get()->CreateDepthStencilView(image, &dsv_desc, dsv);
+        CheckRemovedAfter(runtime->device.Get(), [&] {
+            return fmt::format("DSV of {} (format {} dim {} level {} layers {}+{})", info.format,
+                               static_cast<u32>(dsv_desc.Format),
+                               static_cast<u32>(dsv_desc.ViewDimension), base_level, base_layer,
+                               layers);
+        });
     }
     if ((resource_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) &&
         runtime->SupportsView(format_info.view, D3D12_FORMAT_SUPPORT1_NONE,
@@ -968,6 +987,12 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
             uav_desc.Texture2DArray = {base_level, base_layer, layers, 0};
         }
         runtime->device.Get()->CreateUnorderedAccessView(image, nullptr, &uav_desc, uav);
+        CheckRemovedAfter(runtime->device.Get(), [&] {
+            return fmt::format("UAV of {} (format {} dim {} level {} layers {}+{})", info.format,
+                               static_cast<u32>(uav_desc.Format),
+                               static_cast<u32>(uav_desc.ViewDimension), base_level, base_layer,
+                               layers);
+        });
     }
 }
 ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewInfo& info,
@@ -1097,6 +1122,14 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
     }
     const D3D12_CPU_DESCRIPTOR_HANDLE handle = runtime->view_descriptors.Allocate();
     runtime->device.Get()->CreateShaderResourceView(image, &desc, handle);
+    CheckRemovedAfter(runtime->device.Get(), [&] {
+        return fmt::format("SRV of {} as type {} (format {} dim {} levels {}+{} layers {}+{} of "
+                           "{}, resource dim {} msaa {})",
+                           format, static_cast<u32>(texture_type), static_cast<u32>(desc.Format),
+                           static_cast<u32>(desc.ViewDimension), p.base_level, p.levels,
+                           p.base_layer, p.layers, p.resource_layers,
+                           static_cast<u32>(p.dimension), p.is_msaa);
+    });
     return handle;
 }
 
@@ -1165,6 +1198,14 @@ Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& 
         .ComparisonFunc = Compare(config.depth_compare_func), .BorderColor = {border[0], border[1], border[2], border[3]},
         .MinLOD = min_lod, .MaxLOD = max_lod};
     runtime->device.Get()->CreateSampler(&desc, handle);
+    CheckRemovedAfter(runtime->device.Get(), [&] {
+        return fmt::format("sampler (filter 0x{:x} address {}/{}/{} aniso {} compare {} lod {}..{} "
+                           "bias {})",
+                           static_cast<u32>(desc.Filter), static_cast<u32>(desc.AddressU),
+                           static_cast<u32>(desc.AddressV), static_cast<u32>(desc.AddressW),
+                           desc.MaxAnisotropy, static_cast<u32>(desc.ComparisonFunc), desc.MinLOD,
+                           desc.MaxLOD, desc.MipLODBias);
+    });
 }
 Sampler::~Sampler() { if (runtime && handle.ptr) runtime->sampler_descriptors.Free(handle); }
 Sampler::Sampler(Sampler&& other) noexcept : runtime{std::exchange(other.runtime, nullptr)}, handle{other.handle}, key{other.key} {}

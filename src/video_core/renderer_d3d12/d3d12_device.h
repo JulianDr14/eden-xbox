@@ -19,6 +19,25 @@ using Microsoft::WRL::ComPtr;
 /// Throws std::runtime_error naming the call and the HRESULT when hr is a failure.
 void ThrowIfFailed(HRESULT hr, const char* what);
 
+namespace removal_tripwire {
+extern std::atomic_bool removal_tripped;
+void ReportRemovedAfter(HRESULT reason, const std::string& what);
+} // namespace removal_tripwire
+
+/// Removal tripwire: a view, resource or pipeline created with parameters the driver rejects
+/// removes the device (DXGI_ERROR_INVALID_CALL) without any other error, and the Xbox driver
+/// rejects things the PC one accepts. Called right after such calls, it logs the first one after
+/// which the device is gone; describe() (the call and its parameters) only runs then.
+template <typename Describe>
+void CheckRemovedAfter(ID3D12Device* device, Describe&& describe) {
+    if (removal_tripwire::removal_tripped.load(std::memory_order_relaxed)) {
+        return;
+    }
+    if (const HRESULT reason = device->GetDeviceRemovedReason(); FAILED(reason)) {
+        removal_tripwire::ReportRemovedAfter(reason, describe());
+    }
+}
+
 /// The D3D12 device, its direct queue and a fence to track queue progress.
 ///
 /// Xbox Series UWP (Dev Mode) exposes feature level 11.0 and shader model <= 6.4 with no Agility SDK,

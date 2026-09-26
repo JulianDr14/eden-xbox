@@ -255,6 +255,10 @@ void ComputePipeline::Build() {
         .Flags = D3D12_PIPELINE_STATE_FLAG_NONE,
     };
     const HRESULT hr = device.Get()->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pipeline_state));
+    CheckRemovedAfter(device.Get(), [&] {
+        return fmt::format("compute PSO for {:016x} (HRESULT 0x{:08X})", unique_hash,
+                           static_cast<u32>(hr));
+    });
     if (FAILED(hr)) {
         LOG_ERROR(Render, "D3D12: CreateComputePipelineState failed (HRESULT 0x{:08X}) for {:016x}",
                   static_cast<u32>(hr), unique_hash);

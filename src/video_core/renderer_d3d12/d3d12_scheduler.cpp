@@ -73,6 +73,10 @@ u64 Scheduler::Flush() {
     ThrowIfFailed(command_list->Close(), "ID3D12GraphicsCommandList::Close");
     ID3D12CommandList* const lists[] = {command_list.Get()};
     device.Queue()->ExecuteCommandLists(1, lists);
+    CheckRemovedAfter(device.Get(), [&] {
+        return fmt::format("submitting tick {} (removed by the GPU or by a recorded command)",
+                           current_tick.load(std::memory_order_relaxed));
+    });
 
     const u64 signaled = current_tick.load(std::memory_order_relaxed);
     ThrowIfFailed(device.Queue()->Signal(fence.Get(), signaled), "ID3D12CommandQueue::Signal");

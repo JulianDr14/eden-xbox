@@ -161,6 +161,7 @@ ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
     ThrowIfFailed(device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
                   D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&result)),
                   "CreateCommittedResource (buffer cache)");
+    CheckRemovedAfter(device.Get(), [&] { return fmt::format("creating a {} byte buffer", size); });
     return result;
 }
 
