@@ -11,6 +11,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
+#include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
@@ -77,6 +78,7 @@ private:
     ShaderCompiler shader_compiler;
     Scheduler scheduler;
     StagingBufferPool staging_pool;
+    BufferCacheRuntime buffer_cache_runtime;
     CpuDescriptorAllocator view_descriptors;    ///< offline CBV/SRV/UAV
     CpuDescriptorAllocator sampler_descriptors; ///< offline samplers
     CpuDescriptorAllocator rtv_descriptors;

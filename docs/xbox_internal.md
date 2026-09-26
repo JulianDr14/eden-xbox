@@ -125,6 +125,19 @@ anillo, la tabla del sampler se guardó y el segundo frame confirmó su deduplic
 en 10,906 s con retorno 0, usando 850 MiB de 5120 MiB, sin warnings/errores de Render, device removed
 ni fallback por CPU. Falta confirmación visual para cerrar formalmente 3a.
 
+**Fase 3b (PC y Series):** `d3d12_buffer_cache` instancia la caché genérica completa con buffers committed
+en heap `DEFAULT`, staging `UPLOAD`/`READBACK`, copias, clears, bindings de índice/vértice y reporte
+de memoria DXGI. El gate escribe un patrón de 4096 bytes, ejecuta `UPLOAD → DEFAULT → READBACK`,
+espera el tick y compara cada byte. Pasó en PC con retorno 0 y sin errores de Render. Los buffers
+vuelven explícitamente a `COMMON` tras cada lote de copias; es conservador, pero evita mezclar una
+promoción a `COPY_DEST` con un uso posterior como fuente dentro de la misma command list.
+
+**Prueba Series de 3b (0.2.11.0, logs):** el runtime arrancó, ejercitó staging de stream y readback
+dedicado, y completó `UPLOAD → DEFAULT → READBACK` comparando correctamente los 4096 bytes. El boot
+terminó en 11,016 s con `RunHeadlessBoot returned 0`, usando 850 MiB de 5120 MiB, sin
+warnings/errores de Render, `DXGI_ERROR_DEVICE_REMOVED` ni fallback por CPU. Los errores de motores
+de input ausentes y del archivo opcional `playtime.bin` son ajenos al renderer y no bloquean el gate.
+
 **Fase 4.**
 - Una clave tipo `FixedPipelineState` que genera el PSO.
 - Una root signature fija por grupo de etapas.

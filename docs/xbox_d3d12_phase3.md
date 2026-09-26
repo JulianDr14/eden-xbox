@@ -24,7 +24,7 @@ con que los recursos se creen, se suban, se copien y se sincronicen bien.
 | 3a.1 | Scheduler | `d3d12_scheduler` | El present usa command lists y ticks; se ve igual y no hay errores de Render. **Pasa en PC y Series (0.2.8.0).** |
 | 3a.2 | Staging pool | `d3d12_staging_buffer_pool` | El frame azul usa un buffer dedicado y el patrón usa el stream; ambos se ven bien y aparecen los dos marcadores en el log. **Pasa en PC; logs de Series correctos en 0.2.9.0, confirmación visual pendiente.** |
 | 3a.3 | Descriptor heaps | `d3d12_descriptor_heap` | El blit usa los heaps offline, el anillo shader-visible y la deduplicación de samplers. **Pasa en PC; logs correctos en Series 0.2.10.0, confirmación visual pendiente.** |
-| 3b | Buffer cache runtime | `d3d12_buffer_cache` | Las copias y subidas de buffers funcionan (probado con un homebrew que usa buffers de GPU) |
+| 3b | Buffer cache runtime | `d3d12_buffer_cache` | Las copias, subidas y descargas funcionan. **Pasa en PC y Series (0.2.11.0) con round-trip GPU de 4096 bytes.** |
 | 3c | Texture cache runtime | `d3d12_texture_cache` | Image, ImageView, Sampler y Framebuffer se crean; hay upload y download |
 | 3d | Fences, queries y `RasterizerD3D12` | `d3d12_fence_manager`, `d3d12_query_cache`, `d3d12_rasterizer` | El rasterizador real sustituye al nulo y el homebrew termina (`RunHeadlessBoot returned 0`) |
 
@@ -241,6 +241,39 @@ que exista el rasterizador:
   `GetDeviceRemovedReason()`, en lugar de dar todo por terminado.
 
 ## 3b–3d (resumen; se detalla al llegar)
+
+## 3b. Buffer cache runtime
+
+`d3d12_buffer_cache` implementa la política que exige `VideoCommon::BufferCache`:
+
+- `Buffer` es un recurso committed `DEFAULT`, `ROW_MAJOR`, creado en `COMMON`. El null buffer tiene
+  almacenamiento real de cuatro bytes porque D3D12 no admite un recurso nulo en todos los bindings.
+- Upload y download salen del staging pool de 3a.2. Las descargas diferidas conservan su buffer
+  hasta `FreeDeferredStagingBuffer`, y el consumidor espera el scheduler antes de leerlo.
+- `CopyBufferRegion` cubre staging→buffer, buffer→staging y buffer→buffer. Cada buffer vuelve a
+  `COMMON` al terminar el lote. D3D12 permite promotion desde `COMMON` y todos los buffers decaen a
+  `COMMON` al terminar `ExecuteCommandLists`; el cierre explícito también hace seguros varios usos
+  incompatibles dentro de una misma lista.
+- `ClearBuffer` genera el patrón de 32 bits en staging y lo copia al recurso. Evita depender de un
+  UAV y de heaps de descriptores para limpiar buffers que quizá no fueron creados con
+  `ALLOW_UNORDERED_ACCESS`.
+- Se implementan los bindings de índice y vértice; las tablas uniform/storage/texture se conectan a
+  la root signature en fase 4, cuando exista el pipeline que las consume.
+- Se instancia explícitamente `VideoCommon::BufferCache<BufferCacheParams>` durante el build, de
+  modo que cualquier método requerido por la caché genérica falla al compilar en vez de aparecer
+  tarde al integrar el rasterizador.
+
+El gate crea un buffer de 4096 bytes, escribe un patrón determinista en `UPLOAD`, lo copia a
+`DEFAULT`, lo descarga a `READBACK`, hace `Finish()` y compara los 4096 bytes. El log positivo es:
+
+```
+D3D12: buffer cache runtime ready
+D3D12: buffer cache round-trip passed (4096 bytes)
+```
+
+En PC terminó con `RunHeadlessBoot returned 0`, sin warnings/errores de Render ni device removal.
+La prueba de Series 0.2.11.0 reprodujo el mismo resultado: round-trip correcto, retorno 0 y sin
+warnings/errores de Render ni device removal. El gate de 3b queda validado en consola.
 
 **Barreras:** usamos `ResourceBarrier` clásico, porque la consola reporta `enhanced barriers no`.
 - **Buffers:** hacen *promotion* y *decay* implícitos. Al final de cada `ExecuteCommandLists` vuelven

@@ -120,6 +120,7 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
                           emu_window.GetFramebufferLayout().width,
                           emu_window.GetFramebufferLayout().height},
       shader_compiler{}, scheduler{device}, staging_pool{device, scheduler},
+      buffer_cache_runtime{device, scheduler, staging_pool},
       view_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV},
       sampler_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 256},
       rtv_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 256},
@@ -152,6 +153,7 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
     RecordCopy(upload, swapchain.Image(index));
     staging_pool.FreeDeferred(upload);
     Present(index);
+    buffer_cache_runtime.RunSelfTest();
     LOG_INFO(Render, "D3D12: presenting through the scheduler (tick {})", scheduler.CurrentTick());
 }
 
