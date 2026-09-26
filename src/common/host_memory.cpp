@@ -879,6 +879,32 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission 
 }
 
 void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
+#ifdef HOST_MEMORY_USE_FROM_APP
+    // Xbox/UWP: the backing is demand-committed, so a memset of zero COMMITS every page it touches.
+    // The kernel clears every newly allocated heap page, and libnx's default heap is all available
+    // memory (~3.x GiB): that memset alone busts the Game-mode title budget, the handler's commit
+    // fails, and the memset access-violates (observed on-console at +3.6 GiB into the backing).
+    //
+    // Zeroing whole pages is a decommit instead: the next touch faults into the demand-commit
+    // handler, which hands back a freshly committed page, and committed pages always read as zero.
+    // Same contents for the guest, but it returns budget rather than spending it. The partial pages
+    // at either end are memset as before. VirtualFree(MEM_DECOMMIT) accepts pages that were never
+    // committed.
+    if (fill_value == 0) {
+        constexpr uintptr_t HostPageSize = 4096;
+        const auto begin = reinterpret_cast<uintptr_t>(backing_base + physical_offset);
+        const auto end = begin + length;
+        const uintptr_t pages_begin = Common::AlignUp(begin, HostPageSize);
+        const uintptr_t pages_end = Common::AlignDown(end, HostPageSize);
+        if (pages_begin < pages_end &&
+            VirtualFree(reinterpret_cast<void*>(pages_begin), pages_end - pages_begin,
+                        MEM_DECOMMIT)) {
+            std::memset(reinterpret_cast<void*>(begin), 0, pages_begin - begin);
+            std::memset(reinterpret_cast<void*>(pages_end), 0, end - pages_end);
+            return;
+        }
+    }
+#endif
     std::memset(backing_base + physical_offset, fill_value, length);
 }
 
