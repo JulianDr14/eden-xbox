@@ -137,7 +137,8 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
       blit_helper{device, scheduler, shader_compiler, descriptor_ring, sampler_heap,
                   sampler_descriptors},
       rasterizer{gpu_, device_memory_, device, scheduler, shader_compiler, buffer_cache_runtime,
-                 texture_cache_runtime, descriptor_ring, sampler_heap, blit_helper} {
+                 texture_cache_runtime, descriptor_ring, sampler_heap, blit_helper,
+                 staging_pool} {
     ID3D12Device* const dev = device.Get();
     texture_cache_runtime.SetBlitHelper(&blit_helper);
 

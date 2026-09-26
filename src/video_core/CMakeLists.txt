@@ -484,6 +484,8 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_fence_manager.h
         renderer_d3d12/d3d12_graphics_pipeline.cpp
         renderer_d3d12/d3d12_graphics_pipeline.h
+        renderer_d3d12/d3d12_indirect_buffer.cpp
+        renderer_d3d12/d3d12_indirect_buffer.h
         renderer_d3d12/d3d12_maxwell_to_d3d12.cpp
         renderer_d3d12/d3d12_maxwell_to_d3d12.h
         renderer_d3d12/d3d12_pipeline_cache.cpp

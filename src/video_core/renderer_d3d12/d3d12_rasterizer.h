@@ -12,6 +12,7 @@
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_fence_manager.h"
+#include "video_core/renderer_d3d12/d3d12_indirect_buffer.h"
 #include "video_core/renderer_d3d12/d3d12_pipeline_cache.h"
 #include "video_core/renderer_d3d12/d3d12_query_cache.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
@@ -47,10 +48,11 @@ public:
                     const Device& device, Scheduler& scheduler, const ShaderCompiler& compiler,
                     BufferCacheRuntime& buffer_runtime, TextureCacheRuntime& texture_runtime,
                     DescriptorRing& descriptor_ring, SamplerHeap& sampler_heap,
-                    BlitImageHelper& blit_helper);
+                    BlitImageHelper& blit_helper, StagingBufferPool& staging);
     ~RasterizerD3D12() override;
 
     void Draw(bool, u32) override;
+    void DrawIndirect() override;
     void DrawTexture() override;
     void Clear(u32) override;
     void DispatchCompute() override;
@@ -124,11 +126,23 @@ private:
         float height;
     };
 
+    using IndirectParams = Tegra::Engines::Maxwell3D::DrawManager::IndirectParams;
+
     /// Records the complete state of a draw, then the draw. Nothing is carried over from earlier
     /// draws: the state tracker of the Vulkan backend is left for later, when it pays off.
     void RecordDraw(const GraphicsPipeline& pipeline, const PipelineBindings& bindings,
                     const Framebuffer& framebuffer, const DrawParams& params,
                     Maxwell::PrimitiveTopology topology);
+    /// RecordDraw without the draw (ExecuteIndirect replaces it).
+    void BindDrawState(const GraphicsPipeline& pipeline, const PipelineBindings& bindings,
+                       const Framebuffer& framebuffer, const DrawParams& params,
+                       Maxwell::PrimitiveTopology topology);
+    /// Every draw binds its vertex buffers again (see Draw).
+    void MarkVertexBuffersDirty();
+    /// Indirect draws of topologies rewritten on the CPU: reads the arguments and draws directly.
+    void DrawIndirectOnCpu(const IndirectParams& params);
+    [[nodiscard]] ViewportState ComputeViewports(
+        std::array<D3D12_VIEWPORT, Maxwell::NumViewports>& viewports) const;
     ViewportState UpdateViewports(ID3D12GraphicsCommandList* cmd);
     void UpdateScissors(ID3D12GraphicsCommandList* cmd);
     [[nodiscard]] D3D12_RECT ScissorRect(size_t index) const;
@@ -141,6 +155,8 @@ private:
     DescriptorRing& descriptor_ring;
     SamplerHeap& sampler_heap;
     BlitImageHelper& blit_helper;
+    IndirectArgumentRing indirect_args;
+    std::vector<u32> indirect_words; ///< CPU part of the ExecuteIndirect records
     GuestDescriptorQueue descriptor_queue;
     BufferCache buffer_cache;
     TextureCache texture_cache;
@@ -155,6 +171,9 @@ private:
     bool logged_layer_clear{};
     bool logged_first_dispatch{};
     bool logged_indirect_dispatch{};
+    bool logged_indirect_draw{};
+    bool logged_cpu_indirect_draw{};
+    bool logged_byte_count_draw{};
 };
 
 } // namespace D3D12

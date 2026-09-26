@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 
@@ -92,6 +94,44 @@ RootSignatureCache::RootSignatureCache(const Device& device_) : device{device_} 
 
 RootSignatureCache::~RootSignatureCache() = default;
 
+void RootSignatureCache::CreateCommandSignatures(PipelineLayout& layout, bool is_compute) {
+    static_assert(offsetof(dxil_spirv_vertex_runtime_data, draw_id) ==
+                  (INDIRECT_DRAW_CONSTANT_WORDS - 1) * sizeof(u32));
+    static_assert(offsetof(dxil_spirv_compute_runtime_data, group_count_z) ==
+                  (INDIRECT_DISPATCH_CONSTANT_WORDS - 1) * sizeof(u32));
+    const auto create = [&](D3D12_INDIRECT_ARGUMENT_TYPE type, u32 constant_words, u32 words,
+                            ComPtr<ID3D12CommandSignature>& out) {
+        const std::array<D3D12_INDIRECT_ARGUMENT_DESC, 2> arguments{{
+            {.Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT,
+             .Constant = {.RootParameterIndex = PipelineLayout::RUNTIME_DATA_INDEX,
+                          .DestOffsetIn32BitValues = 0,
+                          .Num32BitValuesToSet = constant_words}},
+            {.Type = type},
+        }};
+        const D3D12_COMMAND_SIGNATURE_DESC desc{
+            .ByteStride = words * static_cast<u32>(sizeof(u32)),
+            .NumArgumentDescs = static_cast<UINT>(arguments.size()),
+            .pArgumentDescs = arguments.data(),
+            .NodeMask = 0,
+        };
+        const HRESULT hr = device.Get()->CreateCommandSignature(
+            &desc, layout.root_signature.Get(), IID_PPV_ARGS(&out));
+        if (FAILED(hr)) {
+            LOG_ERROR(Render, "D3D12: CreateCommandSignature failed (0x{:08X})",
+                      static_cast<u32>(hr));
+        }
+    };
+    if (is_compute) {
+        create(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, INDIRECT_DISPATCH_CONSTANT_WORDS,
+               INDIRECT_DISPATCH_WORDS, layout.dispatch_signature);
+    } else {
+        create(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, INDIRECT_DRAW_CONSTANT_WORDS,
+               INDIRECT_DRAW_WORDS, layout.draw_signature);
+        create(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, INDIRECT_DRAW_CONSTANT_WORDS,
+               INDIRECT_DRAW_INDEXED_WORDS, layout.draw_indexed_signature);
+    }
+}
+
 const PipelineLayout& RootSignatureCache::Get(std::span<const Shader::Info* const> infos,
                                               bool is_compute) {
     TableRanges ranges;
@@ -182,6 +222,7 @@ const PipelineLayout& RootSignatureCache::Get(std::span<const Shader::Info* cons
                                                     blob->GetBufferSize(),
                                                     IID_PPV_ARGS(&layout->root_signature)),
                   "CreateRootSignature");
+    CreateCommandSignatures(*layout, is_compute);
     LOG_DEBUG(Render, "D3D12: root signature {:016x} ({} resource and {} sampler descriptors)",
               hash, ranges.num_resources, ranges.num_samplers);
 

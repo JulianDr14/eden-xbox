@@ -19,6 +19,16 @@ namespace D3D12 {
 /// offset read, 16-byte aligned: RescalingLayout needs 8 dwords, RenderAreaLayout 4.
 constexpr u32 PUSH_CONSTANT_WORDS = 8;
 
+/// ExecuteIndirect records (see IndirectArgumentRing). A draw record starts with the first five
+/// words of the vertex runtime data (first_vertex, base_instance, is_indexed_draw, yz_flip_mask,
+/// draw_id), set as root constants, followed by the D3D12 draw arguments; a dispatch record with
+/// the group counts, then the dispatch arguments (the same counts).
+constexpr u32 INDIRECT_DRAW_CONSTANT_WORDS = 5;
+constexpr u32 INDIRECT_DRAW_WORDS = INDIRECT_DRAW_CONSTANT_WORDS + 4;
+constexpr u32 INDIRECT_DRAW_INDEXED_WORDS = INDIRECT_DRAW_CONSTANT_WORDS + 5;
+constexpr u32 INDIRECT_DISPATCH_CONSTANT_WORDS = 3;
+constexpr u32 INDIRECT_DISPATCH_WORDS = INDIRECT_DISPATCH_CONSTANT_WORDS + 3;
+
 /// Root signature of a guest pipeline.
 ///
 /// Layout (root parameters, in this order; the tables only exist when non-empty):
@@ -62,6 +72,14 @@ public:
     u32 NumSamplerDescriptors() const noexcept {
         return num_samplers;
     }
+    /// Command signatures for ExecuteIndirect with the records above; null if D3D12 refused them
+    /// (logged). Graphics layouts have the draw ones, compute layouts the dispatch one.
+    ID3D12CommandSignature* DrawSignature(bool indexed) const noexcept {
+        return indexed ? draw_indexed_signature.Get() : draw_signature.Get();
+    }
+    ID3D12CommandSignature* DispatchSignature() const noexcept {
+        return dispatch_signature.Get();
+    }
 
     static constexpr u32 PUSH_CONSTANTS_INDEX = 0;
     static constexpr u32 RUNTIME_DATA_INDEX = 1;
@@ -71,6 +89,9 @@ private:
     friend class RootSignatureCache;
 
     ComPtr<ID3D12RootSignature> root_signature;
+    ComPtr<ID3D12CommandSignature> draw_signature;
+    ComPtr<ID3D12CommandSignature> draw_indexed_signature;
+    ComPtr<ID3D12CommandSignature> dispatch_signature;
     u32 runtime_data_words{};
     u32 resource_table_index{NO_TABLE};
     u32 sampler_table_index{NO_TABLE};
@@ -89,6 +110,8 @@ public:
     const PipelineLayout& Get(std::span<const Shader::Info* const> infos, bool is_compute);
 
 private:
+    void CreateCommandSignatures(PipelineLayout& layout, bool is_compute);
+
     const Device& device;
     std::mutex mutex;
     std::unordered_map<u64, std::vector<std::pair<std::vector<u32>, std::unique_ptr<PipelineLayout>>>>

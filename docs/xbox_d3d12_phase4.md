@@ -429,11 +429,7 @@ los draws se graban en la 4.3.
   storage a `UNORDERED_ACCESS`.
 - Los buffers escritos por compute y leídos después por un draw (vértices, por ejemplo) cambian de
   estado con `Buffer::Transition`. Entre dos usos como UAV se pone una barrera UAV.
-- **Dispatch indirecto:**
-  - De momento, los grupos se leen de la memoria del guest en la CPU, con un aviso único.
-  - Si una escritura de la GPU los dejó solo en la caché de buffers, el valor estaría viejo.
-  - Lo correcto sería `ExecuteIndirect` con una command signature de root constants + dispatch.
-    Queda pendiente hasta que un juego lo use.
+- **Dispatch indirecto:** con `ExecuteIndirect`, en la sección siguiente.
 
 **Gate en PC:** deko3d ex09 ejecuta el shader de compute (8x1x1 grupos de 32 hilos), que genera
 256 vértices. El draw los pinta como una onda senoidal (de magenta a verde), visible en
@@ -535,10 +531,73 @@ que haría el hardware.
 Los cuatro terminan con `RunHeadlessBoot returned 0`. Con `-DebugLayer`, la capa de debug no da
 ningún error ni aviso en ninguno.
 
+### Draws y dispatches indirectos (`ExecuteIndirect`)
+
+**Cuándo llegan:**
+- **Dispatch indirecto:** `KeplerCompute` lo marca cuando los `grid_dim` del QMD se suben desde
+  memoria que ha escrito la GPU.
+- **Draw indirecto:** solo llega desde las macros HLE de NVN (`DrawArraysIndirect`,
+  `DrawIndexedIndirect`, `MultiDrawIndexedIndirectCount`), y solo cuando sus parámetros vienen de
+  memoria y no del pushbuffer. Si no, la macro dibuja directamente.
+- **Antes:** `DrawIndirect` no estaba implementado (quedaba el `{}` vacío de la interfaz) y esos
+  draws se perdían. El dispatch leía los grupos en la CPU.
+
+**El problema:** los registros del guest no se pueden usar tal cual.
+- Cada draw también tiene que fijar la runtime data que lee `spirv_to_dxil`: `first_vertex`,
+  `base_instance`, `is_indexed_draw`, `yz_flip_mask` y `draw_id`.
+- `SV_VertexID` de D3D12 no incluye ni el vértice inicial ni el base vertex.
+- Una command signature lee esas constantes del mismo registro, delante de los argumentos del draw.
+
+**Solución (`IndirectArgumentRing`, `d3d12_indirect_buffer`):** el rasterizador reconstruye los
+registros en un anillo de buffers `DEFAULT` con copias en la GPU. Así también ve los argumentos que
+el guest escribió desde shaders.
+
+- **Registro de draw** (`INDIRECT_DRAW(_INDEXED)_WORDS`, 9 o 10 palabras):
+  - las 5 primeras palabras de la runtime data de vértice;
+  - detrás, los 4 argumentos del guest (o 5 si es indexado), que coinciden con los de D3D12.
+- **Qué pone la CPU:** `is_indexed_draw`, los flips de y/z (calculados con `ComputeViewports`, que
+  no graba comandos) y el índice del draw. Sube una plantilla por staging.
+- **Qué copia la GPU:**
+  - los argumentos;
+  - como `first_vertex` y `base_instance`, las dos últimas palabras del registro del guest, que en
+    los dos formatos son el vértice inicial (o base vertex) y la instancia base;
+  - con count buffer, la cuenta, detrás de los registros. Así el buffer de la cuenta es el nuestro
+    y el del guest solo necesita `GENERIC_READ`.
+- **Registro de dispatch** (6 palabras): los tres grupos dos veces, una para la runtime data
+  (`gl_NumWorkGroups`) y otra para el dispatch.
+- **Command signatures:** se crean junto con cada root signature, porque un argumento `CONSTANT`
+  necesita conocerla. Hay una para draw y otra para draw indexado en los layouts gráficos, y una de
+  dispatch en los de compute.
+- **Límite:** el máximo de 65535 grupos por dimensión no se puede comprobar en un dispatch
+  indirecto.
+- **`LineLoop` y `TriangleFan`:** las macros los aceptan, pero en D3D12 se reescriben en la CPU.
+  - `DrawIndirectOnCpu` lee los argumentos con `ReadBlock`, que baja antes lo que la GPU haya
+    escrito (y puede esperar).
+  - Después hace un `Draw` directo por cada registro.
+  - Los draws de byte count (transform feedback) se saltan con aviso. No deberían llegar, porque
+    `HasDrawTransformFeedback()` es falso.
+
+**Payload de prueba: deko3d ex11** (`tools/xbox/deko3d/Example11_EdenIndirect.cpp`, con el shader
+`indirect_args.glsl`). Es el ex09 con dispatch y draw indirectos:
+1. Un compute shader de un hilo escribe los argumentos en un SSBO, así que son memoria escrita por
+   la GPU.
+2. `dispatchComputeIndirect` lanza el generador de la onda. `sinewave.glsl` reparte la onda según
+   `gl_NumWorkGroups`, así que también comprueba las constantes copiadas.
+3. `drawIndirect` dibuja la línea.
+
+deko3d no usa las macros de NVN, así que su `drawIndirect` lo resuelve el intérprete de macros como
+un draw directo (con los valores que escribió la GPU). La ruta `DrawIndirect` con `ExecuteIndirect`
+queda sin payload que la pruebe hasta un juego de NVN.
+
+**Gate en PC (0.2.17.0):**
+- ex11 dibuja un periodo entero de la onda a todo el ancho, de magenta a verde. El log muestra
+  `first indirect dispatch recorded`.
+- ex02, ex04, ex09 y ex10 siguen igual.
+- Los cinco terminan con `RunHeadlessBoot returned 0` y, con `-DebugLayer`, sin errores ni avisos.
+
 **Pendiente de la 4.4:**
 - Probar en la Series.
-- `DrawTexture` sin payload que lo use.
-- Dispatch indirecto con `ExecuteIndirect`.
+- `DrawTexture` y `DrawIndirect` con `ExecuteIndirect`, sin payload que los use.
 - El gate final: un juego 2D del usuario, con sus keys y su firmware en `LocalState` y nunca en el
   repo.
 - Pasan a la fase 5: blits con stencil, MSAA y conversiones de formato (`ConvertImage`).
