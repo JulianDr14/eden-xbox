@@ -59,13 +59,22 @@ whose subject matches the manifest's `Publisher`, signs the package, and exports
 ```
 build-uwp\package\eden-xbox.appx
 build-uwp\package\eden-xbox.cer
+build-uwp\package\Microsoft.VCLibs.x64.14.00.appx
 ```
+
+That third file is the **Store CRT framework package**. The exe hard-imports `VCRUNTIME140_APP` /
+`MSVCP140_APP`, which live there rather than in our package, so the manifest declares it as a
+`PackageDependency` and the console needs it installed. Without it the app fails to *activate*, with
+a generic launch error and no crash dump. The script copies it out of the VS Extension SDK, which
+means the **"C++ (v143) Universal Windows Platform tools"** component has to be installed — the
+base C++ toolset alone links the app fine but does not ship this package.
 
 ## Deploy
 
 1. Open `https://<xbox-ip>:11443` and accept the self-signed certificate warning.
-2. **Add** → upload `eden-xbox.appx` **and** `eden-xbox.cer` (the console must trust the signer, or
-   installation fails with a generic error).
+2. **Add** → upload `eden-xbox.appx`, with `eden-xbox.cer` as the certificate and
+   `Microsoft.VCLibs.x64.14.00.appx` as a **dependency package**. The console must trust the signer
+   and must have the framework package, or installation or activation fails with a generic error.
 3. Set the app to **Game mode**, not App mode. App mode caps a UWP app at roughly a gigabyte of
    memory; Game mode is what makes the emulated DRAM reservation viable — especially on Series S.
 4. Launch it.

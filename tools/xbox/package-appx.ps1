@@ -103,7 +103,27 @@ if ($LASTEXITCODE -ne 0) { throw "SignTool failed ($LASTEXITCODE)." }
 $cer = Join-Path $repo "$OutDir\eden-xbox.cer"
 Export-Certificate -Cert $cert -FilePath $cer -Type CERT | Out-Null
 
+# --- 5. the VCLibs framework package ------------------------------------------------------
+# The exe hard-imports the Store CRT, which lives in the Microsoft.VCLibs.140.00 framework
+# package rather than ours (see the PackageDependency in the manifest). The console needs it
+# installed too, so hand it over next to our package instead of leaving the user to find it.
+# It ships with the VS "C++ (v143) UWP tools" component, as an Extension SDK.
+$vclibs = $null
+foreach ($pf in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+    if (-not $pf) { continue }
+    $cand = Join-Path $pf "Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.VCLibs\14.0\Appx\Retail\x64\Microsoft.VCLibs.x64.14.00.appx"
+    if (Test-Path -LiteralPath $cand) { $vclibs = $cand; break }
+}
+if ($vclibs) {
+    $vcOut = Join-Path $repo "$OutDir\Microsoft.VCLibs.x64.14.00.appx"
+    Copy-Item -LiteralPath $vclibs -Destination $vcOut -Force
+} else {
+    Write-Warning ("Microsoft.VCLibs.x64.14.00.appx not found. The app will FAIL TO ACTIVATE on-console " +
+                   "without it. Install the VS component Microsoft.VisualStudio.ComponentGroup.UWP.VC.")
+}
+
 Write-Host ""
 Write-Host "package  : $appx"
 Write-Host "cert     : $cer"
-Write-Host "Next: Device Portal https://<xbox-ip>:11443 -> Add -> upload both -> set the app to Game mode."
+if ($vclibs) { Write-Host "framework: $vcOut  (upload as a dependency package)" }
+Write-Host "Next: Device Portal https://<xbox-ip>:11443 -> Add -> upload all of the above -> set the app to Game mode."
