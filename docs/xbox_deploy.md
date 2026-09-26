@@ -4,9 +4,12 @@ This is the step that turns the UWP build from [`docs/uwp_build.md`](uwp_build.m
 that actually runs on a console. It covers **GATE 2**: proving Eden executed guest code through the
 dynarmic JIT inside the Xbox AppContainer.
 
-> **What this does _not_ do yet:** there is no D3D12 renderer (Phase 1/3). The boot selects the
-> **Null renderer** — no GPU device, no image, no input, no audio. Success looks like a log line,
-> not a game.
+> **What this does _not_ do yet:** the Direct3D 12 renderer is at phase 1: a real device and
+> swapchain on the CoreWindow that present the guest framebuffer through a CPU copy. There is no
+> shader path, so guest GPU work is not rendered; no input, no audio. Success is a dark-blue screen,
+> then the payload's ~10 s test pattern (green top band, colour ramps, a white bar sweeping right),
+> and `RunHeadlessBoot returned 0` in the diag. The log lists the console's real D3D12 caps
+> (`D3D12: ...` lines).
 
 ## What you need
 

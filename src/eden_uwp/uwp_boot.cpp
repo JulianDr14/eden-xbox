@@ -44,10 +44,22 @@ std::string MemoryReport();             // likewise
 namespace EdenXbox {
 
 constexpr const char* JIT_LIVENESS_SENTINEL = "EDEN_XBOX_JIT_ALIVE";
+// Emitted by the payload after its framebuffer loop, so the boot keeps presenting until then.
+constexpr const char* GFX_DONE_SENTINEL = "EDEN_XBOX_GFX_DONE";
 
-// Force the renderer-independent, device-light configuration the headless boot needs.
-static void ApplyHeadlessBootSettings() {
-    Settings::values.renderer_backend = Settings::RendererBackend::Null; // no Vk/GL device created
+/// Where the renderer presents: the CoreWindow (as IUnknown*) and its size in physical pixels.
+/// A null window selects the Null renderer.
+struct BootSurface {
+    void* core_window{};
+    u32 width{1920};
+    u32 height{1080};
+};
+
+// Force the device-light configuration the boot needs.
+static void ApplyHeadlessBootSettings(const BootSurface& surface) {
+    Settings::values.renderer_backend = surface.core_window != nullptr
+                                            ? Settings::RendererBackend::Direct3D12
+                                            : Settings::RendererBackend::Null;
     Settings::values.sink_id = Settings::AudioEngine::Null;              // audio_core/sink/null_sink
     Settings::values.cpuopt_fastmem = false;        // Phase-2: bounds-checked page-table path
     Settings::values.cpuopt_fastmem_exclusives = false;
@@ -59,10 +71,13 @@ static void ApplyHeadlessBootSettings() {
 }
 
 // Returns a process exit-style status. 0 == boot reached the run phase cleanly.
-int RunHeadlessBoot(const std::string& nro_path) {
+int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface) {
     Common::Log::Initialize();
-    ApplyHeadlessBootSettings();
-    WriteDiag("step: logging up, headless settings applied");
+    ApplyHeadlessBootSettings(surface);
+    WriteDiag(surface.core_window != nullptr
+                  ? "step: logging up, renderer Direct3D12 on a " + std::to_string(surface.width) +
+                        "x" + std::to_string(surface.height) + " CoreWindow"
+                  : std::string("step: logging up, renderer Null"));
 
     Core::System system{};
     WriteDiag("step: Core::System constructed");
@@ -71,7 +86,7 @@ int RunHeadlessBoot(const std::string& nro_path) {
     system.ApplySettings();
     WriteDiag("step: system.ApplySettings() done");
 
-    HeadlessEmuWindow emu_window{};
+    HeadlessEmuWindow emu_window{surface.core_window, surface.width, surface.height};
 
     // Filesystem + content plumbing, exactly as yuzu_cmd does it.
     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
@@ -96,9 +111,14 @@ int RunHeadlessBoot(const std::string& nro_path) {
     std::mutex live_mutex;
     std::condition_variable live_cv;
     std::atomic<bool> jit_alive{false};
+    std::atomic<bool> gfx_done{false};
     Kernel::Svc::SetDebugStringObserver([&](std::string_view chunk) {
         if (chunk.find(JIT_LIVENESS_SENTINEL) != std::string_view::npos) {
             jit_alive.store(true, std::memory_order_release);
+            live_cv.notify_all();
+        }
+        if (chunk.find(GFX_DONE_SENTINEL) != std::string_view::npos) {
+            gfx_done.store(true, std::memory_order_release);
             live_cv.notify_all();
         }
     });
@@ -124,6 +144,20 @@ int RunHeadlessBoot(const std::string& nro_path) {
     WriteDiag(std::string(alive ? "step: sentinel observed"
                                 : "step: sentinel NOT observed within timeout") +
               " | " + MemoryReport());
+
+    // With a real renderer the payload goes on to draw frames; keep the guest running so they reach
+    // the screen, until it reports the loop finished (or the backstop expires).
+    if (alive && surface.core_window != nullptr) {
+        constexpr auto kGfxTimeout = std::chrono::seconds(30);
+        {
+            std::unique_lock lock(live_mutex);
+            live_cv.wait_for(lock, kGfxTimeout,
+                             [&] { return gfx_done.load(std::memory_order_acquire); });
+        }
+        WriteDiag(std::string(gfx_done.load() ? "step: framebuffer loop finished"
+                                              : "step: framebuffer loop NOT finished in time") +
+                  " | " + MemoryReport());
+    }
 
     Kernel::Svc::SetDebugStringObserver(nullptr); // detach before teardown
     void(system.Pause());
@@ -165,6 +199,7 @@ int RunHeadlessBoot(const std::string& nro_path) {
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Core.h>
@@ -448,7 +483,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         return *this;
     }
     void Initialize(CoreApplicationView const&) {}
-    void SetWindow(CoreWindow const&) {}
+    void SetWindow(CoreWindow const& window) {
+        m_window = window;
+    }
     void Load(hstring const&) {}
     void Uninitialize() {}
 
@@ -465,8 +502,24 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         CoreWindow window = CoreWindow::GetForCurrentThread();
         window.Activate();
 
+        // The swapchain is sized in physical pixels: CoreWindow bounds are in view pixels (DIPs).
+        EdenXbox::BootSurface surface{};
+        if (m_window) {
+            surface.core_window = winrt::get_abi(m_window); // an IInspectable, so a valid IUnknown*
+            try {
+                const auto bounds = m_window.Bounds();
+                const double scale = Windows::Graphics::Display::DisplayInformation::
+                                         GetForCurrentView()
+                                             .RawPixelsPerViewPixel();
+                surface.width = static_cast<u32>(bounds.Width * scale + 0.5);
+                surface.height = static_cast<u32>(bounds.Height * scale + 0.5);
+            } catch (...) {
+                WriteDiag("could not read the window size, assuming 1920x1080");
+            }
+        }
+
         std::atomic<bool> done{false};
-        std::thread worker([&done]() {
+        std::thread worker([&done, surface]() {
             std::set_terminate(OnTerminate); // per-thread in the MSVC runtime
             std::string nro_path;
             try {
@@ -481,7 +534,7 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
             // Capture any early throw to the diag file instead of a silent exit.
             try {
                 WriteDiag("calling RunHeadlessBoot");
-                const int rc = EdenXbox::RunHeadlessBoot(nro_path);
+                const int rc = EdenXbox::RunHeadlessBoot(nro_path, surface);
                 WriteDiag("RunHeadlessBoot returned " + std::to_string(rc));
             } catch (winrt::hresult_error const& e) {
                 WriteDiag("winrt::hresult_error: " + winrt::to_string(e.message()));
@@ -508,6 +561,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         worker.join();
         WriteDiag("boot worker joined; exiting");
     }
+
+private:
+    CoreWindow m_window{nullptr};
 };
 
 } // namespace

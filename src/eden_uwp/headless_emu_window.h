@@ -21,10 +21,12 @@ namespace EdenXbox {
 /// Headless EmuWindow for null-renderer boot. No surface, never minimized, hands back a no-op context.
 class HeadlessEmuWindow final : public Core::Frontend::EmuWindow {
 public:
-    explicit HeadlessEmuWindow(u32 width = 1280, u32 height = 720) {
-        // Headless: no native surface. The video backend treats render_surface == nullptr as headless.
-        window_info.type = Core::Frontend::WindowSystemType::Headless;
-        window_info.render_surface = nullptr;
+    /// core_window: the CoreWindow's IUnknown* for the D3D12 renderer, or nullptr for headless.
+    explicit HeadlessEmuWindow(void* core_window = nullptr, u32 width = 1280, u32 height = 720) {
+        // Without a surface the video backend runs headless (render_surface == nullptr).
+        window_info.type = core_window != nullptr ? Core::Frontend::WindowSystemType::CoreWindow
+                                                  : Core::Frontend::WindowSystemType::Headless;
+        window_info.render_surface = core_window;
         window_info.render_surface_scale = 1.0f;
         // Seed a framebuffer layout so anything querying it (even the null renderer's present path)
         // gets a self-consistent size.

@@ -230,6 +230,9 @@ cmake_dependent_option(ENABLE_LIBUSB "Enable the use of LibUSB" ON "WIN32 OR PLA
 cmake_dependent_option(ENABLE_OPENGL "Enable OpenGL" ON "NOT (WIN32 AND ARCHITECTURE_arm64) AND NOT APPLE" OFF)
 mark_as_advanced(FORCE ENABLE_OPENGL)
 
+# Direct3D 12 renderer: the only graphics API a UWP app has on Xbox. Desktop Windows can build it too.
+cmake_dependent_option(ENABLE_D3D12 "Enable the Direct3D 12 renderer" ON "CMAKE_SYSTEM_NAME STREQUAL WindowsStore" OFF)
+
 option(ENABLE_WEB_SERVICE "Enable web services (telemetry, etc.)" ON)
 option(ENABLE_WIFI_SCAN "Enable WiFi scanning" OFF)
 

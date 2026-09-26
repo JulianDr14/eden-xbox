@@ -389,6 +389,19 @@ if (ENABLE_OPENGL)
     target_compile_definitions(video_core PUBLIC HAS_OPENGL)
 endif()
 
+if (ENABLE_D3D12)
+    target_sources(video_core PRIVATE
+        renderer_d3d12/d3d12_device.cpp
+        renderer_d3d12/d3d12_device.h
+        renderer_d3d12/d3d12_swapchain.cpp
+        renderer_d3d12/d3d12_swapchain.h
+        renderer_d3d12/renderer_d3d12.cpp
+        renderer_d3d12/renderer_d3d12.h
+    )
+    target_compile_definitions(video_core PUBLIC HAS_D3D12)
+    target_link_libraries(video_core PRIVATE d3d12 dxgi)
+endif()
+
 if (ARCHITECTURE_x86_64)
     target_link_libraries(video_core PUBLIC xbyak::xbyak)
 endif()
