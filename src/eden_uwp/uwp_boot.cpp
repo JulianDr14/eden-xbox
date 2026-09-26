@@ -22,6 +22,7 @@
 #include <string>
 #include <string_view>
 
+
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core.h"
@@ -35,6 +36,11 @@
 
 #include "eden_uwp/headless_emu_window.h"
 
+namespace {
+void WriteDiag(const std::string& msg); // defined with the UWP entry point below
+std::string MemoryReport();             // likewise
+} // namespace
+
 namespace EdenXbox {
 
 constexpr const char* JIT_LIVENESS_SENTINEL = "EDEN_XBOX_JIT_ALIVE";
@@ -45,6 +51,9 @@ static void ApplyHeadlessBootSettings() {
     Settings::values.sink_id = Settings::AudioEngine::Null;              // audio_core/sink/null_sink
     Settings::values.cpuopt_fastmem = false;        // Phase-2: bounds-checked page-table path
     Settings::values.cpuopt_fastmem_exclusives = false;
+    // The on-console failure mode is a hard crash with no eden_log.txt; the default 4 KiB write
+    // buffering loses exactly the lines that say where it died. Flush every line instead.
+    Settings::values.log_flush_line = true;
     // memory_layout_mode stays at its default until the Series-S budget is measured on-console; the
     // DRAM clamp is a separate reservation follow-up, not here.
 }
@@ -53,10 +62,14 @@ static void ApplyHeadlessBootSettings() {
 int RunHeadlessBoot(const std::string& nro_path) {
     Common::Log::Initialize();
     ApplyHeadlessBootSettings();
+    WriteDiag("step: logging up, headless settings applied");
 
     Core::System system{};
+    WriteDiag("step: Core::System constructed");
     system.Initialize();
+    WriteDiag("step: system.Initialize() done");
     system.ApplySettings();
+    WriteDiag("step: system.ApplySettings() done");
 
     HeadlessEmuWindow emu_window{};
 
@@ -65,9 +78,12 @@ int RunHeadlessBoot(const std::string& nro_path) {
     system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
     system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
     system.GetUserChannel().clear();
+    WriteDiag("step: filesystem factories created");
 
     Service::AM::FrontendAppletParameters load_parameters{};
     const Core::SystemResultStatus load_result = system.Load(emu_window, nro_path, load_parameters);
+    WriteDiag("step: system.Load() returned status " +
+              std::to_string(static_cast<int>(load_result)) + " | " + MemoryReport());
     if (load_result != Core::SystemResultStatus::Success) {
         LOG_CRITICAL(Frontend, "Headless boot: failed to load NRO {} (status {})", nro_path,
                      static_cast<int>(load_result));
@@ -89,10 +105,12 @@ int RunHeadlessBoot(const std::string& nro_path) {
 
     // Start the GPU host thread (null renderer — no device) and release the CPU manager.
     system.GPU().Start();
+    WriteDiag("step: GPU host thread started");
     system.GetCpuManager().OnGpuReady();
 
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
     void(system.Run());
+    WriteDiag("step: system.Run() issued, waiting for the JIT sentinel | " + MemoryReport());
 
     // Headless: no window event loop. Wait for the guest to execute through the JIT and emit the
     // sentinel; the timeout is only a backstop (a hung/failed boot), not the success path.
@@ -103,10 +121,14 @@ int RunHeadlessBoot(const std::string& nro_path) {
                          [&] { return jit_alive.load(std::memory_order_acquire); });
     }
     const bool alive = jit_alive.load(std::memory_order_acquire);
+    WriteDiag(std::string(alive ? "step: sentinel observed"
+                                : "step: sentinel NOT observed within timeout") +
+              " | " + MemoryReport());
 
     Kernel::Svc::SetDebugStringObserver(nullptr); // detach before teardown
     void(system.Pause());
     system.ShutdownMainProcess();
+    WriteDiag("step: shutdown complete");
 
     if (alive) {
         LOG_INFO(Frontend, "Headless boot: JIT liveness CONFIRMED ('{}' observed).",
@@ -128,15 +150,23 @@ int RunHeadlessBoot(const std::string& nro_path) {
 // LocalFolder; see common/fs/path_util.cpp under YUZU_UWP_APPCONTAINER.)
 // ============================================================================================
 #include <atomic>
+#include <csignal>
+#include <cstdint>
+#include <cstdio>
+#include <exception>
 #include <fstream>
+#include <mutex>
 #include <thread>
 
 #include <windows.h> // OutputDebugStringA/W + ::Sleep (sets the target-arch macros winnt.h needs)
+
+#include "common/dynamic_library.h"
 
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Core.h>
 
 using namespace winrt;
@@ -148,17 +178,269 @@ namespace {
 // Best-effort startup diagnostics that survive an early crash (before Eden's own logging is up):
 // append to a pullable file in the app's LocalFolder AND emit on the debugger channel. This is how we
 // see *where* the headless boot fails on-console when no eden_log.txt and no crash dump are produced.
+//
+// Every line carries milliseconds since launch, so a hang (steps stop, heartbeats continue) reads
+// differently from a crash (steps stop, a CRASH line follows, or nothing at all).
+//
+// The diag path is resolved once, on the UI thread before the boot worker exists, and cached: the
+// crash handlers below must not call into WinRT from a dying process.
+std::string g_diag_path;
+std::mutex g_diag_mutex;
+
+unsigned long long ElapsedMs() {
+    static const ULONGLONG start = GetTickCount64();
+    return GetTickCount64() - start;
+}
+
 void WriteDiag(const std::string& msg) {
-    const std::string line = "[eden-uwp] " + msg + "\n";
+    const std::string line = "[eden-uwp] [+" + std::to_string(ElapsedMs()) + "ms] " + msg + "\n";
     OutputDebugStringA(line.c_str());
     try {
-        const std::string local =
-            winrt::to_string(Windows::Storage::ApplicationData::Current().LocalFolder().Path());
-        std::ofstream f(local + "\\eden_uwp_diag.txt", std::ios::app);
+        std::scoped_lock lock{g_diag_mutex};
+        if (g_diag_path.empty()) {
+            g_diag_path =
+                winrt::to_string(Windows::Storage::ApplicationData::Current().LocalFolder().Path()) +
+                "\\eden_uwp_diag.txt";
+        }
+        std::ofstream f(g_diag_path, std::ios::app);
         f << line;
     } catch (...) {
         OutputDebugStringW(L"[eden-uwp] WriteDiag: could not write diag file\n");
     }
+}
+
+// The title's memory budget as the OS enforces it: Microsoft documents Game-mode UWP titles as capped
+// (5 GB on the Xbox resource page), and exceeding it makes allocations fail rather than paging.
+std::string MemoryReport() {
+    try {
+        using winrt::Windows::System::MemoryManager;
+        return "app memory " + std::to_string(MemoryManager::AppMemoryUsage() >> 20) + " MiB of " +
+               std::to_string(MemoryManager::AppMemoryUsageLimit() >> 20) + " MiB limit";
+    } catch (...) {
+        return "app memory: MemoryManager unavailable";
+    }
+}
+
+// Last-chance writer for the crash handlers: no WinRT, no lock (the faulting thread may hold it),
+// no allocation beyond what fopen needs.
+void WriteDiagRaw(const char* line, bool debugger_channel = true) {
+    if (debugger_channel) {
+        OutputDebugStringA(line); // raises DBG_PRINTEXCEPTION_C internally: never from the VEH
+    }
+    if (g_diag_path.empty()) {
+        return;
+    }
+    std::FILE* f = nullptr;
+    if (fopen_s(&f, g_diag_path.c_str(), "a") == 0 && f != nullptr) {
+        std::fputs(line, f);
+        std::fclose(f);
+    }
+}
+
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+
+// Unhandled SEH (access violation, illegal instruction, breakpoint from a soft assert, ...) on any
+// thread. /EHsc catch(...) does not see these, which is why the boot worker's handlers stay silent.
+// Reports the faulting address as an RVA into eden-uwp.exe so it can be resolved with the build's PDB.
+LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* info) {
+    const EXCEPTION_RECORD* rec = info->ExceptionRecord;
+    const auto base = reinterpret_cast<uintptr_t>(&__ImageBase);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + __ImageBase.e_lfanew);
+    const auto addr = reinterpret_cast<uintptr_t>(rec->ExceptionAddress);
+
+    char where[64];
+    if (addr >= base && addr < base + nt->OptionalHeader.SizeOfImage) {
+        std::snprintf(where, sizeof(where), "eden-uwp.exe+0x%llx",
+                      static_cast<unsigned long long>(addr - base));
+    } else {
+        std::snprintf(where, sizeof(where), "0x%llx (outside eden-uwp.exe: JIT code or a DLL)",
+                      static_cast<unsigned long long>(addr));
+    }
+
+    char line[320];
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
+        const ULONG_PTR kind = rec->ExceptionInformation[0];
+        const char* what = kind == 0 ? "read of" : kind == 1 ? "write to" : "execute at";
+        std::snprintf(line, sizeof(line),
+                      "[eden-uwp] [+%llums] CRASH: access violation at %s (%s 0x%llx), thread %lu\n",
+                      ElapsedMs(), where, what,
+                      static_cast<unsigned long long>(rec->ExceptionInformation[1]),
+                      GetCurrentThreadId());
+    } else {
+        std::snprintf(line, sizeof(line),
+                      "[eden-uwp] [+%llums] CRASH: exception 0x%08lx at %s, thread %lu\n",
+                      ElapsedMs(), static_cast<unsigned long>(rec->ExceptionCode), where,
+                      GetCurrentThreadId());
+    }
+    WriteDiagRaw(line);
+    Common::Log::Stop(); // flush eden_log.txt
+    return EXCEPTION_CONTINUE_SEARCH; // let the OS finish the crash (and WER take its dump)
+}
+
+// Eden's fatal ASSERT/UNREACHABLE and the default std::terminate both end in abort(). SIGABRT is
+// process-wide in the UCRT, so this sees it from any thread.
+void OnAbort(int) {
+    char line[200];
+    std::snprintf(line, sizeof(line),
+                  "[eden-uwp] [+%llums] CRASH: abort() on thread %lu - fatal ASSERT/UNREACHABLE "
+                  "(see eden\\log\\eden_log.txt) or an exception escaped a thread\n",
+                  ElapsedMs(), GetCurrentThreadId());
+    WriteDiagRaw(line);
+}
+
+// Terminate handlers are per-thread in the MSVC runtime; installed on the boot worker, this names the
+// exception that escaped (e.g. std::bad_alloc from the 4 GiB backing reservation).
+[[noreturn]] void OnTerminate() {
+    char line[320];
+    const char* what = "unknown (not a std::exception)";
+    std::string msg;
+    if (const std::exception_ptr e = std::current_exception()) {
+        try {
+            std::rethrow_exception(e);
+        } catch (const std::exception& ex) {
+            msg = ex.what();
+            what = msg.c_str();
+        } catch (...) {
+        }
+    } else {
+        what = "no active exception (std::terminate called directly)";
+    }
+    std::snprintf(line, sizeof(line), "[eden-uwp] [+%llums] CRASH: std::terminate: %s\n",
+                  ElapsedMs(), what);
+    WriteDiagRaw(line);
+    std::abort();
+}
+
+// ---- First-chance logging ------------------------------------------------------------------
+// The unhandled filter above never runs for a fault inside JIT code when the unwinder cannot walk
+// back out of it: the process just disappears (observed on-console: log stops ~300 ms after
+// system.Run(), no CRASH line, no heartbeat). A vectored handler runs BEFORE any unwinding, so it
+// sees every fault. It is installed LAST in the chain, so the demand-commit handlers (DRAM backing,
+// VirtualBuffer) resolve their own expected faults first and never reach it.
+std::atomic<int> g_first_chance_lines{0};
+constexpr int MAX_FIRST_CHANCE_LINES = 32;
+
+const char* ProtectName(DWORD protect) {
+    switch (protect & 0xFF) {
+    case PAGE_NOACCESS:          return "NOACCESS";
+    case PAGE_READONLY:          return "R";
+    case PAGE_READWRITE:         return "RW";
+    case PAGE_WRITECOPY:         return "WC";
+    case PAGE_EXECUTE:           return "X";
+    case PAGE_EXECUTE_READ:      return "RX";
+    case PAGE_EXECUTE_READWRITE: return "RWX";
+    case PAGE_EXECUTE_WRITECOPY: return "XWC";
+    default:                     return "?";
+    }
+}
+
+// "eden-uwp.exe+0xRVA" inside the image; otherwise the region's state/type/protection, which is what
+// tells JIT code (private RX), a code page left RW (W^X failure) and unmapped memory apart.
+void DescribeAddress(std::uintptr_t addr, char* out, std::size_t out_size) {
+    const auto base = reinterpret_cast<std::uintptr_t>(&__ImageBase);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + __ImageBase.e_lfanew);
+    if (addr >= base && addr < base + nt->OptionalHeader.SizeOfImage) {
+        std::snprintf(out, out_size, "eden-uwp.exe+0x%llx",
+                      static_cast<unsigned long long>(addr - base));
+        return;
+    }
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0) {
+        std::snprintf(out, out_size, "0x%llx [VirtualQuery failed]",
+                      static_cast<unsigned long long>(addr));
+        return;
+    }
+    const char* state = mbi.State == MEM_COMMIT    ? "commit"
+                        : mbi.State == MEM_RESERVE ? "reserved"
+                                                   : "free";
+    const char* type = mbi.Type == MEM_PRIVATE ? "private"
+                       : mbi.Type == MEM_MAPPED ? "mapped"
+                       : mbi.Type == MEM_IMAGE  ? "image"
+                                                : "-";
+    std::snprintf(out, out_size, "0x%llx [%s %s %s, alloc base 0x%llx]",
+                  static_cast<unsigned long long>(addr), state, type,
+                  mbi.State == MEM_COMMIT ? ProtectName(mbi.Protect) : "-",
+                  static_cast<unsigned long long>(
+                      reinterpret_cast<std::uintptr_t>(mbi.AllocationBase)));
+}
+
+LONG NTAPI FirstChanceLogger(EXCEPTION_POINTERS* ep) {
+    const EXCEPTION_RECORD* rec = ep->ExceptionRecord;
+    switch (rec->ExceptionCode) {
+    case 0xE06D7363: // C++ throw: the frontend's catch blocks report these
+    case 0x406D1388: // SetThreadDescription-by-exception (thread naming)
+    case 0x40010006: // DBG_PRINTEXCEPTION_C (OutputDebugStringA)
+    case 0x4001000A: // DBG_PRINTEXCEPTION_WIDE_C (OutputDebugStringW)
+        return EXCEPTION_CONTINUE_SEARCH;
+    default:
+        break;
+    }
+    if (g_first_chance_lines.fetch_add(1, std::memory_order_relaxed) >= MAX_FIRST_CHANCE_LINES) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    char at[160];
+    DescribeAddress(reinterpret_cast<std::uintptr_t>(rec->ExceptionAddress), at, sizeof(at));
+
+    char line[512];
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
+        const ULONG_PTR kind = rec->ExceptionInformation[0];
+        const char* what = kind == 0 ? "read of" : kind == 1 ? "write to" : "execute at";
+        char target[160];
+        DescribeAddress(static_cast<std::uintptr_t>(rec->ExceptionInformation[1]), target,
+                        sizeof(target));
+        std::snprintf(line, sizeof(line),
+                      "[eden-uwp] [+%llums] FIRST-CHANCE access violation: %s %s | at %s | "
+                      "thread %lu\n",
+                      ElapsedMs(), what, target, at, GetCurrentThreadId());
+    } else if ((rec->ExceptionCode == 0xE0DA0001 || rec->ExceptionCode == 0xE0DA0002) &&
+               rec->NumberParameters >= 4) {
+        std::snprintf(line, sizeof(line),
+                      "[eden-uwp] [+%llums] JIT MEMORY: %s failed, GetLastError=%llu, base 0x%llx, "
+                      "size 0x%llx, protection %s | thread %lu\n",
+                      ElapsedMs(),
+                      rec->ExceptionCode == 0xE0DA0001 ? "VirtualProtectFromApp"
+                                                       : "VirtualAllocFromApp(MEM_COMMIT)",
+                      static_cast<unsigned long long>(rec->ExceptionInformation[0]),
+                      static_cast<unsigned long long>(rec->ExceptionInformation[1]),
+                      static_cast<unsigned long long>(rec->ExceptionInformation[2]),
+                      ProtectName(static_cast<DWORD>(rec->ExceptionInformation[3])),
+                      GetCurrentThreadId());
+    } else {
+        std::snprintf(line, sizeof(line),
+                      "[eden-uwp] [+%llums] FIRST-CHANCE exception 0x%08lx | at %s | params %lu "
+                      "[0x%llx 0x%llx] | thread %lu\n",
+                      ElapsedMs(), static_cast<unsigned long>(rec->ExceptionCode), at,
+                      static_cast<unsigned long>(rec->NumberParameters),
+                      static_cast<unsigned long long>(
+                          rec->NumberParameters > 0 ? rec->ExceptionInformation[0] : 0),
+                      static_cast<unsigned long long>(
+                          rec->NumberParameters > 1 ? rec->ExceptionInformation[1] : 0),
+                      GetCurrentThreadId());
+    }
+    WriteDiagRaw(line, /*debugger_channel=*/false);
+    return EXCEPTION_CONTINUE_SEARCH; // observe only
+}
+
+// Resolved by name, never imported: importing the errorhandling-l1-1-1 api-set makes the app fail
+// to activate on-console (see host_memory.cpp).
+void InstallFirstChanceLogger() {
+    using PFN_AddVectoredExceptionHandler = PVOID(WINAPI*)(ULONG, PVECTORED_EXCEPTION_HANDLER);
+    static Common::DynamicLibrary kernelbase("Kernelbase");
+    PFN_AddVectoredExceptionHandler add_veh{};
+    if (kernelbase.IsOpen() && kernelbase.GetSymbol("AddVectoredExceptionHandler", &add_veh) &&
+        add_veh(/*first=*/0, FirstChanceLogger) != nullptr) {
+        WriteDiag("first-chance exception logger installed");
+    } else {
+        WriteDiag("WARNING: could not install the first-chance exception logger");
+    }
+}
+
+void InstallCrashHandlers() {
+    InstallFirstChanceLogger();
+    SetUnhandledExceptionFilter(OnUnhandledException);
+    std::signal(SIGABRT, OnAbort);
+    std::set_terminate(OnTerminate);
 }
 
 struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
@@ -171,7 +453,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
     void Uninitialize() {}
 
     void Run() {
-        WriteDiag("BootView::Run entered");
+        WriteDiag("BootView::Run entered"); // also resolves + caches the diag path
+        WriteDiag(MemoryReport());
+        InstallCrashHandlers();
 
         // A UWP app MUST activate its CoreWindow and pump the dispatcher, or the OS terminates it a
         // couple seconds after launch (no crash, no dump - exactly the "flashes then closes" symptom).
@@ -183,6 +467,7 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
 
         std::atomic<bool> done{false};
         std::thread worker([&done]() {
+            std::set_terminate(OnTerminate); // per-thread in the MSVC runtime
             std::string nro_path;
             try {
                 // Bundled NRO from the read-only package install location.
@@ -208,10 +493,17 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
             done.store(true);
         });
 
+        // Heartbeat every 10 s: if steps stop but heartbeats continue, the boot hung rather than
+        // crashed, and the last step names where.
         CoreDispatcher dispatcher = window.Dispatcher();
+        ULONGLONG next_heartbeat = GetTickCount64() + 10'000;
         while (!done.load()) {
             dispatcher.ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
             ::Sleep(50);
+            if (GetTickCount64() >= next_heartbeat) {
+                WriteDiag("heartbeat: boot worker still running | " + MemoryReport());
+                next_heartbeat += 10'000;
+            }
         }
         worker.join();
         WriteDiag("boot worker joined; exiting");

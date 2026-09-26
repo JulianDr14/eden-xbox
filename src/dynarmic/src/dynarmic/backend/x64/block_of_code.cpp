@@ -19,6 +19,16 @@
 #    if defined(DYNARMIC_UWP_APPCONTAINER)
 #        define DYNARMIC_VIRTUAL_ALLOC   VirtualAllocFromApp
 #        define DYNARMIC_VIRTUAL_PROTECT VirtualProtectFromApp
+// A failed protect or commit here does not fail at the call: it surfaces later as a fault inside
+// JIT code, where the process dies without reaching any unhandled-exception filter. Raise at the
+// cause instead, with a code the UWP frontend's first-chance logger decodes:
+//   Information[0] = GetLastError(), [1] = address, [2] = size, [3] = requested protection
+#        define DYNARMIC_UWP_PROTECT_FAILED 0xE0DA0001u
+#        define DYNARMIC_UWP_COMMIT_FAILED  0xE0DA0002u
+static void RaiseJitMemoryFailure(DWORD code, const void* base, size_t size, DWORD protection) {
+    const ULONG_PTR info[4] = {GetLastError(), reinterpret_cast<ULONG_PTR>(base), size, protection};
+    RaiseException(code, EXCEPTION_NONCONTINUABLE, 4, info);
+}
 #    else
 #        define DYNARMIC_VIRTUAL_ALLOC   VirtualAlloc
 #        define DYNARMIC_VIRTUAL_PROTECT VirtualProtect
@@ -147,7 +157,15 @@ void ProtectMemory(const void* base, size_t size, bool is_executable) {
     // The is_executable→PAGE_EXECUTE_READ transition is the call that requires the `codeGeneration`
     // capability under the AppContainer (VirtualProtectFromApp); the W^X invariant means we only ever
     // hold RW or RX, never RWX.
-    DYNARMIC_VIRTUAL_PROTECT(const_cast<void*>(base), size, is_executable ? PAGE_EXECUTE_READ : PAGE_READWRITE, &oldProtect);
+    const DWORD protection = is_executable ? PAGE_EXECUTE_READ : PAGE_READWRITE;
+    const BOOL protected_ok = DYNARMIC_VIRTUAL_PROTECT(const_cast<void*>(base), size, protection, &oldProtect);
+#        if defined(DYNARMIC_UWP_APPCONTAINER)
+    if (!protected_ok) {
+        RaiseJitMemoryFailure(DYNARMIC_UWP_PROTECT_FAILED, base, size, protection);
+    }
+#        else
+    (void)protected_ok;
+#        endif
 #    else
     static const size_t pageSize = sysconf(_SC_PAGESIZE);
     const size_t iaddr = reinterpret_cast<size_t>(base);
@@ -311,7 +329,14 @@ void BlockOfCode::EnsureMemoryCommitted([[maybe_unused]] size_t codesize) {
         committed_size = std::min<size_t>(maxSize_, committed_size + codesize);
 #    ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
         // W^X: commit read-write only; ProtectMemory() flips pages to RX before execution.
-        DYNARMIC_VIRTUAL_ALLOC(top_, committed_size, MEM_COMMIT, PAGE_READWRITE);
+        void* const committed = DYNARMIC_VIRTUAL_ALLOC(top_, committed_size, MEM_COMMIT, PAGE_READWRITE);
+#        if defined(DYNARMIC_UWP_APPCONTAINER)
+        if (committed == nullptr) {
+            RaiseJitMemoryFailure(DYNARMIC_UWP_COMMIT_FAILED, top_, committed_size, PAGE_READWRITE);
+        }
+#        else
+        (void)committed;
+#        endif
 #    else
         // RWX fast path — desktop only. Never compiled under DYNARMIC_UWP_APPCONTAINER, which
         // forces DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT on (the AppContainer never grants RWX).
