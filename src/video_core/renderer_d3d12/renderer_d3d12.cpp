@@ -347,6 +347,13 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
         }
     }
     gpu.RendererFrameEndNotify();
+    // As RendererVulkan::Composite: advances the caches' garbage collection and the fence
+    // manager's frame, which otherwise never run.
+    try {
+        rasterizer.TickFrame();
+    } catch (const std::exception& e) {
+        LOG_CRITICAL(Render, "{} - rasterizer frame tick failed", e.what());
+    }
     render_window.OnFrameDisplayed();
 }
 
