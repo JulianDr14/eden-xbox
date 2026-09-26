@@ -545,6 +545,10 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
 
     const HRESULT hr =
         device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline_state));
+    CheckRemovedAfter(device.Get(), [&] {
+        return fmt::format("graphics PSO for VS {:016x} PS {:016x} (HRESULT 0x{:08X})",
+                           key.unique_hashes[1], key.unique_hashes[5], static_cast<u32>(hr));
+    });
     if (FAILED(hr)) {
         LOG_ERROR(Render,
                   "D3D12: CreateGraphicsPipelineState failed (HRESULT 0x{:08X}) for VS {:016x} "

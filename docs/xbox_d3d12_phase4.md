@@ -719,6 +719,64 @@ Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
   - **Regla:** cualquier estado que D3D12 deje indefinido se normaliza antes de crear el objeto.
     Que la capa de debug no se queje no basta.
 
+**Entrada (0.2.20.0): el jugador 1 es un Pro Controller.**
+- **Diseño (`src/eden_uwp/uwp_input.{h,cpp}`):**
+  - Se registra solo el motor `virtual_gamepad` de `input_common`, el que `hid_core` asigna a todos
+    los jugadores y el que usa Android.
+  - Se evita el `InputSubsystem` completo porque arrancaría SDL (enumeración de dispositivos en
+    AppContainer) y los sockets UDP de cemuhook.
+  - `uwp_boot` pone al jugador 1 como Pro Controller conectado y llama a `ReloadInputDevices`
+    antes de `Load`. Al terminar llama a `UnloadInputDevices` antes de desregistrar el motor.
+- **Mando de Xbox (Windows.Gaming.Input):**
+  - Se lee el primero cada 4 ms.
+  - Los botones se asignan por posición en un mando de Switch: la A de Xbox es la B de Switch, la B
+    es la A, la X es la Y y la Y es la X.
+  - LB/RB van a L/R, y LT/RT a ZL/ZR (a partir de 0,5). Menu es +, View es −. Los sticks llevan una
+    zona muerta radial de 0,12.
+  - El "atrás" que Xbox asocia a la B se marca como manejado (`BackRequested`).
+- **Guion en `boot.cfg`:**
+  - Formato: `input=<segundos>:<botones>[:<ms>]`, con los botones separados por `+`.
+  - Botones: A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LS RS HOME CAPTURE.
+  - Direcciones de stick: LS_UP/DOWN/LEFT/RIGHT y lo mismo con RS_.
+  - Cada paso dura 200 ms por defecto. El tiempo cuenta desde `system.Run()` y el guion se suma al
+    mando.
+  - Se pasa con `package-appx.ps1 -BootCfg @('input=30:L+R:500','input=40:A')`. Con `local-run.ps1`
+    hay que invocarlo con `&`, no con `-File`, para que el arreglo llegue entero.
+- **PC:** con `L+R` a los 30 s y `A` de 40 a 60 s, Wonder pasa del título al menú, a la selección de
+  personaje y a la carga del primer nivel.
+  - La memoria de la app sube a ~4,3 GiB a los 90 s. En la Series el límite es de 5 GiB, así que
+    toca vigilarlo.
+  - Aparece un aviso nuevo: `a vertex attribute format (read as RGBA32F) is not supported`.
+
+**Series (0.2.20.0): la entrada funciona y el dispositivo se pierde al cargar el primer nivel.**
+- **Lo que funciona:** el guion pulsa L+R y A en la consola, y el juego pasa del título al menú y
+  a la selección de personaje, igual que en el PC.
+- **La caída:**
+  - A los 72,97 s, al cargar el nivel, `CreateRootSignature` falla con `DEVICE_REMOVED`. El motivo
+    es `0x887A0001` (`INVALID_CALL`), y el proceso aborta.
+  - El dispositivo ya estaba perdido entre el último PSO construido (VS `fe4427ada456a0e3`) y el
+    siguiente (VS `ad90e5c2b0961459`).
+  - La memoria de la app estaba en ~3,4 GiB.
+- **En el PC, el mismo tramo es válido:** a los ~74,4 s se construyen esos mismos pipelines sin
+  error, y la capa de debug no marca nada.
+  - El PC sigue hasta la intro ("Welcome to the Flower Kingdom"), aunque la escena 3D sale en
+    siluetas blancas y negras. Es un problema de renderizado aparte, para la fase 5.
+  - Aparece por primera vez el primer dispatch de compute (a los ~77 s).
+- **Hipótesis:**
+  - Un `INVALID_CALL` sin errores de la capa de debug apunta a una llamada de CPU (una vista, un
+    recurso o un PSO) con parámetros que el driver de la consola rechaza y el del PC acepta.
+  - Ya sabemos que los dos drivers responden distinto a `FORMAT_SUPPORT`: la Series no tiene
+    lecturas de UAV tipados en RGBA8 y otros formatos.
+- **0.2.21.0 (diagnóstico):**
+  - `CheckRemovedAfter` (`d3d12_device.h`) consulta `GetDeviceRemovedReason` tras cada creación de
+    imagen, RTV, DSV, UAV, SRV, sampler, CBV, vista de buffer, buffer, staging y PSO, y tras cada
+    `ExecuteCommandLists`.
+  - La primera llamada tras la que el dispositivo está perdido queda en el log como
+    `device removed (reason …) right after …`, con sus parámetros.
+  - DRED (breadcrumbs y page faults) queda activo siempre, no solo con `renderer_debug`.
+    `ReportDeviceRemoved` ahora dice cuántas listas quedaron sin terminar: si ninguna quedó
+    abierta, la causa no fue la GPU.
+
 **Pendiente de la 4.4:**
 - `DrawTexture` y `DrawIndirect` con `ExecuteIndirect`: no han salido en este juego.
 - Pasan a la fase 5:

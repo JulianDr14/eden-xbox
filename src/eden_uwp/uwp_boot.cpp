@@ -5,7 +5,8 @@
 //
 // Brings up Core::System with the Null renderer + null audio sink, loads a homebrew NRO staged in the
 // app's sandboxed local storage, runs it through the dynarmic JIT, and emits a deterministic
-// JIT-liveness marker. No GPU device, no input, no audio device.
+// JIT-liveness marker. No audio device; input is the Xbox gamepad and/or a boot.cfg script
+// (uwp_input.h).
 //
 // The Core::System bring-up is modeled on the proven desktop boot in src/yuzu_cmd/yuzu.cpp; the
 // WinRT IFrameworkView wrapper is the UWP entry point that drives it.
@@ -35,9 +36,11 @@
 #include "core/hle/kernel/svc/svc_debug_string.h" // Kernel::Svc::SetDebugStringObserver
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "hid_core/hid_core.h"
 #include "video_core/gpu.h"
 
 #include "eden_uwp/headless_emu_window.h"
+#include "eden_uwp/uwp_input.h"
 
 namespace {
 void WriteDiag(const std::string& msg); // defined with the UWP entry point below
@@ -69,6 +72,10 @@ static void ApplyHeadlessBootSettings(const BootSurface& surface) {
     // The on-console failure mode is a hard crash with no eden_log.txt; the default 4 KiB write
     // buffering loses exactly the lines that say where it died. Flush every line instead.
     Settings::values.log_flush_line = true;
+    // Player 1 is a connected Pro Controller bound to the virtual_gamepad engine (uwp_input.h).
+    auto& player = Settings::values.players.GetValue()[0];
+    player.connected = true;
+    player.controller_type = Settings::ControllerType::ProController;
     // memory_layout_mode stays at its default until the Series-S budget is measured on-console; the
     // DRAM clamp is a separate reservation follow-up, not here.
 }
@@ -85,6 +92,8 @@ struct BootConfig {
     std::string log_filter;
     /// Null renderer even with a window, to tell GPU hangs from CPU ones.
     bool null_renderer{};
+    /// Buttons to press at given times ("input=25:L+R" lines).
+    std::vector<InputStep> input_script;
 };
 
 /// Games never emit the sentinels; without an explicit time they run this long.
@@ -121,6 +130,18 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     WriteDiag("step: system.ApplySettings() done");
 
     HeadlessEmuWindow emu_window{surface.core_window, surface.width, surface.height};
+
+    // Before Load, so HID starts with player 1 connected and bound to the gamepad engine.
+    GamepadInput input{config.input_script};
+    system.HIDCore().ReloadInputDevices();
+    const auto shutdown = [&] {
+        input.Stop();
+        Kernel::Svc::SetDebugStringObserver(nullptr); // detach before teardown
+        void(system.Pause());
+        system.ShutdownMainProcess();
+        system.HIDCore().UnloadInputDevices();
+        WriteDiag("step: shutdown complete");
+    };
 
     // Filesystem + content plumbing, as yuzu_cmd does it, plus the manual content provider the Qt
     // and Android frontends fill from their game lists: a game dump loaded straight from its file
@@ -178,6 +199,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
 
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
     void(system.Run());
+    input.Start();
 
     if (config.run_seconds > 0) {
         // Timed mode: nothing to wait for but the clock. The payload counts as having run if the
@@ -190,10 +212,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 WriteDiag("step: running, " + std::to_string(second) + " s | " + MemoryReport());
             }
         }
-        Kernel::Svc::SetDebugStringObserver(nullptr);
-        void(system.Pause());
-        system.ShutdownMainProcess();
-        WriteDiag("step: shutdown complete");
+        shutdown();
         LOG_INFO(Frontend, "Headless boot: timed run of {} s finished.", config.run_seconds);
         return 0;
     }
@@ -226,10 +245,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                   " | " + MemoryReport());
     }
 
-    Kernel::Svc::SetDebugStringObserver(nullptr); // detach before teardown
-    void(system.Pause());
-    system.ShutdownMainProcess();
-    WriteDiag("step: shutdown complete");
+    shutdown();
 
     if (alive) {
         LOG_INFO(Frontend, "Headless boot: JIT liveness CONFIRMED ('{}' observed).",
@@ -666,6 +682,10 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         // worker thread, and keep the UI thread pumping so the OS sees an activated, responsive app.
         CoreWindow window = CoreWindow::GetForCurrentThread();
         window.Activate();
+        // On Xbox the gamepad's B also raises "back"; left unhandled at the root it can send the
+        // app to the background. B is a game button here (uwp_input.h).
+        SystemNavigationManager::GetForCurrentView().BackRequested(
+            [](auto&&, BackRequestedEventArgs const& args) { args.Handled(true); });
 
         // The swapchain is sized in physical pixels: CoreWindow bounds are in view pixels (DIPs).
         EdenXbox::BootSurface surface{};
@@ -710,6 +730,13 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "renderer=null") {
                         config.null_renderer = true;
                         WriteDiag("boot.cfg: Null renderer");
+                    } else if (line.starts_with("input=")) {
+                        if (auto step = EdenXbox::ParseInputStep(line.substr(6))) {
+                            config.input_script.push_back(std::move(*step));
+                            WriteDiag("boot.cfg: input " + line.substr(6));
+                        } else {
+                            WriteDiag("boot.cfg: IGNORED bad input line " + line.substr(6));
+                        }
                     } else if (line.starts_with("game=")) {
                         config.game = line.substr(5);
                         WriteDiag("boot.cfg: game " + config.game);

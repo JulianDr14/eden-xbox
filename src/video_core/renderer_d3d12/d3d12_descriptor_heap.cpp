@@ -213,6 +213,9 @@ void GuestDescriptorQueue::AddConstantBuffer(D3D12_GPU_VIRTUAL_ADDRESS address, 
         .SizeInBytes = address != 0 ? (size + 255u) & ~255u : 0u,
     };
     device->CreateConstantBufferView(&desc, Next());
+    CheckRemovedAfter(device, [&] {
+        return fmt::format("CBV at 0x{:x} of {} bytes", desc.BufferLocation, desc.SizeInBytes);
+    });
 }
 
 void GuestDescriptorQueue::AddStorageBuffer(ID3D12Resource* resource, u64 offset, u32 size) {
@@ -249,6 +252,10 @@ void GuestDescriptorQueue::AddStorageBuffer(ID3D12Resource* resource, u64 offset
                    .Flags = D3D12_BUFFER_SRV_FLAG_RAW},
     };
     device->CreateShaderResourceView(resource, &srv, Next());
+    CheckRemovedAfter(device, [&] {
+        return fmt::format("storage buffer views (offset {} size {} null {})", offset, size,
+                           resource == nullptr);
+    });
 }
 
 void GuestDescriptorQueue::AddTexelBuffer(ID3D12Resource* resource, u64 offset, u32 size,
@@ -285,6 +292,11 @@ void GuestDescriptorQueue::AddTexelBuffer(ID3D12Resource* resource, u64 offset, 
         .Buffer = {.FirstElement = first, .NumElements = elements},
     };
     device->CreateShaderResourceView(resource, &srv, Next());
+    CheckRemovedAfter(device, [&] {
+        return fmt::format("texel buffer views (format {} offset {} elements {} uav {} null {})",
+                           static_cast<u32>(format), offset, elements, with_uav,
+                           resource == nullptr);
+    });
 }
 
 void GuestDescriptorQueue::AddCopy(D3D12_CPU_DESCRIPTOR_HANDLE descriptor) {

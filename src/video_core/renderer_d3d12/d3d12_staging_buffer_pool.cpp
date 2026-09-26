@@ -49,6 +49,10 @@ ComPtr<ID3D12Resource> CreateMappedBuffer(ID3D12Device* device, u64 size,
     ThrowIfFailed(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
                                                   nullptr, IID_PPV_ARGS(&buffer)),
                   "CreateCommittedResource (staging)");
+    CheckRemovedAfter(device, [&] {
+        return fmt::format("creating a {} byte staging buffer (heap {})", desc.Width,
+                           static_cast<u32>(heap_type));
+    });
     void* pointer{};
     const D3D12_RANGE no_cpu_reads{0, 0};
     const D3D12_RANGE* const read_range =
