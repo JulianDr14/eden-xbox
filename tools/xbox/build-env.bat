@@ -23,6 +23,11 @@ if not defined VSROOT (
 )
 echo VS: %VSROOT%
 
+REM English compiler messages: Ninja finds header dependencies by matching the /showIncludes
+REM prefix byte for byte, and a localized prefix (e.g. Spanish) that drifts from the one CMake
+REM cached silently stops header edits from triggering rebuilds. Needs the VS English language pack.
+set VSLANG=1033
+
 call "%VSROOT%\VC\Auxiliary\Build\vcvarsall.bat" x64 uwp
 if errorlevel 1 ( echo ERROR: vcvarsall x64 uwp failed. & exit /b 1 )
 
