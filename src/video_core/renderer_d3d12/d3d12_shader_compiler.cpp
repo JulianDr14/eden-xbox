@@ -1,0 +1,158 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include <stdexcept>
+#include <string>
+
+// First: dxcapi.h relies on the Windows/COM declarations d3d12_device.h pulls in.
+#include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
+
+#include <dxcapi.h>
+#include <fmt/format.h>
+
+#include "common/logging.h"
+
+namespace D3D12 {
+
+namespace {
+
+/// Shader model the translator may use: the Xbox Series UWP runtime reports 6.4.
+constexpr dxil_shader_model SHADER_MODEL = SHADER_MODEL_6_4;
+/// Validator rules the translator targets; dxil.dll only has to be at least this new.
+constexpr dxil_validator_version VALIDATOR_VERSION = DXIL_VALIDATOR_1_4;
+
+/// Minimal IDxcBlob over caller-owned memory, so the validator can sign a buffer in place.
+class BorrowedBlob final : public IDxcBlob {
+public:
+    BorrowedBlob(void* data_, size_t size_) : data{data_}, size{size_} {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IDxcBlob)) {
+            *out = static_cast<IDxcBlob*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    // Lives on the caller's stack for the duration of one Validate call.
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return 1;
+    }
+    ULONG STDMETHODCALLTYPE Release() override {
+        return 1;
+    }
+    LPVOID STDMETHODCALLTYPE GetBufferPointer() override {
+        return data;
+    }
+    SIZE_T STDMETHODCALLTYPE GetBufferSize() override {
+        return size;
+    }
+
+private:
+    void* data;
+    size_t size;
+};
+
+void LogTranslatorMessage(void*, const char* msg) {
+    LOG_ERROR(Render, "spirv_to_dxil: {}", msg);
+}
+
+} // Anonymous namespace
+
+ShaderCompiler::ShaderCompiler() {
+    if (!spirv_to_dxil_library.Open("spirv_to_dxil.dll")) {
+        LOG_ERROR(Render, "D3D12: spirv_to_dxil.dll could not be loaded (error {})",
+                  GetLastError());
+        return;
+    }
+    if (!spirv_to_dxil_library.GetSymbol("spirv_to_dxil", &translate) ||
+        !spirv_to_dxil_library.GetSymbol("spirv_to_dxil_free", &free_dxil)) {
+        LOG_ERROR(Render, "D3D12: spirv_to_dxil.dll lacks its entry points");
+        return;
+    }
+    if (!dxil_library.Open("dxil.dll")) {
+        LOG_ERROR(Render, "D3D12: dxil.dll could not be loaded (error {})", GetLastError());
+        return;
+    }
+    DxcCreateInstanceProc create_instance{};
+    if (!dxil_library.GetSymbol("DxcCreateInstance", &create_instance)) {
+        LOG_ERROR(Render, "D3D12: dxil.dll lacks DxcCreateInstance");
+        return;
+    }
+    const HRESULT hr = create_instance(CLSID_DxcValidator, IID_PPV_ARGS(&validator));
+    if (FAILED(hr)) {
+        LOG_ERROR(Render, "D3D12: creating the DXIL validator failed (HRESULT 0x{:08X})",
+                  static_cast<u32>(hr));
+        return;
+    }
+
+    UINT32 major = 0;
+    UINT32 minor = 0;
+    ComPtr<IDxcVersionInfo> version;
+    if (SUCCEEDED(validator.As(&version))) {
+        version->GetVersion(&major, &minor);
+    }
+    LOG_INFO(Render, "D3D12: shader path ready (spirv_to_dxil, DXIL validator {}.{})", major,
+             minor);
+    available = true;
+}
+
+ShaderCompiler::~ShaderCompiler() {
+    // The validator's code lives in dxil.dll: release it before the library unloads.
+    validator.Reset();
+}
+
+std::vector<u8> ShaderCompiler::Compile(std::span<const u32> spirv, dxil_spirv_shader_stage stage,
+                                        bool flip_y) const {
+    if (!available) {
+        throw std::runtime_error("D3D12: the shader path is unavailable");
+    }
+    dxil_spirv_runtime_conf conf{};
+    conf.runtime_data_cbv = {.register_space = RUNTIME_DATA_SPACE, .base_shader_register = 0};
+    conf.push_constant_cbv = {.register_space = PUSH_CONSTANT_SPACE, .base_shader_register = 0};
+    conf.first_vertex_and_base_instance_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
+    conf.workgroup_id_mode = DXIL_SPIRV_SYSVAL_TYPE_NATIVE;
+    conf.yz_flip.mode = flip_y ? DXIL_SPIRV_Y_FLIP_UNCONDITIONAL : DXIL_SPIRV_YZ_FLIP_NONE;
+    conf.declared_read_only_images_as_srvs = true;
+    conf.shader_model_max = SHADER_MODEL;
+
+    // spirv_to_dxil dereferences both of these unconditionally.
+    const dxil_spirv_debug_options debug_options{};
+    const dxil_spirv_logger logger{.priv = nullptr, .log = LogTranslatorMessage};
+    dxil_spirv_object object{};
+    if (!translate(spirv.data(), spirv.size(), nullptr, 0, stage, "main", VALIDATOR_VERSION,
+                   &debug_options, &conf, &logger, &object)) {
+        throw std::runtime_error(
+            fmt::format("D3D12: spirv_to_dxil failed for stage {}", static_cast<int>(stage)));
+    }
+    std::vector<u8> dxil(static_cast<const u8*>(object.binary.buffer),
+                         static_cast<const u8*>(object.binary.buffer) + object.binary.size);
+    free_dxil(&object);
+
+    Sign(dxil);
+    return dxil;
+}
+
+void ShaderCompiler::Sign(std::vector<u8>& dxil) const {
+    // The runtime refuses unsigned DXIL outside developer mode; the validator writes the hash in place.
+    BorrowedBlob blob{dxil.data(), dxil.size()};
+    ComPtr<IDxcOperationResult> result;
+    ThrowIfFailed(validator->Validate(&blob, DxcValidatorFlags_InPlaceEdit, &result),
+                  "IDxcValidator::Validate");
+    HRESULT status = E_FAIL;
+    result->GetStatus(&status);
+    if (SUCCEEDED(status)) {
+        return;
+    }
+    std::string message = "(no details)";
+    ComPtr<IDxcBlobEncoding> errors;
+    if (SUCCEEDED(result->GetErrorBuffer(&errors)) && errors && errors->GetBufferSize() > 0) {
+        message.assign(static_cast<const char*>(errors->GetBufferPointer()),
+                       errors->GetBufferSize());
+    }
+    throw std::runtime_error(fmt::format("D3D12: DXIL validation failed (0x{:08X}): {}",
+                                         static_cast<u32>(status), message));
+}
+
+} // namespace D3D12

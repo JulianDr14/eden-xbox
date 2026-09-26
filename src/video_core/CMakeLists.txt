@@ -391,14 +391,24 @@ endif()
 
 if (ENABLE_D3D12)
     target_sources(video_core PRIVATE
+        renderer_d3d12/d3d12_descriptor_heap.cpp
+        renderer_d3d12/d3d12_descriptor_heap.h
         renderer_d3d12/d3d12_device.cpp
         renderer_d3d12/d3d12_device.h
+        renderer_d3d12/d3d12_scheduler.cpp
+        renderer_d3d12/d3d12_scheduler.h
+        renderer_d3d12/d3d12_shader_compiler.cpp
+        renderer_d3d12/d3d12_shader_compiler.h
+        renderer_d3d12/d3d12_staging_buffer_pool.cpp
+        renderer_d3d12/d3d12_staging_buffer_pool.h
         renderer_d3d12/d3d12_swapchain.cpp
         renderer_d3d12/d3d12_swapchain.h
         renderer_d3d12/renderer_d3d12.cpp
         renderer_d3d12/renderer_d3d12.h
     )
     target_compile_definitions(video_core PUBLIC HAS_D3D12)
+    # spirv_to_dxil.dll (Mesa) is loaded at runtime; only its C headers are needed to build.
+    target_include_directories(video_core PRIVATE ${PROJECT_SOURCE_DIR}/externals/spirv-to-dxil/include)
     target_link_libraries(video_core PRIVATE d3d12 dxgi)
 endif()
 

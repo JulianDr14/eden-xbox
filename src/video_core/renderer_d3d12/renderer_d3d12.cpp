@@ -12,6 +12,8 @@
 #include "video_core/capture.h"
 #include "video_core/framebuffer_config.h"
 #include "video_core/gpu.h"
+#include "video_core/host_shaders/blit_color_float_frag_spv.h"
+#include "video_core/host_shaders/full_screen_triangle_vert_spv.h"
 #include "video_core/renderer_d3d12/renderer_d3d12.h"
 #include "video_core/surface.h"
 #include "video_core/textures/decoders.h"
@@ -19,6 +21,10 @@
 namespace D3D12 {
 
 namespace {
+
+/// Shader-visible CBV/SRV/UAV descriptors in the ring. Far below the 1,000,000 tier limit; enough
+/// for many frames of draws with room for the ring never to stall in practice.
+constexpr u32 DESCRIPTOR_RING_SIZE = 256 * 1024;
 
 IUnknown* CoreWindowOf(const Core::Frontend::EmuWindow& emu_window) {
     const auto& info = emu_window.GetWindowInfo();
@@ -59,8 +65,49 @@ u32 ToRgba8(Service::android::PixelFormat format, const u8* src) {
                (((b << 3) | (b >> 2)) << 16) | 0xFF000000u;
     }
     default:
-        return 0xFFFF00FFu; // magenta: a format phase 1 does not convert
+        return 0xFFFF00FFu; // magenta: a format this path does not convert yet
     }
+}
+
+D3D12_RESOURCE_DESC Texture2DDesc(u32 width, u32 height, DXGI_FORMAT format) {
+    return D3D12_RESOURCE_DESC{
+        .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+        .Alignment = 0,
+        .Width = width,
+        .Height = height,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .Format = format,
+        .SampleDesc = {.Count = 1, .Quality = 0},
+        .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        .Flags = D3D12_RESOURCE_FLAG_NONE,
+    };
+}
+
+D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+                                  D3D12_RESOURCE_STATES after) {
+    return D3D12_RESOURCE_BARRIER{
+        .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        .Transition =
+            {
+                .pResource = resource,
+                .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                .StateBefore = before,
+                .StateAfter = after,
+            },
+    };
+}
+
+/// A staging allocation as the source of a buffer -> texture copy.
+D3D12_TEXTURE_COPY_LOCATION StagingSource(const StagingBufferRef& ref,
+                                          D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint) {
+    footprint.Offset = ref.offset;
+    return D3D12_TEXTURE_COPY_LOCATION{
+        .pResource = ref.buffer,
+        .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+        .PlacedFootprint = footprint,
+    };
 }
 
 } // Anonymous namespace
@@ -72,71 +119,180 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
       device{}, swapchain{device, CoreWindowOf(emu_window),
                           emu_window.GetFramebufferLayout().width,
                           emu_window.GetFramebufferLayout().height},
-      rasterizer{gpu_} {
+      shader_compiler{}, scheduler{device}, staging_pool{device, scheduler},
+      view_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV},
+      sampler_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 256},
+      rtv_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 256},
+      descriptor_ring{device.Get(), scheduler, DESCRIPTOR_RING_SIZE},
+      sampler_heap{device.Get(), scheduler}, rasterizer{gpu_} {
     ID3D12Device* const dev = device.Get();
 
-    const D3D12_RESOURCE_DESC image_desc{
-        .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-        .Alignment = 0,
-        .Width = swapchain.Width(),
-        .Height = swapchain.Height(),
-        .DepthOrArraySize = 1,
-        .MipLevels = 1,
-        .Format = Swapchain::FORMAT,
-        .SampleDesc = {.Count = 1, .Quality = 0},
-        .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
-        .Flags = D3D12_RESOURCE_FLAG_NONE,
-    };
+    const D3D12_RESOURCE_DESC image_desc =
+        Texture2DDesc(swapchain.Width(), swapchain.Height(), Swapchain::FORMAT);
     dev->GetCopyableFootprints(&image_desc, 0, 1, 0, &footprint, nullptr, nullptr, &upload_size);
-
-    const D3D12_HEAP_PROPERTIES upload_heap{.Type = D3D12_HEAP_TYPE_UPLOAD};
-    const D3D12_RESOURCE_DESC buffer_desc{
-        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
-        .Alignment = 0,
-        .Width = upload_size,
-        .Height = 1,
-        .DepthOrArraySize = 1,
-        .MipLevels = 1,
-        .Format = DXGI_FORMAT_UNKNOWN,
-        .SampleDesc = {.Count = 1, .Quality = 0},
-        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        .Flags = D3D12_RESOURCE_FLAG_NONE,
-    };
-    for (Frame& frame : frames) {
-        ThrowIfFailed(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                  IID_PPV_ARGS(&frame.allocator)),
-                      "CreateCommandAllocator");
-        ThrowIfFailed(dev->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE,
-                                                   &buffer_desc,
-                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                                   IID_PPV_ARGS(&frame.upload)),
-                      "CreateCommittedResource (upload)");
-        void* mapped{};
-        ThrowIfFailed(frame.upload->Map(0, nullptr, &mapped), "ID3D12Resource::Map");
-        frame.mapped = static_cast<u8*>(mapped);
+    for (u32 i = 0; i < Swapchain::IMAGE_COUNT; ++i) {
+        back_buffer_rtvs[i] = rtv_descriptors.Allocate();
+        dev->CreateRenderTargetView(swapchain.Image(i), nullptr, back_buffer_rtvs[i]);
     }
-    ThrowIfFailed(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                         frames[0].allocator.Get(), nullptr,
-                                         IID_PPV_ARGS(&command_list)),
-                  "CreateCommandList");
-    ThrowIfFailed(command_list->Close(), "ID3D12GraphicsCommandList::Close");
+
+    blit_ready = CreateBlitPipeline();
 
     // Present one dark-blue frame straight away: on-console, a blue screen before the guest draws
     // anything proves the device and swapchain work independently of the emulation.
     const u32 index = swapchain.CurrentIndex();
+    const StagingBufferRef upload = staging_pool.Request(upload_size, MemoryUsage::Upload);
     for (u32 y = 0; y < swapchain.Height(); ++y) {
-        auto* row = reinterpret_cast<u32*>(frames[index].mapped + y * footprint.Footprint.RowPitch);
+        auto* row = reinterpret_cast<u32*>(upload.mapped_span.data() +
+                                           y * footprint.Footprint.RowPitch);
         std::fill_n(row, swapchain.Width(), 0xFF402010u);
     }
+    RecordCopy(upload, swapchain.Image(index));
     Present(index);
+    LOG_INFO(Render, "D3D12: presenting through the scheduler (tick {})", scheduler.CurrentTick());
 }
 
 RendererD3D12::~RendererD3D12() {
     try {
-        device.WaitIdle();
+        scheduler.Finish();
     } catch (const std::exception& e) {
         LOG_ERROR(Render, "{}", e.what());
     }
+}
+
+bool RendererD3D12::CreateBlitPipeline() {
+    if (!shader_compiler.IsAvailable()) {
+        LOG_WARNING(Render, "D3D12: no shader path, presenting through the CPU");
+        return false;
+    }
+    try {
+        ID3D12Device* const dev = device.Get();
+
+        // Eden's blit shaders, exactly as the Vulkan backend uses them.
+        const std::vector<u8> vs =
+            shader_compiler.Compile(FULL_SCREEN_TRIANGLE_VERT_SPV, DXIL_SPIRV_SHADER_VERTEX, true);
+        const std::vector<u8> ps =
+            shader_compiler.Compile(BLIT_COLOR_FLOAT_FRAG_SPV, DXIL_SPIRV_SHADER_FRAGMENT);
+
+        // Push constants {tex_scale, tex_offset} arrive as a CBV in PUSH_CONSTANT_SPACE; the
+        // combined sampler at set 0 binding 0 becomes t0 + s0 in space 0. The texture and the
+        // sampler come from descriptor tables (ring and sampler heap), as guest draws will.
+        const D3D12_DESCRIPTOR_RANGE srv_range{
+            .RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+            .NumDescriptors = 1,
+            .BaseShaderRegister = 0,
+            .RegisterSpace = 0,
+            .OffsetInDescriptorsFromTableStart = 0,
+        };
+        const D3D12_DESCRIPTOR_RANGE sampler_range{
+            .RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+            .NumDescriptors = 1,
+            .BaseShaderRegister = 0,
+            .RegisterSpace = 0,
+            .OffsetInDescriptorsFromTableStart = 0,
+        };
+        D3D12_ROOT_PARAMETER params[4]{};
+        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        params[0].Constants = {.ShaderRegister = 0, .RegisterSpace = PUSH_CONSTANT_SPACE,
+                               .Num32BitValues = 4};
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        params[1].Constants = {.ShaderRegister = 0, .RegisterSpace = RUNTIME_DATA_SPACE,
+                               .Num32BitValues = 12};
+        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[2].DescriptorTable = {.NumDescriptorRanges = 1, .pDescriptorRanges = &srv_range};
+        params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[3].DescriptorTable = {.NumDescriptorRanges = 1,
+                                     .pDescriptorRanges = &sampler_range};
+        params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        const D3D12_ROOT_SIGNATURE_DESC root_desc{
+            .NumParameters = 4,
+            .pParameters = params,
+            .NumStaticSamplers = 0,
+            .pStaticSamplers = nullptr,
+            .Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE,
+        };
+        ComPtr<ID3DBlob> serialized;
+        ComPtr<ID3DBlob> error;
+        const HRESULT hr = D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                                       &serialized, &error);
+        if (FAILED(hr)) {
+            throw std::runtime_error(
+                error ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                    error->GetBufferSize())
+                      : std::string("D3D12SerializeRootSignature failed"));
+        }
+        ThrowIfFailed(dev->CreateRootSignature(0, serialized->GetBufferPointer(),
+                                               serialized->GetBufferSize(),
+                                               IID_PPV_ARGS(&blit_root_signature)),
+                      "CreateRootSignature");
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+        pso.pRootSignature = blit_root_signature.Get();
+        pso.VS = {vs.data(), vs.size()};
+        pso.PS = {ps.data(), ps.size()};
+        pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pso.SampleMask = UINT_MAX;
+        pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        pso.RasterizerState.DepthClipEnable = TRUE;
+        pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pso.NumRenderTargets = 1;
+        pso.RTVFormats[0] = Swapchain::FORMAT;
+        pso.SampleDesc.Count = 1;
+        ThrowIfFailed(dev->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&blit_pipeline)),
+                      "CreateGraphicsPipelineState");
+
+        const D3D12_SAMPLER_DESC sampler{
+            .Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+            .AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            .AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            .AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            .MipLODBias = 0.0f,
+            .MaxAnisotropy = 1,
+            .ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER,
+            .BorderColor = {0.0f, 0.0f, 0.0f, 1.0f},
+            .MinLOD = 0.0f,
+            .MaxLOD = D3D12_FLOAT32_MAX,
+        };
+        linear_sampler = sampler_descriptors.Allocate();
+        dev->CreateSampler(&sampler, linear_sampler);
+
+        LOG_INFO(Render,
+                 "D3D12: blit pipeline built from translated SPIR-V (VS {} bytes, PS {} bytes)",
+                 vs.size(), ps.size());
+        return true;
+    } catch (const std::exception& e) {
+        LOG_ERROR(Render, "{} - presenting through the CPU", e.what());
+        return false;
+    }
+}
+
+void RendererD3D12::PrepareGuestImage(u32 width, u32 height) {
+    if (guest_texture && width == guest_width && height == guest_height) {
+        return;
+    }
+    ID3D12Device* const dev = device.Get();
+
+    // The old texture may still be read by frames in flight: the scheduler keeps it alive.
+    scheduler.DeferRelease(std::move(guest_texture));
+    const D3D12_HEAP_PROPERTIES default_heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
+    const D3D12_RESOURCE_DESC desc = Texture2DDesc(width, height, DXGI_FORMAT_R8G8B8A8_UNORM);
+    ThrowIfFailed(dev->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                               nullptr, IID_PPV_ARGS(&guest_texture)),
+                  "CreateCommittedResource (guest texture)");
+    if (guest_srv.ptr == 0) {
+        guest_srv = view_descriptors.Allocate();
+    }
+    // Rewriting the offline SRV is safe: frames in flight read their copy in the ring.
+    dev->CreateShaderResourceView(guest_texture.Get(), nullptr, guest_srv);
+    dev->GetCopyableFootprints(&desc, 0, 1, 0, &guest_footprint, nullptr, nullptr,
+                               &guest_upload_size);
+    guest_width = width;
+    guest_height = height;
+    LOG_INFO(Render, "D3D12: guest image {}x{}", width, height);
 }
 
 void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuffers) {
@@ -145,9 +301,26 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
     }
     if (!present_failed) {
         try {
+            const Tegra::FramebufferConfig& framebuffer = framebuffers.front();
             const u32 index = swapchain.CurrentIndex();
-            device.Wait(frames[index].fence_value);
-            DrawLayer(framebuffers.front(), frames[index].mapped);
+            // Frame pacing: at most IMAGE_COUNT frames ahead of the GPU.
+            scheduler.Wait(present_ticks[index]);
+            ID3D12Resource* const image = swapchain.Image(index);
+            const bool has_image = ReadGuestLayer(framebuffer);
+            if (blit_ready && has_image) {
+                PrepareGuestImage(static_cast<u32>(crop_width), static_cast<u32>(crop_height));
+                const StagingBufferRef upload =
+                    staging_pool.Request(guest_upload_size, MemoryUsage::Upload);
+                CopyGuestImage(framebuffer, upload.mapped_span.data(),
+                               guest_footprint.Footprint.RowPitch);
+                RecordBlit(upload, image, index);
+            } else {
+                const StagingBufferRef upload =
+                    staging_pool.Request(upload_size, MemoryUsage::Upload);
+                ScaleGuestImage(framebuffer, upload.mapped_span.data(),
+                                footprint.Footprint.RowPitch);
+                RecordCopy(upload, image);
+            }
             Present(index);
         } catch (const std::exception& e) {
             // Keep the emulation running headless rather than taking the GPU thread down.
@@ -159,18 +332,11 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
     render_window.OnFrameDisplayed();
 }
 
-void RendererD3D12::DrawLayer(const Tegra::FramebufferConfig& framebuffer, u8* dst) {
-    const u32 dst_width = swapchain.Width();
-    const u32 dst_height = swapchain.Height();
-    const u32 row_pitch = footprint.Footprint.RowPitch;
-    for (u32 y = 0; y < dst_height; ++y) {
-        std::memset(dst + y * row_pitch, 0, dst_width * 4);
-    }
-
+bool RendererD3D12::ReadGuestLayer(const Tegra::FramebufferConfig& framebuffer) {
     const u32 bpp = BytesPerPixel(framebuffer);
     const u8* const guest = device_memory.GetPointer<u8>(framebuffer.address + framebuffer.offset);
     if (guest == nullptr || bpp == 0 || framebuffer.width == 0 || framebuffer.height == 0) {
-        return;
+        return false;
     }
 
     // Guest display buffers are block linear; same parameters as the Vulkan layer upload.
@@ -189,19 +355,47 @@ void RendererD3D12::DrawLayer(const Tegra::FramebufferConfig& framebuffer, u8* d
     }
     crop.right = std::min(crop.right, static_cast<int>(framebuffer.width));
     crop.bottom = std::min(crop.bottom, static_cast<int>(framebuffer.height));
-    const int src_width = crop.GetWidth();
-    const int src_height = crop.GetHeight();
-    if (src_width <= 0 || src_height <= 0) {
+    crop_left = crop.left;
+    crop_top = crop.top;
+    crop_width = crop.GetWidth();
+    crop_height = crop.GetHeight();
+    return crop_width > 0 && crop_height > 0;
+}
+
+void RendererD3D12::CopyGuestImage(const Tegra::FramebufferConfig& framebuffer, u8* dst,
+                                   u32 row_pitch) {
+    const u32 bpp = BytesPerPixel(framebuffer);
+    const std::size_t src_pitch = static_cast<std::size_t>(framebuffer.stride) * bpp;
+    const auto flags = framebuffer.transform_flags;
+    const bool flip_h = True(flags & Service::android::BufferTransformFlags::FlipH);
+    const bool flip_v = True(flags & Service::android::BufferTransformFlags::FlipV);
+    for (int y = 0; y < crop_height; ++y) {
+        const int sy = flip_v ? crop_height - 1 - y : y;
+        const u8* const src_row = linear.data() + (crop_top + sy) * src_pitch;
+        auto* const out = reinterpret_cast<u32*>(dst + static_cast<std::size_t>(y) * row_pitch);
+        for (int x = 0; x < crop_width; ++x) {
+            const int sx = flip_h ? crop_width - 1 - x : x;
+            out[x] = ToRgba8(framebuffer.pixel_format, src_row + (crop_left + sx) * bpp);
+        }
+    }
+}
+
+void RendererD3D12::ScaleGuestImage(const Tegra::FramebufferConfig& framebuffer, u8* dst,
+                                    u32 row_pitch) {
+    const u32 dst_width = swapchain.Width();
+    const u32 dst_height = swapchain.Height();
+    for (u32 y = 0; y < dst_height; ++y) {
+        std::memset(dst + y * row_pitch, 0, dst_width * 4);
+    }
+    if (crop_width <= 0 || crop_height <= 0 || linear.empty()) {
         return;
     }
-
+    const u32 bpp = BytesPerPixel(framebuffer);
     const auto flags = framebuffer.transform_flags;
-    const bool flip_h =
-        True(flags & Service::android::BufferTransformFlags::FlipH);
-    const bool flip_v =
-        True(flags & Service::android::BufferTransformFlags::FlipV);
+    const bool flip_h = True(flags & Service::android::BufferTransformFlags::FlipH);
+    const bool flip_v = True(flags & Service::android::BufferTransformFlags::FlipV);
 
-    // Aspect-preserving letterbox, nearest sampling. Phase 1 only: the shader path replaces this.
+    // Aspect-preserving letterbox, nearest sampling.
     const auto& screen = render_window.GetFramebufferLayout().screen;
     const u32 out_left = std::min<u32>(screen.left, dst_width);
     const u32 out_top = std::min<u32>(screen.top, dst_height);
@@ -209,63 +403,109 @@ void RendererD3D12::DrawLayer(const Tegra::FramebufferConfig& framebuffer, u8* d
     const u32 out_height = std::min<u32>(screen.GetHeight(), dst_height - out_top);
     const std::size_t src_pitch = static_cast<std::size_t>(framebuffer.stride) * bpp;
     for (u32 y = 0; y < out_height; ++y) {
-        int sy = static_cast<int>(static_cast<u64>(y) * src_height / out_height);
+        int sy = static_cast<int>(static_cast<u64>(y) * crop_height / out_height);
         if (flip_v) {
-            sy = src_height - 1 - sy;
+            sy = crop_height - 1 - sy;
         }
-        const u8* const src_row = linear.data() + (crop.top + sy) * src_pitch;
+        const u8* const src_row = linear.data() + (crop_top + sy) * src_pitch;
         auto* const out = reinterpret_cast<u32*>(dst + (out_top + y) * row_pitch) + out_left;
         for (u32 x = 0; x < out_width; ++x) {
-            int sx = static_cast<int>(static_cast<u64>(x) * src_width / out_width);
+            int sx = static_cast<int>(static_cast<u64>(x) * crop_width / out_width);
             if (flip_h) {
-                sx = src_width - 1 - sx;
+                sx = crop_width - 1 - sx;
             }
-            out[x] = ToRgba8(framebuffer.pixel_format, src_row + (crop.left + sx) * bpp);
+            out[x] = ToRgba8(framebuffer.pixel_format, src_row + (crop_left + sx) * bpp);
         }
     }
 }
 
-void RendererD3D12::Present(u32 image_index) {
-    Frame& frame = frames[image_index];
-    ID3D12Resource* const image = swapchain.Image(image_index);
+void RendererD3D12::RecordBlit(const StagingBufferRef& upload, ID3D12Resource* image,
+                               u32 image_index) {
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
 
-    ThrowIfFailed(frame.allocator->Reset(), "ID3D12CommandAllocator::Reset");
-    ThrowIfFailed(command_list->Reset(frame.allocator.Get(), nullptr),
-                  "ID3D12GraphicsCommandList::Reset");
-
-    D3D12_RESOURCE_BARRIER barrier{
-        .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        .Transition =
-            {
-                .pResource = image,
-                .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                .StateBefore = D3D12_RESOURCE_STATE_PRESENT,
-                .StateAfter = D3D12_RESOURCE_STATE_COPY_DEST,
-            },
+    // Upload the guest image.
+    D3D12_RESOURCE_BARRIER barrier = Transition(guest_texture.Get(),
+                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                D3D12_RESOURCE_STATE_COPY_DEST);
+    cmd->ResourceBarrier(1, &barrier);
+    const D3D12_TEXTURE_COPY_LOCATION dst{
+        .pResource = guest_texture.Get(),
+        .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        .SubresourceIndex = 0,
     };
-    command_list->ResourceBarrier(1, &barrier);
+    const D3D12_TEXTURE_COPY_LOCATION src = StagingSource(upload, guest_footprint);
+    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
+    const D3D12_RESOURCE_BARRIER to_draw[2] = {
+        Transition(guest_texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+        Transition(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET),
+    };
+    cmd->ResourceBarrier(2, to_draw);
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = back_buffer_rtvs[image_index];
+    constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    cmd->ClearRenderTargetView(rtv, black, 0, nullptr);
+    cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+
+    // Letterboxed into the layout's screen rectangle, as the Vulkan presenter does.
+    const auto& screen = render_window.GetFramebufferLayout().screen;
+    const D3D12_VIEWPORT viewport{
+        .TopLeftX = static_cast<float>(screen.left),
+        .TopLeftY = static_cast<float>(screen.top),
+        .Width = static_cast<float>(screen.GetWidth()),
+        .Height = static_cast<float>(screen.GetHeight()),
+        .MinDepth = 0.0f,
+        .MaxDepth = 1.0f,
+    };
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(swapchain.Width()),
+                             static_cast<LONG>(swapchain.Height())};
+    cmd->RSSetViewports(1, &viewport);
+    cmd->RSSetScissorRects(1, &scissor);
+
+    // Descriptor heaps are bound per command list: a reset list starts with none.
+    ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
+    cmd->SetDescriptorHeaps(2, heaps);
+    const D3D12_GPU_DESCRIPTOR_HANDLE srv_table = descriptor_ring.Upload({&guest_srv, 1});
+    constexpr u64 LINEAR_SAMPLER_KEY = 0;
+    const D3D12_GPU_DESCRIPTOR_HANDLE sampler_table =
+        sampler_heap.GetTable({&LINEAR_SAMPLER_KEY, 1}, {&linear_sampler, 1});
+
+    cmd->SetGraphicsRootSignature(blit_root_signature.Get());
+    cmd->SetPipelineState(blit_pipeline.Get());
+    const float push_constants[4] = {1.0f, 1.0f, 0.0f, 0.0f}; // tex_scale, tex_offset
+    cmd->SetGraphicsRoot32BitConstants(0, 4, push_constants, 0);
+    const u32 runtime_data[12]{};
+    cmd->SetGraphicsRoot32BitConstants(1, 12, runtime_data, 0);
+    cmd->SetGraphicsRootDescriptorTable(2, srv_table);
+    cmd->SetGraphicsRootDescriptorTable(3, sampler_table);
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmd->DrawInstanced(3, 1, 0, 0);
+
+    barrier = Transition(image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    cmd->ResourceBarrier(1, &barrier);
+}
+
+void RendererD3D12::RecordCopy(const StagingBufferRef& upload, ID3D12Resource* image) {
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    D3D12_RESOURCE_BARRIER barrier =
+        Transition(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmd->ResourceBarrier(1, &barrier);
     const D3D12_TEXTURE_COPY_LOCATION dst{
         .pResource = image,
         .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
         .SubresourceIndex = 0,
     };
-    const D3D12_TEXTURE_COPY_LOCATION src{
-        .pResource = frame.upload.Get(),
-        .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-        .PlacedFootprint = footprint,
-    };
-    command_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
+    const D3D12_TEXTURE_COPY_LOCATION src = StagingSource(upload, footprint);
+    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-    command_list->ResourceBarrier(1, &barrier);
-    ThrowIfFailed(command_list->Close(), "ID3D12GraphicsCommandList::Close");
+    cmd->ResourceBarrier(1, &barrier);
+}
 
-    ID3D12CommandList* const lists[] = {command_list.Get()};
-    device.Queue()->ExecuteCommandLists(1, lists);
+void RendererD3D12::Present(u32 image_index) {
+    present_ticks[image_index] = scheduler.Flush();
     swapchain.Present();
-    frame.fence_value = device.Signal();
+    staging_pool.TickFrame();
 }
 
 std::vector<u8> RendererD3D12::GetAppletCaptureBuffer() {

@@ -17,6 +17,9 @@ param(
     [string] $BootNro,
     # Must match Identity/@Publisher in dist/uwp/AppxManifest.xml, character for character.
     [string] $PublisherCN = "CN=EdenXboxDev",
+    # Mesa's SPIR-V -> DXIL translator for the D3D12 renderer, built by build-spirv-to-dxil.ps1.
+    # Without it the renderer still presents, through its CPU fallback.
+    [string] $SpirvToDxil = "..\mesa-build\build-uwp\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll",
     [string] $OutDir = "build-uwp\package"
 )
 
@@ -59,6 +62,23 @@ Copy-Item (Join-Path $repo "dist\uwp\Assets") $layout -Recurse
 # Any runtime DLLs the link produced land next to the exe; carry them along.
 Get-ChildItem (Split-Path $exe) -Filter *.dll -ErrorAction SilentlyContinue |
     ForEach-Object { Copy-Item $_.FullName $layout }
+
+# The D3D12 renderer's shader path: spirv_to_dxil.dll translates, dxil.dll (Windows SDK, freely
+# redistributable) signs the DXIL. Both are loaded at runtime from the package root.
+$s2d = if ([IO.Path]::IsPathRooted($SpirvToDxil)) { $SpirvToDxil } else { Join-Path $repo $SpirvToDxil }
+if (Test-Path $s2d) {
+    Copy-Item $s2d $layout
+    Write-Host "shaders  : $s2d"
+    try {
+        $dxil = Find-SdkTool "dxil.dll"
+        Copy-Item $dxil $layout
+        Write-Host "signing  : $dxil"
+    } catch {
+        Write-Warning "dxil.dll not found in the Windows SDK: the D3D12 renderer will present through the CPU."
+    }
+} else {
+    Write-Warning "spirv_to_dxil.dll not found ($s2d): the D3D12 renderer will present through the CPU."
+}
 
 # uwp_boot.cpp reads Package.InstalledLocation\boot.nro - the payload must sit at the layout root.
 if ($BootNro) {
