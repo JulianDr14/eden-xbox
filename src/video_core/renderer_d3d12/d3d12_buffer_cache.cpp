@@ -1,16 +1,89 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+#include <bit>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
 
+#include "common/alignment.h"
 #include "common/logging.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
+#include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
+#include "video_core/renderer_d3d12/d3d12_texture_cache.h"
+#include "video_core/surface.h"
 
 namespace D3D12 {
+
+namespace {
+
+using PrimitiveTopology = Tegra::Engines::Maxwell3D::Regs::PrimitiveTopology;
+using IndexFormat = Tegra::Engines::Maxwell3D::Regs::IndexFormat;
+
+/// Rewrites count vertices of an emulated topology as a list D3D12 can draw; vertex(i) gives the
+/// vertex number of the i-th guest vertex. Same triangulation as the Vulkan backend's quad passes.
+template <typename Vertex>
+void AssembleTopology(PrimitiveTopology topology, u32 count, Vertex&& vertex,
+                      std::vector<u32>& out) {
+    out.clear();
+    switch (topology) {
+    case PrimitiveTopology::Quads:
+        for (u32 quad = 0; quad + 4 <= count; quad += 4) {
+            for (const u32 i : {0u, 1u, 2u, 0u, 2u, 3u}) {
+                out.push_back(vertex(quad + i));
+            }
+        }
+        break;
+    case PrimitiveTopology::QuadStrip:
+        for (u32 base = 0; base + 4 <= count; base += 2) {
+            for (const u32 i : {0u, 3u, 1u, 0u, 2u, 3u}) {
+                out.push_back(vertex(base + i));
+            }
+        }
+        break;
+    case PrimitiveTopology::TriangleFan:
+    case PrimitiveTopology::Polygon:
+        for (u32 i = 1; i + 1 < count; ++i) {
+            out.push_back(vertex(0));
+            out.push_back(vertex(i));
+            out.push_back(vertex(i + 1));
+        }
+        break;
+    case PrimitiveTopology::LineLoop:
+        if (count < 2) {
+            break;
+        }
+        for (u32 i = 0; i + 1 < count; ++i) {
+            out.push_back(vertex(i));
+            out.push_back(vertex(i + 1));
+        }
+        out.push_back(vertex(count - 1));
+        out.push_back(vertex(0));
+        break;
+    default:
+        for (u32 i = 0; i < count; ++i) {
+            out.push_back(vertex(i));
+        }
+        break;
+    }
+}
+
+u32 IndexSize(IndexFormat format) {
+    switch (format) {
+    case IndexFormat::UnsignedByte:
+        return 1;
+    case IndexFormat::UnsignedShort:
+        return 2;
+    case IndexFormat::UnsignedInt:
+        return 4;
+    }
+    return 4;
+}
+
+} // Anonymous namespace
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams params)
     : VideoCommon::BufferBase(params), scheduler{&runtime.scheduler},
@@ -35,13 +108,43 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
         scheduler = other.scheduler;
         buffer = std::move(other.buffer);
         tracker = std::move(other.tracker);
+        state = other.state;
+        state_tick = other.state_tick;
     }
     return *this;
 }
 
+void Buffer::Transition(D3D12_RESOURCE_STATES next) {
+    if (!scheduler || !buffer) {
+        return;
+    }
+    const u64 tick = scheduler->CurrentTick();
+    const D3D12_RESOURCE_STATES current = state_tick == tick ? state : D3D12_RESOURCE_STATE_COMMON;
+    ID3D12GraphicsCommandList* const cmd = scheduler->CommandList();
+    if (current == next) {
+        if (next == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            // Orders the previous draw's or dispatch's writes before this one.
+            const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV,
+                                                 .UAV = {.pResource = buffer.Get()}};
+            cmd->ResourceBarrier(1, &barrier);
+        }
+    } else {
+        const D3D12_RESOURCE_BARRIER barrier{
+            .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            .Transition = {.pResource = buffer.Get(),
+                           .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                           .StateBefore = current,
+                           .StateAfter = next}};
+        cmd->ResourceBarrier(1, &barrier);
+    }
+    state = next;
+    state_tick = tick;
+}
+
 BufferCacheRuntime::BufferCacheRuntime(const Device& device_, Scheduler& scheduler_,
-                                       StagingBufferPool& staging_)
-    : device{device_}, scheduler{scheduler_}, staging{staging_} {
+                                       StagingBufferPool& staging_,
+                                       Tegra::MaxwellDeviceMemoryManager& device_memory_)
+    : device{device_}, scheduler{scheduler_}, staging{staging_}, device_memory{device_memory_} {
     LOG_INFO(Render, "D3D12: buffer cache runtime ready");
 }
 
@@ -51,7 +154,9 @@ ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
                                    .Width = size, .Height = 1, .DepthOrArraySize = 1,
                                    .MipLevels = 1, .Format = DXGI_FORMAT_UNKNOWN,
                                    .SampleDesc = {.Count = 1},
-                                   .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR};
+                                   .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                                   // Storage buffers and image buffers are UAVs.
+                                   .Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS};
     ComPtr<ID3D12Resource> result;
     ThrowIfFailed(device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
                   D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&result)),
@@ -115,23 +220,15 @@ void BufferCacheRuntime::Copy(Buffer* dst, ID3D12Resource* dst_raw, Buffer* src,
         scheduler.DeferRelease(std::move(scratch));
         return;
     }
+    // Cache buffers are tracked (Buffer::Transition). Raw resources are staging memory, whose
+    // state never changes, or the scratch buffer above, promoted from COMMON.
+    if (dst) dst->Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+    if (src) src->Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
     for (const auto& copy : copies) {
         cmd->CopyBufferRegion(dst_raw, copy.dst_offset, src_raw, copy.src_offset, copy.size);
         if (dst) dst->MarkUsage(copy.dst_offset, copy.size);
         if (src) src->MarkUsage(copy.src_offset, copy.size);
     }
-    D3D12_RESOURCE_BARRIER barriers[2]{};
-    u32 count = 0;
-    const auto add_decay = [&](ID3D12Resource* resource, D3D12_RESOURCE_STATES before) {
-        barriers[count++] = {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                             .Transition = {.pResource = resource,
-                                            .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                                            .StateBefore = before,
-                                            .StateAfter = D3D12_RESOURCE_STATE_COMMON}};
-    };
-    if (src) add_decay(src_raw, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    if (dst) add_decay(dst_raw, D3D12_RESOURCE_STATE_COPY_DEST);
-    if (count) cmd->ResourceBarrier(count, barriers);
 }
 void BufferCacheRuntime::CopyBuffer(Buffer& dst, Buffer& src, std::span<const VideoCommon::BufferCopy> copies, bool, bool) { Copy(&dst, dst.Handle(), &src, src.Handle(), copies); }
 void BufferCacheRuntime::CopyBuffer(Buffer& dst, ID3D12Resource* src, std::span<const VideoCommon::BufferCopy> copies, bool, bool) { Copy(&dst, dst.Handle(), nullptr, src, copies); }
@@ -145,28 +242,195 @@ void BufferCacheRuntime::ClearBuffer(Buffer& dst, u32 offset, size_t size, u32 v
     CopyBuffer(dst, upload.buffer, {&copy, 1}, true);
 }
 
-void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology, IndexFormat format, u32, u32,
-                                         Buffer& buffer, u32 offset, u32 size) {
-    const DXGI_FORMAT dxgi = format == IndexFormat::UnsignedShort ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
-    const D3D12_INDEX_BUFFER_VIEW view{.BufferLocation = buffer.Address() + offset,
-                                       .SizeInBytes = size, .Format = dxgi};
-    scheduler.CommandList()->IASetIndexBuffer(&view);
+bool BufferCacheRuntime::IsEmulatedTopology(PrimitiveTopology topology) noexcept {
+    switch (topology) {
+    case PrimitiveTopology::Quads:
+    case PrimitiveTopology::QuadStrip:
+    case PrimitiveTopology::TriangleFan:
+    case PrimitiveTopology::Polygon:
+    case PrimitiveTopology::LineLoop:
+        return true;
+    default:
+        return false;
+    }
 }
-void BufferCacheRuntime::BindVertexBuffer(u32 index, Buffer& buffer, u32 offset, u32 size, u32 stride) {
+
+void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat format,
+                                         u32 first, u32 num_indices, Buffer& buffer, u32 offset,
+                                         u32 size) {
+    rewritten_count.reset();
+    if (!IsEmulatedTopology(topology) && format != IndexFormat::UnsignedByte) {
+        buffer.Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
+        pending_index = D3D12_INDEX_BUFFER_VIEW{
+            .BufferLocation = buffer.Address() + offset,
+            .SizeInBytes = size,
+            .Format = format == IndexFormat::UnsignedShort ? DXGI_FORMAT_R16_UINT
+                                                           : DXGI_FORMAT_R32_UINT,
+        };
+        return;
+    }
+    // D3D12 has neither these topologies nor 8-bit indices: rewrite the guest's indices on the
+    // CPU from guest memory (the Vulkan backend uses compute passes instead).
+    // TODO: inline index draws (inline_index_draw_indexes) never reach guest memory.
+    if (!logged_rewrite) {
+        LOG_INFO(Render, "D3D12: rewriting indexed draws on the CPU (topology {}, format {})",
+                 static_cast<u32>(topology), static_cast<u32>(format));
+        logged_rewrite = true;
+    }
+    const u32 index_size = IndexSize(format);
+    guest_indices.resize(static_cast<size_t>(num_indices) * index_size);
+    device_memory.ReadBlockUnsafe(buffer.CpuAddr() + offset + static_cast<u64>(first) * index_size,
+                                  guest_indices.data(), guest_indices.size());
+    const auto read = [&](u32 i) -> u32 {
+        const u8* const data = guest_indices.data() + static_cast<size_t>(i) * index_size;
+        switch (index_size) {
+        case 1:
+            return data[0];
+        case 2: {
+            u16 value;
+            std::memcpy(&value, data, sizeof(value));
+            return value;
+        }
+        default: {
+            u32 value;
+            std::memcpy(&value, data, sizeof(value));
+            return value;
+        }
+        }
+    };
+    AssembleTopology(topology, num_indices, read, rewrite_scratch);
+    BindRewrittenIndices(rewrite_scratch, format == IndexFormat::UnsignedInt);
+}
+
+void BufferCacheRuntime::EmulateTopology(PrimitiveTopology topology, u32 first, u32 count) {
+    AssembleTopology(topology, count, [first](u32 i) { return first + i; }, rewrite_scratch);
+    BindRewrittenIndices(rewrite_scratch, first + count > 0xFFFF);
+}
+
+void BufferCacheRuntime::BindRewrittenIndices(std::span<const u32> indices, bool wide) {
+    rewritten_count = static_cast<u32>(indices.size());
+    if (indices.empty()) {
+        return;
+    }
+    const size_t index_size = wide ? sizeof(u32) : sizeof(u16);
+    const size_t bytes = indices.size() * index_size;
+    const StagingBufferRef upload = staging.Request(bytes, MemoryUsage::Upload);
+    if (wide) {
+        std::memcpy(upload.mapped_span.data(), indices.data(), bytes);
+    } else {
+        u8* out = upload.mapped_span.data();
+        for (const u32 index : indices) {
+            const u16 narrow = static_cast<u16>(index);
+            std::memcpy(out, &narrow, sizeof(narrow));
+            out += sizeof(narrow);
+        }
+    }
+    pending_index = D3D12_INDEX_BUFFER_VIEW{
+        .BufferLocation = upload.buffer->GetGPUVirtualAddress() + upload.offset,
+        .SizeInBytes = static_cast<UINT>(bytes),
+        .Format = wide ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT,
+    };
+}
+
+void BufferCacheRuntime::BindVertexBuffer(u32 index, Buffer& buffer, u32 offset, u32 size,
+                                          u32 stride) {
+    buffer.Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
     BindVertexBuffer(index, buffer.Handle(), offset, size, stride);
 }
-void BufferCacheRuntime::BindVertexBuffer(u32 index, ID3D12Resource* buffer, u32 offset, u32 size, u32 stride) {
-    const D3D12_VERTEX_BUFFER_VIEW view{.BufferLocation = buffer->GetGPUVirtualAddress() + offset,
-                                        .SizeInBytes = size, .StrideInBytes = stride};
-    scheduler.CommandList()->IASetVertexBuffers(index, 1, &view);
+
+void BufferCacheRuntime::BindVertexBuffer(u32 index, ID3D12Resource* buffer, u32 offset,
+                                          u32 size, u32 stride) {
+    if (index >= VideoCommon::NUM_VERTEX_BUFFERS || !buffer) {
+        return;
+    }
+    pending_vertex[index] = D3D12_VERTEX_BUFFER_VIEW{
+        .BufferLocation = buffer->GetGPUVirtualAddress() + offset,
+        .SizeInBytes = size,
+        .StrideInBytes = stride,
+    };
+    pending_vertex_mask |= 1u << index;
 }
+
 void BufferCacheRuntime::BindVertexBuffers(VideoCommon::HostBindings<Buffer>& bindings) {
-    for (u32 i = bindings.min_index; i < bindings.max_index; ++i)
-        BindVertexBuffer(i, *bindings.buffers[i], static_cast<u32>(bindings.offsets[i]),
-                         static_cast<u32>(bindings.sizes[i]), static_cast<u32>(bindings.strides[i]));
+    for (u32 i = bindings.min_index; i < bindings.max_index; ++i) {
+        const u32 slot = i - bindings.min_index;
+        BindVertexBuffer(i, *bindings.buffers[slot], static_cast<u32>(bindings.offsets[slot]),
+                         static_cast<u32>(bindings.sizes[slot]),
+                         static_cast<u32>(bindings.strides[slot]));
+    }
 }
+
+void BufferCacheRuntime::ApplyGeometry(ID3D12GraphicsCommandList* cmd) {
+    if (pending_index) {
+        cmd->IASetIndexBuffer(&*pending_index);
+    }
+    for (u32 mask = pending_vertex_mask; mask != 0; mask &= mask - 1) {
+        const u32 index = static_cast<u32>(std::countr_zero(mask));
+        cmd->IASetVertexBuffers(index, 1, &pending_vertex[index]);
+    }
+    pending_index.reset();
+    pending_vertex_mask = 0;
+    rewritten_count.reset();
+}
+
 std::span<u8> BufferCacheRuntime::BindMappedUniformBuffer(size_t, u32, u32 size) {
-    return staging.Request(size, MemoryUsage::Upload).mapped_span;
+    const StagingBufferRef ref =
+        staging.Request(Common::AlignUp(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT),
+                        MemoryUsage::Upload);
+    if (descriptor_queue) {
+        descriptor_queue->AddConstantBuffer(ref.buffer->GetGPUVirtualAddress() + ref.offset,
+                                            size);
+    }
+    return ref.mapped_span.first(size);
+}
+
+void BufferCacheRuntime::BindUniformBuffer(Buffer& buffer, u32 offset, u32 size) {
+    if (!descriptor_queue) {
+        return;
+    }
+    // A CBV spans whole 256-byte blocks and must stay inside its resource; the null buffer (an
+    // unbound guest cbuf) does not hold one.
+    const u64 aligned = Common::AlignUp(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+    if (!buffer.Handle() || offset + aligned > buffer.SizeBytes()) {
+        descriptor_queue->AddConstantBuffer(0, 0);
+        return;
+    }
+    buffer.Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
+    descriptor_queue->AddConstantBuffer(buffer.Address() + offset, size);
+}
+
+void BufferCacheRuntime::BindStorageBuffer(Buffer& buffer, u32 offset, u32 size,
+                                           bool is_written) {
+    if (!descriptor_queue) {
+        return;
+    }
+    // A buffer the cache merged with other data (vertices, say) stays in the state of its last
+    // binding; AMD hardware, the Series included, reads buffers in any state.
+    buffer.Transition(is_written ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                 : D3D12_RESOURCE_STATE_GENERIC_READ);
+    const u64 available = buffer.SizeBytes() > offset ? buffer.SizeBytes() - offset : 0;
+    const u32 clamped = static_cast<u32>(std::min<u64>(size, available));
+    descriptor_queue->AddStorageBuffer(clamped != 0 ? buffer.Handle() : nullptr, offset, clamped);
+}
+
+void BufferCacheRuntime::BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
+                                           VideoCore::Surface::PixelFormat format) {
+    if (!descriptor_queue) {
+        return;
+    }
+    buffer.Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
+    descriptor_queue->AddTexelBuffer(buffer.Handle(), offset, size, SurfaceFormat(format).view,
+                                     VideoCore::Surface::BytesPerBlock(format), false);
+}
+
+void BufferCacheRuntime::BindImageBuffer(Buffer& buffer, u32 offset, u32 size,
+                                         VideoCore::Surface::PixelFormat format) {
+    if (!descriptor_queue) {
+        return;
+    }
+    buffer.Transition(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    descriptor_queue->AddTexelBuffer(buffer.Handle(), offset, size, SurfaceFormat(format).view,
+                                     VideoCore::Surface::BytesPerBlock(format), true);
 }
 
 void BufferCacheRuntime::RunSelfTest() {

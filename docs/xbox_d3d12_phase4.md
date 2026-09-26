@@ -174,6 +174,65 @@ cuando un homebrew que dibuja con la GPU, y después un juego 2D, se ven igual e
   declara el shader.
 - Las claves del heap de samplers deben ser únicas por `Sampler`.
 
+## 4.0: implementación
+Estado: **gate 4.0 superado en el PC (26 sep 2026).**
+- Con el homebrew de siempre:
+  - La DLL exporta `eden_spirv_to_dxil_pipeline`.
+  - El log dice `shader path ready (spirv_to_dxil with stage linking, DXIL validator 1.8)`.
+  - El blit se construye enlazado (VS de 1901 bytes, PS de 1851).
+  - `RunHeadlessBoot returned 0` y sin errores de Render.
+- Con `deko3d_ex02.nro -RunSeconds 15`:
+  - Eden carga el NRO y levanta nvdrv.
+  - El ejemplo envía su primer clear, que se omite hasta la 4.3.
+  - Se presenta una imagen del guest de 1280×720.
+  - Apaga limpio y devuelve 0.
+- La Series no se probó en esta sub-fase: no cambia nada que dependa de la consola.
+
+- **Export de Mesa `eden_spirv_to_dxil_pipeline`:**
+  - La fuente está en `tools/xbox/mesa/eden_pipeline.c` (MIT) y el header compartido en
+    `externals/spirv-to-dxil/include/eden_spirv_to_dxil.h`.
+  - `build-spirv-to-dxil.ps1` copia los dos al árbol de Mesa en cada ejecución y parchea
+    `spirv_to_dxil.def` y `meson.build`. Ninja reconfigura solo al ver el `meson.build` cambiado.
+  - **Flujo:**
+    1. Por cada etapa: `spirv_to_nir`, `prep` y `passes`, igual que `spirv_to_dxil()`.
+    2. Enlaza de la última etapa a la primera, como hacen `spirv2dxil.c` y Dozen.
+    3. `nir_to_dxil` por etapa.
+  - **Cada etapa lleva su propio `conf`.** `yz_flip` solo es válido en la última etapa antes del
+    rasterizador.
+  - **`dxil_spirv_nir_link` pone `requires_runtime_data` a false**, así que la metadata de `passes`
+    y la de `link` se combinan con OR.
+  - **Las `nir_shader_compiler_options` son una por etapa**, porque cada `nir_shader` guarda un
+    puntero a las suyas hasta que se libera.
+- **`ShaderCompiler::CompilePipeline`:**
+  - Busca el export con `GetSymbol`. Si la DLL es la vieja, avisa en el log y traduce cada etapa
+    por separado.
+  - El blit del present ya pasa por esta ruta: es el gate de la 4.0. El log dice
+    `shader path ready (spirv_to_dxil with stage linking, ...)`.
+- **Trampa de `yz_flip`:**
+  - `Y_FLIP_UNCONDITIONAL` solo invierte las vistas cuyo bit está en `y_mask`
+    (`lower_yz_flip`: `nir_test_mask(y_mask, 1)`).
+  - Nuestro `Compile(..., flip_y=true)` pasaba la máscara a 0, así que **el blit nunca se invirtió**,
+    y aun así se ve bien.
+  - El blit sigue sin flip. `Compile` ya pone `y_mask = 1`.
+  - Para el guest se usará `YZ_FLIP_CONDITIONAL` con la máscara en runtime data.
+- **`Shader::Profile::descriptor_arrays_use_count`:**
+  - Solo afecta a `DefineTextures`, porque las texturas son lo único que Eden declara como array
+    en SPIR-V. Las imágenes y los texel buffers son siempre escalares.
+  - Con el flag, un array de N texturas consume los bindings B..B+N-1. La root signature debe
+    reservar N registros para ese binding.
+- **Arnés:**
+  - `package-appx.ps1 -RunSeconds N` escribe `boot.cfg` (`run_seconds=N`) en el paquete. Con él,
+    `RunHeadlessBoot` no espera centinelas: deja correr el NRO N segundos, apaga y devuelve 0.
+  - `local-run.ps1` acepta `-BootNro` y `-RunSeconds`.
+- **Payloads deko3d:**
+  - `tools/xbox/build-deko3d-examples.ps1 [-Examples 2,3,4,9]` copia los ejemplos oficiales desde
+    `C:\devkitPro\examples\switch\graphics\deko3d\deko_examples` a `build-uwp\payloads\deko3d`,
+    fuera de git.
+  - Sustituye su menú, que espera al mando, por `tools/xbox/deko3d/main.cpp`. Cada NRO ejecuta un
+    ejemplo fijado con `-DEDEN_DEKO_EXAMPLE=n`.
+  - **Necesita `switch-glm`,** además de `deko3d`.
+  - `DEVKITPRO=/opt/devkitpro` funciona porque el `fstab` de su msys2 monta `c:\devkitPro` ahí.
+
 ## Riesgos abiertos
 - Las lecturas de UAV tipados salieron "no" por formato en el probe de la consola. Se medirá con un
   shader real.
@@ -196,3 +255,129 @@ cuando un homebrew que dibuja con la GPU, y después un juego 2D, se ven igual e
   - [D3D12_INPUT_ELEMENT_DESC](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_input_element_desc)
 - Xenia: [pipeline_cache.cc](https://github.com/xenia-project/xenia/blob/master/src/xenia/gpu/d3d12/pipeline_cache.cc).
 - [Métodos de dibujo de quads en D3D12](https://christofferchiniquy.com/posts/d3d12-quad-rendering-methods.html).
+
+## 4.1 y 4.2: implementación
+
+**Archivos nuevos** (`src/video_core/renderer_d3d12/`):
+- `d3d12_pipeline_cache`: hereda de `VideoCommon::ShaderCache`, sigue a `vk_pipeline_cache`.
+  - Traduce Maxwell → SPIR-V, compila con `CompilePipeline` (`Y_FLIP_CONDITIONAL`, first
+    vertex/base instance en `RUNTIME_DATA`) y crea el PSO en 4 workers como máximo.
+  - Caché en disco `d3d12.bin`.
+  - El `Profile` sale de `CheckFeatureSupport` (OPTIONS y OPTIONS1).
+- `d3d12_root_signature`: root signature 1.0, deduplicada por sus rangos.
+  - Root constants para push (8 dwords, space 30) y para runtime data (space 31, del tamaño del
+    struct de Mesa).
+  - Una tabla CBV_SRV_UAV y otra de samplers, en el orden de bindings del backend SPIR-V.
+  - SSBOs e imágenes llevan UAV + SRV en el mismo registro, porque Mesa convierte en SRV los que
+    demuestra de solo lectura.
+- `d3d12_graphics_pipeline`:
+  - La clave es la de Vulkan (`FixedPipelineState` con todas las features dinámicas en false),
+    más el estado que D3D12 fija en el PSO: depth bias, máscaras de stencil y strip cut.
+  - El input layout usa `TEXCOORD<n>` con n = location.
+  - Se ignoran con aviso: logic op, depth bounds, point fill y conservative raster.
+- `d3d12_compute_pipeline`: PSO de compute; el dispatch queda para la 4.4.
+- `d3d12_maxwell_to_d3d12`: topologías, comparaciones, stencil, blend, cull, formatos de vértice
+  e índice, y MSAA.
+
+**Cambios en lo que ya existía:**
+- El rasterizador pide el pipeline en `Draw` y `DispatchCompute`, pero sigue sin grabar nada
+  (eso es la 4.3).
+- Se añadieron los hooks de invalidación, canal y disco de la caché de shaders.
+- `ShaderCompiler::Sign` usa un mutex, porque los workers comparten el validador.
+
+**Trampas:**
+- `FixedPipelineState::Refresh` solo relee atributos, blending y swizzles si Vulkan marcó sus dirty
+  flags. Sin el state tracker de Vulkan hay que forzarlos (`Vulkan::Dirty::VertexInput`, `Blending`
+  y `ViewportSwizzles`) antes de cada refresh.
+- Los bytes de `FixedPipelineState` más allá de `Size()` pueden quedar obsoletos. El hash y la
+  comparación de la clave D3D12 solo usan el prefijo válido y los campos extra.
+- `support_descriptor_aliasing=false`: DXIL no admite dos recursos en el mismo registro.
+
+**Gate en PC (AMD Radeon Pro 5300M):**
+
+| Payload | Resultado |
+|---|---|
+| deko3d ex02 | `pipeline built … (2 attributes, 1 RTs, RT0 28, DSV 0, 0 + 0 descriptors)` |
+| deko3d ex04 | `pipeline built … (2 attributes, 1 RTs, RT0 28, DSV 45, 2 + 1 descriptors)` (cubo con depth D24S8, un CBV y una textura con su sampler) |
+| deko3d ex09 | `compute pipeline built … (4 + 0 descriptors)`, más el pipeline gráfico |
+
+En los tres, `RunHeadlessBoot returned 0` y sin errores de Render. La pantalla sale negra porque
+los draws se graban en la 4.3.
+
+**Pendiente:**
+- Validar los PSOs con la capa de debug de D3D12 en el PC.
+- Probar en la Series.
+
+## 4.3: implementación
+
+**Qué se hizo:**
+- **`GraphicsPipeline::Configure`** (port de `ConfigureImpl` de Vulkan). Sincroniza y enlaza los
+  buffers y texturas del guest, escribe la tabla CBV/SRV/UAV en el orden de la root signature y
+  pasa las imágenes muestreadas o de storage a su estado. No graba estado en la command list, así
+  que un flush a mitad (heaps llenos) no pierde nada.
+- **`GuestDescriptorQueue`** (`d3d12_descriptor_heap`): los CBV, SSBO (UAV + SRV raw) y texel
+  buffers se crean directamente en el anillo; las texturas se copian de su SRV offline. Reserva un
+  hueco extra para absorber escrituras de más, y el error se registra en el log.
+- **Caché de buffers:**
+  - Cada `Buffer` lleva su estado (`Transition`), válido solo dentro de la command list que lo
+    puso, porque los buffers decaen a `COMMON` en cada `ExecuteCommandLists`.
+  - Los buffers tienen `ALLOW_UNORDERED_ACCESS`.
+  - El índice y los vertex buffers se acumulan y se ponen justo antes del draw (`ApplyGeometry`).
+  - Quads, quad strips, fans, polígonos, line loops e índices u8 se reescriben en la CPU a una
+    lista en staging.
+- **Caché de texturas:**
+  - Un SRV por `Shader::TextureType`, creado la primera vez que se pide: D3D12 exige que la
+    dimensión coincida con la declaración HLSL.
+  - El `Framebuffer` usa el slot i para `regs.rt[i]`, como el render pass de Vulkan y las
+    `RTVFormats` del PSO. Los huecos llevan un RTV nulo.
+  - Los samplers tienen una clave única, que es la que usa `SamplerHeap` para deduplicar.
+- **Rasterizador:**
+  - `Draw` graba todo el estado en cada draw: aún no hay state tracker.
+  - Viewports: se calcula el de Vulkan y se convierte a D3D12 como hace Dozen. Con altura
+    positiva se activa el y-flip del shader; con altura negativa se gira el viewport. Si
+    `MinDepth > MaxDepth`, z-flip. Por eso los pipelines ahora usan `YZ_FLIP_CONDITIONAL`.
+  - También se ponen scissors, blend factor, stencil ref (uno solo para las dos caras) y los
+    runtime data (`first_vertex`, `base_instance`, máscara de flips).
+  - `Clear` usa `ClearRenderTargetView`/`ClearDepthStencilView` con el rect del scissor. Las
+    máscaras de color parciales se saltan, con aviso; llegan en la 4.4.
+- **Present:** `AccelerateDisplay` busca la imagen del framebuffer en la caché de texturas
+  (`TryFindFramebufferImageView`), y `Composite` la dibuja con el blit que ya había.
+  - El recorte y los flips son los de `Tegra::NormalizeCrop`: el borde superior de la pantalla
+    muestrea `crop.top`.
+  - Si no la encuentra, sigue la ruta por CPU (homebrew que dibuja en software).
+- **Volcado de fotograma:** en el fotograma 120 presentado por la GPU se escribe `frame.bmp` junto
+  al log. Es la forma de ver lo que presentó la consola sin capturadora; en el PC, la ventana UWP
+  no sale en una captura del escritorio.
+
+**Trampas:**
+- **Parpadeo por dirty flags sin registrar.**
+  - La caché de texturas solo vuelve a buscar los render targets si se marcan
+    `Dirty::RenderTargets`/`ColorBuffer0..7`, y `RefreshStages` solo relee shaders con
+    `Dirty::Shaders`.
+  - Esos flags solo se marcan con escrituras de registros que el backend registró en las tablas.
+    Vulkan y OpenGL lo hacen en `StateTracker::SetupTables`.
+  - Sin eso, deko3d dibujaba los dos fotogramas en la imagen del primer buffer. El segundo buffer
+    no estaba en la caché y salía por la ruta CPU (negro): el cubo parpadeaba.
+  - Arreglo: `VideoCommon::Dirty::SetupDirtyFlags` en `RasterizerD3D12::InitializeChannel`. Si
+    vuelve a pasar, sale un aviso único: `framebuffer … is not a GPU image after N GPU frames`.
+- Las copias DMA imagen↔buffer usan el recurso crudo y cuentan con la promoción implícita desde
+  `COMMON`, así que `AccelerateDMA` devuelve el buffer a `COMMON` antes.
+- Un buffer que la caché fusionó (por ejemplo, vértices más SSBO escrito) queda en el estado de su
+  último binding. El hardware AMD lo lee igual; la capa de debug lo marcará.
+
+**Gate en PC (AMD Radeon Pro 5300M), revisado con `frame.bmp`:**
+
+| Payload | Resultado |
+|---|---|
+| deko3d ex02 | Triángulo: rojo arriba, verde abajo a la izquierda, azul abajo a la derecha (coincide con los vértices del ejemplo) |
+| deko3d ex04 | Cubo texturizado que gira, con la profundidad correcta y sin parpadeo (los dos framebuffers salen por la GPU) |
+| deko3d ex09 | El draw se graba y se presenta; el dispatch de compute se salta hasta la 4.4 |
+
+`RunHeadlessBoot returned 0` y sin errores de Render. Único aviso: la transferencia de depth-stencil
+(fase 5).
+
+**Pendiente:**
+- Probar en la Series.
+- Pasar la capa de debug de D3D12.
+- State tracker (rendimiento).
+- Clears con máscara y `DrawTexture`, que llegan en la 4.4.

@@ -63,14 +63,25 @@ private:
     /// Converts and letterboxes the guest image into the window-sized upload image (CPU path).
     void ScaleGuestImage(const Tegra::FramebufferConfig& framebuffer, u8* dst, u32 row_pitch);
 
-    /// Records the shader-path upload + draw of the guest texture into the back buffer.
-    void RecordBlit(const StagingBufferRef& upload, ID3D12Resource* image, u32 image_index,
-                    D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
-                    D3D12_GPU_DESCRIPTOR_HANDLE sampler_table);
+    /// Records the shader-path upload of the CPU-read guest image into guest_texture.
+    void RecordUpload(const StagingBufferRef& upload);
+    /// Draws a texture into back buffer image_index, letterboxed; tex_scale_offset maps the
+    /// screen (x right, y up in D3D12 clip space) to texture coordinates.
+    void RecordBlit(ID3D12Resource* image, u32 image_index, D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
+                    D3D12_GPU_DESCRIPTOR_HANDLE sampler_table,
+                    const std::array<float, 4>& tex_scale_offset);
+    /// Presents the guest image the GPU rendered (texture cache), without reading it back.
+    /// False when the framebuffer is not a cached image.
+    bool CompositeAccelerated(const Tegra::FramebufferConfig& framebuffer, u32 image_index);
     /// Records the CPU-path copy of the upload image into the back buffer.
     void RecordCopy(const StagingBufferRef& upload, ID3D12Resource* image);
     /// Submits the recorded frame and presents back buffer image_index.
     void Present(u32 image_index);
+    /// Records a copy of back buffer image into readback memory (before Present).
+    StagingBufferRef RecordFrameReadback(ID3D12Resource* image);
+    /// Waits for the copy and writes it as frame.bmp next to the log: the one way to see what
+    /// the console presented without a capture card.
+    void WriteFrameDump(StagingBufferRef& readback);
 
     Tegra::MaxwellDeviceMemoryManager& device_memory;
     Tegra::GPU& gpu;
@@ -112,6 +123,9 @@ private:
     int crop_width{};
     int crop_height{};
     bool present_failed{};
+    bool logged_accelerated{};
+    u32 accelerated_frames{};
+    bool logged_fallback{};
 };
 
 } // namespace D3D12

@@ -1396,7 +1396,7 @@ void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_in
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
         }
-        ++binding;
+        binding += profile.descriptor_arrays_use_count ? desc.count : 1;
         ++scaling_index;
     }
     if (info.uses_atomic_image_u32) {

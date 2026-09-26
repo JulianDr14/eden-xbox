@@ -2,10 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
+#include <optional>
 #include <stdexcept>
 
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
@@ -120,7 +125,7 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
                           emu_window.GetFramebufferLayout().width,
                           emu_window.GetFramebufferLayout().height},
       shader_compiler{}, scheduler{device}, staging_pool{device, scheduler},
-      buffer_cache_runtime{device, scheduler, staging_pool},
+      buffer_cache_runtime{device, scheduler, staging_pool, device_memory_},
       view_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV},
       sampler_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 256},
       rtv_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 256},
@@ -129,8 +134,8 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
                             sampler_descriptors, rtv_descriptors, dsv_descriptors},
       descriptor_ring{device.Get(), scheduler, DESCRIPTOR_RING_SIZE},
       sampler_heap{device.Get(), scheduler},
-      rasterizer{gpu_, device_memory_, device, scheduler, buffer_cache_runtime,
-                 texture_cache_runtime} {
+      rasterizer{gpu_, device_memory_, device, scheduler, shader_compiler, buffer_cache_runtime,
+                 texture_cache_runtime, descriptor_ring, sampler_heap} {
     ID3D12Device* const dev = device.Get();
 
     const D3D12_RESOURCE_DESC image_desc =
@@ -178,11 +183,15 @@ bool RendererD3D12::CreateBlitPipeline() {
     try {
         ID3D12Device* const dev = device.Get();
 
-        // Eden's blit shaders, exactly as the Vulkan backend uses them.
-        const std::vector<u8> vs =
-            shader_compiler.Compile(FULL_SCREEN_TRIANGLE_VERT_SPV, DXIL_SPIRV_SHADER_VERTEX, true);
-        const std::vector<u8> ps =
-            shader_compiler.Compile(BLIT_COLOR_FLOAT_FRAG_SPV, DXIL_SPIRV_SHADER_FRAGMENT);
+        // Eden's blit shaders, exactly as the Vulkan backend uses them, linked as guest pipelines
+        // will be. No Y flip: the blit has always run unflipped (see docs/xbox_d3d12_phase4.md).
+        const std::array<ShaderCompiler::PipelineStage, 2> stages{{
+            {FULL_SCREEN_TRIANGLE_VERT_SPV, DXIL_SPIRV_SHADER_VERTEX},
+            {BLIT_COLOR_FLOAT_FRAG_SPV, DXIL_SPIRV_SHADER_FRAGMENT},
+        }};
+        auto compiled = shader_compiler.CompilePipeline(stages, {});
+        const std::vector<u8> vs = std::move(compiled[0].dxil);
+        const std::vector<u8> ps = std::move(compiled[1].dxil);
 
         // Push constants {tex_scale, tex_offset} arrive as a CBV in PUSH_CONSTANT_SPACE; the
         // combined sampler at set 0 binding 0 becomes t0 + s0 in space 0. The texture and the
@@ -317,8 +326,20 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
             // Frame pacing: at most IMAGE_COUNT frames ahead of the GPU.
             scheduler.Wait(present_ticks[index]);
             ID3D12Resource* const image = swapchain.Image(index);
-            const bool has_image = ReadGuestLayer(framebuffer);
-            if (blit_ready && has_image) {
+            if (blit_ready && CompositeAccelerated(framebuffer, index)) {
+                // One dump per run, once the guest has had two seconds to settle.
+                constexpr u32 DUMP_FRAME = 120;
+                const bool dump = ++accelerated_frames == DUMP_FRAME;
+                std::optional<StagingBufferRef> readback;
+                if (dump) {
+                    readback = RecordFrameReadback(image);
+                }
+                Present(index);
+                if (readback) {
+                    WriteFrameDump(*readback);
+                }
+            } else if (const bool has_image = ReadGuestLayer(framebuffer);
+                       blit_ready && has_image) {
                 PrepareGuestImage(static_cast<u32>(crop_width), static_cast<u32>(crop_height));
                 // Descriptor allocation may flush when a heap wraps. Do it before obtaining
                 // staging memory, whose lifetime is tied to the then-current scheduler tick.
@@ -331,15 +352,17 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                     staging_pool.Request(guest_upload_size, MemoryUsage::Upload);
                 CopyGuestImage(framebuffer, upload.mapped_span.data(),
                                guest_footprint.Footprint.RowPitch);
-                RecordBlit(upload, image, index, srv_table, sampler_table);
+                RecordUpload(upload);
+                RecordBlit(image, index, srv_table, sampler_table, {1.0f, 1.0f, 0.0f, 0.0f});
+                Present(index);
             } else {
                 const StagingBufferRef upload =
                     staging_pool.Request(upload_size, MemoryUsage::Upload);
                 ScaleGuestImage(framebuffer, upload.mapped_span.data(),
                                 footprint.Footprint.RowPitch);
                 RecordCopy(upload, image);
+                Present(index);
             }
-            Present(index);
         } catch (const std::exception& e) {
             // Keep the emulation running headless rather than taking the GPU thread down.
             LOG_CRITICAL(Render, "{} - presentation disabled", e.what());
@@ -444,12 +467,43 @@ void RendererD3D12::ScaleGuestImage(const Tegra::FramebufferConfig& framebuffer,
     }
 }
 
-void RendererD3D12::RecordBlit(const StagingBufferRef& upload, ID3D12Resource* image,
-                               u32 image_index, D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
-                               D3D12_GPU_DESCRIPTOR_HANDLE sampler_table) {
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+bool RendererD3D12::CompositeAccelerated(const Tegra::FramebufferConfig& framebuffer,
+                                         u32 image_index) {
+    const DAddr framebuffer_addr = framebuffer.address + framebuffer.offset;
+    const auto texture = rasterizer.AccelerateDisplay(framebuffer, framebuffer_addr);
+    if (!texture || texture->srv.ptr == 0 || texture->width == 0 || texture->height == 0) {
+        if (accelerated_frames != 0 && !logged_fallback) {
+            // Alternating GPU and CPU frames flicker: the CPU path shows guest memory, which
+            // GPU rendering never writes. Seen when render target changes went unnoticed.
+            LOG_WARNING(Render, "D3D12: framebuffer {:#x} is not a GPU image after {} GPU frames; "
+                        "presenting it from guest memory", framebuffer_addr, accelerated_frames);
+            logged_fallback = true;
+        }
+        return false;
+    }
+    // Same crop and flips as the Vulkan presenter (Tegra::NormalizeCrop): the screen's top edge
+    // samples crop.top and its bottom edge crop.bottom. The blit's quad runs from the bottom of
+    // the screen (y = -1 in D3D12 clip space, coordinate offset) to the top (offset + scale).
+    const Common::Rectangle<f32> crop =
+        Tegra::NormalizeCrop(framebuffer, texture->width, texture->height);
+    const std::array<float, 4> scale_offset{crop.right - crop.left, crop.top - crop.bottom,
+                                            crop.left, crop.bottom};
+    constexpr u64 LINEAR_SAMPLER_KEY = 0;
+    const D3D12_GPU_DESCRIPTOR_HANDLE sampler_table =
+        sampler_heap.GetTable({&LINEAR_SAMPLER_KEY, 1}, {&linear_sampler, 1});
+    const D3D12_GPU_DESCRIPTOR_HANDLE srv_table = descriptor_ring.Upload({&texture->srv, 1});
+    RecordBlit(swapchain.Image(image_index), image_index, srv_table, sampler_table, scale_offset);
+    if (!logged_accelerated) {
+        LOG_INFO(Render, "D3D12: presenting the GPU-rendered guest image ({}x{} image, {}x{} "
+                 "framebuffer)", texture->width, texture->height, framebuffer.width,
+                 framebuffer.height);
+        logged_accelerated = true;
+    }
+    return true;
+}
 
-    // Upload the guest image.
+void RendererD3D12::RecordUpload(const StagingBufferRef& upload) {
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
     D3D12_RESOURCE_BARRIER barrier = Transition(guest_texture.Get(),
                                                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                                 D3D12_RESOURCE_STATE_COPY_DEST);
@@ -461,13 +515,19 @@ void RendererD3D12::RecordBlit(const StagingBufferRef& upload, ID3D12Resource* i
     };
     const D3D12_TEXTURE_COPY_LOCATION src = StagingSource(upload, guest_footprint);
     cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    barrier = Transition(guest_texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmd->ResourceBarrier(1, &barrier);
+}
 
-    const D3D12_RESOURCE_BARRIER to_draw[2] = {
-        Transition(guest_texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-        Transition(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET),
-    };
-    cmd->ResourceBarrier(2, to_draw);
+void RendererD3D12::RecordBlit(ID3D12Resource* image, u32 image_index,
+                               D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
+                               D3D12_GPU_DESCRIPTOR_HANDLE sampler_table,
+                               const std::array<float, 4>& tex_scale_offset) {
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    D3D12_RESOURCE_BARRIER barrier =
+        Transition(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cmd->ResourceBarrier(1, &barrier);
 
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = back_buffer_rtvs[image_index];
     constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -496,8 +556,8 @@ void RendererD3D12::RecordBlit(const StagingBufferRef& upload, ID3D12Resource* i
 
     cmd->SetGraphicsRootSignature(blit_root_signature.Get());
     cmd->SetPipelineState(blit_pipeline.Get());
-    const float push_constants[4] = {1.0f, 1.0f, 0.0f, 0.0f}; // tex_scale, tex_offset
-    cmd->SetGraphicsRoot32BitConstants(0, 4, push_constants, 0);
+    // tex_scale, tex_offset
+    cmd->SetGraphicsRoot32BitConstants(0, 4, tex_scale_offset.data(), 0);
     const u32 runtime_data[12]{};
     cmd->SetGraphicsRoot32BitConstants(1, 12, runtime_data, 0);
     cmd->SetGraphicsRootDescriptorTable(2, srv_table);
@@ -529,6 +589,68 @@ void RendererD3D12::Present(u32 image_index) {
     present_ticks[image_index] = scheduler.Flush();
     swapchain.Present();
     staging_pool.TickFrame();
+}
+
+StagingBufferRef RendererD3D12::RecordFrameReadback(ID3D12Resource* image) {
+    StagingBufferRef readback = staging_pool.Request(upload_size, MemoryUsage::Download, true);
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    D3D12_RESOURCE_BARRIER barrier =
+        Transition(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmd->ResourceBarrier(1, &barrier);
+    const D3D12_TEXTURE_COPY_LOCATION src{
+        .pResource = image,
+        .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        .SubresourceIndex = 0,
+    };
+    const D3D12_TEXTURE_COPY_LOCATION dst = StagingSource(readback, footprint);
+    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+    cmd->ResourceBarrier(1, &barrier);
+    return readback;
+}
+
+void RendererD3D12::WriteFrameDump(StagingBufferRef& readback) {
+    scheduler.Finish();
+    const u32 width = swapchain.Width();
+    const u32 height = swapchain.Height();
+    const u32 row_bytes = width * 4;
+    const u32 image_bytes = row_bytes * height;
+    // 32-bit BGRA bottom-up BMP: BITMAPFILEHEADER + BITMAPINFOHEADER, written by hand.
+    std::vector<u8> file(54 + static_cast<size_t>(image_bytes));
+    const auto put32 = [&file](size_t offset, u32 value) { std::memcpy(&file[offset], &value, 4); };
+    const auto put16 = [&file](size_t offset, u16 value) { std::memcpy(&file[offset], &value, 2); };
+    file[0] = 'B';
+    file[1] = 'M';
+    put32(2, static_cast<u32>(file.size()));
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, width);
+    put32(22, height);
+    put16(26, 1);
+    put16(28, 32);
+    put32(34, image_bytes);
+    for (u32 y = 0; y < height; ++y) {
+        const u8* const src = readback.mapped_span.data() +
+                              static_cast<size_t>(y) * footprint.Footprint.RowPitch;
+        u8* const dst = file.data() + 54 + static_cast<size_t>(height - 1 - y) * row_bytes;
+        for (u32 x = 0; x < width; ++x) {
+            dst[x * 4 + 0] = src[x * 4 + 2];
+            dst[x * 4 + 1] = src[x * 4 + 1];
+            dst[x * 4 + 2] = src[x * 4 + 0];
+            dst[x * 4 + 3] = src[x * 4 + 3];
+        }
+    }
+    staging_pool.FreeDeferred(readback);
+    const std::filesystem::path path =
+        Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "frame.bmp";
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+    if (out) {
+        LOG_INFO(Render, "D3D12: presented frame dumped to {} ({}x{})", path.string(), width,
+                 height);
+    } else {
+        LOG_WARNING(Render, "D3D12: could not write the frame dump {}", path.string());
+    }
 }
 
 std::vector<u8> RendererD3D12::GetAppletCaptureBuffer() {

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <stdexcept>
 #include <string>
 
@@ -71,6 +72,10 @@ ShaderCompiler::ShaderCompiler() {
         LOG_ERROR(Render, "D3D12: spirv_to_dxil.dll lacks its entry points");
         return;
     }
+    if (!spirv_to_dxil_library.GetSymbol("eden_spirv_to_dxil_pipeline", &translate_pipeline)) {
+        LOG_WARNING(Render, "D3D12: spirv_to_dxil.dll cannot link stages (rebuild it with "
+                            "tools/xbox/build-spirv-to-dxil.ps1); stages are translated alone");
+    }
     if (!dxil_library.Open("dxil.dll")) {
         LOG_ERROR(Render, "D3D12: dxil.dll could not be loaded (error {})", GetLastError());
         return;
@@ -93,8 +98,8 @@ ShaderCompiler::ShaderCompiler() {
     if (SUCCEEDED(validator.As(&version))) {
         version->GetVersion(&major, &minor);
     }
-    LOG_INFO(Render, "D3D12: shader path ready (spirv_to_dxil, DXIL validator {}.{})", major,
-             minor);
+    LOG_INFO(Render, "D3D12: shader path ready (spirv_to_dxil{}, DXIL validator {}.{})",
+             translate_pipeline ? " with stage linking" : "", major, minor);
     available = true;
 }
 
@@ -108,14 +113,11 @@ std::vector<u8> ShaderCompiler::Compile(std::span<const u32> spirv, dxil_spirv_s
     if (!available) {
         throw std::runtime_error("D3D12: the shader path is unavailable");
     }
-    dxil_spirv_runtime_conf conf{};
-    conf.runtime_data_cbv = {.register_space = RUNTIME_DATA_SPACE, .base_shader_register = 0};
-    conf.push_constant_cbv = {.register_space = PUSH_CONSTANT_SPACE, .base_shader_register = 0};
-    conf.first_vertex_and_base_instance_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
-    conf.workgroup_id_mode = DXIL_SPIRV_SYSVAL_TYPE_NATIVE;
-    conf.yz_flip.mode = flip_y ? DXIL_SPIRV_Y_FLIP_UNCONDITIONAL : DXIL_SPIRV_YZ_FLIP_NONE;
-    conf.declared_read_only_images_as_srvs = true;
-    conf.shader_model_max = SHADER_MODEL;
+    dxil_spirv_runtime_conf conf = MakeConf();
+    // An unconditional flip only applies to the viewports set in its mask.
+    if (flip_y) {
+        conf.yz_flip = {.mode = DXIL_SPIRV_Y_FLIP_UNCONDITIONAL, .y_mask = 1, .z_mask = 0};
+    }
 
     // spirv_to_dxil dereferences both of these unconditionally.
     const dxil_spirv_debug_options debug_options{};
@@ -134,10 +136,91 @@ std::vector<u8> ShaderCompiler::Compile(std::span<const u32> spirv, dxil_spirv_s
     return dxil;
 }
 
+std::vector<ShaderCompiler::CompiledStage> ShaderCompiler::CompilePipeline(
+    std::span<const PipelineStage> stages, const PipelineOptions& options) const {
+    if (!available) {
+        throw std::runtime_error("D3D12: the shader path is unavailable");
+    }
+    if (stages.empty() || stages.size() > EDEN_SPIRV_TO_DXIL_MAX_STAGES) {
+        throw std::runtime_error(fmt::format("D3D12: invalid pipeline of {} stages", stages.size()));
+    }
+    // The last stage before the fragment one owns the clip-space position the flip applies to.
+    size_t flip_stage = stages.size();
+    for (size_t i = 0; i < stages.size(); ++i) {
+        if (stages[i].stage != DXIL_SPIRV_SHADER_FRAGMENT &&
+            stages[i].stage != DXIL_SPIRV_SHADER_COMPUTE) {
+            flip_stage = i;
+        }
+    }
+    std::array<dxil_spirv_runtime_conf, EDEN_SPIRV_TO_DXIL_MAX_STAGES> confs{};
+    std::array<eden_spirv_to_dxil_stage, EDEN_SPIRV_TO_DXIL_MAX_STAGES> inputs{};
+    for (size_t i = 0; i < stages.size(); ++i) {
+        confs[i] = MakeConf();
+        confs[i].first_vertex_and_base_instance_mode = options.first_vertex_and_base_instance;
+        if (i == flip_stage) {
+            confs[i].yz_flip = {.mode = options.yz_flip,
+                                .y_mask = options.y_flip_mask,
+                                .z_mask = options.z_flip_mask};
+        }
+        inputs[i] = {.words = stages[i].spirv.data(),
+                     .word_count = stages[i].spirv.size(),
+                     .stage = stages[i].stage,
+                     .entry_point = "main",
+                     .conf = &confs[i]};
+    }
+
+    const dxil_spirv_debug_options debug_options{};
+    const dxil_spirv_logger logger{.priv = nullptr, .log = LogTranslatorMessage};
+    std::array<dxil_spirv_object, EDEN_SPIRV_TO_DXIL_MAX_STAGES> objects{};
+    if (translate_pipeline) {
+        if (!translate_pipeline(inputs.data(), static_cast<unsigned>(stages.size()),
+                                VALIDATOR_VERSION, &debug_options, &logger, objects.data())) {
+            throw std::runtime_error("D3D12: eden_spirv_to_dxil_pipeline failed");
+        }
+    } else {
+        for (size_t i = 0; i < stages.size(); ++i) {
+            if (translate(inputs[i].words, inputs[i].word_count, nullptr, 0, inputs[i].stage,
+                          "main", VALIDATOR_VERSION, &debug_options, &confs[i], &logger,
+                          &objects[i])) {
+                continue;
+            }
+            for (size_t j = 0; j < i; ++j) {
+                free_dxil(&objects[j]);
+            }
+            throw std::runtime_error(fmt::format("D3D12: spirv_to_dxil failed for stage {}",
+                                                 static_cast<int>(inputs[i].stage)));
+        }
+    }
+
+    std::vector<CompiledStage> result(stages.size());
+    for (size_t i = 0; i < stages.size(); ++i) {
+        const auto* data = static_cast<const u8*>(objects[i].binary.buffer);
+        result[i].dxil.assign(data, data + objects[i].binary.size);
+        result[i].metadata = objects[i].metadata;
+        free_dxil(&objects[i]);
+    }
+    for (CompiledStage& stage : result) {
+        Sign(stage.dxil);
+    }
+    return result;
+}
+
+dxil_spirv_runtime_conf ShaderCompiler::MakeConf() const {
+    dxil_spirv_runtime_conf conf{};
+    conf.runtime_data_cbv = {.register_space = RUNTIME_DATA_SPACE, .base_shader_register = 0};
+    conf.push_constant_cbv = {.register_space = PUSH_CONSTANT_SPACE, .base_shader_register = 0};
+    conf.first_vertex_and_base_instance_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
+    conf.workgroup_id_mode = DXIL_SPIRV_SYSVAL_TYPE_NATIVE;
+    conf.declared_read_only_images_as_srvs = true;
+    conf.shader_model_max = SHADER_MODEL;
+    return conf;
+}
+
 void ShaderCompiler::Sign(std::vector<u8>& dxil) const {
     // The runtime refuses unsigned DXIL outside developer mode; the validator writes the hash in place.
     BorrowedBlob blob{dxil.data(), dxil.size()};
     ComPtr<IDxcOperationResult> result;
+    std::scoped_lock lock{validator_mutex};
     ThrowIfFailed(validator->Validate(&blob, DxcValidatorFlags_InPlaceEdit, &result),
                   "IDxcValidator::Validate");
     HRESULT status = E_FAIL;

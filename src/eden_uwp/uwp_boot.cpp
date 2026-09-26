@@ -18,10 +18,12 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <string_view>
-
+#include <thread>
 
 #include "common/logging.h"
 #include "common/settings.h"
@@ -70,8 +72,15 @@ static void ApplyHeadlessBootSettings(const BootSurface& surface) {
     // DRAM clamp is a separate reservation follow-up, not here.
 }
 
+/// Optional boot.cfg next to boot.nro (written by package-appx.ps1 -RunSeconds).
+struct BootConfig {
+    /// > 0: the payload does not emit the sentinels (deko3d examples, ...); run it this long.
+    u32 run_seconds{};
+};
+
 // Returns a process exit-style status. 0 == boot reached the run phase cleanly.
-int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface) {
+int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
+                    const BootConfig& config) {
     Common::Log::Initialize();
     ApplyHeadlessBootSettings(surface);
     WriteDiag(surface.core_window != nullptr
@@ -130,6 +139,25 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface) {
 
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
     void(system.Run());
+
+    if (config.run_seconds > 0) {
+        // Timed mode: nothing to wait for but the clock. The payload counts as having run if the
+        // process is still alive when the time is up; the log says what it drew.
+        WriteDiag("step: system.Run() issued, running for " + std::to_string(config.run_seconds) +
+                  " s | " + MemoryReport());
+        for (u32 second = 1; second <= config.run_seconds; ++second) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (second % 10 == 0) {
+                WriteDiag("step: running, " + std::to_string(second) + " s | " + MemoryReport());
+            }
+        }
+        Kernel::Svc::SetDebugStringObserver(nullptr);
+        void(system.Pause());
+        system.ShutdownMainProcess();
+        WriteDiag("step: shutdown complete");
+        LOG_INFO(Frontend, "Headless boot: timed run of {} s finished.", config.run_seconds);
+        return 0;
+    }
     WriteDiag("step: system.Run() issued, waiting for the JIT sentinel | " + MemoryReport());
 
     // Headless: no window event loop. Wait for the guest to execute through the JIT and emit the
@@ -522,19 +550,29 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         std::thread worker([&done, surface]() {
             std::set_terminate(OnTerminate); // per-thread in the MSVC runtime
             std::string nro_path;
+            EdenXbox::BootConfig config{};
             try {
                 // Bundled NRO from the read-only package install location.
-                const auto install_path =
-                    Windows::ApplicationModel::Package::Current().InstalledLocation().Path();
-                nro_path = winrt::to_string(install_path) + "\\boot.nro";
+                const std::string install_path = winrt::to_string(
+                    Windows::ApplicationModel::Package::Current().InstalledLocation().Path());
+                nro_path = install_path + "\\boot.nro";
                 WriteDiag("resolved NRO path: " + nro_path);
+                std::ifstream cfg{install_path + "\\boot.cfg"};
+                for (std::string line; std::getline(cfg, line);) {
+                    constexpr std::string_view key = "run_seconds=";
+                    if (line.starts_with(key)) {
+                        config.run_seconds =
+                            static_cast<u32>(std::strtoul(line.c_str() + key.size(), nullptr, 10));
+                        WriteDiag("boot.cfg: run " + std::to_string(config.run_seconds) + " s");
+                    }
+                }
             } catch (...) {
                 WriteDiag("FAILED resolving Package.InstalledLocation");
             }
             // Capture any early throw to the diag file instead of a silent exit.
             try {
                 WriteDiag("calling RunHeadlessBoot");
-                const int rc = EdenXbox::RunHeadlessBoot(nro_path, surface);
+                const int rc = EdenXbox::RunHeadlessBoot(nro_path, surface, config);
                 WriteDiag("RunHeadlessBoot returned " + std::to_string(rc));
             } catch (winrt::hresult_error const& e) {
                 WriteDiag("winrt::hresult_error: " + winrt::to_string(e.message()));

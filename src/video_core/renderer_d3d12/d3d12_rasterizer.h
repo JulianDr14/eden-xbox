@@ -3,13 +3,21 @@
 
 #pragma once
 
+#include <optional>
+
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
+#include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_fence_manager.h"
+#include "video_core/renderer_d3d12/d3d12_pipeline_cache.h"
 #include "video_core/renderer_d3d12/d3d12_query_cache.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
+
+namespace Tegra {
+struct FramebufferConfig;
+}
 
 namespace D3D12 {
 
@@ -35,8 +43,9 @@ class RasterizerD3D12 final : public VideoCore::RasterizerInterface,
                               protected VideoCommon::ChannelSetupCaches<VideoCommon::ChannelInfo> {
 public:
     RasterizerD3D12(Tegra::GPU& gpu, Tegra::MaxwellDeviceMemoryManager& device_memory,
-                    const Device& device, Scheduler& scheduler,
-                    BufferCacheRuntime& buffer_runtime, TextureCacheRuntime& texture_runtime);
+                    const Device& device, Scheduler& scheduler, const ShaderCompiler& compiler,
+                    BufferCacheRuntime& buffer_runtime, TextureCacheRuntime& texture_runtime,
+                    DescriptorRing& descriptor_ring, SamplerHeap& sampler_heap);
     ~RasterizerD3D12() override;
 
     void Draw(bool, u32) override;
@@ -85,19 +94,63 @@ public:
 
     [[nodiscard]] bool AnyCommandQueued() const noexcept { return true; }
 
+    /// A guest image the display can sample directly (see RendererD3D12::Composite).
+    struct DisplayTexture {
+        D3D12_CPU_DESCRIPTOR_HANDLE srv;
+        u32 width;
+        u32 height;
+    };
+
+    /// The texture cache image holding the framebuffer at framebuffer_addr, transitioned for
+    /// sampling, or nullopt when the guest wrote it from the CPU (as RasterizerVulkan).
+    std::optional<DisplayTexture> AccelerateDisplay(const Tegra::FramebufferConfig& config,
+                                                    DAddr framebuffer_addr);
+
 private:
+    struct DrawParams {
+        u32 num_vertices;
+        u32 num_instances;
+        u32 first_index;
+        u32 base_vertex;
+        u32 base_instance;
+        bool is_indexed;
+        u32 runtime_first_vertex; ///< what gl_VertexIndex adds to SV_VertexID
+    };
+    struct ViewportState {
+        u32 yz_flip_mask;
+        float width;
+        float height;
+    };
+
+    /// Records the complete state of a draw, then the draw. Nothing is carried over from earlier
+    /// draws: the state tracker of the Vulkan backend is left for later, when it pays off.
+    void RecordDraw(const GraphicsPipeline& pipeline, const PipelineBindings& bindings,
+                    const Framebuffer& framebuffer, const DrawParams& params,
+                    Maxwell::PrimitiveTopology topology);
+    ViewportState UpdateViewports(ID3D12GraphicsCommandList* cmd);
+    void UpdateScissors(ID3D12GraphicsCommandList* cmd);
+    [[nodiscard]] D3D12_RECT ScissorRect(size_t index) const;
     void UnsupportedDraw(const char* operation);
     void QueryFallback(GPUVAddr, VideoCommon::QueryType, VideoCommon::QueryPropertiesFlags, u32);
 
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
     Scheduler& scheduler;
+    BufferCacheRuntime& buffer_runtime;
+    DescriptorRing& descriptor_ring;
+    SamplerHeap& sampler_heap;
+    GuestDescriptorQueue descriptor_queue;
     BufferCache buffer_cache;
     TextureCache texture_cache;
+    PipelineCache pipeline_cache;
     QueryCache query_cache;
     AccelerateDMA accelerate_dma;
     FenceManager fence_manager;
     bool logged_phase4_draw{};
+    bool logged_first_draw{};
+    bool logged_stencil_ref{};
+    bool logged_layer_clear{};
+    bool logged_masked_clear{};
 };
 
 } // namespace D3D12

@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <array>
+#include <optional>
+#include <vector>
+
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/buffer_cache/usage_tracker.h"
@@ -13,6 +17,7 @@ namespace D3D12 {
 
 class Scheduler;
 class BufferCacheRuntime;
+class GuestDescriptorQueue;
 
 class Buffer : public VideoCommon::BufferBase {
 public:
@@ -37,10 +42,17 @@ public:
     void MarkUsage(u64 offset, u64 size) noexcept { tracker.Track(offset, size); }
     void ResetUsageTracking() noexcept { tracker.Reset(); }
 
+    /// Records a barrier to next unless the buffer is already there (a UAV barrier for UAV ->
+    /// UAV). Buffers decay to COMMON at the end of every ExecuteCommandLists, so the tracked state
+    /// only holds within the list that set it.
+    void Transition(D3D12_RESOURCE_STATES next);
+
 private:
     Scheduler* scheduler{};
     ComPtr<ID3D12Resource> buffer;
     VideoCommon::UsageTracker tracker;
+    D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
+    u64 state_tick{}; ///< scheduler tick of the list that set state
 };
 
 class BufferCacheRuntime {
@@ -49,8 +61,12 @@ class BufferCacheRuntime {
     using IndexFormat = Tegra::Engines::Maxwell3D::Regs::IndexFormat;
 
 public:
-    BufferCacheRuntime(const Device& device, Scheduler& scheduler, StagingBufferPool& staging);
+    BufferCacheRuntime(const Device& device, Scheduler& scheduler, StagingBufferPool& staging,
+                       Tegra::MaxwellDeviceMemoryManager& device_memory);
     void RunSelfTest();
+
+    /// Where guest uniform, storage and texel buffer views go (set by the rasterizer).
+    void SetDescriptorQueue(GuestDescriptorQueue* queue) noexcept { descriptor_queue = queue; }
 
     void TickFrame(Common::SlotVector<Buffer>& buffers) noexcept;
 
@@ -82,8 +98,12 @@ public:
                     bool can_reorder = false);
     void ClearBuffer(Buffer& dst, u32 offset, size_t size, u32 value);
 
-    void BindIndexBuffer(PrimitiveTopology topology, IndexFormat format, u32 base_vertex,
+    /// Index and vertex buffers are collected here and set by ApplyGeometry() right before the
+    /// draw, so a flush between binding and drawing (descriptor ring or staging exhaustion)
+    /// cannot leave the new command list without them.
+    void BindIndexBuffer(PrimitiveTopology topology, IndexFormat format, u32 first,
                          u32 num_indices, Buffer& buffer, u32 offset, u32 size);
+    /// Non-indexed quads are rewritten by EmulateTopology, like fans and loops.
     void BindQuadIndexBuffer(PrimitiveTopology, u32, u32) {}
     void BindVertexBuffer(u32 index, Buffer& buffer, u32 offset, u32 size, u32 stride);
     void BindVertexBuffer(u32 index, ID3D12Resource* buffer, u32 offset, u32 size, u32 stride);
@@ -91,13 +111,33 @@ public:
     void BindTransformFeedbackBuffer(u32, Buffer&, u32, u32) {}
     void BindTransformFeedbackBuffers(VideoCommon::HostBindings<Buffer>&) {}
     std::span<u8> BindMappedUniformBuffer(size_t, u32, u32 size);
-    void BindUniformBuffer(Buffer&, u32, u32) {}
-    void BindStorageBuffer(Buffer&, u32, u32, bool) {}
-    void BindTextureBuffer(Buffer&, u32, u32, VideoCore::Surface::PixelFormat) {}
+    void BindUniformBuffer(Buffer& buffer, u32 offset, u32 size);
+    void BindStorageBuffer(Buffer& buffer, u32 offset, u32 size, bool is_written);
+    void BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
+                           VideoCore::Surface::PixelFormat format);
+    void BindImageBuffer(Buffer& buffer, u32 offset, u32 size,
+                         VideoCore::Surface::PixelFormat format);
     bool ShouldLimitDynamicStorageBuffers() const { return false; }
     u32 GetMaxDynamicStorageBuffers() const { return UINT32_MAX; }
 
+    /// Topologies D3D12 lacks (quads, quad strips, fans, polygons, line loops), drawn without an
+    /// index buffer: builds the equivalent list of vertex numbers first..first+count.
+    void EmulateTopology(PrimitiveTopology topology, u32 first, u32 count);
+
+    /// Index count of the rewritten index buffer when the draw was rewritten (emulated topology or
+    /// 8-bit indices): the draw then reads it from index 0, with the guest's base vertex.
+    [[nodiscard]] std::optional<u32> RewrittenIndexCount() const noexcept {
+        return rewritten_count;
+    }
+
+    /// Sets the collected index and vertex buffers on the command list and forgets them.
+    void ApplyGeometry(ID3D12GraphicsCommandList* cmd);
+
+    [[nodiscard]] static bool IsEmulatedTopology(PrimitiveTopology topology) noexcept;
+
 private:
+    /// Uploads indices to staging memory and binds them as a 32-bit or 16-bit index buffer.
+    void BindRewrittenIndices(std::span<const u32> indices, bool wide);
     ComPtr<ID3D12Resource> CreateDefaultBuffer(u64 size);
     void Copy(Buffer* dst, ID3D12Resource* dst_raw, Buffer* src, ID3D12Resource* src_raw,
               std::span<const VideoCommon::BufferCopy> copies);
@@ -105,6 +145,17 @@ private:
     const Device& device;
     Scheduler& scheduler;
     StagingBufferPool& staging;
+    Tegra::MaxwellDeviceMemoryManager& device_memory;
+    GuestDescriptorQueue* descriptor_queue{};
+
+    std::optional<D3D12_INDEX_BUFFER_VIEW> pending_index;
+    std::array<D3D12_VERTEX_BUFFER_VIEW, VideoCommon::NUM_VERTEX_BUFFERS> pending_vertex{};
+    u32 pending_vertex_mask{};
+    std::optional<u32> rewritten_count;
+    std::vector<u32> rewrite_scratch;
+    std::vector<u8> guest_indices;
+    bool logged_rewrite{};
+    bool logged_inline_rewrite{};
 };
 
 struct BufferCacheParams {
@@ -118,7 +169,7 @@ struct BufferCacheParams {
     static constexpr bool NEEDS_BIND_UNIFORM_INDEX = false;
     static constexpr bool NEEDS_BIND_STORAGE_INDEX = false;
     static constexpr bool USE_MEMORY_MAPS = true;
-    static constexpr bool SEPARATE_IMAGE_BUFFER_BINDINGS = false;
+    static constexpr bool SEPARATE_IMAGE_BUFFER_BINDINGS = true;
     static constexpr bool USE_MEMORY_MAPS_FOR_UPLOADS = true;
 };
 

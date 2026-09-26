@@ -55,6 +55,17 @@ Patch-File "src\compiler\nir\meson.build" `
 Patch-File "src\util\os_misc.c" `
     "#if !defined(_GAMING_XBOX)`n   if(GetConsoleWindow()" `
     "#if !defined(_GAMING_XBOX) && !defined(MESA_UWP)`n   if(GetConsoleWindow()"
+# Linked-pipeline entry point (eden_spirv_to_dxil_pipeline): the sources live in the repo and are
+# copied on every run, so edits to them reach the next build.
+$s2d = Join-Path $src "src\microsoft\spirv_to_dxil"
+Copy-Item (Join-Path $PSScriptRoot "mesa\eden_pipeline.c") $s2d -Force
+Copy-Item (Join-Path $PSScriptRoot "..\..\externals\spirv-to-dxil\include\eden_spirv_to_dxil.h") $s2d -Force
+Patch-File "src\microsoft\spirv_to_dxil\spirv_to_dxil.def" `
+    "    spirv_to_dxil_get_version`n" `
+    "    spirv_to_dxil_get_version`n    eden_spirv_to_dxil_pipeline`n"
+Patch-File "src\microsoft\spirv_to_dxil\meson.build" `
+    "      'spirv_to_dxil.h',`n" `
+    "      'spirv_to_dxil.h',`n      'eden_pipeline.c',`n      'eden_spirv_to_dxil.h',`n"
 
 # --- Python tools -----------------------------------------------------------------------------
 if (-not (Test-Path (Join-Path $venv "Scripts\meson.exe"))) {

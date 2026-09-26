@@ -42,6 +42,9 @@ struct FormatInfo {
     VideoCore::Surface::PixelFormat copy_format = VideoCore::Surface::PixelFormat::Invalid;
 };
 
+/// DXGI formats of a guest pixel format (the texture cache's table; texel buffers use it too).
+[[nodiscard]] FormatInfo SurfaceFormat(VideoCore::Surface::PixelFormat format);
+
 class TextureCacheRuntime {
     friend Image;
     friend ImageView;
@@ -92,6 +95,11 @@ public:
     [[nodiscard]] bool SupportsView(DXGI_FORMAT format, D3D12_FORMAT_SUPPORT1 support1,
                                     D3D12_FORMAT_SUPPORT2 support2 = D3D12_FORMAT_SUPPORT2_NONE) const;
 
+    /// RTV of no resource, bound in the render target slots a framebuffer leaves empty.
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE NullRenderTarget() const noexcept {
+        return null_rtv;
+    }
+
 private:
     const Device& device;
     Scheduler& scheduler;
@@ -100,6 +108,7 @@ private:
     CpuDescriptorAllocator& sampler_descriptors;
     CpuDescriptorAllocator& rtv_descriptors;
     CpuDescriptorAllocator& dsv_descriptors;
+    D3D12_CPU_DESCRIPTOR_HANDLE null_rtv{};
 };
 
 class Image : public VideoCommon::ImageBase {
@@ -152,11 +161,13 @@ private:
 };
 
 class ImageView : public VideoCommon::ImageViewBase {
+    friend Framebuffer;
+
 public:
     ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewInfo& info, ImageId image_id,
               Image& image);
     ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewInfo& info, ImageId image_id,
-              Image& image, const SlotVector<Image>& images);
+              Image& image, SlotVector<Image>& images);
     ImageView(TextureCacheRuntime&, const VideoCommon::ImageInfo&,
               const VideoCommon::ImageViewInfo&, GPUVAddr);
     ImageView(TextureCacheRuntime&, const VideoCommon::NullImageViewParams&);
@@ -167,9 +178,9 @@ public:
     ImageView(ImageView&& other) noexcept;
     ImageView& operator=(ImageView&& other) noexcept;
 
-    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE Handle(Shader::TextureType) const noexcept {
-        return srv;
-    }
+    /// SRV declared as the shader's texture type: D3D12 requires the view dimension to match
+    /// the HLSL declaration, so each type gets its own SRV, created on first use.
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE Handle(Shader::TextureType texture_type) const noexcept;
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE StorageView(Shader::TextureType,
                                                            Shader::ImageFormat) const noexcept {
         return uav;
@@ -181,12 +192,31 @@ public:
     [[nodiscard]] u32 BufferSize() const noexcept { return buffer_size; }
     [[nodiscard]] bool IsRescaled() const noexcept;
 
+    /// Transitions the whole image this view belongs to (no-op for null and buffer views).
+    void TransitionImage(D3D12_RESOURCE_STATES state) const;
+
 private:
+    /// What the per-type SRVs are created from.
+    struct SrvParams {
+        DXGI_FORMAT format{};
+        UINT mapping{D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING};
+        u32 base_level{};
+        u32 levels{1};
+        u32 base_layer{};
+        u32 layers{1};
+        bool is_msaa{};
+        D3D12_RESOURCE_DIMENSION dimension{D3D12_RESOURCE_DIMENSION_TEXTURE2D};
+        u32 resource_layers{1};
+    };
+
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE CreateSrv(Shader::TextureType texture_type) const;
     void Release();
     TextureCacheRuntime* runtime{};
-    const SlotVector<Image>* slot_images{};
+    SlotVector<Image>* slot_images{};
     ID3D12Resource* image{};
-    D3D12_CPU_DESCRIPTOR_HANDLE srv{};
+    SrvParams srv_params{};
+    Shader::TextureType natural_type{Shader::TextureType::Color2D};
+    mutable std::array<D3D12_CPU_DESCRIPTOR_HANDLE, Shader::NUM_TEXTURE_TYPES> srvs{};
     D3D12_CPU_DESCRIPTOR_HANDLE uav{};
     D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
     D3D12_CPU_DESCRIPTOR_HANDLE dsv{};
@@ -210,9 +240,13 @@ public:
     }
     [[nodiscard]] bool HasAddedAnisotropy() const noexcept { return false; }
 
+    /// Never reused by another sampler: SamplerHeap deduplicates tables by these keys.
+    [[nodiscard]] u64 Key() const noexcept { return key; }
+
 private:
     TextureCacheRuntime* runtime{};
     D3D12_CPU_DESCRIPTOR_HANDLE handle{};
+    u64 key{};
 };
 
 class Framebuffer {
@@ -220,18 +254,32 @@ public:
     Framebuffer(TextureCacheRuntime&, std::span<ImageView*, NUM_RT> color_buffers,
                 ImageView* depth_buffer, const VideoCommon::RenderTargets& key);
 
+    /// RTVs by guest render target index, as the pipeline's RTVFormats: slot i is regs.rt[i]
+    /// (like the Vulkan render pass), empty slots hold the null RTV.
     [[nodiscard]] std::span<const D3D12_CPU_DESCRIPTOR_HANDLE> ColorTargets() const noexcept {
         return std::span{colors.data(), num_colors};
     }
+    [[nodiscard]] bool HasColor(size_t index) const noexcept {
+        return index < NUM_RT && color_images[index] != ImageId{};
+    }
+    /// Null when there is no depth buffer.
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthTarget() const noexcept { return depth; }
+    [[nodiscard]] bool HasStencil() const noexcept { return has_stencil; }
     [[nodiscard]] VideoCommon::Extent2D Extent() const noexcept { return extent; }
     [[nodiscard]] bool IsRescaled() const noexcept { return is_rescaled; }
 
+    /// Transitions the attachments to RENDER_TARGET and DEPTH_WRITE.
+    void PrepareAttachments() const;
+
 private:
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, NUM_RT> colors{};
+    std::array<ImageId, NUM_RT> color_images{};
+    ImageId depth_image{};
+    SlotVector<Image>* images{};
     D3D12_CPU_DESCRIPTOR_HANDLE depth{};
     u32 num_colors{};
     VideoCommon::Extent2D extent{};
+    bool has_stencil{};
     bool is_rescaled{};
 };
 

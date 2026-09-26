@@ -7,12 +7,17 @@
 # before going to the console.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\xbox\local-run.ps1 [-NoBuild] [-TimeoutSec 75]
+#       [-BootNro path\to\payload.nro] [-RunSeconds 20]
 #
-# The log is left in %LOCALAPPDATA%\Packages\<family>\LocalState\eden_log.txt (path printed at the end).
+# -RunSeconds runs payloads without the sentinels (deko3d examples, ...) for that long, then exits.
+# The log is left in %LOCALAPPDATA%\Packages\<family>\LocalState\eden\log\eden_log.txt (path
+# printed at the end).
 
-param([int] $TimeoutSec = 75, [switch] $NoBuild)
+param([int] $TimeoutSec = 75, [switch] $NoBuild, [string] $BootNro, [int] $RunSeconds = 0)
 $ErrorActionPreference = 'Stop'
 $r = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+if (-not $BootNro) { $BootNro = "$r\tools\xbox\boot_nro\boot.nro" }
+$BootNro = (Resolve-Path $BootNro).Path
 $cmd = "$env:SystemRoot\System32\cmd.exe"
 
 if (-not $NoBuild) {
@@ -24,7 +29,7 @@ if (-not $NoBuild) {
 Get-Process -Name eden-uwp -ErrorAction SilentlyContinue | Stop-Process -Force
 Push-Location $r
 try {
-    & "$r\tools\xbox\package-appx.ps1" -BootNro "$r\tools\xbox\boot_nro\boot.nro" *> $null
+    & "$r\tools\xbox\package-appx.ps1" -BootNro $BootNro -RunSeconds $RunSeconds *> $null
 } finally {
     Pop-Location
 }
@@ -45,4 +50,4 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 500
 }
 Get-Content $diag
-Write-Host "log: $(Join-Path $local 'eden_log.txt')"
+Write-Host "log: $(Join-Path $local 'eden\log\eden_log.txt')"

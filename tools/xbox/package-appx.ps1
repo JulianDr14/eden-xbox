@@ -15,6 +15,9 @@ param(
     # Homebrew NRO bundled as the GATE-2 payload. It must emit the JIT-liveness sentinel
     # EDEN_XBOX_JIT_ALIVE via svcOutputDebugString. NO keys/firmware/commercial ROMs (house rule).
     [string] $BootNro,
+    # For payloads without the sentinels (deko3d examples, ...): run the NRO this many seconds,
+    # then shut down. 0 keeps the sentinel-driven boot. Written to boot.cfg in the package.
+    [int] $RunSeconds = 0,
     # Must match Identity/@Publisher in dist/uwp/AppxManifest.xml, character for character.
     [string] $PublisherCN = "CN=EdenXboxDev",
     # Mesa's SPIR-V -> DXIL translator for the D3D12 renderer, built by build-spirv-to-dxil.ps1.
@@ -85,6 +88,10 @@ if ($BootNro) {
     if (-not (Test-Path $BootNro)) { throw "BootNro not found: $BootNro" }
     Copy-Item $BootNro (Join-Path $layout "boot.nro")
     Write-Host "payload  : $BootNro -> boot.nro"
+    if ($RunSeconds -gt 0) {
+        [IO.File]::WriteAllText((Join-Path $layout "boot.cfg"), "run_seconds=$RunSeconds`n")
+        Write-Host "mode     : run $RunSeconds s (no sentinels)"
+    }
 } else {
     Write-Warning "No -BootNro given. The app will activate, fail to load the NRO and log status 2 to eden_uwp_diag.txt."
 }

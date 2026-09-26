@@ -88,6 +88,49 @@ private:
     bool logged_upload{};
 };
 
+/// The CBV/SRV/UAV table of one draw or dispatch, written in root-signature order straight into a
+/// range of the ring (see d3d12_root_signature.h for the slot order). Buffer views are created in
+/// place; image views are copied from their offline descriptors.
+///
+/// Acquire() must come before any command of the draw is recorded: allocating from a full ring
+/// flushes the command list.
+class GuestDescriptorQueue {
+public:
+    explicit GuestDescriptorQueue(ID3D12Device* device, DescriptorRing& ring);
+
+    GuestDescriptorQueue(const GuestDescriptorQueue&) = delete;
+    GuestDescriptorQueue& operator=(const GuestDescriptorQueue&) = delete;
+
+    /// Starts a table of count descriptors (none when count is zero).
+    void Acquire(u32 count);
+
+    /// GPU handle of the table; checks (and warns once) that it was filled exactly.
+    [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE Table();
+
+    /// A CBV; address 0 writes a null one. size is rounded up to 256 bytes.
+    void AddConstantBuffer(D3D12_GPU_VIRTUAL_ADDRESS address, u32 size);
+    /// A raw UAV, then a raw SRV of the same range (null ones when resource is null).
+    void AddStorageBuffer(ID3D12Resource* resource, u64 offset, u32 size);
+    /// A typed SRV (texture buffer), preceded by a typed UAV for image buffers. Null views when
+    /// resource is null or the offset is not a whole number of elements.
+    void AddTexelBuffer(ID3D12Resource* resource, u64 offset, u32 size, DXGI_FORMAT format,
+                        u32 element_size, bool with_uav);
+    /// Copies of offline descriptors (texture SRVs, image UAVs).
+    void AddCopy(D3D12_CPU_DESCRIPTOR_HANDLE descriptor);
+
+private:
+    D3D12_CPU_DESCRIPTOR_HANDLE Next();
+
+    ID3D12Device* device;
+    DescriptorRing& ring;
+    u32 stride;
+    DescriptorRange range{};
+    u32 count{};
+    u32 written{};
+    bool logged_mismatch{};
+    bool logged_unaligned{};
+};
+
 /// The one shader-visible sampler heap. D3D12 caps it at 2048 entries on every tier, too few for
 /// a per-draw ring, so whole sampler tables are deduplicated by content: games reuse the same
 /// combinations constantly. When the heap fills up it is reset after the GPU goes idle.

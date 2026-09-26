@@ -15,6 +15,9 @@ enum class Stage : u32;
 struct Profile {
     u32 supported_spirv{0x00010000};
     bool unified_descriptor_binding{};
+    /// Descriptor arrays consume one binding per element (D3D12 via spirv_to_dxil maps element i
+    /// of binding B to register B+i, so the next descriptor must start after the whole array)
+    bool descriptor_arrays_use_count{};
     bool support_descriptor_aliasing{};
     bool support_int8{};
     bool support_uniform_and_storage_buffer_8bit{};

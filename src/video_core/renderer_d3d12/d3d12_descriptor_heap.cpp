@@ -174,6 +174,126 @@ void DescriptorRing::Retire() {
     }
 }
 
+// --- GuestDescriptorQueue ---------------------------------------------------------------------
+
+GuestDescriptorQueue::GuestDescriptorQueue(ID3D12Device* device_, DescriptorRing& ring_)
+    : device{device_}, ring{ring_}, stride{ring_.Stride()} {}
+
+void GuestDescriptorQueue::Acquire(u32 count_) {
+    count = count_;
+    written = 0;
+    // One spare slot past the table absorbs writes beyond what the root signature declares.
+    range = count != 0 ? ring.Allocate(count + 1) : DescriptorRange{};
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE GuestDescriptorQueue::Table() {
+    if (written != count && !logged_mismatch) {
+        LOG_ERROR(Render, "D3D12: descriptor table filled with {} of {} descriptors", written,
+                  count);
+        logged_mismatch = true;
+    }
+    return range.gpu;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE GuestDescriptorQueue::Next() {
+    if (written >= count) {
+        // More bindings than the root signature declares: the spare slot. Reported by Table().
+        ++written;
+        return {range.cpu.ptr + static_cast<SIZE_T>(count) * stride};
+    }
+    return {range.cpu.ptr + static_cast<SIZE_T>(written++) * stride};
+}
+
+void GuestDescriptorQueue::AddConstantBuffer(D3D12_GPU_VIRTUAL_ADDRESS address, u32 size) {
+    if (count == 0) {
+        return;
+    }
+    const D3D12_CONSTANT_BUFFER_VIEW_DESC desc{
+        .BufferLocation = address,
+        .SizeInBytes = address != 0 ? (size + 255u) & ~255u : 0u,
+    };
+    device->CreateConstantBufferView(&desc, Next());
+}
+
+void GuestDescriptorQueue::AddStorageBuffer(ID3D12Resource* resource, u64 offset, u32 size) {
+    if (count == 0) {
+        return;
+    }
+    // Raw views address 32-bit words from a 16-byte aligned offset.
+    if (resource && offset % D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT != 0) {
+        if (!logged_unaligned) {
+            LOG_WARNING(Render, "D3D12: storage buffer at unaligned offset {} bound as null",
+                        offset);
+            logged_unaligned = true;
+        }
+        resource = nullptr;
+    }
+    const u32 words = (size + 3) / 4;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{
+        .Format = DXGI_FORMAT_R32_TYPELESS,
+        .ViewDimension = D3D12_UAV_DIMENSION_BUFFER,
+        .Buffer = {.FirstElement = resource ? offset / 4 : 0,
+                   .NumElements = resource ? words : 0,
+                   .StructureByteStride = 0,
+                   .CounterOffsetInBytes = 0,
+                   .Flags = D3D12_BUFFER_UAV_FLAG_RAW},
+    };
+    device->CreateUnorderedAccessView(resource, nullptr, &uav, Next());
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{
+        .Format = DXGI_FORMAT_R32_TYPELESS,
+        .ViewDimension = D3D12_SRV_DIMENSION_BUFFER,
+        .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+        .Buffer = {.FirstElement = resource ? offset / 4 : 0,
+                   .NumElements = resource ? words : 0,
+                   .StructureByteStride = 0,
+                   .Flags = D3D12_BUFFER_SRV_FLAG_RAW},
+    };
+    device->CreateShaderResourceView(resource, &srv, Next());
+}
+
+void GuestDescriptorQueue::AddTexelBuffer(ID3D12Resource* resource, u64 offset, u32 size,
+                                          DXGI_FORMAT format, u32 element_size, bool with_uav) {
+    if (count == 0) {
+        return;
+    }
+    if (format == DXGI_FORMAT_UNKNOWN || element_size == 0) {
+        format = DXGI_FORMAT_R32_UINT;
+        element_size = 4;
+        resource = nullptr;
+    }
+    if (resource && offset % element_size != 0) {
+        if (!logged_unaligned) {
+            LOG_WARNING(Render, "D3D12: texel buffer at unaligned offset {} bound as null", offset);
+            logged_unaligned = true;
+        }
+        resource = nullptr;
+    }
+    const u64 first = resource ? offset / element_size : 0;
+    const u32 elements = resource ? size / element_size : 0;
+    if (with_uav) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{
+            .Format = format,
+            .ViewDimension = D3D12_UAV_DIMENSION_BUFFER,
+            .Buffer = {.FirstElement = first, .NumElements = elements},
+        };
+        device->CreateUnorderedAccessView(resource, nullptr, &uav, Next());
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{
+        .Format = format,
+        .ViewDimension = D3D12_SRV_DIMENSION_BUFFER,
+        .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+        .Buffer = {.FirstElement = first, .NumElements = elements},
+    };
+    device->CreateShaderResourceView(resource, &srv, Next());
+}
+
+void GuestDescriptorQueue::AddCopy(D3D12_CPU_DESCRIPTOR_HANDLE descriptor) {
+    if (count == 0) {
+        return;
+    }
+    device->CopyDescriptorsSimple(1, Next(), descriptor, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
 // --- SamplerHeap ------------------------------------------------------------------------------
 
 size_t SamplerHeap::KeyHash::operator()(const std::vector<u64>& key) const noexcept {

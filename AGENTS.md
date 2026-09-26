@@ -32,8 +32,8 @@ detalle técnico está en [`docs/xbox_internal.md`](docs/xbox_internal.md) (cuad
 | 3b: runtime de la caché de buffers | ✅ PC y Series (0.2.11.0); round-trip GPU de 4096 bytes |
 | 3c: runtime de la caché de texturas | ✅ PC y Series (0.2.12.0); gate 13×7 RGBA8 y vistas completas |
 | 3d: fences, queries y `RasterizerD3D12` sustituyendo al nulo | ✅ PC y Series (0.2.13.0) tras la revisión de la fase 3; **fase 3 cerrada** |
-| Mudanza a Eden actual (sep 2026): fork de `eden-emulator/mirror`, rama `xbox` | 🔨 En curso: fusión hecha y compilando; faltan las pruebas en PC y Series |
-| 4: pipelines, root signature y shaders del guest | 🔨 Diseño en `docs/xbox_d3d12_phase4.md`; `TickFrame` en `Composite` corregido |
+| Mudanza a Eden actual (sep 2026): fork de `eden-emulator/mirror`, rama `xbox` | ✅ PC (merge `b18b22a674`); la Series se da por buena (el usuario no la repitió) |
+| 4: pipelines, root signature y shaders del guest | 🔨 4.0–4.3 ✅ en PC (deko3d ex02 triángulo y ex04 cubo texturizado se ven bien); siguiente: Series y 4.4 (compute y helpers). Diseño en `docs/xbox_d3d12_phase4.md` |
 | 5: paridad (ASTC, stream output, quads, etc.) | — |
 
 La rama de trabajo es `xbox`. `master` del fork es Eden tal cual.

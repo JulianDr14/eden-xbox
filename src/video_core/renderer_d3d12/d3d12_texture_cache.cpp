@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -247,6 +248,15 @@ bool logged_view_format = false;
 
 } // namespace
 
+FormatInfo SurfaceFormat(PixelFormat format) {
+    return NativeFormat(format);
+}
+
+namespace {
+/// Sampler keys for SamplerHeap; 0 is the presenter's linear sampler.
+std::atomic<u64> next_sampler_key{1};
+} // Anonymous namespace
+
 /// How one BufferImageCopy is laid out in staging memory (tightly packed by the generic cache) and
 /// in the placed footprint D3D12 copies through (rows padded to 256 bytes).
 struct Image::CopyLayout {
@@ -274,6 +284,13 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
                                          CpuDescriptorAllocator& dsvs)
     : device{device_}, scheduler{scheduler_}, staging{staging_}, view_descriptors{views},
       sampler_descriptors{samplers}, rtv_descriptors{rtvs}, dsv_descriptors{dsvs} {
+    null_rtv = rtv_descriptors.Allocate();
+    const D3D12_RENDER_TARGET_VIEW_DESC null_desc{
+        .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+        .ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D,
+        .Texture2D = {.MipSlice = 0, .PlaneSlice = 0},
+    };
+    device.Get()->CreateRenderTargetView(nullptr, &null_desc, null_rtv);
     LOG_INFO(Render, "D3D12: texture cache runtime ready");
 }
 
@@ -667,36 +684,36 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
     const u32 levels = info.range.extent.levels;
     const u32 layers = info.range.extent.layers;
     const bool is_msaa = source.info.num_samples > 1;
+    const D3D12_RESOURCE_DESC resource_desc = image->GetDesc();
 
-    // SRV: the dimension must match the shader's declaration, so it follows the view type.
-    // TODO(phase 4): one SRV per compatible Shader::TextureType, as the Vulkan backend does.
-    srv = runtime->view_descriptors.Allocate();
-    D3D12_SHADER_RESOURCE_VIEW_DESC desc{.Format = format_info.srv,
-        .Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(Component(swizzle[0]), Component(swizzle[1]), Component(swizzle[2]), Component(swizzle[3]))};
+    srv_params = {
+        .format = format_info.srv,
+        .mapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+            Component(swizzle[0]), Component(swizzle[1]), Component(swizzle[2]),
+            Component(swizzle[3])),
+        .base_level = base_level,
+        .levels = levels,
+        .base_layer = base_layer,
+        .layers = layers,
+        .is_msaa = is_msaa,
+        .dimension = resource_desc.Dimension,
+        .resource_layers = resource_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                               ? 1U
+                               : resource_desc.DepthOrArraySize,
+    };
     switch (info.type) {
-    case ImageViewType::e1D: desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D; desc.Texture1D = {base_level, levels, 0.0f}; break;
-    case ImageViewType::e1DArray: desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY; desc.Texture1DArray = {base_level, levels, base_layer, layers, 0.0f}; break;
-    case ImageViewType::e3D: desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D; desc.Texture3D = {base_level, levels, 0.0f}; break;
-    case ImageViewType::Cube: desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE; desc.TextureCube = {base_level, levels, 0.0f}; break;
-    case ImageViewType::CubeArray: desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY; desc.TextureCubeArray = {base_level, levels, base_layer, layers / 6, 0.0f}; break;
-    case ImageViewType::e2DArray:
-        if (is_msaa) { desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY; desc.Texture2DMSArray = {base_layer, layers}; }
-        else { desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY; desc.Texture2DArray = {base_level, levels, base_layer, layers, 0, 0.0f}; }
-        break;
-    default: // e2D, Rect
-        if (is_msaa) {
-            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY; desc.Texture2DMSArray = {base_layer, 1};
-        } else if (base_layer == 0 && source.info.resources.layers <= 1) {
-            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; desc.Texture2D = {base_level, levels, 0, 0.0f};
-        } else {
-            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY; desc.Texture2DArray = {base_level, levels, base_layer, 1, 0, 0.0f};
-        }
-        break;
+    case ImageViewType::e1D: natural_type = Shader::TextureType::Color1D; break;
+    case ImageViewType::e1DArray: natural_type = Shader::TextureType::ColorArray1D; break;
+    case ImageViewType::e2DArray: natural_type = Shader::TextureType::ColorArray2D; break;
+    case ImageViewType::e3D: natural_type = Shader::TextureType::Color3D; break;
+    case ImageViewType::Cube: natural_type = Shader::TextureType::ColorCube; break;
+    case ImageViewType::CubeArray: natural_type = Shader::TextureType::ColorArrayCube; break;
+    default: natural_type = Shader::TextureType::Color2D; break;
     }
-    runtime->device.Get()->CreateShaderResourceView(image, &desc, srv);
+    // The view's own type up front; the rest when a shader asks for them.
+    srvs[static_cast<size_t>(natural_type)] = CreateSrv(natural_type);
 
     const SurfaceType surface = VideoCore::Surface::GetFormatType(info.format);
-    const D3D12_RESOURCE_DESC resource_desc = image->GetDesc();
     const bool is_3d = resource_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
     if (surface == SurfaceType::ColorTexture &&
         (resource_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
@@ -751,50 +768,164 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
     }
 }
 ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewInfo& info,
-                     ImageId id, Image& image_, const SlotVector<Image>& images)
+                     ImageId id, Image& image_, SlotVector<Image>& images)
     : ImageView{runtime, info, id, image_} { slot_images = &images; }
 ImageView::ImageView(TextureCacheRuntime&, const VideoCommon::ImageInfo& info,
                      const VideoCommon::ImageViewInfo& view, GPUVAddr addr)
     : VideoCommon::ImageViewBase{info, view, addr}, buffer_size{VideoCommon::CalculateGuestSizeInBytes(info)} {}
 ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::NullImageViewParams& params)
     : VideoCommon::ImageViewBase{params}, runtime{&runtime_} {
-    srv = runtime->view_descriptors.Allocate();
-    const D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{
-        .Format = DXGI_FORMAT_R8_UNORM,
-        .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
-        .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-        .Texture2D = {.MostDetailedMip = 0, .MipLevels = 1, .PlaneSlice = 0,
-                      .ResourceMinLODClamp = 0.0f},
-    };
-    runtime->device.Get()->CreateShaderResourceView(nullptr, &srv_desc, srv);
+    // Null SRVs of every type (dimension must still match the shader), created on demand.
+    srv_params.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvs[static_cast<size_t>(natural_type)] = CreateSrv(natural_type);
     uav = runtime->view_descriptors.Allocate();
     const D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc{
-        .Format = DXGI_FORMAT_R8_UNORM,
+        .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
         .ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D,
         .Texture2D = {.MipSlice = 0, .PlaneSlice = 0},
     };
     runtime->device.Get()->CreateUnorderedAccessView(nullptr, nullptr, &uav_desc, uav);
 }
 ImageView::~ImageView() { Release(); }
+
+D3D12_CPU_DESCRIPTOR_HANDLE ImageView::Handle(Shader::TextureType texture_type) const noexcept {
+    const size_t index = static_cast<size_t>(texture_type);
+    if (index >= srvs.size() || !runtime) {
+        return {};
+    }
+    if (srvs[index].ptr == 0) {
+        srvs[index] = CreateSrv(texture_type);
+    }
+    return srvs[index];
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_type) const {
+    using Shader::TextureType;
+    const SrvParams& p = srv_params;
+    // A type the resource cannot be viewed as (a 2D texture read as 3D, a cube from fewer than six
+    // layers) falls back to the view's own dimension: the shader reads garbage, not a bad view.
+    const bool is_1d = p.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+    const bool is_3d = p.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    bool compatible = true;
+    switch (texture_type) {
+    case TextureType::Color1D:
+    case TextureType::ColorArray1D:
+        compatible = !image || is_1d;
+        break;
+    case TextureType::Color3D:
+        compatible = !image || is_3d;
+        break;
+    case TextureType::ColorCube:
+    case TextureType::ColorArrayCube:
+        compatible = !image || (!is_1d && !is_3d && !p.is_msaa && p.resource_layers >= 6);
+        break;
+    case TextureType::Buffer:
+        compatible = false;
+        break;
+    default:
+        compatible = !image || (!is_1d && !is_3d);
+        break;
+    }
+    if (!compatible && texture_type != natural_type) {
+        return Handle(natural_type);
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc{.Format = p.format,
+                                         .Shader4ComponentMapping = p.mapping};
+    const u32 cubes = std::max(1U, p.layers / 6);
+    switch (texture_type) {
+    case TextureType::Color1D:
+        if (p.base_layer == 0) {
+            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
+            desc.Texture1D = {p.base_level, p.levels, 0.0f};
+        } else {
+            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
+            desc.Texture1DArray = {p.base_level, p.levels, p.base_layer, 1, 0.0f};
+        }
+        break;
+    case TextureType::ColorArray1D:
+        desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
+        desc.Texture1DArray = {p.base_level, p.levels, p.base_layer, p.layers, 0.0f};
+        break;
+    case TextureType::Color3D:
+        desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        desc.Texture3D = {p.base_level, p.levels, 0.0f};
+        break;
+    case TextureType::ColorCube:
+        if (p.base_layer == 0) {
+            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            desc.TextureCube = {p.base_level, p.levels, 0.0f};
+        } else {
+            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+            desc.TextureCubeArray = {p.base_level, p.levels, p.base_layer, 1, 0.0f};
+        }
+        break;
+    case TextureType::ColorArrayCube:
+        desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+        desc.TextureCubeArray = {p.base_level, p.levels, p.base_layer, cubes, 0.0f};
+        break;
+    case TextureType::ColorArray2D:
+        if (p.is_msaa) {
+            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
+            desc.Texture2DMSArray = {p.base_layer, p.layers};
+        } else {
+            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            desc.Texture2DArray = {p.base_level, p.levels, p.base_layer, p.layers, 0, 0.0f};
+        }
+        break;
+    default: // Color2D, Color2DRect (and a buffer read from an image view)
+        if (p.base_layer != 0) {
+            // A plain 2D SRV can only see layer 0: view the layer as a one-layer array.
+            if (p.is_msaa) {
+                desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
+                desc.Texture2DMSArray = {p.base_layer, 1};
+            } else {
+                desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                desc.Texture2DArray = {p.base_level, p.levels, p.base_layer, 1, 0, 0.0f};
+            }
+        } else if (p.is_msaa) {
+            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+        } else {
+            desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            desc.Texture2D = {p.base_level, p.levels, 0, 0.0f};
+        }
+        break;
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE handle = runtime->view_descriptors.Allocate();
+    runtime->device.Get()->CreateShaderResourceView(image, &desc, handle);
+    return handle;
+}
+
+void ImageView::TransitionImage(D3D12_RESOURCE_STATES state) const {
+    if (slot_images && image) {
+        (*slot_images)[image_id].Transition(state);
+    }
+}
+
 void ImageView::Release() {
     if (!runtime) return;
-    if (srv.ptr) runtime->view_descriptors.Free(srv);
+    for (D3D12_CPU_DESCRIPTOR_HANDLE& handle : srvs) {
+        if (handle.ptr) runtime->view_descriptors.Free(handle);
+        handle = {};
+    }
     if (uav.ptr) runtime->view_descriptors.Free(uav);
     if (rtv.ptr) runtime->rtv_descriptors.Free(rtv);
     if (dsv.ptr) runtime->dsv_descriptors.Free(dsv);
     runtime = nullptr;
 }
 ImageView::ImageView(ImageView&& other) noexcept : VideoCommon::ImageViewBase{std::move(other)}, runtime{std::exchange(other.runtime, nullptr)},
-    slot_images{other.slot_images}, image{other.image}, srv{other.srv}, uav{other.uav}, rtv{other.rtv}, dsv{other.dsv}, buffer_size{other.buffer_size} {}
+    slot_images{other.slot_images}, image{other.image}, srv_params{other.srv_params}, natural_type{other.natural_type},
+    srvs{std::exchange(other.srvs, {})}, uav{other.uav}, rtv{other.rtv}, dsv{other.dsv}, buffer_size{other.buffer_size} {}
 ImageView& ImageView::operator=(ImageView&& other) noexcept {
     if (this != &other) { Release(); static_cast<VideoCommon::ImageViewBase&>(*this) = std::move(other);
         runtime = std::exchange(other.runtime, nullptr); slot_images = other.slot_images; image = other.image;
-        srv = other.srv; uav = other.uav; rtv = other.rtv; dsv = other.dsv; buffer_size = other.buffer_size; }
+        srv_params = other.srv_params; natural_type = other.natural_type; srvs = std::exchange(other.srvs, {});
+        uav = other.uav; rtv = other.rtv; dsv = other.dsv; buffer_size = other.buffer_size; }
     return *this;
 }
 bool ImageView::IsRescaled() const noexcept { return slot_images && (*slot_images)[image_id].IsRescaled(); }
 
-Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& config) : runtime{&runtime_} {
+Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& config)
+    : runtime{&runtime_}, key{next_sampler_key.fetch_add(1, std::memory_order_relaxed)} {
     handle = runtime->sampler_descriptors.Allocate();
     const bool linear_min = config.min_filter == Tegra::Texture::TextureFilter::Linear;
     const bool linear_mag = config.mag_filter == Tegra::Texture::TextureFilter::Linear;
@@ -823,21 +954,45 @@ Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& 
     runtime->device.Get()->CreateSampler(&desc, handle);
 }
 Sampler::~Sampler() { if (runtime && handle.ptr) runtime->sampler_descriptors.Free(handle); }
-Sampler::Sampler(Sampler&& other) noexcept : runtime{std::exchange(other.runtime, nullptr)}, handle{other.handle} {}
+Sampler::Sampler(Sampler&& other) noexcept : runtime{std::exchange(other.runtime, nullptr)}, handle{other.handle}, key{other.key} {}
 Sampler& Sampler::operator=(Sampler&& other) noexcept {
     if (this != &other) { if (runtime && handle.ptr) runtime->sampler_descriptors.Free(handle);
-        runtime = std::exchange(other.runtime, nullptr); handle = other.handle; } return *this;
+        runtime = std::exchange(other.runtime, nullptr); handle = other.handle; key = other.key; } return *this;
 }
 
-Framebuffer::Framebuffer(TextureCacheRuntime&, std::span<ImageView*, NUM_RT> color_buffers,
+Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM_RT> color_buffers,
                          ImageView* depth_buffer, const VideoCommon::RenderTargets& key)
     : extent{key.size}, is_rescaled{key.is_rescaled} {
+    // Slot i is guest render target i, as in the Vulkan render pass and the pipeline's RTVFormats
+    // (fragment output i writes render target i; rt_control's mapping is not applied).
+    colors.fill(runtime.NullRenderTarget());
     for (size_t index = 0; index < color_buffers.size(); ++index) {
-        if (!color_buffers[index]) continue;
-        colors[key.draw_buffers[index]] = color_buffers[index]->RenderTarget();
-        num_colors = std::max(num_colors, static_cast<u32>(key.draw_buffers[index]) + 1);
+        ImageView* const view = color_buffers[index];
+        if (!view || !view->RenderTarget().ptr) continue;
+        colors[index] = view->RenderTarget();
+        color_images[index] = view->image_id;
+        images = view->slot_images ? view->slot_images : images;
+        num_colors = static_cast<u32>(index) + 1;
     }
-    if (depth_buffer) depth = depth_buffer->DepthStencil();
+    if (depth_buffer && depth_buffer->DepthStencil().ptr) {
+        depth = depth_buffer->DepthStencil();
+        depth_image = depth_buffer->image_id;
+        images = depth_buffer->slot_images ? depth_buffer->slot_images : images;
+        has_stencil = VideoCore::Surface::GetFormatType(depth_buffer->format) ==
+                      SurfaceType::DepthStencil;
+    }
+}
+
+void Framebuffer::PrepareAttachments() const {
+    if (!images) return;
+    for (size_t index = 0; index < num_colors; ++index) {
+        if (color_images[index] != ImageId{}) {
+            (*images)[color_images[index]].Transition(D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
+    }
+    if (depth_image != ImageId{}) {
+        (*images)[depth_image].Transition(D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    }
 }
 
 void TextureCacheRuntime::RunSelfTest() {
