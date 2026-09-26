@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 
 #include <d3d12.h>
@@ -58,6 +59,10 @@ public:
     /// Called once per frame; cheap when the layer is off.
     void LogDebugMessages();
 
+    /// Logs what is known about a device removal, once: the removal reason, the debug layer's
+    /// pending messages and, with renderer_debug, DRED's breadcrumbs and page fault.
+    void ReportDeviceRemoved();
+
 private:
     void LogCapabilities() const;
 
@@ -67,6 +72,7 @@ private:
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12InfoQueue> info_queue; ///< debug layer only
     u32 debug_messages_logged{};
+    std::atomic_flag removal_reported;
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12Fence> fence;
     HANDLE fence_event{};

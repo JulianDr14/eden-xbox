@@ -80,6 +80,9 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
 
     GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
     if (!pipeline) {
+        if (trace_draws) {
+            TraceDraw("draw skipped (no pipeline)", nullptr, nullptr, {}, 0, 0);
+        }
         return;
     }
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
@@ -87,11 +90,18 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     MarkVertexBuffersDirty();
 
     PipelineBindings bindings;
+    std::vector<VideoCommon::ImageViewId> traced_views;
+    if (trace_draws) {
+        bindings.trace_views = &traced_views;
+    }
     pipeline->Configure(is_indexed,
                         {*maxwell3d, *gpu_memory, buffer_cache, texture_cache, descriptor_queue,
                          sampler_heap},
                         bindings);
     if (!pipeline->Handle()) {
+        if (trace_draws) {
+            TraceDraw("draw skipped (PSO rejected)", pipeline, nullptr, traced_views, 0, 0);
+        }
         return; // D3D12 rejected the PSO (logged when it was built)
     }
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
@@ -122,9 +132,17 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     }
     if (params.num_vertices == 0 || params.num_instances == 0) {
         buffer_runtime.ApplyGeometry(scheduler.CommandList());
+        if (trace_draws) {
+            TraceDraw("draw skipped (empty)", pipeline, framebuffer, traced_views,
+                      params.num_vertices, params.num_instances);
+        }
         return;
     }
     RecordDraw(*pipeline, bindings, *framebuffer, params, draw_state.topology);
+    if (trace_draws) {
+        TraceDraw(params.is_indexed ? "draw indexed" : "draw", pipeline, framebuffer,
+                  traced_views, params.num_vertices, params.num_instances);
+    }
     if (!logged_first_draw) {
         LOG_INFO(Render,
                  "D3D12: first guest draw recorded ({} {} vertices, {} instances, {} RTs{})",
@@ -501,6 +519,11 @@ void RasterizerD3D12::DrawTexture() {
         {static_cast<s32>(state.src_x0), static_cast<s32>(state.src_y0)},
         {static_cast<s32>(state.src_x1), static_cast<s32>(state.src_y1)}};
     framebuffer->PrepareAttachments();
+    if (trace_draws) {
+        TraceDraw(fmt::format("draw texture from {} {}x{}", texture.format, texture.size.width,
+                              texture.size.height),
+                  nullptr, framebuffer, {}, 4, 1);
+    }
     texture.TransitionImage(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     blit_helper.BlitColor(
@@ -539,6 +562,16 @@ void RasterizerD3D12::Clear(u32 layer_count) {
         rect.top = std::max(rect.top, scissor.top);
         rect.right = std::min(rect.right, scissor.right);
         rect.bottom = std::min(rect.bottom, scissor.bottom);
+    }
+    if (trace_draws) {
+        TraceDraw(fmt::format("clear rt{} mask {}{}{}{} depth {} stencil {} rect {},{}-{},{} "
+                              "color {:.3f},{:.3f},{:.3f},{:.3f}",
+                              regs.clear_surface.RT.Value(), regs.clear_surface.R.Value(),
+                              regs.clear_surface.G.Value(), regs.clear_surface.B.Value(),
+                              regs.clear_surface.A.Value(), use_depth, use_stencil, rect.left,
+                              rect.top, rect.right, rect.bottom, regs.clear_color[0],
+                              regs.clear_color[1], regs.clear_color[2], regs.clear_color[3]),
+                  nullptr, framebuffer, {}, 0, 0);
     }
     if (rect.right <= rect.left || rect.bottom <= rect.top) {
         return;
@@ -876,7 +909,62 @@ bool RasterizerD3D12::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surfa
                                             const Tegra::Engines::Fermi2D::Surface& dst,
                                             const Tegra::Engines::Fermi2D::Config& config) {
     std::scoped_lock lock{texture_cache.mutex};
-    return texture_cache.BlitImage(dst, src, config);
+    const bool blitted = texture_cache.BlitImage(dst, src, config);
+    if (trace_draws) {
+        TraceDraw(fmt::format("2D blit {:x} ({}x{}) -> {:x} ({}x{}) {}", src.Address(), src.width,
+                              src.height, dst.Address(), dst.width, dst.height,
+                              blitted ? "accelerated" : "left to the CPU"),
+                  nullptr, nullptr, {}, 0, 0);
+    }
+    return blitted;
+}
+
+void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* pipeline,
+                                const Framebuffer* framebuffer,
+                                std::span<const VideoCommon::ImageViewId> views, u32 vertices,
+                                u32 instances) {
+    const auto describe = [](const Image* image) {
+        if (!image) {
+            return std::string("none");
+        }
+        const auto& info = image->info;
+        return fmt::format("{} {}x{}x{} L{} @{:x} flags {:x}", info.format, info.size.width,
+                           info.size.height,
+                           info.type == VideoCommon::ImageType::e3D ? info.size.depth
+                                                                     : info.resources.layers,
+                           info.resources.levels, image->gpu_addr,
+                           static_cast<u32>(image->flags));
+    };
+    std::string line = fmt::format("D3D12 trace #{}: {}", trace_index++, what);
+    if (vertices != 0 || instances != 0) {
+        line += fmt::format(" ({} vertices x{})", vertices, instances);
+    }
+    if (pipeline) {
+        const GraphicsPipelineCacheKey& key = pipeline->Key();
+        line += fmt::format(" | VS {:016x} PS {:016x} blend0 {:08x}", key.unique_hashes[1],
+                            key.unique_hashes[5], key.state.attachments[0].raw);
+    }
+    if (framebuffer) {
+        const VideoCommon::Extent2D extent = framebuffer->Extent();
+        line += fmt::format(" | fb {}x{}", extent.width, extent.height);
+        for (size_t index = 0; index < VideoCommon::NUM_RT; ++index) {
+            if (const Image* const image = framebuffer->ColorImage(index)) {
+                line += fmt::format(" rt{} [{}]", index, describe(image));
+            }
+        }
+        if (const u32 missing = framebuffer->MissingColorMask()) {
+            line += fmt::format(" MISSING RTV mask {:x}", missing);
+        }
+        if (const Image* const image = framebuffer->DepthImage()) {
+            line += fmt::format(" ds [{}]", describe(image));
+        }
+    }
+    for (const VideoCommon::ImageViewId id : views) {
+        const ImageView& view = texture_cache.GetImageView(id);
+        line += fmt::format(" | tex {} {}x{} of [{}]", view.format, view.size.width,
+                            view.size.height, describe(view.SourceImage()));
+    }
+    LOG_INFO(Render, "{}", line);
 }
 Tegra::Engines::AccelerateDMAInterface& RasterizerD3D12::AccessAccelerateDMA() { return accelerate_dma; }
 void RasterizerD3D12::AccelerateInlineToMemory(GPUVAddr address, size_t size,

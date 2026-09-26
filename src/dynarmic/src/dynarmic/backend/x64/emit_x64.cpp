@@ -360,23 +360,29 @@ EmitX64::BlockDescriptor EmitX64::RegisterBlock(const IR::LocationDescriptor& de
 void EmitX64::Patch(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
     const CodePtr save_code_ptr = code.getCurr();
     const PatchInformation& patch_info = patch_information[target_desc];
+    // Patch sites are in blocks already emitted, so behind the write window (paged W^X).
+    constexpr size_t MAX_PATCH_SIZE = 32;
 
     for (CodePtr location : patch_info.jg) {
+        code.MakeWritable(location, MAX_PATCH_SIZE);
         code.SetCodePtr(location);
         EmitPatchJg(target_desc, target_code_ptr);
     }
 
     for (CodePtr location : patch_info.jz) {
+        code.MakeWritable(location, MAX_PATCH_SIZE);
         code.SetCodePtr(location);
         EmitPatchJz(target_desc, target_code_ptr);
     }
 
     for (CodePtr location : patch_info.jmp) {
+        code.MakeWritable(location, MAX_PATCH_SIZE);
         code.SetCodePtr(location);
         EmitPatchJmp(target_desc, target_code_ptr);
     }
 
     for (CodePtr location : patch_info.mov_rcx) {
+        code.MakeWritable(location, MAX_PATCH_SIZE);
         code.SetCodePtr(location);
         EmitPatchMovRcx(target_code_ptr);
     }

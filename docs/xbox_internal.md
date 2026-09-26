@@ -87,6 +87,34 @@ Qué buscar en esos archivos:
   `blit pipeline built`.
 - Si el shader path falla, el log dice `presenting through the CPU` junto con el motivo.
 
+### Probar un juego (volcados propios del usuario)
+Las keys, el firmware y los juegos son del usuario y **nunca** van al repo ni a un appx publicado. En
+el PC viven fuera del repo, en `..\eden-data\` (`keys\`, `firmware\` con los `.nca` y `games\`).
+
+- **Empaquetar:**
+  `tools\xbox\package-appx.ps1 -Keys ..\eden-data\keys -Firmware ..\eden-data\firmware -Game ..\eden-data\games\wonder.nsp -RunSeconds 180`
+  - Van a `layout\userdata\` y el `boot.cfg` recibe `game=wonder.nsp`.
+  - Con juego, el appx se empaqueta sin comprimir (`/nc`): un volcado cifrado no se comprime, y
+    comprimirlo tarda minutos.
+- **En el primer arranque** la app copia `userdata` a `LocalState`, siempre que falte el archivo o
+  cambie su tamaño (`SeedUserData`, con una línea `seed ...` en el diag):
+  - las keys van a `eden\keys`;
+  - el firmware va a `eden\nand\system\Contents\registered`;
+  - los juegos van a `games`.
+- **Con el juego ya copiado** (`LocalState` sobrevive a las actualizaciones), basta con
+  `-Game wonder.nsp`. Si no existe el archivo, solo se escribe el nombre en `boot.cfg`. Así el appx
+  vuelve a pesar unos MB.
+- **En el PC:** lo mismo con `local-run.ps1 -Keys/-Firmware/-Game`. Para pasar `-BootCfg` hay que
+  llamarlo con `&`, porque con `-File` el array llega como un solo texto.
+- **Tiempo:** un juego no emite centinelas. Sin `-RunSeconds` corre 120 s.
+- **Opciones de diagnóstico** (`-BootCfg @("...")`):
+  - `log_filter=*:Debug` para el detalle del log;
+  - `renderer=null` para saber si un bloqueo es de GPU o de CPU.
+- **Para ver el progreso:** en `eden\log` quedan `frame.bmp` y un `frame_<n>.bmp` cada ~10 s.
+- **Si el proceso muere sin línea `CRASH`:**
+  - buscar `C++ throw` en el diag;
+  - con `-DebugLayer`, buscar `device removed` y `DRED` en el log.
+
 ---
 
 ## 3. Fases
@@ -284,3 +312,7 @@ vez:
 - `BSD: Network isn't initialized` y `Unknown engine name: camera/joycon/tas/...`: el frontend
   headless no tiene esos backends.
 - Al salir de la app en la consola aparece `0x80010012`: es el desmontaje de COM y no importa.
+- Con un juego:
+  - `playtime.bin` no existe la primera vez.
+  - `ResolveCallerProgramId: Could not resolve caller process_id=0` también sale en escritorio.
+  - `Pin count imbalance` sale al cerrar.

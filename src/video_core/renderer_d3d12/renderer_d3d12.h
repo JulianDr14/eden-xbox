@@ -83,7 +83,7 @@ private:
     StagingBufferRef RecordFrameReadback(ID3D12Resource* image);
     /// Waits for the copy and writes it as frame.bmp next to the log: the one way to see what
     /// the console presented without a capture card.
-    void WriteFrameDump(StagingBufferRef& readback);
+    void WriteFrameDump(StagingBufferRef& readback, u32 dump_index);
 
     Tegra::MaxwellDeviceMemoryManager& device_memory;
     Tegra::GPU& gpu;

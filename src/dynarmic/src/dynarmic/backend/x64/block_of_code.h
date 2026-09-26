@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <type_traits>
+#include <vector>
 
 #include "common/common_types.h"
 #include "common/x64/xbyak.h"
@@ -49,6 +50,9 @@ public:
     void EnableWriting();
     /// Change permissions to RX. This is required to support systems with W^X enforced.
     void DisableWriting();
+    /// Between EnableWriting and DisableWriting: makes [where, where + size) writable too, for writes
+    /// behind the current code pointer (block linking patches). No-op without paged W^X.
+    void MakeWritable(CodePtr where, size_t size);
 
     /// Clears this block of code and resets code pointer to beginning.
     void ClearCache();
@@ -182,6 +186,16 @@ private:
     CodePtr code_begin = nullptr;
 #ifdef _WIN32
     size_t committed_size = 0;
+#endif
+#if defined(_WIN32) && defined(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT)
+    // Paged W^X (see EnableWriting). Pages in [wx_exec_begin, wx_exec_end) hold emitted code and
+    // are RX unless being written; committed pages past wx_exec_end are always RW. The constant
+    // pool sits below wx_exec_begin and stays RW: it is only ever read as data.
+    const u8* wx_exec_begin = nullptr;
+    const u8* wx_exec_end = nullptr;
+    const u8* wx_write_begin = nullptr;
+    std::vector<const u8*> wx_extra_pages;
+    bool wx_writing = false;
 #endif
     bool prelude_complete = false;
 

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <stdexcept>
 #include <string_view>
@@ -53,6 +54,14 @@ Device::Device() {
             debug->EnableDebugLayer();
         } else {
             LOG_WARNING(Render, "D3D12: debug layer requested but not installed");
+        }
+        // DRED (part of the runtime, not the SDK layers): on a device removal, the last GPU
+        // operations of each command list and the faulting address (ReportDeviceRemoved).
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
+            dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            LOG_INFO(Render, "D3D12: DRED breadcrumbs and page faults on");
         }
     }
     // Feature level 11.0 is all Xbox Series UWP offers; desktop GPUs accept it too.
@@ -142,6 +151,102 @@ void Device::LogDebugMessages() {
         }
     }
     info_queue->ClearStoredMessages();
+}
+
+namespace {
+
+const char* BreadcrumbOpName(D3D12_AUTO_BREADCRUMB_OP op) {
+    switch (op) {
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED:
+        return "DrawInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED:
+        return "DrawIndexedInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT:
+        return "ExecuteIndirect";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCH:
+        return "Dispatch";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION:
+        return "CopyBufferRegion";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION:
+        return "CopyTextureRegion";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYRESOURCE:
+        return "CopyResource";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCE:
+        return "ResolveSubresource";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW:
+        return "ClearRenderTargetView";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW:
+        return "ClearUnorderedAccessView";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARDEPTHSTENCILVIEW:
+        return "ClearDepthStencilView";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOURCEBARRIER:
+        return "ResourceBarrier";
+    case D3D12_AUTO_BREADCRUMB_OP_PRESENT:
+        return "Present";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOLVEQUERYDATA:
+        return "ResolveQueryData";
+    case D3D12_AUTO_BREADCRUMB_OP_BEGINSUBMISSION:
+        return "BeginSubmission";
+    case D3D12_AUTO_BREADCRUMB_OP_ENDSUBMISSION:
+        return "EndSubmission";
+    default:
+        return nullptr;
+    }
+}
+
+} // Anonymous namespace
+
+void Device::ReportDeviceRemoved() {
+    if (removal_reported.test_and_set()) {
+        return;
+    }
+    LOG_CRITICAL(Render, "D3D12: device removed, reason 0x{:08X}",
+                 static_cast<u32>(device->GetDeviceRemovedReason()));
+    LogDebugMessages();
+
+    ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+    if (FAILED(device.As(&dred))) {
+        LOG_CRITICAL(Render, "D3D12: no DRED data (enable renderer_debug to record it)");
+        return;
+    }
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs{};
+    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs))) {
+        for (const D3D12_AUTO_BREADCRUMB_NODE* node = breadcrumbs.pHeadAutoBreadcrumbNode;
+             node != nullptr; node = node->pNext) {
+            const u32 completed = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+            if (completed >= node->BreadcrumbCount) {
+                continue; // this list finished on the GPU
+            }
+            // The operations around the first one that did not complete.
+            std::string ops;
+            const u32 first = completed > 6 ? completed - 6 : 0;
+            const u32 last = std::min(node->BreadcrumbCount, completed + 4);
+            for (u32 i = first; i < last; ++i) {
+                const D3D12_AUTO_BREADCRUMB_OP op = node->pCommandHistory[i];
+                const char* name = BreadcrumbOpName(op);
+                ops += fmt::format("{}{}{}", i == completed ? " >>" : " ",
+                                   name ? name : "op", name ? "" : std::to_string(op));
+            }
+            LOG_CRITICAL(Render, "D3D12 DRED: list with {} ops stopped after {}:{}",
+                         node->BreadcrumbCount, completed, ops);
+        }
+    }
+    D3D12_DRED_PAGE_FAULT_OUTPUT page_fault{};
+    if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&page_fault)) && page_fault.PageFaultVA != 0) {
+        LOG_CRITICAL(Render, "D3D12 DRED: page fault at GPU VA 0x{:X}", page_fault.PageFaultVA);
+        u32 listed = 0;
+        for (const D3D12_DRED_ALLOCATION_NODE* node = page_fault.pHeadRecentFreedAllocationNode;
+             node != nullptr && listed < 8; node = node->pNext, ++listed) {
+            LOG_CRITICAL(Render, "D3D12 DRED: recently freed allocation there: type {}",
+                         static_cast<u32>(node->AllocationType));
+        }
+        listed = 0;
+        for (const D3D12_DRED_ALLOCATION_NODE* node = page_fault.pHeadExistingAllocationNode;
+             node != nullptr && listed < 8; node = node->pNext, ++listed) {
+            LOG_CRITICAL(Render, "D3D12 DRED: live allocation there: type {}",
+                         static_cast<u32>(node->AllocationType));
+        }
+    }
 }
 
 Device::~Device() {

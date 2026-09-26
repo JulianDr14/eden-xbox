@@ -75,15 +75,27 @@ static void ApplyHeadlessBootSettings(const BootSurface& surface) {
 
 /// Optional boot.cfg next to boot.nro (written by package-appx.ps1 -RunSeconds).
 struct BootConfig {
-    /// > 0: the payload does not emit the sentinels (deko3d examples, ...); run it this long.
+    /// > 0: the payload does not emit the sentinels (deko3d examples, games, ...); run it this long.
     u32 run_seconds{};
     /// D3D12 debug layer (renderer_debug); PC only, the console has no SDK layers.
     bool debug_layer{};
+    /// File name of a game in LocalState\games to boot instead of boot.nro (package-appx.ps1 -Game).
+    std::string game;
+    /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
+    std::string log_filter;
+    /// Null renderer even with a window, to tell GPU hangs from CPU ones.
+    bool null_renderer{};
 };
+
+/// Games never emit the sentinels; without an explicit time they run this long.
+constexpr u32 DEFAULT_GAME_RUN_SECONDS = 120;
 
 // Returns a process exit-style status. 0 == boot reached the run phase cleanly.
 int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     const BootConfig& config) {
+    if (!config.log_filter.empty()) {
+        Settings::values.log_filter = config.log_filter;
+    }
     Common::Log::Initialize();
     // As yuzu_cmd: the default 15.6 ms timer resolution makes the emulated vsync (and any sleep in
     // the core) tick every 15.6 ms and drop one frame in ten, visible as a stutter.
@@ -91,12 +103,12 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     WriteDiag("step: timer resolution " +
               std::to_string(std::chrono::duration<double, std::milli>(timer_resolution).count()) +
               " ms");
-    ApplyHeadlessBootSettings(surface);
+    ApplyHeadlessBootSettings(config.null_renderer ? BootSurface{} : surface);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
         WriteDiag("step: D3D12 debug layer requested");
     }
-    WriteDiag(surface.core_window != nullptr
+    WriteDiag(surface.core_window != nullptr && !config.null_renderer
                   ? "step: logging up, renderer Direct3D12 on a " + std::to_string(surface.width) +
                         "x" + std::to_string(surface.height) + " CoreWindow"
                   : std::string("step: logging up, renderer Null"));
@@ -110,19 +122,33 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
 
     HeadlessEmuWindow emu_window{surface.core_window, surface.width, surface.height};
 
-    // Filesystem + content plumbing, exactly as yuzu_cmd does it.
+    // Filesystem + content plumbing, as yuzu_cmd does it, plus the manual content provider the Qt
+    // and Android frontends fill from their game lists: a game dump loaded straight from its file
+    // is only found through it, and without it the game has no control data (NACP), so no save
+    // data sizes, and aborts.
+    FileSys::ManualContentProvider manual_provider;
     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,
+                                   &manual_provider);
     system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
     system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
     system.GetUserChannel().clear();
+    if (const auto file = system.GetFilesystem()->OpenFile(nro_path, FileSys::OpenMode::Read);
+        file != nullptr && manual_provider.AddEntriesFromContainer(file)) {
+        WriteDiag("step: game contents registered");
+    }
     WriteDiag("step: filesystem factories created");
 
-    Service::AM::FrontendAppletParameters load_parameters{};
+    // As yuzu_cmd. Without the Application applet id, AM never sends the focus messages and a game
+    // waits for them forever after its first ReceiveMessage (homebrew does not wait).
+    Service::AM::FrontendAppletParameters load_parameters{
+        .applet_id = Service::AM::AppletId::Application,
+    };
     const Core::SystemResultStatus load_result = system.Load(emu_window, nro_path, load_parameters);
     WriteDiag("step: system.Load() returned status " +
               std::to_string(static_cast<int>(load_result)) + " | " + MemoryReport());
     if (load_result != Core::SystemResultStatus::Success) {
-        LOG_CRITICAL(Frontend, "Headless boot: failed to load NRO {} (status {})", nro_path,
+        LOG_CRITICAL(Frontend, "Headless boot: failed to load {} (status {})", nro_path,
                      static_cast<int>(load_result));
         return 2;
     }
@@ -229,6 +255,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <thread>
@@ -440,10 +467,52 @@ void DescribeAddress(std::uintptr_t addr, char* out, std::size_t out_size) {
                       reinterpret_cast<std::uintptr_t>(mbi.AllocationBase)));
 }
 
+// C++ throws are not failures by themselves, but one that escapes a thread other than the boot
+// worker ends the process through a per-thread terminate handler nobody installed: no CRASH line,
+// just a WER event. Name them (type and what()) so the log says what was thrown.
+std::atomic<int> g_cxx_throw_lines{0};
+constexpr int MAX_CXX_THROW_LINES = 16;
+
+void LogCxxThrow(const EXCEPTION_RECORD* rec) {
+    // MSVC x64 throw: [1] = thrown object, [2] = ThrowInfo, [3] = image base of the RVAs.
+    if (rec->NumberParameters < 4 ||
+        g_cxx_throw_lines.fetch_add(1, std::memory_order_relaxed) >= MAX_CXX_THROW_LINES) {
+        return;
+    }
+    const auto object = static_cast<std::uintptr_t>(rec->ExceptionInformation[1]);
+    const auto* throw_info = reinterpret_cast<const s32*>(rec->ExceptionInformation[2]);
+    const auto image = static_cast<std::uintptr_t>(rec->ExceptionInformation[3]);
+    if (throw_info == nullptr || image == 0) {
+        return;
+    }
+    // ThrowInfo { attributes, pmfnUnwind, pForwardCompat, pCatchableTypeArray }
+    const auto* types = reinterpret_cast<const s32*>(image + throw_info[3]);
+    const char* first_name = "?";
+    const char* what = "";
+    for (s32 i = 0; i < types[0]; ++i) {
+        // CatchableType { properties, pType, mdisp, pdisp, vdisp, sizeOrOffset, copyFunction }
+        const auto* type = reinterpret_cast<const s32*>(image + types[1 + i]);
+        // TypeDescriptor { pVFTable, spare, name[] }
+        const char* name = reinterpret_cast<const char*>(image + type[1] + 2 * sizeof(void*));
+        if (i == 0) {
+            first_name = name;
+        }
+        if (std::string_view{name} == ".?AVexception@std@@" && object != 0) {
+            what = reinterpret_cast<const std::exception*>(object + type[2])->what();
+        }
+    }
+    char line[512];
+    std::snprintf(line, sizeof(line), "[eden-uwp] [+%llums] C++ throw %s: %s | thread %lu\n",
+                  ElapsedMs(), first_name, what, GetCurrentThreadId());
+    WriteDiagRaw(line, /*debugger_channel=*/false);
+}
+
 LONG NTAPI FirstChanceLogger(EXCEPTION_POINTERS* ep) {
     const EXCEPTION_RECORD* rec = ep->ExceptionRecord;
     switch (rec->ExceptionCode) {
-    case 0xE06D7363: // C++ throw: the frontend's catch blocks report these
+    case 0xE06D7363: // C++ throw
+        LogCxxThrow(rec);
+        return EXCEPTION_CONTINUE_SEARCH;
     case 0x406D1388: // SetThreadDescription-by-exception (thread naming)
     case 0x40010006: // DBG_PRINTEXCEPTION_C (OutputDebugStringA)
     case 0x4001000A: // DBG_PRINTEXCEPTION_WIDE_C (OutputDebugStringW)
@@ -519,6 +588,61 @@ void InstallCrashHandlers() {
     std::set_terminate(OnTerminate);
 }
 
+// ---- User data seeding ------------------------------------------------------------------------
+// The user's own keys, firmware and game dumps reach the console inside a local-only package
+// (package-appx.ps1 -Keys/-Firmware/-Game, never the repo), under InstalledLocation\userdata. Eden
+// reads keys and firmware from its writable user dir, so they are copied into LocalState once;
+// LocalState survives package updates, so later packages can leave them out.
+//   userdata\keys\*      -> LocalState\eden\keys
+//   userdata\firmware\*  -> LocalState\eden\nand\system\Contents\registered
+//   userdata\games\*     -> LocalState\games
+// A file is copied when it is missing or its size differs.
+void SeedDirectory(const std::filesystem::path& from, const std::filesystem::path& to,
+                   const char* what) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(from, ec)) {
+        return;
+    }
+    fs::create_directories(to, ec);
+    u32 copied = 0;
+    u32 kept = 0;
+    u64 bytes = 0;
+    const ULONGLONG start = GetTickCount64();
+    for (const fs::directory_entry& entry : fs::directory_iterator(from, ec)) {
+        if (!entry.is_regular_file(ec)) {
+            continue;
+        }
+        const fs::path target = to / entry.path().filename();
+        const u64 size = entry.file_size(ec);
+        std::error_code size_ec;
+        if (fs::exists(target, size_ec) && fs::file_size(target, size_ec) == size && !size_ec) {
+            ++kept;
+            continue;
+        }
+        std::error_code copy_ec;
+        fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing, copy_ec);
+        if (copy_ec) {
+            WriteDiag(std::string("seed ") + what + ": FAILED copying " +
+                      entry.path().filename().string() + ": " + copy_ec.message());
+            continue;
+        }
+        ++copied;
+        bytes += size;
+    }
+    WriteDiag(std::string("seed ") + what + ": " + std::to_string(copied) + " copied (" +
+              std::to_string(bytes >> 20) + " MiB in " + std::to_string(GetTickCount64() - start) +
+              " ms), " + std::to_string(kept) + " already there");
+}
+
+void SeedUserData(const std::filesystem::path& install, const std::filesystem::path& local) {
+    const std::filesystem::path userdata = install / "userdata";
+    SeedDirectory(userdata / "keys", local / "eden" / "keys", "keys");
+    SeedDirectory(userdata / "firmware", local / "eden" / "nand" / "system" / "Contents" / "registered",
+                  "firmware");
+    SeedDirectory(userdata / "games", local / "games", "games");
+}
+
 struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
     IFrameworkView CreateView() {
         return *this;
@@ -580,7 +704,28 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "debug_layer=1") {
                         config.debug_layer = true;
                         WriteDiag("boot.cfg: D3D12 debug layer");
+                    } else if (line.starts_with("log_filter=")) {
+                        config.log_filter = line.substr(11);
+                        WriteDiag("boot.cfg: log filter " + config.log_filter);
+                    } else if (line == "renderer=null") {
+                        config.null_renderer = true;
+                        WriteDiag("boot.cfg: Null renderer");
+                    } else if (line.starts_with("game=")) {
+                        config.game = line.substr(5);
+                        WriteDiag("boot.cfg: game " + config.game);
                     }
+                }
+                const std::string local_path = winrt::to_string(
+                    Windows::Storage::ApplicationData::Current().LocalFolder().Path());
+                SeedUserData(std::filesystem::path{winrt::to_hstring(install_path).c_str()},
+                             std::filesystem::path{winrt::to_hstring(local_path).c_str()});
+                if (!config.game.empty()) {
+                    nro_path = local_path + "\\games\\" + config.game;
+                    if (config.run_seconds == 0) {
+                        config.run_seconds = EdenXbox::DEFAULT_GAME_RUN_SECONDS;
+                    }
+                    WriteDiag("resolved game path: " + nro_path + ", running " +
+                              std::to_string(config.run_seconds) + " s");
                 }
             } catch (...) {
                 WriteDiag("FAILED resolving Package.InstalledLocation");

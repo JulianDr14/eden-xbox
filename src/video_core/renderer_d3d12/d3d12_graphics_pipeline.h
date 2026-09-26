@@ -92,6 +92,8 @@ struct PipelineBindings {
     D3D12_GPU_DESCRIPTOR_HANDLE resource_table{};
     D3D12_GPU_DESCRIPTOR_HANDLE sampler_table{};
     std::array<u32, PUSH_CONSTANT_WORDS> push_constants{};
+    /// When set (draw trace), Configure appends the views of the sampled textures here.
+    std::vector<VideoCommon::ImageViewId>* trace_views{};
 };
 
 /// A guest graphics pipeline: signed DXIL of each stage, its root signature and the PSO, built on

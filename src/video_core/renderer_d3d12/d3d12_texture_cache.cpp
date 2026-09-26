@@ -253,6 +253,50 @@ bool logged_integer_blit = false;
 bool logged_blit_target = false;
 bool logged_stencil_blit = false;
 bool logged_no_blit_helper = false;
+bool logged_missing_rtv = false;
+
+/// Typed UAV stores every feature level 11.0 device supports ("Format support for Direct3D
+/// feature level 11.0 hardware").
+bool RequiredTypedUavStore(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R32G32B32A32_FLOAT: case DXGI_FORMAT_R32G32B32A32_UINT:
+    case DXGI_FORMAT_R32G32B32A32_SINT:
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: case DXGI_FORMAT_R16G16B16A16_UNORM:
+    case DXGI_FORMAT_R16G16B16A16_UINT: case DXGI_FORMAT_R16G16B16A16_SNORM:
+    case DXGI_FORMAT_R16G16B16A16_SINT:
+    case DXGI_FORMAT_R32G32_FLOAT: case DXGI_FORMAT_R32G32_UINT: case DXGI_FORMAT_R32G32_SINT:
+    case DXGI_FORMAT_R10G10B10A2_UNORM: case DXGI_FORMAT_R10G10B10A2_UINT:
+    case DXGI_FORMAT_R11G11B10_FLOAT:
+    case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UINT:
+    case DXGI_FORMAT_R8G8B8A8_SNORM: case DXGI_FORMAT_R8G8B8A8_SINT:
+    case DXGI_FORMAT_R16G16_FLOAT: case DXGI_FORMAT_R16G16_UNORM: case DXGI_FORMAT_R16G16_UINT:
+    case DXGI_FORMAT_R16G16_SNORM: case DXGI_FORMAT_R16G16_SINT:
+    case DXGI_FORMAT_R32_FLOAT: case DXGI_FORMAT_R32_UINT: case DXGI_FORMAT_R32_SINT:
+    case DXGI_FORMAT_R8G8_UNORM: case DXGI_FORMAT_R8G8_UINT: case DXGI_FORMAT_R8G8_SNORM:
+    case DXGI_FORMAT_R8G8_SINT:
+    case DXGI_FORMAT_R16_FLOAT: case DXGI_FORMAT_R16_UNORM: case DXGI_FORMAT_R16_UINT:
+    case DXGI_FORMAT_R16_SNORM: case DXGI_FORMAT_R16_SINT:
+    case DXGI_FORMAT_R8_UNORM: case DXGI_FORMAT_R8_UINT: case DXGI_FORMAT_R8_SNORM:
+    case DXGI_FORMAT_R8_SINT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// Render targets every feature level 11.0 device supports (same table): the typed UAV formats
+/// plus sRGB and BGR ones.
+bool RequiredRenderTarget(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B5G6R5_UNORM: case DXGI_FORMAT_B5G5R5A1_UNORM:
+    case DXGI_FORMAT_A8_UNORM:
+        return true;
+    default:
+        return RequiredTypedUavStore(format);
+    }
+}
 
 } // namespace
 
@@ -319,13 +363,40 @@ u64 TextureCacheRuntime::GetDeviceMemoryUsage() const {
 
 bool TextureCacheRuntime::SupportsView(DXGI_FORMAT format, D3D12_FORMAT_SUPPORT1 support1,
                                        D3D12_FORMAT_SUPPORT2 support2) const {
-    D3D12_FEATURE_DATA_FORMAT_SUPPORT support{.Format = format};
-    if (format == DXGI_FORMAT_UNKNOWN ||
-        FAILED(device.Get()->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support,
-                                                 sizeof(support)))) {
+    if (format == DXGI_FORMAT_UNKNOWN) {
         return false;
     }
-    return (support.Support1 & support1) == support1 && (support.Support2 & support2) == support2;
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support{.Format = format};
+    {
+        std::scoped_lock lock{format_support_mutex};
+        if (const auto it = format_support.find(format); it != format_support.end()) {
+            support = it->second;
+        } else {
+            const HRESULT hr = device.Get()->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                                                 &support, sizeof(support));
+            if (FAILED(hr)) {
+                support.Support1 = D3D12_FORMAT_SUPPORT1_NONE;
+                support.Support2 = D3D12_FORMAT_SUPPORT2_NONE;
+            }
+            LOG_INFO(Render, "D3D12: format {} support 0x{:08x} / 0x{:08x} (hr 0x{:08x})",
+                     static_cast<u32>(format), static_cast<u32>(support.Support1),
+                     static_cast<u32>(support.Support2), static_cast<u32>(hr));
+            format_support.emplace(format, support);
+        }
+    }
+    const bool reported = (support.Support1 & support1) == support1 &&
+                          (support.Support2 & support2) == support2;
+    // What feature level 11.0 guarantees counts even when the driver does not report it: the
+    // console answers "no typed UAV loads" for R8G8B8A8_UNORM, which D3D12 requires.
+    const bool wants_render_target = (support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) != 0;
+    const bool wants_uav_store = (support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
+    const D3D12_FORMAT_SUPPORT1 other1 = support1 & ~D3D12_FORMAT_SUPPORT1_RENDER_TARGET;
+    const D3D12_FORMAT_SUPPORT2 other2 = support2 & ~D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE;
+    const bool guaranteed = other1 == D3D12_FORMAT_SUPPORT1_NONE &&
+                            other2 == D3D12_FORMAT_SUPPORT2_NONE &&
+                            (!wants_render_target || RequiredRenderTarget(format)) &&
+                            (!wants_uav_store || RequiredTypedUavStore(format));
+    return reported || guaranteed;
 }
 
 Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_, GPUVAddr gpu_addr_,
@@ -442,6 +513,34 @@ Image::CopyLayout Image::Layout(const BufferImageCopy& copy) const {
     return layout;
 }
 
+void Image::LogConvertedUpload(const u8* data, const CopyLayout& layout,
+                               const BufferImageCopy& copy) const {
+    // The CPU-decoded (ASTC) uploads of the first frames: a hash of what the decoder produced and
+    // how much of it is transparent, comparable between the console and the PC.
+    static std::atomic<u32> logged{0};
+    constexpr u32 MAX_LOGGED = 48;
+    if (logged.fetch_add(1, std::memory_order_relaxed) >= MAX_LOGGED) {
+        return;
+    }
+    const u64 size = layout.tight_slice * layout.depth;
+    u32 hash = 2166136261U;
+    u64 transparent = 0;
+    const bool rgba8 = format.copy_format == PixelFormat::A8B8G8R8_UNORM;
+    for (u64 i = 0; i < size; ++i) {
+        hash = (hash ^ data[i]) * 16777619U;
+        if (rgba8 && i % 4 == 3 && data[i] == 0) {
+            ++transparent;
+        }
+    }
+    const u64 texels = rgba8 ? std::max<u64>(1, size / 4) : 1;
+    LOG_INFO(Render,
+             "D3D12: converted upload {} {}x{} level {} @{:x}: {} bytes, hash {:08x}, {}% "
+             "transparent",
+             info.format, copy.image_extent.width, copy.image_extent.height,
+             copy.image_subresource.base_level, gpu_addr, size, hash,
+             rgba8 ? transparent * 100 / texels : 0);
+}
+
 bool Image::CanTransfer() const {
     if (!resource) {
         return false;
@@ -480,6 +579,9 @@ void Image::UploadMemory(ID3D12Resource* buffer, size_t base_offset,
     for (const auto& copy : copies) {
         const CopyLayout layout = Layout(copy);
         const u32 layers = static_cast<u32>(std::max(1, copy.image_subresource.num_layers));
+        if (format.converted && source_base) {
+            LogConvertedUpload(source_base + base_offset + copy.buffer_offset, layout, copy);
+        }
         for (u32 layer = 0; layer < layers; ++layer) {
             const u64 source_offset = base_offset + copy.buffer_offset +
                                       static_cast<u64>(layer) * layout.depth * layout.tight_slice;
@@ -904,31 +1006,33 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
     using Shader::TextureType;
     const SrvParams& p = srv_params;
     // A type the resource cannot be viewed as (a 2D texture read as 3D, a cube from fewer than six
-    // layers) falls back to the view's own dimension: the shader reads garbage, not a bad view.
+    // layers) falls back to the view's own dimension, or to the resource's when that one does not
+    // fit either (a 2D view of a 3D texture, a cube view of a 2D texture with fewer than six
+    // layers): the shader reads garbage, not a bad view. Creating an SRV whose dimension the
+    // resource cannot have removes the device.
     const bool is_1d = p.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D;
     const bool is_3d = p.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-    bool compatible = true;
-    switch (texture_type) {
-    case TextureType::Color1D:
-    case TextureType::ColorArray1D:
-        compatible = !image || is_1d;
-        break;
-    case TextureType::Color3D:
-        compatible = !image || is_3d;
-        break;
-    case TextureType::ColorCube:
-    case TextureType::ColorArrayCube:
-        compatible = !image || (!is_1d && !is_3d && !p.is_msaa && p.resource_layers >= 6);
-        break;
-    case TextureType::Buffer:
-        compatible = false;
-        break;
-    default:
-        compatible = !image || (!is_1d && !is_3d);
-        break;
-    }
-    if (!compatible && texture_type != natural_type) {
-        return Handle(natural_type);
+    const auto is_compatible = [&](TextureType candidate) {
+        switch (candidate) {
+        case TextureType::Color1D:
+        case TextureType::ColorArray1D:
+            return !image || is_1d;
+        case TextureType::Color3D:
+            return !image || is_3d;
+        case TextureType::ColorCube:
+        case TextureType::ColorArrayCube:
+            return !image || (!is_1d && !is_3d && !p.is_msaa && p.resource_layers >= 6);
+        case TextureType::Buffer:
+            return false;
+        default:
+            return !image || (!is_1d && !is_3d);
+        }
+    };
+    if (!is_compatible(texture_type)) {
+        const TextureType resource_type = is_3d   ? TextureType::Color3D
+                                          : is_1d ? TextureType::ColorArray1D
+                                                  : TextureType::ColorArray2D;
+        return Handle(is_compatible(natural_type) ? natural_type : resource_type);
     }
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{.Format = p.format,
                                          .Shader4ComponentMapping = p.mapping};
@@ -1050,12 +1154,16 @@ Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& 
         linear_mip ? D3D12_FILTER_TYPE_LINEAR : D3D12_FILTER_TYPE_POINT,
         reduction);
     const auto border = config.BorderColor();
+    // D3D12 leaves MinLOD > MaxLOD and biases outside [-16, 15.99] undefined; drivers differ.
+    const bool no_mips = config.mipmap_filter == Tegra::Texture::TextureMipmapFilter::None;
+    const f32 min_lod = no_mips ? 0.0f : config.MinLod();
+    const f32 max_lod = no_mips ? 0.25f : std::max(config.MaxLod(), min_lod);
     D3D12_SAMPLER_DESC desc{.Filter = filter, .AddressU = AddressMode(config.wrap_u),
         .AddressV = AddressMode(config.wrap_v), .AddressW = AddressMode(config.wrap_p),
-        .MipLODBias = config.LodBias(), .MaxAnisotropy = static_cast<u32>(anisotropy),
+        .MipLODBias = std::clamp(config.LodBias(), D3D12_MIP_LOD_BIAS_MIN, D3D12_MIP_LOD_BIAS_MAX),
+        .MaxAnisotropy = static_cast<u32>(anisotropy),
         .ComparisonFunc = Compare(config.depth_compare_func), .BorderColor = {border[0], border[1], border[2], border[3]},
-        .MinLOD = config.mipmap_filter == Tegra::Texture::TextureMipmapFilter::None ? 0.0f : config.MinLod(),
-        .MaxLOD = config.mipmap_filter == Tegra::Texture::TextureMipmapFilter::None ? 0.25f : config.MaxLod()};
+        .MinLOD = min_lod, .MaxLOD = max_lod};
     runtime->device.Get()->CreateSampler(&desc, handle);
 }
 Sampler::~Sampler() { if (runtime && handle.ptr) runtime->sampler_descriptors.Free(handle); }
@@ -1073,7 +1181,13 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
     colors.fill(runtime.NullRenderTarget());
     for (size_t index = 0; index < color_buffers.size(); ++index) {
         ImageView* const view = color_buffers[index];
-        if (!view || !view->RenderTarget().ptr) continue;
+        if (!view) continue;
+        if (!view->RenderTarget().ptr) {
+            missing_colors |= 1U << index;
+            WarnOnce(logged_missing_rtv, "render target {} (format {}) has no RTV; draws to it "
+                     "are lost", index, view->format);
+            continue;
+        }
         colors[index] = view->RenderTarget();
         color_images[index] = view->image_id;
         color_formats[index] = runtime.Format(view->format).view;
@@ -1106,6 +1220,16 @@ void Framebuffer::PrepareAttachments() const {
     if (depth_image != ImageId{}) {
         (*images)[depth_image].Transition(D3D12_RESOURCE_STATE_DEPTH_WRITE);
     }
+}
+
+const Image* Framebuffer::ColorImage(size_t index) const noexcept {
+    if (!images || index >= NUM_RT || color_images[index] == ImageId{}) return nullptr;
+    return &(*images)[color_images[index]];
+}
+
+const Image* Framebuffer::DepthImage() const noexcept {
+    if (!images || depth_image == ImageId{}) return nullptr;
+    return &(*images)[depth_image];
 }
 
 void TextureCacheRuntime::RunSelfTest() {

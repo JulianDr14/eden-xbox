@@ -4,6 +4,8 @@
 #pragma once
 
 #include <optional>
+#include <span>
+#include <string_view>
 
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
@@ -110,6 +112,13 @@ public:
     std::optional<DisplayTexture> AccelerateDisplay(const Tegra::FramebufferConfig& config,
                                                     DAddr framebuffer_addr);
 
+    /// Logs every draw, clear and skipped draw until turned off: one frame of it, taken on two
+    /// machines, shows where their output starts to differ.
+    void SetDrawTrace(bool enabled) noexcept {
+        trace_draws = enabled;
+        trace_index = 0;
+    }
+
 private:
     struct DrawParams {
         u32 num_vertices;
@@ -147,6 +156,10 @@ private:
     void UpdateScissors(ID3D12GraphicsCommandList* cmd);
     [[nodiscard]] D3D12_RECT ScissorRect(size_t index) const;
     void QueryFallback(GPUVAddr, VideoCommon::QueryType, VideoCommon::QueryPropertiesFlags, u32);
+    /// One trace line (SetDrawTrace): what was recorded or why it was skipped.
+    void TraceDraw(std::string_view what, const GraphicsPipeline* pipeline,
+                   const Framebuffer* framebuffer, std::span<const VideoCommon::ImageViewId> views,
+                   u32 vertices, u32 instances);
 
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
@@ -174,6 +187,8 @@ private:
     bool logged_indirect_draw{};
     bool logged_cpu_indirect_draw{};
     bool logged_byte_count_draw{};
+    bool trace_draws{};
+    u32 trace_index{};
 };
 
 } // namespace D3D12

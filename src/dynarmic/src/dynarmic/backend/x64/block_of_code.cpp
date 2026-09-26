@@ -43,7 +43,9 @@ static void RaiseJitMemoryFailure(DWORD code, const void* base, size_t size, DWO
 #    include <sys/sysctl.h>
 #endif
 
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstring>
 
 #include "common/assert.h"
@@ -108,6 +110,18 @@ public:
 
 // This is threadsafe as Xbyak::Allocator does not contain any state; it is a pure interface.
 CustomXbyakAllocator s_allocator;
+#endif
+
+#if defined(_WIN32) && defined(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT)
+constexpr size_t WX_PAGE_SIZE = 4096;
+
+const u8* WxPageDown(const u8* ptr) {
+    return reinterpret_cast<const u8*>(reinterpret_cast<uintptr_t>(ptr) & ~(WX_PAGE_SIZE - 1));
+}
+
+const u8* WxPageUp(const u8* ptr) {
+    return WxPageDown(ptr + WX_PAGE_SIZE - 1);
+}
 #endif
 
 #ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
@@ -225,6 +239,11 @@ BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_cod
 {
     EnableWriting();
     EnsureMemoryCommitted(PRELUDE_COMMIT_SIZE);
+#if defined(_WIN32) && defined(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT)
+    // Code starts on a page of its own, so the constant pool pages below never need execute.
+    align(WX_PAGE_SIZE);
+    wx_exec_begin = getCurr<const u8*>();
+#endif
     GenRunCode(rcp);
 }
 
@@ -236,13 +255,32 @@ void BlockOfCode::PreludeComplete() {
     prelude_complete = true;
     code_begin = getCurr();
     ClearCache();
+#if defined(_WIN32) && defined(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT)
+    wx_exec_end = WxPageUp(static_cast<const u8*>(code_begin));
+    ProtectMemory(wx_exec_begin, wx_exec_end - wx_exec_begin, true);
+#else
     DisableWriting();
+#endif
 }
 
+// Paged W^X on Windows. Flipping the whole committed code region on every block, as the other
+// platforms do, costs two VirtualProtect calls over tens to hundreds of MiB per compiled block; on
+// the UWP build it took ~90% of a guest core while a game booted. Only the pages actually written
+// change instead: the page the next block starts in (shared with the end of the previous one),
+// patch sites via MakeWritable, and nothing else, since everything past the emitted code is still
+// RW. Each JIT instance has its own BlockOfCode, used from one thread, so a page is never RW while
+// code in it can run.
 void BlockOfCode::EnableWriting() {
 #ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
 #    ifdef _WIN32
-    ProtectMemory(getCode(), committed_size, false);
+    if (!prelude_complete || wx_writing) {
+        return; // before PreludeComplete everything committed is still RW
+    }
+    wx_writing = true;
+    wx_write_begin = std::max(WxPageDown(getCurr<const u8*>()), wx_exec_begin);
+    if (wx_write_begin < wx_exec_end) {
+        ProtectMemory(wx_write_begin, wx_exec_end - wx_write_begin, false);
+    }
 #    else
     ProtectMemory(getCode(), maxSize_, false);
 #    endif
@@ -252,16 +290,54 @@ void BlockOfCode::EnableWriting() {
 void BlockOfCode::DisableWriting() {
 #ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
 #    ifdef _WIN32
-    ProtectMemory(getCode(), committed_size, true);
+    if (!prelude_complete || !wx_writing) {
+        return;
+    }
+    wx_writing = false;
+    const u8* const write_end = WxPageUp(getCurr<const u8*>());
+    if (wx_write_begin < write_end) {
+        ProtectMemory(wx_write_begin, write_end - wx_write_begin, true);
+    }
+    wx_exec_end = std::max(wx_exec_end, write_end);
+    for (const u8* page : wx_extra_pages) {
+        ProtectMemory(page, WX_PAGE_SIZE, true);
+    }
+    wx_extra_pages.clear();
 #    else
     ProtectMemory(getCode(), maxSize_, true);
 #    endif
 #endif
 }
 
+void BlockOfCode::MakeWritable([[maybe_unused]] CodePtr where, [[maybe_unused]] size_t size) {
+#if defined(_WIN32) && defined(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT)
+    if (!prelude_complete || !wx_writing) {
+        return;
+    }
+    const u8* const begin = static_cast<const u8*>(where);
+    for (const u8* page = WxPageDown(begin); page < begin + size; page += WX_PAGE_SIZE) {
+        // Pages from the write window on are RW already.
+        if (page < wx_exec_begin || page >= wx_write_begin ||
+            std::find(wx_extra_pages.begin(), wx_extra_pages.end(), page) != wx_extra_pages.end()) {
+            continue;
+        }
+        ProtectMemory(page, WX_PAGE_SIZE, false);
+        wx_extra_pages.push_back(page);
+    }
+#endif
+}
+
 void BlockOfCode::ClearCache() {
     ASSERT(prelude_complete);
     SetCodePtr(code_begin);
+#if defined(_WIN32) && defined(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT)
+    // Code is emitted from code_begin again: hand the old blocks' pages back to the RW tail.
+    const u8* const tail = WxPageUp(static_cast<const u8*>(code_begin));
+    if (wx_exec_end != nullptr && tail < wx_exec_end) {
+        ProtectMemory(tail, wx_exec_end - tail, false);
+        wx_exec_end = tail;
+    }
+#endif
 }
 
 size_t BlockOfCode::SpaceRemaining() const {
@@ -275,13 +351,22 @@ size_t BlockOfCode::SpaceRemaining() const {
 void BlockOfCode::EnsureMemoryCommitted([[maybe_unused]] size_t codesize) {
 #ifdef _WIN32
     if (committed_size < size_ + codesize) {
+        [[maybe_unused]] const size_t old_committed_size = committed_size;
         committed_size = std::min<size_t>(maxSize_, committed_size + codesize);
 #    ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
-        // W^X: commit read-write only; ProtectMemory() flips pages to RX before execution.
-        void* const committed = DYNARMIC_VIRTUAL_ALLOC(top_, committed_size, MEM_COMMIT, PAGE_READWRITE);
+        // W^X: commit read-write only; ProtectMemory() flips pages to RX before execution. Only
+        // the pages not committed yet: committing again the ones holding emitted code would make
+        // them RW.
+        const u8* const commit_begin = WxPageUp(top_ + old_committed_size);
+        const u8* const commit_end = WxPageUp(top_ + committed_size);
+        void* const committed = commit_begin >= commit_end
+            ? top_
+            : DYNARMIC_VIRTUAL_ALLOC(const_cast<u8*>(commit_begin), commit_end - commit_begin,
+                                     MEM_COMMIT, PAGE_READWRITE);
 #        if defined(DYNARMIC_UWP_APPCONTAINER)
         if (committed == nullptr) {
-            RaiseJitMemoryFailure(DYNARMIC_UWP_COMMIT_FAILED, top_, committed_size, PAGE_READWRITE);
+            RaiseJitMemoryFailure(DYNARMIC_UWP_COMMIT_FAILED, commit_begin, commit_end - commit_begin,
+                                  PAGE_READWRITE);
         }
 #        else
         (void)committed;

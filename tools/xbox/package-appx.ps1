@@ -20,6 +20,18 @@ param(
     [int] $RunSeconds = 0,
     # Enables the D3D12 debug layer (PC only: needs the Graphics Tools optional feature).
     [switch] $DebugLayer,
+    # The user's own dumps for a game test, bundled under userdata\ and copied into LocalState by
+    # the app on its first run (uwp_boot.cpp SeedUserData). They only ever go into this local
+    # package: never commit them, never publish the appx. LocalState survives package updates, so
+    # once seeded, later packages can pass just -Game <file name> without the file.
+    #   -Keys      directory with prod.keys (and title.keys)
+    #   -Firmware  directory with the firmware .nca files
+    #   -Game      game dump (.nsp/.xci) to boot instead of boot.nro, or the name of one already seeded
+    [string] $Keys,
+    [string] $Firmware,
+    [string] $Game,
+    # Extra boot.cfg lines for diagnosis: "log_filter=*:Info HW.GPU:Debug", "renderer=null".
+    [string[]] $BootCfg = @(),
     # Must match Identity/@Publisher in dist/uwp/AppxManifest.xml, character for character.
     [string] $PublisherCN = "CN=EdenXboxDev",
     # Mesa's SPIR-V -> DXIL translator for the D3D12 renderer, built by build-spirv-to-dxil.ps1.
@@ -85,12 +97,51 @@ if (Test-Path $s2d) {
     Write-Warning "spirv_to_dxil.dll not found ($s2d): the D3D12 renderer will present through the CPU."
 }
 
+# User data (keys, firmware, game): see the parameters above.
+$userdata = Join-Path $layout "userdata"
+if ($Keys) {
+    New-Item -ItemType Directory -Force "$userdata\keys" | Out-Null
+    foreach ($name in @("prod.keys", "title.keys")) {
+        $k = Join-Path $Keys $name
+        if (Test-Path -LiteralPath $k) { Copy-Item -LiteralPath $k "$userdata\keys" }
+    }
+    if (-not (Test-Path "$userdata\keys\prod.keys")) { throw "prod.keys not found in $Keys" }
+    Write-Host "keys     : $Keys"
+}
+if ($Firmware) {
+    $ncas = Get-ChildItem -LiteralPath $Firmware -Filter *.nca -File
+    if (-not $ncas) { throw "no .nca files in $Firmware" }
+    New-Item -ItemType Directory -Force "$userdata\firmware" | Out-Null
+    $ncas | ForEach-Object { Copy-Item -LiteralPath $_.FullName "$userdata\firmware" }
+    Write-Host "firmware : $($ncas.Count) NCAs from $Firmware"
+}
+$gameName = $null
+if ($Game) {
+    $gameName = Split-Path -Leaf $Game
+    if (Test-Path -LiteralPath $Game -PathType Leaf) {
+        New-Item -ItemType Directory -Force "$userdata\games" | Out-Null
+        Copy-Item -LiteralPath $Game "$userdata\games\$gameName"
+        Write-Host "game     : $Game"
+    } else {
+        Write-Host "game     : $gameName (expected already in LocalState\games)"
+    }
+}
+
 # uwp_boot.cpp reads Package.InstalledLocation\boot.nro - the payload must sit at the layout root.
-if ($BootNro) {
-    if (-not (Test-Path $BootNro)) { throw "BootNro not found: $BootNro" }
-    Copy-Item $BootNro (Join-Path $layout "boot.nro")
-    Write-Host "payload  : $BootNro -> boot.nro"
+if ($BootNro -or $gameName) {
+    if ($BootNro) {
+        if (-not (Test-Path $BootNro)) { throw "BootNro not found: $BootNro" }
+        Copy-Item $BootNro (Join-Path $layout "boot.nro")
+        Write-Host "payload  : $BootNro -> boot.nro"
+    }
     $cfg = ""
+    if ($gameName) {
+        $cfg += "game=$gameName`n"
+    }
+    foreach ($line in $BootCfg) {
+        $cfg += "$line`n"
+        Write-Host "boot.cfg : $line"
+    }
     if ($RunSeconds -gt 0) {
         $cfg += "run_seconds=$RunSeconds`n"
         Write-Host "mode     : run $RunSeconds s (no sentinels)"
@@ -116,7 +167,10 @@ if ($mf.Package.Identity.Publisher -ne $PublisherCN) {
 $makeappx = Find-SdkTool "MakeAppx.exe"
 $appx = Join-Path $repo "$OutDir\eden-xbox.appx"
 if (Test-Path $appx) { Remove-Item $appx -Force }
-& $makeappx pack /d $layout /p $appx /o
+# A bundled game dump is gigabytes of encrypted data that does not compress: skip compression.
+$packArgs = @("pack", "/d", $layout, "/p", $appx, "/o")
+if (Test-Path "$userdata\games") { $packArgs += "/nc" }
+& $makeappx @packArgs
 if ($LASTEXITCODE -ne 0) { throw "MakeAppx failed ($LASTEXITCODE)." }
 
 # --- 4. sign -----------------------------------------------------------------------------

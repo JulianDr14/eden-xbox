@@ -595,9 +595,135 @@ queda sin payload que la pruebe hasta un juego de NVN.
 - ex02, ex04, ex09 y ex10 siguen igual.
 - Los cinco terminan con `RunHeadlessBoot returned 0` y, con `-DebugLayer`, sin errores ni avisos.
 
+**En la Series (0.2.17.0):** ex11 igual que en el PC (la onda entera a todo el ancho),
+`first indirect dispatch recorded` y ningún error de Render.
+
+### Primer juego: Super Mario Bros. Wonder (volcado del cartucho del usuario)
+
+Cómo se prueba sin meter nada en el repo: `docs/xbox_internal.md`, "Probar un juego".
+
+Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
+
+1. **El juego esperaba para siempre tras su primer `ReceiveMessage`.**
+   - `uwp_boot` cargaba con `FrontendAppletParameters{}`, es decir, `applet_id` 0.
+   - AM solo manda los mensajes de foco a un applet `Application`. `yuzu_cmd` pone
+     `.applet_id = AppletId::Application`, y ahora nosotros también.
+   - Un homebrew no los espera, por eso nunca se vio.
+2. **Arranque de 25 a 130 s con un núcleo al 100 %.**
+   - Con un muestreador de hilos (suspender, leer RIP y la pila, símbolos del PDB), CPUCore_0 pasaba
+     el ~87 % del tiempo en la syscall `NtProtectVirtualMemory`.
+   - La llamaban `BlockOfCode::EnableWriting`/`DisableWriting`: el W^X de dynarmic cambiaba la
+     protección de **toda** la caché de código comprometida (decenas o cientos de MiB) dos veces por
+     cada bloque compilado.
+   - **Arreglo: W^X por páginas** (`block_of_code.cpp`, solo Windows con W^X, es decir, el build UWP):
+     - El código emitido es RX y la cola aún sin usar queda siempre RW.
+     - Cada bloque cambia solo la página donde empieza, que comparte con el bloque anterior, y las
+       páginas donde escribe.
+     - Los parches de enlace entre bloques cambian las suyas con `MakeWritable`.
+     - El pool de constantes queda por debajo, alineado a página y siempre RW: solo se lee como
+       dato.
+     - `EnsureMemoryCommitted` compromete solo las páginas nuevas. Recomprometer las viejas con
+       `PAGE_READWRITE` volvería RW el código ya emitido.
+   - Resultado: la pantalla de título en ~20 s en lugar de minutos.
+3. **Pánico del juego (`svcBreak`) tras `SetTerminateResult`.**
+   - El log decía `No control data found`: sin NACP, no había tamaños de guardado.
+   - Un volcado cargado desde su archivo solo se encuentra a través del `ManualContentProvider`, que
+     Qt y Android rellenan desde su lista de juegos.
+   - `uwp_boot` ahora lo registra (`FrontendManual`) con `AddEntriesFromContainer`.
+4. **Device removed (`DXGI_ERROR_INVALID_CALL`) a los ~25 s.**
+   - La capa de debug: `CreateShaderResourceView: The ViewDimension ... is incompatible with the type
+     of the Resource`.
+   - `ImageView::CreateSrv` caía al tipo propio de la vista cuando el shader pedía uno incompatible,
+     pero no comprobaba que ese tipo sí lo fuera (una vista 2D de una textura 3D, un cubo de menos
+     de seis capas).
+   - Ahora, si tampoco encaja, usa la dimensión del recurso: 3D, array 1D o array 2D.
+
+**Diagnóstico añadido por el camino:**
+- **Excepciones C++:** el logger de primera oportunidad de `uwp_boot` las nombra (tipo y `what()`).
+  Una que escapa de un hilo que no es el del arranque mataba el proceso sin línea `CRASH`, solo con
+  un evento de WER.
+- **`Device::ReportDeviceRemoved`:** al perder el dispositivo vuelca los mensajes pendientes de la
+  capa de debug y, con `renderer_debug`, los breadcrumbs y el page fault de DRED.
+- **Volcados de frames:** además de `frame.bmp` (frame 120), un `frame_<n>.bmp` cada 600 frames,
+  hasta 12.
+- **Nuevas líneas de `boot.cfg`:**
+  - `game=` es el juego de `LocalState\games` que se arranca.
+  - `log_filter=` es el filtro del log de Eden.
+  - `renderer=null` usa el renderer Null, para separar bloqueos de GPU de los de CPU.
+
+**Gate en PC (0.2.18.0):**
+- El juego llega a la pantalla de título, "Press A + B to Start", y se ve correcta. Se queda ahí
+  porque no hay entrada.
+- 150 s sin fallos y ~2,4 GiB de memoria de la app.
+- Con `-DebugLayer`, sin errores. Queda un aviso inofensivo: un PS escribe en el RT 1 sin RT 1 en
+  el PSO.
+- boot, ex02, ex04, ex09, ex10 y ex11 siguen igual, sin errores.
+
+**Series (0.2.18.0): la pantalla de título sale sin las texturas ASTC.**
+- **Qué funciona:** la copia a `LocalState` (4 GB en ~7 s), el arranque, la carga de pantalla y
+  el título a 60 fps durante 150 s.
+- **Qué falta:** el `frame_1.bmp` de la consola solo tiene el degradado de fondo y "Press L + R to
+  Start". Faltan la ilustración, el logo y los iconos.
+- **Mismos draws que en el PC:** los dos logs construyen los mismos 41 pipelines y suben la misma
+  textura de 16 MiB al mismo tiempo.
+- **Traza del PC (frame 720):**
+  - El degradado (#43, BC4) y la ilustración, el logo y los iconos (#45–69) se dibujan con el mismo
+    pipeline, blend y RT.
+  - Solo cambia la textura: todo lo que falta es `ASTC_2D_4X4_SRGB` (formato 70).
+  - D3D12 no tiene ASTC: esas texturas las decodifica la CPU (`ConvertImage`) a RGBA8 y se suben
+    por el camino `converted`.
+  - Lo que sí se ve en la consola es BC4 (el degradado) y R8 (el texto).
+- **Una rareza de la consola:**
+  - Informa `TypedUAVLoadAdditionalFormats` = sí, pero `UAV_TYPED_LOAD` = no para RGBA8_UNORM.
+  - Según Microsoft ("Typed unordered access view loads"), el primero implica el segundo, así que
+    el `Support2` de `FORMAT_SUPPORT` no es fiable ahí.
+  - La consola es D3D12 feature level 11.0 (blog de Chuck Walbourn, "DirectX and UWP on Xbox
+    Series X|S").
+- **Cambios en 0.2.19.0 (diagnóstico y robustez):**
+  - **`SupportsView`:**
+    - Guarda en caché y registra una vez por formato la respuesta de `FORMAT_SUPPORT`
+      (`format N support 0x… / 0x…`).
+    - Da por buenos los RT y los UAV tipados que la tabla de feature level 11.0 exige
+      ("Format support for Direct3D feature level 11.0 hardware").
+  - **`Framebuffer`:** avisa (`has no RTV; draws to it are lost`) y marca `MISSING RTV` cuando un
+    render target no tiene RTV. Antes se usaba el RTV nulo sin decir nada.
+  - **Traza de draws:** `RasterizerD3D12::SetDrawTrace` registra cada draw, clear, blit 2D y draw
+    saltado del frame 720, el que acaba en `frame_1.bmp`. Cada línea lleva pipeline, blend, RTs y
+    texturas (formato, tamaño y dirección).
+  - **Subidas convertidas:** las 48 primeras dejan una línea con el tamaño, un hash FNV de los
+    datos decodificados y el % de texels transparentes.
+    - Referencia del PC: la ilustración de 1920x1080 da `hash 16c91871, 21% transparent`.
+    - El logo de 741x115 da `7715f89b, 14%`.
+  - **Samplers:** `MaxLOD` ≥ `MinLOD` y el LOD bias dentro de [-16, 15.99], porque D3D12 deja
+    indefinido lo demás.
+
+**Series (0.2.19.0): la pantalla de título se ve completa, igual que en el PC.**
+- **Imagen:** los frames 1 a 6 muestran la ilustración, el logo, los iconos y el texto. La prueba
+  duró 90 s, con ~2,3 GiB de memoria de la app, y terminó con `RunHeadlessBoot returned 0`.
+- **Decodificación ASTC:** los 14 hashes y porcentajes de transparencia de las subidas convertidas
+  son idénticos a los del PC. La CPU nunca decodificó mal.
+- **Traza del frame 720:** las 73 entradas son idénticas a las del PC si se ignoran los flags de
+  las imágenes. El juego emite exactamente los mismos draws.
+- **Formatos:** todas las respuestas de `FORMAT_SUPPORT` cubren lo que se pide, así que el
+  fallback de feature level 11.0 no se activó para ninguno.
+  - La Series responde `Support2` 0x280 para RGBA8_UNORM, R11G11B10F, R8 y R16G16B16A16F: store sí
+    y load no. El PC responde 0x2c0.
+  - Para RGBA8_SRGB, la Series responde `Support1` 0x11fcd3f0 y el PC 0x31fcd3f0. La diferencia
+    son bits de vídeo.
+- **Causa:** el único cambio de 0.2.19.0 que toca esos draws es el sampler: ahora `MaxLOD` ≥
+  `MinLOD` y el bias está limitado. El arreglo del SRV con dimensión incompatible ya estaba en
+  0.2.18.0.
+  - Lo más probable es que, con `MinLOD` > `MaxLOD`, el hardware de la consola devuelva texels a
+    cero, que son transparentes al mezclar, mientras que el driver del PC los interpreta de otra
+    forma. No se ha aislado qué valor exacto lo provocaba.
+  - **Regla:** cualquier estado que D3D12 deje indefinido se normaliza antes de crear el objeto.
+    Que la capa de debug no se queje no basta.
+
 **Pendiente de la 4.4:**
-- Probar en la Series.
-- `DrawTexture` y `DrawIndirect` con `ExecuteIndirect`, sin payload que los use.
-- El gate final: un juego 2D del usuario, con sus keys y su firmware en `LocalState` y nunca en el
-  repo.
-- Pasan a la fase 5: blits con stencil, MSAA y conversiones de formato (`ConvertImage`).
+- `DrawTexture` y `DrawIndirect` con `ExecuteIndirect`: no han salido en este juego.
+- Pasan a la fase 5:
+  - blits con stencil;
+  - transferencias depth-stencil (el aviso `depth-stencil (110) transfers need plane splitting`
+    ya sale en este juego);
+  - MSAA;
+  - conversiones de formato (`ConvertImage`).
