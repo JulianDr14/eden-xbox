@@ -3,11 +3,13 @@
 
 #include <algorithm>
 #include <limits>
+#include <stdexcept>
 
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/bit_util.h"
 #include "common/literals.h"
+#include "common/logging.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
 
@@ -23,6 +25,9 @@ constexpr u64 STREAM_BUFFER_SIZE = 128_MiB;
 
 ComPtr<ID3D12Resource> CreateMappedBuffer(ID3D12Device* device, u64 size,
                                           D3D12_HEAP_TYPE heap_type, std::span<u8>& mapped) {
+    if (size == 0) {
+        throw std::invalid_argument("D3D12: staging buffer size must not be zero");
+    }
     const D3D12_HEAP_PROPERTIES heap{.Type = heap_type};
     const D3D12_RESOURCE_DESC desc{
         .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
@@ -45,7 +50,10 @@ ComPtr<ID3D12Resource> CreateMappedBuffer(ID3D12Device* device, u64 size,
                                                   nullptr, IID_PPV_ARGS(&buffer)),
                   "CreateCommittedResource (staging)");
     void* pointer{};
-    ThrowIfFailed(buffer->Map(0, nullptr, &pointer), "ID3D12Resource::Map");
+    const D3D12_RANGE no_cpu_reads{0, 0};
+    const D3D12_RANGE* const read_range =
+        heap_type == D3D12_HEAP_TYPE_UPLOAD ? &no_cpu_reads : nullptr;
+    ThrowIfFailed(buffer->Map(0, read_range, &pointer), "ID3D12Resource::Map");
     mapped = std::span(static_cast<u8*>(pointer), static_cast<size_t>(size));
     return buffer;
 }
@@ -55,11 +63,17 @@ StagingBufferPool::StagingBufferPool(const Device& device_, Scheduler& scheduler
       region_size{STREAM_BUFFER_SIZE / NUM_SYNCS} {
     stream_buffer = CreateMappedBuffer(device.Get(), stream_buffer_size, D3D12_HEAP_TYPE_UPLOAD,
                                        stream_pointer);
+    constexpr u64 bytes_per_mib = 1024 * 1024;
+    LOG_INFO(Render, "D3D12: staging stream ready ({} MiB, {} regions of {} MiB)",
+             stream_buffer_size / bytes_per_mib, NUM_SYNCS, region_size / bytes_per_mib);
 }
 
 StagingBufferPool::~StagingBufferPool() = default;
 
 StagingBufferRef StagingBufferPool::Request(size_t size, MemoryUsage usage, bool deferred) {
+    if (size == 0) {
+        throw std::invalid_argument("D3D12: staging request size must not be zero");
+    }
     if (!deferred && usage == MemoryUsage::Upload && size <= region_size) {
         return GetStreamBuffer(size);
     }
@@ -84,29 +98,29 @@ void StagingBufferPool::TickFrame() {
 }
 
 StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
-    if (AreRegionsActive(Region(free_iterator) + 1,
-                         std::min(Region(iterator + size) + 1, NUM_SYNCS))) {
-        // The GPU still reads the next regions: use a dedicated buffer instead of waiting.
+    size_t offset = Common::AlignUp(iterator, ALIGNMENT);
+    bool wrapped = false;
+    if (offset > stream_buffer_size || size > stream_buffer_size - offset) {
+        offset = 0;
+        wrapped = true;
+    }
+
+    const size_t first_region = Region(offset);
+    const size_t end_region = Region(offset + size - 1) + 1;
+    if (wrapped && AreRegionsActive(first_region, end_region)) {
+        // Do not stall the CPU when wrapping into memory still consumed by the GPU.
         return GetStagingBuffer(size, MemoryUsage::Upload);
     }
-    const u64 current_tick = scheduler.CurrentTick();
-    std::fill(sync_ticks.begin() + Region(used_iterator), sync_ticks.begin() + Region(iterator),
-              current_tick);
-    used_iterator = iterator;
-    free_iterator = std::max(free_iterator, iterator + size);
 
-    if (iterator + size >= stream_buffer_size) {
-        std::fill(sync_ticks.begin() + Region(used_iterator), sync_ticks.begin() + NUM_SYNCS,
-                  current_tick);
-        used_iterator = 0;
-        iterator = 0;
-        free_iterator = size;
-        if (AreRegionsActive(0, Region(size) + 1)) {
-            return GetStagingBuffer(size, MemoryUsage::Upload);
-        }
+    std::fill(sync_ticks.begin() + first_region, sync_ticks.begin() + end_region,
+              scheduler.CurrentTick());
+    iterator = offset + size;
+
+    if (!logged_stream_use) {
+        LOG_INFO(Render, "D3D12: staging stream path active ({} bytes at offset {})", size,
+                 offset);
+        logged_stream_use = true;
     }
-    const size_t offset = iterator;
-    iterator = Common::AlignUp(iterator + size, ALIGNMENT);
     return StagingBufferRef{
         .buffer = stream_buffer.Get(),
         .offset = offset,
@@ -119,8 +133,14 @@ StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
 
 bool StagingBufferPool::AreRegionsActive(size_t region_begin, size_t region_end) const {
     const u64 gpu_tick = scheduler.KnownGpuTick();
+    const u64 current_tick = scheduler.CurrentTick();
     return std::any_of(sync_ticks.begin() + region_begin, sync_ticks.begin() + region_end,
-                       [gpu_tick](u64 sync_tick) { return gpu_tick < sync_tick; });
+                       [gpu_tick, current_tick](u64 sync_tick) {
+                           // Multiple non-overlapping allocations may touch the same coarse region
+                           // while recording one command list. Only an earlier submission blocks
+                           // reuse after the stream wraps.
+                           return sync_tick != current_tick && gpu_tick < sync_tick;
+                       });
 }
 
 StagingBufferRef StagingBufferPool::GetStagingBuffer(size_t size, MemoryUsage usage,
@@ -134,7 +154,11 @@ StagingBufferRef StagingBufferPool::GetStagingBuffer(size_t size, MemoryUsage us
 std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t size,
                                                                         MemoryUsage usage,
                                                                         bool deferred) {
-    StagingBuffers& cache_level = GetCache(usage)[Common::Log2Ceil64(size)];
+    const u32 log2 = Common::Log2Ceil64(size);
+    if (log2 >= NUM_LEVELS) {
+        throw std::length_error("D3D12: staging request is too large");
+    }
+    StagingBuffers& cache_level = GetCache(usage)[log2];
     const auto is_free = [this](const StagingBuffer& entry) {
         return !entry.deferred && scheduler.IsFree(entry.tick);
     };
@@ -156,6 +180,9 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
 StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage usage,
                                                         bool deferred) {
     const u32 log2 = Common::Log2Ceil64(size);
+    if (log2 >= NUM_LEVELS) {
+        throw std::length_error("D3D12: staging request is too large");
+    }
     const D3D12_HEAP_TYPE heap_type =
         usage == MemoryUsage::Download ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_UPLOAD;
     std::span<u8> mapped;
@@ -170,6 +197,8 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .tick = deferred ? std::numeric_limits<u64>::max() : scheduler.CurrentTick(),
         .deferred = deferred,
     });
+    LOG_INFO(Render, "D3D12: created dedicated staging {} buffer ({} bytes, request {} bytes)",
+             usage == MemoryUsage::Download ? "readback" : "upload", 1ULL << log2, size);
     return entry.Ref();
 }
 

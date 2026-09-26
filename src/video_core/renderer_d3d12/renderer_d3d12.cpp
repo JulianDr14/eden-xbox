@@ -140,13 +140,16 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
     // Present one dark-blue frame straight away: on-console, a blue screen before the guest draws
     // anything proves the device and swapchain work independently of the emulation.
     const u32 index = swapchain.CurrentIndex();
-    const StagingBufferRef upload = staging_pool.Request(upload_size, MemoryUsage::Upload);
+    // Force this one-time visible copy through the dedicated path. Guest frames below use the
+    // stream ring, so the phase-3a.2 gate exercises both allocation paths.
+    StagingBufferRef upload = staging_pool.Request(upload_size, MemoryUsage::Upload, true);
     for (u32 y = 0; y < swapchain.Height(); ++y) {
         auto* row = reinterpret_cast<u32*>(upload.mapped_span.data() +
                                            y * footprint.Footprint.RowPitch);
         std::fill_n(row, swapchain.Width(), 0xFF402010u);
     }
     RecordCopy(upload, swapchain.Image(index));
+    staging_pool.FreeDeferred(upload);
     Present(index);
     LOG_INFO(Render, "D3D12: presenting through the scheduler (tick {})", scheduler.CurrentTick());
 }

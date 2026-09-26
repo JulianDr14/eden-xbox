@@ -22,7 +22,9 @@ detalle técnico está en [`docs/xbox_internal.md`](docs/xbox_internal.md) (cuad
 | Boot en consola (JIT con W^X, AppContainer) | ✅ Gate 2 |
 | 1: device, swapchain y framebuffer por CPU | ✅ Gate 3, commit `cc2ea38d9` |
 | 2: shaders SPIR-V→DXIL, blit por GPU | ✅ Gate 4 en la Series (0.2.7.0); **sin commit** |
-| 3a: scheduler, staging pool y descriptor heaps | ✅ en el PC; **0.2.8.0 pendiente de probar en la Series**; sin commit |
+| 3a.1: scheduler | ✅ PC y Series (0.2.8.0); sin commit |
+| 3a.2: staging pool | ✅ PC; logs correctos en Series (0.2.9.0), confirmación visual pendiente |
+| 3a.3: descriptor heaps | ⏭ después de 3a.2 |
 | 3b: runtime de la caché de buffers | ⏭ siguiente |
 | 3c: runtime de la caché de texturas | — |
 | 3d: fences, queries y `RasterizerD3D12` sustituyendo al nulo | — |

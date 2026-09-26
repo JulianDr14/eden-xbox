@@ -88,7 +88,7 @@ Qué buscar en esos archivos:
 | 0–2 (boot) | Toolchain UWP, AppContainer, JIT con W^X, boot headless | **Gate 2:** el NRO llega al centinela del JIT en la Series | ✅ |
 | 1 (render) | Renderer D3D12: device, swapchain en el CoreWindow, probe de capacidades, framebuffer del guest vía CPU | **Gate 3:** se ve el patrón en la tele | ✅ 0.2.6.0, commit `cc2ea38d9` |
 | 2 | Shaders SPIR-V → Mesa `spirv_to_dxil` → DXIL firmado con `dxil.dll`; el blit de Eden en la GPU | **Gate 4:** el PSO se crea en la Series con DXIL firmado | ✅ 0.2.7.0 (sin commit todavía) |
-| 3 | Infraestructura del rasterizador; diseño completo en [`xbox_d3d12_phase3.md`](xbox_d3d12_phase3.md) | Uno por sub-fase (3a–3d) | 🔨 En curso: 3a pasa en el PC; 0.2.8.0 pendiente de probar en la Series |
+| 3 | Infraestructura del rasterizador; diseño completo en [`xbox_d3d12_phase3.md`](xbox_d3d12_phase3.md) | Uno por sub-fase (3a.1–3d) | 🔨 En curso: scheduler (3a.1) validado en PC y Series con 0.2.8.0; staging (3a.2) pasa en PC y sus logs pasan en Series con 0.2.9.0, pendiente confirmación visual |
 | 4 | Pipelines (detalle debajo) | Primer draw 3D de un homebrew | — |
 | 5 | Paridad (detalle debajo) | — | — |
 
@@ -99,6 +99,18 @@ Qué buscar en esos archivos:
   samplers (el límite es 2048).
 - `BufferCacheRuntime`, `TextureCacheRuntime` con Image, ImageView, Sampler y Framebuffer.
 - `FenceManager` y `QueryCacheLegacy`.
+
+**Prueba PC de 3a.2:** el frame inicial salió de un buffer dedicado (16 MiB para una petición de
+12 MiB en la ventana local 2048×1536) y el patrón 1280×720 salió del stream (3.686.400 bytes). El
+boot terminó con retorno 0, sin warnings ni errores de Render. Durante la primera implementación se
+detectó que consultar las fences en cada petición impedía compartir una región entre rangos no
+solapados de frames consecutivos y creaba buffers dedicados innecesarios. La consulta se hace solo
+al envolver el ring, que es cuando el cursor puede volver a pisar memoria anterior.
+
+**Prueba Series de 3a.2 (0.2.9.0, logs):** el frame inicial usó un dedicado de 8 MiB para
+8.294.400 bytes y el patrón usó el stream con peticiones de 3.686.400 bytes. Hubo exactamente un
+marcador de cada ruta, `RunHeadlessBoot returned 0`, cero warnings/errores de Render, cero device
+removed y ningún fallback por CPU. Falta confirmar el resultado visual antes de cerrar el gate.
 
 **Fase 4.**
 - Una clave tipo `FixedPipelineState` que genera el PSO.

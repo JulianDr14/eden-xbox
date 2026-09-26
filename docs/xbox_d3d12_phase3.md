@@ -21,7 +21,9 @@ con que los recursos se creen, se suban, se copien y se sincronicen bien.
 
 | # | Pieza | Archivo(s) | Gate |
 |---|---|---|---|
-| 3a | Scheduler, staging pool y descriptor heaps | `d3d12_scheduler`, `d3d12_staging_buffer_pool`, `d3d12_descriptor_heap` | El present usa las tres piezas y en la Series se ve igual y sin regresiones. **En el PC: pasa. En la Series: pendiente (0.2.8.0)** |
+| 3a.1 | Scheduler | `d3d12_scheduler` | El present usa command lists y ticks; se ve igual y no hay errores de Render. **Pasa en PC y Series (0.2.8.0).** |
+| 3a.2 | Staging pool | `d3d12_staging_buffer_pool` | El frame azul usa un buffer dedicado y el patrón usa el stream; ambos se ven bien y aparecen los dos marcadores en el log. **Pasa en PC; logs de Series correctos en 0.2.9.0, confirmación visual pendiente.** |
+| 3a.3 | Descriptor heaps | `d3d12_descriptor_heap` | El blit usa los heaps offline, el anillo shader-visible y la deduplicación de samplers. **Pendiente después de 3a.2.** |
 | 3b | Buffer cache runtime | `d3d12_buffer_cache` | Las copias y subidas de buffers funcionan (probado con un homebrew que usa buffers de GPU) |
 | 3c | Texture cache runtime | `d3d12_texture_cache` | Image, ImageView, Sampler y Framebuffer se crean; hay upload y download |
 | 3d | Fences, queries y `RasterizerD3D12` | `d3d12_fence_manager`, `d3d12_query_cache`, `d3d12_rasterizer` | El rasterizador real sustituye al nulo y el homebrew termina (`RunHeadlessBoot returned 0`) |
@@ -99,6 +101,49 @@ usando heaps `CUSTOM` (`WRITE_BACK`, `L0`) o `WriteToSubresource`
 Lo dejamos como optimización **medida** para después. El documento de Microsoft advierte que no se
 debe dar acceso de CPU a todo sin medir, porque puede empeorar el acceso de la GPU.
 
+### 3a.2: implementación y gate
+
+- El stream es un recurso `UPLOAD` persistente de 128 MiB, dividido en 16 regiones de 8 MiB. Cada
+  petición queda alineada a 512 bytes y marca inmediatamente con `CurrentTick()` todas las regiones
+  que toca. Mientras el cursor avanza no puede solapar asignaciones anteriores y no necesita
+  consultar las fences. Al envolver, solo se reutiliza una región si su submission anterior ya
+  terminó; si no, se obtiene un buffer dedicado en vez de bloquear el hilo de CPU.
+- Varias asignaciones no solapadas de la command list actual pueden compartir una región. El cursor
+  garantiza que no se pisan y todas quedan retiradas por el mismo tick.
+- Las peticiones grandes, las descargas y las peticiones `deferred` usan recursos dedicados cuyo
+  tamaño es la siguiente potencia de dos. Se separan en cachés `UPLOAD` y `READBACK` y solo se
+  reutilizan cuando el scheduler confirma su tick. `FreeDeferred` transfiere explícitamente una
+  petición diferida al tick de la lista que contiene su último uso.
+- `Map` recibe `{0, 0}` para los recursos `UPLOAD`, indicando que la CPU no leerá memoria
+  write-combined. Los recursos `READBACK` se mapean para lectura y el llamador debe esperar su tick
+  antes de consultar el span.
+- Se rechazan peticiones vacías o imposibles de representar en los buckets, evitando `log2(0)`,
+  índices fuera del array y desplazamientos de 64 bits inválidos.
+
+El gate fuerza el frame azul inicial por un buffer dedicado y lo libera contra el tick de esa
+submission. Los frames 1280×720 del patrón usan el stream. El log debe contener:
+
+```
+D3D12: staging stream ready (128 MiB, 16 regions of 8 MiB)
+D3D12: created dedicated staging upload buffer (...)
+D3D12: staging stream path active (...)
+```
+
+La cuenta correcta para el upload de 1920×1080 es 8.294.400 bytes con row pitch 7680: sí cabe en
+una región de 8 MiB (8.388.608 bytes). Por eso no sirve por sí solo para forzar la ruta dedicada.
+
+La prueba local usa una ventana 2048×1536: registró un dedicado de 16.777.216 bytes para la petición
+inicial de 12.582.912 bytes y luego el stream con peticiones de 3.686.400 bytes. Terminó con
+`RunHeadlessBoot returned 0`, sin warnings ni errores de Render. Una primera versión consultaba las
+regiones activas en cada asignación; eso confundía compartir una región con solapar memoria y creó
+dedicados de 4 MiB innecesarios. Solo hay riesgo de solapamiento al envolver el cursor, así que la
+consulta de fences quedó limitada a ese caso.
+
+En la Series, la versión 0.2.9.0 registró un dedicado de 8.388.608 bytes para el frame inicial de
+8.294.400 bytes y el stream para el patrón con peticiones de 3.686.400 bytes. El boot terminó en
+10,875 s con retorno 0, sin warnings/errores de Render, device removal ni fallback por CPU. Queda
+pendiente la confirmación visual del usuario.
+
 ## 3a.3 Descriptores
 
 Hay dos tipos de heap:
@@ -146,9 +191,8 @@ que exista el rasterizador:
   - `Present` hace `scheduler.Flush()` y guarda el tick de ese back buffer.
   - Antes de volver a usar un back buffer, `Composite` espera su tick. Eso limita al CPU a
     `IMAGE_COUNT` frames por delante de la GPU.
-- **Staging:** la imagen del guest (1280x720, 3.6 MB) sale del stream buffer. La ruta CPU a
-  1920x1080 (8.3 MB) no cabe en una región de 8 MB y usa un buffer dedicado, así que los dos caminos
-  quedan probados.
+- **Staging:** la imagen del guest (1280×720, unos 3,6 MB) sale del stream. El frame azul inicial se
+  solicita expresamente como diferido para forzar un buffer dedicado y probar los dos caminos.
 - **Descriptores:**
   - El SRV de la imagen vive en el heap offline y se copia al anillo en cada frame.
   - El sampler lineal ya no es un *static sampler*: pasa por `SamplerHeap::GetTable`, que lo

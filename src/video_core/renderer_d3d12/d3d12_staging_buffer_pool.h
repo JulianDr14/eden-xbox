@@ -109,9 +109,9 @@ private:
     u64 region_size;
 
     size_t iterator = 0;
-    size_t used_iterator = 0;
-    size_t free_iterator = 0;
     std::array<u64, NUM_SYNCS> sync_ticks{};
+
+    bool logged_stream_use = false;
 
     StagingBuffersCache upload_cache;
     StagingBuffersCache download_cache;
