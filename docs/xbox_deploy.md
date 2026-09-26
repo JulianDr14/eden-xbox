@@ -22,9 +22,20 @@ dynarmic JIT inside the Xbox AppContainer.
   on its own.
 
 **The payload**
-- A homebrew **`boot.nro`** that issues `svcOutputDebugString` with the exact sentinel
-  `EDEN_XBOX_JIT_ALIVE`. No keys, no firmware, no commercial ROMs — house rule, non-negotiable.
-  Observing that sentinel is what makes GATE 2 positive proof rather than "it didn't crash".
+- **devkitPro** with the `switch-dev` package, to build the `boot.nro` in
+  [`tools/xbox/boot_nro/`](../tools/xbox/boot_nro/). That is ordinary homebrew, built from source
+  here: no keys, no firmware, no commercial ROMs — house rule, and nothing it calls needs them.
+
+Build the payload from that directory, in **PowerShell or cmd** (not a Git Bash shell — msys2's
+make resolves paths differently there and the compile fails):
+
+```
+C:\devkitPro\msys2\usr\bin\make.exe
+```
+
+It runs a loop, checks the result, and emits `EDEN_XBOX_JIT_ALIVE` only if the arithmetic came out
+right — a miscompiling JIT reports `EDEN_XBOX_JIT_MISCOMPILE` instead of silently passing the
+gate. Observing the sentinel is what makes GATE 2 positive proof rather than "it didn't crash".
 
 ## Build, package, sign
 
