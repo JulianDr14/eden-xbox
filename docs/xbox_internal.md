@@ -88,7 +88,7 @@ Qué buscar en esos archivos:
 | 0–2 (boot) | Toolchain UWP, AppContainer, JIT con W^X, boot headless | **Gate 2:** el NRO llega al centinela del JIT en la Series | ✅ |
 | 1 (render) | Renderer D3D12: device, swapchain en el CoreWindow, probe de capacidades, framebuffer del guest vía CPU | **Gate 3:** se ve el patrón en la tele | ✅ 0.2.6.0, commit `cc2ea38d9` |
 | 2 | Shaders SPIR-V → Mesa `spirv_to_dxil` → DXIL firmado con `dxil.dll`; el blit de Eden en la GPU | **Gate 4:** el PSO se crea en la Series con DXIL firmado | ✅ 0.2.7.0 (sin commit todavía) |
-| 3 | Infraestructura del rasterizador; diseño completo en [`xbox_d3d12_phase3.md`](xbox_d3d12_phase3.md) | Uno por sub-fase (3a.1–3d) | 🔨 En curso: 3a.1 validado en PC/Series; 3a.2 y 3a.3 con logs correctos en PC/Series, confirmación visual pendiente |
+| 3 | Infraestructura del rasterizador; diseño completo en [`xbox_d3d12_phase3.md`](xbox_d3d12_phase3.md) | Uno por sub-fase (3a.1–3d) | ✅ Cerrada: 3a–3d validados en la Series (3d en 0.2.13.0) |
 | 4 | Pipelines (detalle debajo) | Primer draw 3D de un homebrew | — |
 | 5 | Paridad (detalle debajo) | — | — |
 
@@ -137,6 +137,28 @@ dedicado, y completó `UPLOAD → DEFAULT → READBACK` comparando correctamente
 terminó en 11,016 s con `RunHeadlessBoot returned 0`, usando 850 MiB de 5120 MiB, sin
 warnings/errores de Render, `DXGI_ERROR_DEVICE_REMOVED` ni fallback por CPU. Los errores de motores
 de input ausentes y del archivo opcional `playtime.bin` son ajenos al renderer y no bloquean el gate.
+
+**Fase 3c (PC):** `d3d12_texture_cache` instancia la caché genérica y aporta recursos `DEFAULT`
+1D/2D/3D, tabla de formatos DXGI (incluidos typeless y depth/stencil), seguimiento persistente de
+estado, copias imagen↔buffer e imagen↔imagen, y objetos `ImageView`, `Sampler` y `Framebuffer`. Las
+vistas persistentes SRV/UAV/RTV/DSV salen de los allocators offline de 3a.3; también existen SRV/UAV
+nulos válidos. ASTC y ETC2 se marcan como convertidos porque D3D12 no los expone de forma nativa.
+
+El dato de Eden está empaquetado por filas, pero D3D12 exige `RowPitch` múltiplo de 256 y offset de
+footprint múltiplo de 512. Para no cambiar el layout que consume la caché genérica, cada transferencia
+usa un buffer `DEFAULT` temporal: `CopyBufferRegion` reempaqueta/desempaqueta las filas en la GPU y
+`CopyTextureRegion` opera sobre el footprint alineado. Esto cubre mips pequeños, capas y texturas 3D.
+El gate usa deliberadamente 13×7 RGBA8 (52 bytes por fila, no alineados), hace
+`UPLOAD → textura → READBACK`, compara 364 bytes y crea SRV/UAV/RTV/DSV, vistas nulas, sampler y
+framebuffer. Pasó con `RunHeadlessBoot returned 0` y sin warnings/errores de Render ni device removal.
+Los blits filtrados requieren los pipelines de fase 4; ASTC/ETC2 y conversiones shader avanzadas son
+trabajo de paridad de fase 5.
+
+**Prueba Series de 3c (0.2.12.0, logs):** creó el runtime, ejercitó el reempaquetado de una textura
+13×7 RGBA8 desde 52 a 256 bytes por fila y recuperó correctamente los 364 bytes. Creó las vistas
+SRV/UAV/RTV/DSV, incluidos el primer heap DSV (tipo 3), vistas nulas, sampler y framebuffer. El
+present siguió por el scheduler, el boot terminó en 10,890 s con retorno 0 y 850 MiB usados de
+5120 MiB. No hubo warnings/errores de Render, `DXGI_ERROR_DEVICE_REMOVED` ni fallback por CPU.
 
 **Fase 4.**
 - Una clave tipo `FixedPipelineState` que genera el PSO.
