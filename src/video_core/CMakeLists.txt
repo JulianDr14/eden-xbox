@@ -395,16 +395,24 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_buffer_cache.h
         renderer_d3d12/d3d12_descriptor_heap.cpp
         renderer_d3d12/d3d12_descriptor_heap.h
+        renderer_d3d12/d3d12_fence_manager.cpp
+        renderer_d3d12/d3d12_fence_manager.h
         renderer_d3d12/d3d12_device.cpp
         renderer_d3d12/d3d12_device.h
         renderer_d3d12/d3d12_scheduler.cpp
         renderer_d3d12/d3d12_scheduler.h
+        renderer_d3d12/d3d12_query_cache.cpp
+        renderer_d3d12/d3d12_query_cache.h
+        renderer_d3d12/d3d12_rasterizer.cpp
+        renderer_d3d12/d3d12_rasterizer.h
         renderer_d3d12/d3d12_shader_compiler.cpp
         renderer_d3d12/d3d12_shader_compiler.h
         renderer_d3d12/d3d12_staging_buffer_pool.cpp
         renderer_d3d12/d3d12_staging_buffer_pool.h
         renderer_d3d12/d3d12_swapchain.cpp
         renderer_d3d12/d3d12_swapchain.h
+        renderer_d3d12/d3d12_texture_cache.cpp
+        renderer_d3d12/d3d12_texture_cache.h
         renderer_d3d12/renderer_d3d12.cpp
         renderer_d3d12/renderer_d3d12.h
     )

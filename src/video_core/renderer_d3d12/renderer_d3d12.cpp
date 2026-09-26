@@ -125,8 +125,12 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
       sampler_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 256},
       rtv_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 256},
       dsv_descriptors{device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 256},
+      texture_cache_runtime{device, scheduler, staging_pool, view_descriptors,
+                            sampler_descriptors, rtv_descriptors, dsv_descriptors},
       descriptor_ring{device.Get(), scheduler, DESCRIPTOR_RING_SIZE},
-      sampler_heap{device.Get(), scheduler}, rasterizer{gpu_} {
+      sampler_heap{device.Get(), scheduler},
+      rasterizer{gpu_, device_memory_, device, scheduler, buffer_cache_runtime,
+                 texture_cache_runtime} {
     ID3D12Device* const dev = device.Get();
 
     const D3D12_RESOURCE_DESC image_desc =
@@ -154,6 +158,7 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
     staging_pool.FreeDeferred(upload);
     Present(index);
     buffer_cache_runtime.RunSelfTest();
+    texture_cache_runtime.RunSelfTest();
     LOG_INFO(Render, "D3D12: presenting through the scheduler (tick {})", scheduler.CurrentTick());
 }
 

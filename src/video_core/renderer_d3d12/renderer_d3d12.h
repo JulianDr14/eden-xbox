@@ -17,15 +17,16 @@
 #include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
 #include "video_core/renderer_d3d12/d3d12_swapchain.h"
-#include "video_core/renderer_null/null_rasterizer.h"
+#include "video_core/renderer_d3d12/d3d12_texture_cache.h"
+#include "video_core/renderer_d3d12/d3d12_rasterizer.h"
 
 namespace D3D12 {
 
 /// Direct3D 12 renderer: a device and swapchain on the UWP CoreWindow, presenting the guest's
 /// display framebuffer. The framebuffer is deswizzled on the CPU and drawn to the window with
 /// Eden's own blit shaders, translated SPIR-V -> DXIL at runtime (phase 2). If that shader path is
-/// unavailable, the phase-1 CPU scale + copy is used instead. Guest GPU work still goes to the null
-/// rasterizer.
+/// unavailable, the phase-1 CPU scale + copy is used instead. Guest GPU work is routed through the
+/// D3D12 rasterizer and its phase-3 caches, queries, DMA and fence manager.
 ///
 /// Presentation already runs on the rasterizer infrastructure (phase 3a): the scheduler's command
 /// list and ticks, staging memory from the stream buffer, and descriptors from the shader-visible
@@ -83,9 +84,10 @@ private:
     CpuDescriptorAllocator sampler_descriptors; ///< offline samplers
     CpuDescriptorAllocator rtv_descriptors;
     CpuDescriptorAllocator dsv_descriptors;
+    TextureCacheRuntime texture_cache_runtime;
     DescriptorRing descriptor_ring;
     SamplerHeap sampler_heap;
-    Null::RasterizerNull rasterizer;
+    RasterizerD3D12 rasterizer;
 
     std::array<u64, Swapchain::IMAGE_COUNT> present_ticks{};
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, Swapchain::IMAGE_COUNT> back_buffer_rtvs{};
