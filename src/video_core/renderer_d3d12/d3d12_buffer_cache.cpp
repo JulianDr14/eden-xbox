@@ -16,7 +16,7 @@ Buffer::Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams params
     : VideoCommon::BufferBase(params), scheduler{&runtime.scheduler},
       buffer{runtime.CreateDefaultBuffer(4)}, tracker{4096} {}
 
-Buffer::Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr, u64 size_bytes)
+Buffer::Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr, u64 size_bytes, bool)
     : VideoCommon::BufferBase(cpu_addr, size_bytes), scheduler{&runtime.scheduler},
       buffer{runtime.CreateDefaultBuffer(size_bytes)}, tracker{size_bytes} {}
 
@@ -65,6 +65,9 @@ void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& buffers) noexcept
     }
 }
 void BufferCacheRuntime::Finish() { scheduler.Finish(); }
+u64 BufferCacheRuntime::CurrentTick() { return scheduler.CurrentTick(); }
+bool BufferCacheRuntime::IsFree(u64 tick) { return scheduler.IsFree(tick); }
+void BufferCacheRuntime::Wait(u64 tick) { scheduler.Wait(tick); }
 u64 BufferCacheRuntime::GetDeviceLocalMemory() const {
     const u64 budget = device.QueryVideoMemory().Budget;
     return budget != 0 ? budget : 4ULL * 1024 * 1024 * 1024;

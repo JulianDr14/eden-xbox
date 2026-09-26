@@ -158,7 +158,7 @@ StagingBufferRef StagingBufferPool::GetStagingBuffer(size_t size, MemoryUsage us
 std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t size,
                                                                         MemoryUsage usage,
                                                                         bool deferred) {
-    const u32 log2 = Common::Log2Ceil64(size);
+    const u32 log2 = static_cast<u32>(Common::Log2Ceil<u64>(size));
     if (log2 >= NUM_LEVELS) {
         throw std::length_error("D3D12: staging request is too large");
     }
@@ -183,7 +183,7 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
 
 StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage usage,
                                                         bool deferred) {
-    const u32 log2 = Common::Log2Ceil64(size);
+    const u32 log2 = static_cast<u32>(Common::Log2Ceil<u64>(size));
     if (log2 >= NUM_LEVELS) {
         throw std::length_error("D3D12: staging request is too large");
     }

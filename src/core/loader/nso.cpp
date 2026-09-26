@@ -209,7 +209,10 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
 
     // Apply cheats if they exist and the program has a valid title ID
     if (pm) {
-        system.SetApplicationProcessBuildID(nso_header.build_id);
+        // TODO(Maufeat): Check if there is a better way to check
+        if (name == "main")
+            system.SetApplicationProcessBuildID(nso_header.build_id);
+
         const auto cheats = pm->CreateCheatList(nso_header.build_id);
         if (!cheats.empty()) {
             system.RegisterCheatList(cheats, nso_header.build_id, load_base, image_size);
@@ -217,7 +220,7 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     }
 
     // Load codeset for current process
-    process.LoadModule(std::move(codeset), load_base);
+    process.LoadModule(system.Kernel(), std::move(codeset), load_base);
     return load_base + image_size;
 }
 
@@ -235,7 +238,7 @@ AppLoader_NSO::LoadResult AppLoader_NSO::Load(Kernel::KProcess& process, Core::S
     }
 
     modules.insert_or_assign(base_address, file->GetName());
-    LOG_DEBUG(Loader, "loaded module {} @ {:#X}", file->GetName(), base_address);
+    LOG_DEBUG(Loader, "loaded module {} @ {:#x}", file->GetName(), base_address);
 
     is_loaded = true;
     return {ResultStatus::Success, LoadParameters{Kernel::KThread::DefaultThreadPriority,

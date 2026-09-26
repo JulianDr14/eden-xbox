@@ -4,8 +4,12 @@ Léelo entero antes de tocar nada. Resume qué hacemos, en qué punto estamos y 
 detalle técnico está en [`docs/xbox_internal.md`](docs/xbox_internal.md) (cuaderno del proyecto) y en
 [`docs/xbox_d3d12_phase3.md`](docs/xbox_d3d12_phase3.md) (diseño de la fase actual).
 
-> `CLAUDE.md` viene del equipo original (juanresendiz813) y apunta a rutas `C:\Users\juanr\...` y a un
+> `CLAUDE.md` viene del fork original (juanresendiz813) y apunta a rutas `C:\Users\juanr\...` y a un
 > tablero de coordinación que **aquí no existe**. Para este fork, la referencia es este archivo.
+>
+> **Eden prohíbe el uso de IA** en su proyecto y su comunidad (su `AGENTS.md`/`CONTRIBUTING.md`).
+> Este fork es independiente: nada de lo que hacemos aquí se envía a Eden (ni PRs, ni issues, ni
+> comentarios). Al fusionar Eden, conservamos nuestros `AGENTS.md` y `CLAUDE.md`.
 
 ## Qué estamos haciendo
 - Portamos **Eden**, un emulador de Nintendo Switch (C++20, GPLv3), a **UWP** para **Xbox Series X|S
@@ -28,20 +32,33 @@ detalle técnico está en [`docs/xbox_internal.md`](docs/xbox_internal.md) (cuad
 | 3b: runtime de la caché de buffers | ✅ PC y Series (0.2.11.0); round-trip GPU de 4096 bytes |
 | 3c: runtime de la caché de texturas | ✅ PC y Series (0.2.12.0); gate 13×7 RGBA8 y vistas completas |
 | 3d: fences, queries y `RasterizerD3D12` sustituyendo al nulo | ✅ PC y Series (0.2.13.0) tras la revisión de la fase 3; **fase 3 cerrada** |
-| 4: pipelines, root signature y shaders del guest | — |
+| Mudanza a Eden actual (sep 2026): fork de `eden-emulator/mirror`, rama `xbox` | 🔨 En curso: fusión hecha y compilando; faltan las pruebas en PC y Series |
+| 4: pipelines, root signature y shaders del guest | 🔨 Diseño en `docs/xbox_d3d12_phase4.md`; `TickFrame` en `Composite` corregido |
 | 5: paridad (ASTC, stream output, quads, etc.) | — |
 
-El trabajo sin commit de las fases 2 y 3a está en la rama `feature/xbox-appx-package`. El usuario
-decide cuándo se hace el commit.
+La rama de trabajo es `xbox`. `master` del fork es Eden tal cual.
 
 ## Reglas duras
-1. **Solo nuestro fork.** Los commits y pushes van únicamente a `origin` (`JulianDr14/eden-xbox`).
-   **Nunca** a `upstream` (juanresendiz813/eden-xbox), que tiene el push deshabilitado y así debe
-   seguir.
+1. **Solo nuestro fork.** Los commits y pushes van únicamente a `origin` (`JulianDr14/eden-xbox`,
+   fork de `eden-emulator/mirror`).
+   - `eden` (el espejo oficial de Eden) y `upstream` (juanresendiz813/eden-xbox, el fork original, ya
+     abandonado) son de **solo lectura**: tienen el push deshabilitado y así deben seguir.
+   - `legacy` (`JulianDr14/eden-xbox-legacy`) es el repo anterior, que queda como archivo.
+   - **Nunca abras PRs ni issues contra Eden.** En un fork, GitHub y `gh pr create` proponen por
+     defecto el repo padre: indica siempre `--repo JulianDr14/eden-xbox` y comprueba el destino.
 2. **Commit solo cuando el usuario lo pida.** Nunca por iniciativa propia. Ciérralo con la línea
    `Co-Authored-By` que indique el sistema.
 3. **Nada de keys, firmware, juegos ni binarios de Mesa** (`spirv_to_dxil.dll`) en el repo.
 4. **GPLv3:** el código queda abierto y se mantienen las cabeceras SPDX y las atribuciones.
+
+## Sincronizar con Eden
+1. El usuario pulsa "Sync fork" en GitHub, sobre `master`. También vale
+   `git fetch eden && git push origin eden/master:master`.
+2. Se fusiona en la rama de trabajo: `git switch xbox && git merge eden/master`.
+3. Se resuelven los conflictos. Los que ya salieron y cómo se resolvieron están en
+   `docs/xbox_internal.md`.
+4. Se adaptan los runtimes D3D12 a los cambios de API de las cachés genéricas.
+5. Se compila y se repite el ciclo de prueba en el PC y en la Series.
 
 ## Cómo trabajamos
 - **Idioma:** el usuario escribe en español, a veces rápido y con erratas. Responde en español,

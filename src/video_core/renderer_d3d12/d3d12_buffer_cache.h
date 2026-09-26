@@ -17,7 +17,9 @@ class BufferCacheRuntime;
 class Buffer : public VideoCommon::BufferBase {
 public:
     explicit Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams);
-    explicit Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr, u64 size_bytes);
+    /// sparse_compatible is ignored: D3D12 buffers here are committed, not reserved resources.
+    explicit Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr, u64 size_bytes,
+                    bool sparse_compatible = false);
     /// The resource outlives the Buffer until the GPU is done with it.
     ~Buffer();
 
@@ -51,6 +53,11 @@ public:
     void RunSelfTest();
 
     void TickFrame(Common::SlotVector<Buffer>& buffers) noexcept;
+
+    /// GPU progress, used by the generic cache to avoid overwriting buffers still in flight.
+    u64 CurrentTick();
+    bool IsFree(u64 tick);
+    void Wait(u64 tick);
     void Finish();
     u64 GetDeviceLocalMemory() const;
     u64 GetDeviceMemoryUsage() const;

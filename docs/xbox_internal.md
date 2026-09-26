@@ -5,8 +5,12 @@ Los docs "de verdad" son [`uwp_build.md`](uwp_build.md) (toolchain) y [`xbox_dep
 (empaquetar y desplegar). Aquí va el resumen rápido y todo lo que no cabe en ellos.
 
 **Reglas de la casa**
-- Los commits van solo a nuestro fork: `origin` = `JulianDr14/eden-xbox`. **Nunca** a `upstream`
-  (juanresendiz813/eden-xbox), que tiene el push deshabilitado.
+- Los commits van solo a nuestro fork: `origin` = `JulianDr14/eden-xbox`, fork de
+  `eden-emulator/mirror` (el espejo oficial de Eden en GitHub), rama `xbox`.
+  - `eden` (espejo de Eden) y `upstream` (juanresendiz813/eden-xbox) son solo lectura, con el push
+    deshabilitado.
+  - `legacy` (`JulianDr14/eden-xbox-legacy`) es el repo anterior, que queda como archivo.
+- Eden prohíbe la IA en su proyecto: nada de este fork se envía a Eden.
 - Nada de keys, firmware ni juegos en el repo. El único payload de prueba es el homebrew de
   `tools/xbox/boot_nro/`.
 - GPLv3: el código queda abierto y se mantienen las atribuciones.
@@ -176,6 +180,34 @@ present siguió por el scheduler, el boot terminó en 10,890 s con retorno 0 y 8
 El plan largo, con la investigación, está en `~/.claude/plans/ancient-shimmying-creek.md`.
 
 ---
+
+## Sincronización con Eden
+
+**Primera fusión** (26 sep 2026): del fork de juanresendiz813, basado en Eden `5219b9f3d` (10 jun),
+al Eden `37fe911952`. Fueron 271 commits de Eden y 10 conflictos. Así se resolvieron, para la próxima
+vez:
+
+| Archivo | Resolución |
+|---|---|
+| `AGENTS.md`, `CLAUDE.md` | Los nuestros. Los de Eden son su política contra la IA |
+| `src/audio_core/CMakeLists.txt` | Eden hizo SDL3 incondicional; lo volvemos a excluir en `WindowsStore` (arrastra DLLs de escritorio y la app no activa) |
+| `src/common/settings_enums.h` | El `GpuAccuracy` de Eden (se quitó `Medium`), más nuestro `Direct3D12` al final de `RendererBackend` |
+| `src/core/hle/service/service.h` | El de Eden: también quitó el `constexpr` de `FunctionInfoTyped` |
+| `src/dynarmic/CMakeLists.txt` | Nuestra opción `DYNARMIC_UWP_APPCONTAINER` sobre los nombres nuevos de plataforma (`OPENBSD`…) |
+| `src/core/hle/kernel/svc/svc_debug_string.cpp` | Eden quitó el hilo de volcado; solo añadimos el observador del centinela |
+| `src/dynarmic/.../block_of_code.cpp` | Eden pasó al allocator por defecto de Xbyak; recuperamos el nuestro (solo reserva, `VirtualAllocFromApp`) **solo en Windows** y se lo pasamos al `CodeGenerator` |
+| `src/common/host_memory.cpp` | Ahora hay un `Init()` que devuelve `bool`; nuestra rama UWP (reserva privada con commit bajo demanda) va dentro con `return false` en vez de excepciones |
+| `src/common/virtual_buffer.cpp` | Eden lo borró (#4219) y lo sustituyó por `sparse_large_vector`, que ya reserva y confirma bajo demanda. Allí portamos lo de UWP: `VirtualAllocFromApp`/`VirtualProtectFromApp` y `AddVectoredExceptionHandler` resuelto por nombre |
+
+**Sin conflicto de texto, pero hubo que adaptar código:**
+- `sparse_large_vector.cpp:65`: un `reinterpret_cast<u64>(ULONG_PTR)` de Eden que MSVC rechaza;
+  cambiado a `static_cast`.
+- **Runtimes D3D12:** la caché genérica ahora pide:
+  - `BufferCacheRuntime::{CurrentTick, IsFree, Wait}`.
+  - Un `Buffer(runtime, addr, size, sparse_compatible)`.
+  - `TextureCacheRuntime::{FlushDeferredClear, CanDownloadMsaa}`.
+  - `TextureCacheParams::HAS_MSAA_DOWNLOADS`.
+- `Common::Log2Ceil64` pasó a llamarse `Common::Log2Ceil<T>`.
 
 ## 4. Lo que sabemos
 

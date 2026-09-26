@@ -78,6 +78,9 @@ public:
     void AccelerateImageUpload(Image&, const StagingBufferRef&,
                                std::span<const VideoCommon::SwizzleParameters>, u32, u32) {}
     void InsertUploadMemoryBarrier() {}
+    /// Clears are recorded immediately; nothing is deferred.
+    void FlushDeferredClear() {}
+    bool CanDownloadMsaa(const VideoCommon::ImageInfo&) const noexcept { return false; }
     void TransitionImageLayout(Image& image);
     bool HasBrokenTextureViewFormats() const noexcept { return false; }
     bool HasNativeBgr() const noexcept { return true; }
@@ -237,6 +240,8 @@ struct TextureCacheParams {
     static constexpr bool FRAMEBUFFER_BLITS = false;
     static constexpr bool HAS_EMULATED_COPIES = false;
     static constexpr bool HAS_DEVICE_MEMORY_INFO = true;
+    /// MSAA downloads need the resolve passes of phase 5.
+    static constexpr bool HAS_MSAA_DOWNLOADS = false;
     /// Downloads are recorded on the GPU thread (CommitAsyncFlushes) and only read back on the fence
     /// thread; the synchronous mode would record and flush the command list from the fence thread.
     static constexpr bool IMPLEMENTS_ASYNC_DOWNLOADS = true;

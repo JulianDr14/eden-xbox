@@ -7,7 +7,6 @@
 # Build directory
 /[Bb]uild*/
 doc-build/
-out/
 AppDir/
 uruntime
 
@@ -64,3 +63,6 @@ artifacts
 /install*
 vulkansdk*.exe
 *.tar.zst
+
+# Build-time generated external sources
+externals/generated
