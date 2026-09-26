@@ -364,6 +364,33 @@ los draws se graban en la 4.3.
   `COMMON`, así que `AccelerateDMA` devuelve el buffer a `COMMON` antes.
 - Un buffer que la caché fusionó (por ejemplo, vértices más SSBO escrito) queda en el estado de su
   último binding. El hardware AMD lo lee igual; la capa de debug lo marcará.
+- **Micro-parones: queries creadas en cada submit.**
+  - `QueryCacheLegacy::EnableCounters` corre en cada `Scheduler::Flush` (callback `on_reset`) y
+    arranca tres counters.
+  - Cada `HostCounter` creaba su query heap y su buffer de readback, así que cada submit hacía 6
+    creaciones de objetos D3D12: unos 12 ms fijos y picos de 120-150 ms en 1 de cada 10 frames.
+  - Arreglo: `QueryPool` (páginas de 256 queries por tipo, con un readback por página). Los slots
+    se reciclan cuando la GPU pasa el tick de su último uso, como el `QueryPool` de Vulkan.
+- **Micro-parones: resolución del temporizador de Windows.**
+  - Con la resolución por defecto (15,6 ms), el vsync emulado llegaba cada 15 ms. Cada 9-10
+    frames había uno de 30 ms para recuperar: un salto visible, porque el cubo rota según el reloj.
+  - Arreglo: `Common::Windows::SetCurrentTimerResolutionToMaximum()` al arrancar `uwp_boot`, como
+    hace `yuzu_cmd`. El log de diagnóstico imprime la resolución obtenida: 0,5 ms en el PC y
+    1 ms en la Series (el AppContainer la respeta).
+- **Medir el ritmo de frames.** Cada 300 frames, `Composite` escribe
+  `D3D12 pacing: … avg … max … hitches …`, donde un hitch es un intervalo de más de 1,5 vblanks.
+
+  | Estado | Media | Hitches cada 300 frames | Pico |
+  |---|---|---|---|
+  | Antes | 19,6 ms | 36 | 160 ms |
+  | Con `QueryPool` | 16,7 ms | 30 | 30-60 ms |
+  | Con `QueryPool` + temporizador (PC) | 16,67 ms | 0-1 | 25 ms |
+  | Con `QueryPool` + temporizador (Series, 0.2.15.0) | 16,68 ms | 3 | 34 ms |
+
+  - En la Series quedan ~3 frames de 34 ms cada 300 frames (uno cada ~1,7 s), siempre dentro de
+    `record+present`: `Present` se bloquea dos vblanks porque el vsync emulado (temporizador de
+    1 ms) se desfasa respecto al refresco real de la tele. El arreglo pendiente es marcar el ritmo
+    con el objeto de espera del swapchain de DXGI en vez del reloj emulado.
 
 **Gate en PC (AMD Radeon Pro 5300M), revisado con `frame.bmp`:**
 

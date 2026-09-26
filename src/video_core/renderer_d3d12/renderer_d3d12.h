@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -126,6 +127,19 @@ private:
     bool logged_accelerated{};
     u32 accelerated_frames{};
     bool logged_fallback{};
+
+    /// Frame pacing statistics, logged every PACING_WINDOW frames: the interval between
+    /// Composite calls and the time the GPU thread spends blocked on frame pacing and Present.
+    struct PacingStats {
+        std::chrono::steady_clock::time_point last_composite{};
+        u32 frames{};
+        u32 hitches{}; ///< intervals over 1.5 vblanks
+        double total_ms{};
+        double max_interval_ms{};
+        double max_wait_ms{};
+        double max_present_ms{};
+    } pacing;
+    void RecordPacing(double wait_ms, double present_ms);
 };
 
 } // namespace D3D12

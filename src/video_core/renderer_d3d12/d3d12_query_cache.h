@@ -3,7 +3,11 @@
 
 #pragma once
 
+#include <array>
+#include <deque>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include "video_core/query_cache.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
@@ -18,6 +22,48 @@ class QueryCache;
 
 using CounterStream = VideoCommon::CounterStreamBase<QueryCache, HostCounter>;
 
+/// Query heap slots, each with its own place in a readback buffer, recycled once the GPU is past
+/// their last use (as Vulkan's QueryPool). The cache starts three counters on every command list,
+/// so creating a heap and a readback buffer per counter stalled every submit.
+class QueryPool {
+public:
+    struct Slot {
+        ID3D12QueryHeap* heap{};
+        ID3D12Resource* readback{};
+        u32 index{};
+        u64 offset{}; ///< byte offset of the resolved value in readback
+    };
+
+    QueryPool(const Device& device, Scheduler& scheduler);
+
+    [[nodiscard]] Slot Reserve(VideoCore::QueryType type);
+    /// Returns slot to the pool; it is handed out again once the GPU has completed tick.
+    void Release(VideoCore::QueryType type, const Slot& slot, u64 tick);
+
+private:
+    static constexpr u32 PAGE_SIZE = 256;
+
+    struct Page {
+        ComPtr<ID3D12QueryHeap> heap;
+        ComPtr<ID3D12Resource> readback;
+    };
+    struct FreeSlot {
+        Slot slot;
+        u64 tick;
+    };
+    struct TypePool {
+        std::vector<Page> pages;
+        std::deque<FreeSlot> free; ///< in release order, so roughly in tick order
+    };
+
+    void AddPage(VideoCore::QueryType type);
+
+    const Device& device;
+    Scheduler& scheduler;
+    std::mutex mutex;
+    std::array<TypePool, VideoCore::NumQueryTypes> pools;
+};
+
 class QueryCache final
     : public VideoCommon::QueryCacheLegacy<QueryCache, CachedQuery, CounterStream, HostCounter> {
 public:
@@ -27,12 +73,16 @@ public:
 
     [[nodiscard]] const Device& GetDevice() const noexcept { return device; }
     [[nodiscard]] Scheduler& GetScheduler() const noexcept { return scheduler; }
+    [[nodiscard]] const std::shared_ptr<QueryPool>& GetPool() const noexcept { return pool; }
     [[nodiscard]] bool AnyCommandQueued() const noexcept;
 
 private:
     RasterizerD3D12& rasterizer;
     const Device& device;
     Scheduler& scheduler;
+    /// Shared with the counters: the base class's streams, and the counters they hold, are
+    /// destroyed after this class's members.
+    std::shared_ptr<QueryPool> pool;
 };
 
 class HostCounter final : public VideoCommon::HostCounterBase<QueryCache, HostCounter> {
@@ -48,8 +98,8 @@ private:
     QueryCache& cache;
     VideoCore::QueryType type;
     D3D12_QUERY_TYPE query_type{};
-    ComPtr<ID3D12QueryHeap> heap;
-    ComPtr<ID3D12Resource> readback;
+    std::shared_ptr<QueryPool> pool;
+    QueryPool::Slot slot;
     mutable u64 tick{};
     bool ended{};
 };

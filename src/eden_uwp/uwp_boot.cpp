@@ -27,6 +27,7 @@
 
 #include "common/logging.h"
 #include "common/settings.h"
+#include "common/windows/timer_resolution.h"
 #include "core/core.h"
 #include "core/cpu_manager.h"
 #include "core/file_sys/registered_cache.h"
@@ -82,6 +83,12 @@ struct BootConfig {
 int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     const BootConfig& config) {
     Common::Log::Initialize();
+    // As yuzu_cmd: the default 15.6 ms timer resolution makes the emulated vsync (and any sleep in
+    // the core) tick every 15.6 ms and drop one frame in ten, visible as a stutter.
+    const auto timer_resolution = Common::Windows::SetCurrentTimerResolutionToMaximum();
+    WriteDiag("step: timer resolution " +
+              std::to_string(std::chrono::duration<double, std::milli>(timer_resolution).count()) +
+              " ms");
     ApplyHeadlessBootSettings(surface);
     WriteDiag(surface.core_window != nullptr
                   ? "step: logging up, renderer Direct3D12 on a " + std::to_string(surface.width) +

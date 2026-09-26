@@ -324,7 +324,9 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
             const Tegra::FramebufferConfig& framebuffer = framebuffers.front();
             const u32 index = swapchain.CurrentIndex();
             // Frame pacing: at most IMAGE_COUNT frames ahead of the GPU.
+            const auto wait_start = std::chrono::steady_clock::now();
             scheduler.Wait(present_ticks[index]);
+            const auto wait_end = std::chrono::steady_clock::now();
             ID3D12Resource* const image = swapchain.Image(index);
             if (blit_ready && CompositeAccelerated(framebuffer, index)) {
                 // One dump per run, once the guest has had two seconds to settle.
@@ -363,6 +365,9 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                 RecordCopy(upload, image);
                 Present(index);
             }
+            const auto present_end = std::chrono::steady_clock::now();
+            using Ms = std::chrono::duration<double, std::milli>;
+            RecordPacing(Ms(wait_end - wait_start).count(), Ms(present_end - wait_end).count());
         } catch (const std::exception& e) {
             // Keep the emulation running headless rather than taking the GPU thread down.
             LOG_CRITICAL(Render, "{} - presentation disabled", e.what());
@@ -378,6 +383,31 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
         LOG_CRITICAL(Render, "{} - rasterizer frame tick failed", e.what());
     }
     render_window.OnFrameDisplayed();
+}
+
+void RendererD3D12::RecordPacing(double wait_ms, double present_ms) {
+    constexpr u32 PACING_WINDOW = 300;
+    constexpr double HITCH_MS = 1000.0 / 60.0 * 1.5;
+    const auto now = std::chrono::steady_clock::now();
+    if (pacing.last_composite != std::chrono::steady_clock::time_point{}) {
+        const double interval =
+            std::chrono::duration<double, std::milli>(now - pacing.last_composite).count();
+        ++pacing.frames;
+        pacing.total_ms += interval;
+        pacing.max_interval_ms = std::max(pacing.max_interval_ms, interval);
+        pacing.hitches += interval > HITCH_MS ? 1 : 0;
+        pacing.max_wait_ms = std::max(pacing.max_wait_ms, wait_ms);
+        pacing.max_present_ms = std::max(pacing.max_present_ms, present_ms);
+    }
+    pacing.last_composite = now;
+    if (pacing.frames == PACING_WINDOW) {
+        LOG_INFO(Render,
+                 "D3D12 pacing: {} frames, avg {:.2f} ms, max {:.2f} ms, {} hitches; max wait "
+                 "{:.2f} ms, max record+present {:.2f} ms",
+                 pacing.frames, pacing.total_ms / pacing.frames, pacing.max_interval_ms,
+                 pacing.hitches, pacing.max_wait_ms, pacing.max_present_ms);
+        pacing = PacingStats{.last_composite = now};
+    }
 }
 
 bool RendererD3D12::ReadGuestLayer(const Tegra::FramebufferConfig& framebuffer) {
