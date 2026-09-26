@@ -1,0 +1,347 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include <algorithm>
+#include <cstdlib>
+#include <exception>
+#include <stdexcept>
+#include <string>
+
+#include "common/logging.h"
+#include "video_core/host_shaders/blit_color_float_frag_spv.h"
+#include "video_core/host_shaders/blit_depth_frag_spv.h"
+#include "video_core/host_shaders/full_screen_triangle_vert_spv.h"
+#include "video_core/host_shaders/vulkan_color_clear_frag_spv.h"
+#include "video_core/host_shaders/vulkan_color_clear_vert_spv.h"
+#include "video_core/host_shaders/vulkan_depthstencil_clear_frag_spv.h"
+#include "video_core/renderer_d3d12/d3d12_blit_image.h"
+#include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
+#include "video_core/renderer_d3d12/d3d12_scheduler.h"
+#include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
+
+namespace D3D12 {
+
+namespace {
+
+/// Root parameters (one signature for every helper pipeline): the four push-constant words each
+/// helper shader uses, spirv_to_dxil's vertex runtime data, then one SRV and one sampler table.
+constexpr u32 PUSH_CONSTANTS_PARAM = 0;
+constexpr u32 SRV_TABLE_PARAM = 2;
+constexpr u32 SAMPLER_TABLE_PARAM = 3;
+constexpr u32 PUSH_CONSTANT_WORDS = 4;
+constexpr u32 RUNTIME_DATA_WORDS = 12;
+
+/// Keys of the helper's samplers in SamplerHeap: guest samplers count up from 1 and the
+/// presenter's linear sampler is 0, so these never meet them.
+constexpr u64 NEAREST_SAMPLER_KEY = ~0ULL;
+constexpr u64 LINEAR_SAMPLER_KEY = ~0ULL - 1;
+
+D3D12_DEPTH_STENCILOP_DESC ReplaceStencil() {
+    return {
+        .StencilFailOp = D3D12_STENCIL_OP_KEEP,
+        .StencilDepthFailOp = D3D12_STENCIL_OP_KEEP,
+        .StencilPassOp = D3D12_STENCIL_OP_REPLACE,
+        .StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS,
+    };
+}
+
+} // Anonymous namespace
+
+BlitImageHelper::BlitImageHelper(const Device& device_, Scheduler& scheduler_,
+                                 const ShaderCompiler& compiler, DescriptorRing& descriptor_ring_,
+                                 SamplerHeap& sampler_heap_,
+                                 CpuDescriptorAllocator& sampler_descriptors)
+    : device{device_}, scheduler{scheduler_}, descriptor_ring{descriptor_ring_},
+      sampler_heap{sampler_heap_} {
+    if (!compiler.IsAvailable()) {
+        LOG_WARNING(Render, "D3D12: no shader path, texture blits and masked clears are skipped");
+        return;
+    }
+    try {
+        // Linked like guest pipelines, so the vertex outputs match the pixel inputs.
+        const auto compile = [&compiler](std::span<const u32> vs, std::span<const u32> ps) {
+            const std::array<ShaderCompiler::PipelineStage, 2> stages{{
+                {vs, DXIL_SPIRV_SHADER_VERTEX},
+                {ps, DXIL_SPIRV_SHADER_FRAGMENT},
+            }};
+            auto compiled = compiler.CompilePipeline(stages, {});
+            return Program{std::move(compiled[0].dxil), std::move(compiled[1].dxil)};
+        };
+        programs[static_cast<size_t>(Kind::BlitColor)] =
+            compile(FULL_SCREEN_TRIANGLE_VERT_SPV, BLIT_COLOR_FLOAT_FRAG_SPV);
+        programs[static_cast<size_t>(Kind::BlitDepth)] =
+            compile(FULL_SCREEN_TRIANGLE_VERT_SPV, BLIT_DEPTH_FRAG_SPV);
+        programs[static_cast<size_t>(Kind::ClearColor)] =
+            compile(VULKAN_COLOR_CLEAR_VERT_SPV, VULKAN_COLOR_CLEAR_FRAG_SPV);
+        programs[static_cast<size_t>(Kind::ClearDepthStencil)] =
+            compile(VULKAN_COLOR_CLEAR_VERT_SPV, VULKAN_DEPTHSTENCIL_CLEAR_FRAG_SPV);
+        CreateRootSignature();
+        CreateSamplers(sampler_descriptors);
+        available = true;
+        LOG_INFO(Render, "D3D12: blit and clear helpers ready (4 programs)");
+    } catch (const std::exception& exception) {
+        LOG_ERROR(Render, "D3D12: blit helpers unavailable: {}", exception.what());
+    }
+}
+
+BlitImageHelper::~BlitImageHelper() = default;
+
+void BlitImageHelper::CreateRootSignature() {
+    const D3D12_DESCRIPTOR_RANGE srv_range{
+        .RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+        .NumDescriptors = 1,
+        .BaseShaderRegister = 0,
+        .RegisterSpace = 0,
+        .OffsetInDescriptorsFromTableStart = 0,
+    };
+    const D3D12_DESCRIPTOR_RANGE sampler_range{
+        .RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+        .NumDescriptors = 1,
+        .BaseShaderRegister = 0,
+        .RegisterSpace = 0,
+        .OffsetInDescriptorsFromTableStart = 0,
+    };
+    std::array<D3D12_ROOT_PARAMETER, 4> params{};
+    params[PUSH_CONSTANTS_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[PUSH_CONSTANTS_PARAM].Constants = {.ShaderRegister = 0,
+                                              .RegisterSpace = PUSH_CONSTANT_SPACE,
+                                              .Num32BitValues = PUSH_CONSTANT_WORDS};
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[1].Constants = {.ShaderRegister = 0, .RegisterSpace = RUNTIME_DATA_SPACE,
+                           .Num32BitValues = RUNTIME_DATA_WORDS};
+    params[SRV_TABLE_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[SRV_TABLE_PARAM].DescriptorTable = {.NumDescriptorRanges = 1,
+                                               .pDescriptorRanges = &srv_range};
+    params[SAMPLER_TABLE_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[SAMPLER_TABLE_PARAM].DescriptorTable = {.NumDescriptorRanges = 1,
+                                                   .pDescriptorRanges = &sampler_range};
+    for (auto& param : params) {
+        param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    }
+    const D3D12_ROOT_SIGNATURE_DESC desc{
+        .NumParameters = static_cast<UINT>(params.size()),
+        .pParameters = params.data(),
+        .NumStaticSamplers = 0,
+        .pStaticSamplers = nullptr,
+        .Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE,
+    };
+    ComPtr<ID3DBlob> serialized;
+    ComPtr<ID3DBlob> error;
+    if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized,
+                                           &error))) {
+        throw std::runtime_error(
+            error ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                error->GetBufferSize())
+                  : std::string("D3D12SerializeRootSignature failed"));
+    }
+    ThrowIfFailed(device.Get()->CreateRootSignature(0, serialized->GetBufferPointer(),
+                                                    serialized->GetBufferSize(),
+                                                    IID_PPV_ARGS(&root_signature)),
+                  "CreateRootSignature (blit helpers)");
+}
+
+void BlitImageHelper::CreateSamplers(CpuDescriptorAllocator& sampler_descriptors) {
+    const auto create = [&](D3D12_FILTER filter, u64 key) {
+        const D3D12_SAMPLER_DESC desc{
+            .Filter = filter,
+            .AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            .AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            .AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            .MipLODBias = 0.0f,
+            .MaxAnisotropy = 1,
+            .ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER,
+            .BorderColor = {},
+            .MinLOD = 0.0f,
+            .MaxLOD = 0.0f,
+        };
+        const D3D12_CPU_DESCRIPTOR_HANDLE handle = sampler_descriptors.Allocate();
+        device.Get()->CreateSampler(&desc, handle);
+        return Sampling{handle, key};
+    };
+    nearest_sampler = create(D3D12_FILTER_MIN_MAG_MIP_POINT, NEAREST_SAMPLER_KEY);
+    linear_sampler = create(D3D12_FILTER_MIN_MAG_MIP_LINEAR, LINEAR_SAMPLER_KEY);
+}
+
+ID3D12PipelineState* BlitImageHelper::Pipeline(Kind kind, const Target& target, u8 mask,
+                                               bool depth) {
+    const u64 key = static_cast<u64>(kind) | (static_cast<u64>(target.format) << 8) |
+                    (static_cast<u64>(mask) << 40) | (static_cast<u64>(depth) << 48) |
+                    (static_cast<u64>(target.samples & 0xff) << 52);
+    if (const auto it = pipelines.find(key); it != pipelines.end()) {
+        return it->second.Get();
+    }
+    const Program& program = programs[static_cast<size_t>(kind)];
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+    desc.pRootSignature = root_signature.Get();
+    desc.VS = {program.vs.data(), program.vs.size()};
+    desc.PS = {program.ps.data(), program.ps.size()};
+    desc.SampleMask = UINT_MAX;
+    desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    desc.RasterizerState.DepthClipEnable = TRUE;
+    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    desc.SampleDesc = {.Count = std::max(1U, target.samples), .Quality = 0};
+    switch (kind) {
+    case Kind::BlitColor:
+    case Kind::ClearColor:
+        desc.NumRenderTargets = 1;
+        desc.RTVFormats[0] = target.format;
+        desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
+            kind == Kind::BlitColor ? static_cast<UINT8>(D3D12_COLOR_WRITE_ENABLE_ALL) : mask;
+        break;
+    case Kind::BlitDepth:
+        desc.DSVFormat = target.format;
+        desc.DepthStencilState.DepthEnable = TRUE;
+        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        break;
+    case Kind::ClearDepthStencil:
+        desc.DSVFormat = target.format;
+        desc.DepthStencilState = {
+            .DepthEnable = depth,
+            .DepthWriteMask = depth ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO,
+            .DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS,
+            .StencilEnable = TRUE,
+            .StencilReadMask = 0xFF,
+            .StencilWriteMask = mask,
+            .FrontFace = ReplaceStencil(),
+            .BackFace = ReplaceStencil(),
+        };
+        break;
+    }
+    ComPtr<ID3D12PipelineState> pipeline;
+    const HRESULT hr = device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline));
+    if (FAILED(hr)) {
+        LOG_ERROR(Render,
+                  "D3D12: blit helper pipeline {} for format {} rejected (HRESULT 0x{:08X})",
+                  static_cast<u32>(kind), static_cast<u32>(target.format), static_cast<u32>(hr));
+    } else {
+        LOG_INFO(Render, "D3D12: blit helper pipeline {} built for format {} ({} samples)",
+                 static_cast<u32>(kind), static_cast<u32>(target.format), desc.SampleDesc.Count);
+    }
+    // A rejected pipeline stays cached as null, so it is reported once.
+    return pipelines.emplace(key, std::move(pipeline)).first->second.Get();
+}
+
+void BlitImageHelper::Begin(ID3D12PipelineState* pipeline, const Target& target, bool is_depth,
+                            const D3D12_RECT& rect) {
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
+    cmd->SetDescriptorHeaps(2, heaps);
+    cmd->SetGraphicsRootSignature(root_signature.Get());
+    cmd->SetPipelineState(pipeline);
+    if (is_depth) {
+        cmd->OMSetRenderTargets(0, nullptr, FALSE, &target.view);
+    } else {
+        cmd->OMSetRenderTargets(1, &target.view, FALSE, nullptr);
+    }
+    const D3D12_VIEWPORT viewport{
+        .TopLeftX = static_cast<f32>(rect.left),
+        .TopLeftY = static_cast<f32>(rect.top),
+        .Width = static_cast<f32>(rect.right - rect.left),
+        .Height = static_cast<f32>(rect.bottom - rect.top),
+        .MinDepth = 0.0f,
+        .MaxDepth = 1.0f,
+    };
+    cmd->RSSetViewports(1, &viewport);
+    cmd->RSSetScissorRects(1, &rect);
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+}
+
+void BlitImageHelper::Blit(Kind kind, const Target& dst, D3D12_CPU_DESCRIPTOR_HANDLE src_srv,
+                           const Sampling& sampler, const VideoCommon::Region2D& dst_region,
+                           const VideoCommon::Region2D& src_region,
+                           const VideoCommon::Extent2D& src_size) {
+    if (!available || src_size.width == 0 || src_size.height == 0) {
+        return;
+    }
+    // As Vulkan's BindBlitState: the destination is the region's bounding box (a mirrored
+    // destination is not mirrored); a mirrored source is, through a negative scale.
+    const D3D12_RECT rect{
+        .left = std::min(dst_region.start.x, dst_region.end.x),
+        .top = std::min(dst_region.start.y, dst_region.end.y),
+        .right = std::max(dst_region.start.x, dst_region.end.x),
+        .bottom = std::max(dst_region.start.y, dst_region.end.y),
+    };
+    if (rect.right <= rect.left || rect.bottom <= rect.top) {
+        return;
+    }
+    ID3D12PipelineState* const pipeline = Pipeline(kind, dst, 0, false);
+    if (!pipeline) {
+        return;
+    }
+    // Descriptors first: a full ring or sampler heap flushes the command list.
+    const D3D12_GPU_DESCRIPTOR_HANDLE srv_table = descriptor_ring.Upload({&src_srv, 1});
+    const D3D12_GPU_DESCRIPTOR_HANDLE sampler_table =
+        sampler_heap.GetTable({&sampler.key, 1}, {&sampler.handle, 1});
+
+    Begin(pipeline, dst, kind == Kind::BlitDepth, rect);
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    // full_screen_triangle.vert computes texcoord = (x, y) / 2 * scale + offset with Vulkan's
+    // clip space, where y = 0 is the top of the viewport; D3D12's y = 0 is the bottom, so the
+    // vertical mapping is mirrored here: v' = (1 - v), hence scale -sy and offset oy + sy.
+    const f32 width = static_cast<f32>(src_size.width);
+    const f32 height = static_cast<f32>(src_size.height);
+    const f32 scale_x = static_cast<f32>(src_region.end.x - src_region.start.x) / width;
+    const f32 scale_y = static_cast<f32>(src_region.end.y - src_region.start.y) / height;
+    const f32 offset_x = static_cast<f32>(src_region.start.x) / width;
+    const f32 offset_y = static_cast<f32>(src_region.start.y) / height;
+    const std::array<f32, PUSH_CONSTANT_WORDS> push{scale_x, -scale_y, offset_x,
+                                                    offset_y + scale_y};
+    cmd->SetGraphicsRoot32BitConstants(PUSH_CONSTANTS_PARAM, PUSH_CONSTANT_WORDS, push.data(), 0);
+    cmd->SetGraphicsRootDescriptorTable(SRV_TABLE_PARAM, srv_table);
+    cmd->SetGraphicsRootDescriptorTable(SAMPLER_TABLE_PARAM, sampler_table);
+    cmd->DrawInstanced(3, 1, 0, 0);
+}
+
+void BlitImageHelper::BlitColor(const Target& dst, D3D12_CPU_DESCRIPTOR_HANDLE src_srv,
+                                const Sampling& sampler, const VideoCommon::Region2D& dst_region,
+                                const VideoCommon::Region2D& src_region,
+                                const VideoCommon::Extent2D& src_size) {
+    Blit(Kind::BlitColor, dst, src_srv, sampler, dst_region, src_region, src_size);
+}
+
+void BlitImageHelper::BlitDepth(const Target& dst, D3D12_CPU_DESCRIPTOR_HANDLE src_srv,
+                                const VideoCommon::Region2D& dst_region,
+                                const VideoCommon::Region2D& src_region,
+                                const VideoCommon::Extent2D& src_size) {
+    Blit(Kind::BlitDepth, dst, src_srv, nearest_sampler, dst_region, src_region, src_size);
+}
+
+void BlitImageHelper::ClearColor(const Target& dst, u8 color_mask, const std::array<f32, 4>& color,
+                                 const D3D12_RECT& rect) {
+    if (!available || rect.right <= rect.left || rect.bottom <= rect.top) {
+        return;
+    }
+    // D3D12's write mask bits are red 1, green 2, blue 4, alpha 8: the guest's order.
+    ID3D12PipelineState* const pipeline =
+        Pipeline(Kind::ClearColor, dst, static_cast<u8>(color_mask & 0xF), false);
+    if (!pipeline) {
+        return;
+    }
+    Begin(pipeline, dst, false, rect);
+    scheduler.CommandList()->SetGraphicsRoot32BitConstants(PUSH_CONSTANTS_PARAM,
+                                                           PUSH_CONSTANT_WORDS, color.data(), 0);
+    scheduler.CommandList()->DrawInstanced(3, 1, 0, 0);
+}
+
+void BlitImageHelper::ClearDepthStencil(const Target& dst, bool clear_depth, f32 depth,
+                                        u8 stencil_mask, u8 stencil_value,
+                                        const D3D12_RECT& rect) {
+    if (!available || rect.right <= rect.left || rect.bottom <= rect.top) {
+        return;
+    }
+    ID3D12PipelineState* const pipeline =
+        Pipeline(Kind::ClearDepthStencil, dst, stencil_mask, clear_depth);
+    if (!pipeline) {
+        return;
+    }
+    Begin(pipeline, dst, true, rect);
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    const std::array<f32, PUSH_CONSTANT_WORDS> push{depth, 0.0f, 0.0f, 0.0f};
+    cmd->SetGraphicsRoot32BitConstants(PUSH_CONSTANTS_PARAM, PUSH_CONSTANT_WORDS, push.data(), 0);
+    cmd->OMSetStencilRef(stencil_value);
+    cmd->DrawInstanced(3, 1, 0, 0);
+}
+
+} // namespace D3D12

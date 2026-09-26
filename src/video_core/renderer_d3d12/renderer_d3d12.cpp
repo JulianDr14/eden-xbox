@@ -134,9 +134,12 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
                             sampler_descriptors, rtv_descriptors, dsv_descriptors},
       descriptor_ring{device.Get(), scheduler, DESCRIPTOR_RING_SIZE},
       sampler_heap{device.Get(), scheduler},
+      blit_helper{device, scheduler, shader_compiler, descriptor_ring, sampler_heap,
+                  sampler_descriptors},
       rasterizer{gpu_, device_memory_, device, scheduler, shader_compiler, buffer_cache_runtime,
-                 texture_cache_runtime, descriptor_ring, sampler_heap} {
+                 texture_cache_runtime, descriptor_ring, sampler_heap, blit_helper} {
     ID3D12Device* const dev = device.Get();
+    texture_cache_runtime.SetBlitHelper(&blit_helper);
 
     const D3D12_RESOURCE_DESC image_desc =
         Texture2DDesc(swapchain.Width(), swapchain.Height(), Swapchain::FORMAT);
@@ -386,6 +389,7 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
 }
 
 void RendererD3D12::RecordPacing(double wait_ms, double present_ms) {
+    device.LogDebugMessages();
     constexpr u32 PACING_WINDOW = 300;
     constexpr double HITCH_MS = 1000.0 / 60.0 * 1.5;
     const auto now = std::chrono::steady_clock::now();

@@ -13,9 +13,14 @@
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
+#include "video_core/renderer_d3d12/d3d12_graphics_pipeline.h"
 
 namespace VideoCore {
 class ShaderNotify;
+}
+
+namespace Tegra::Engines {
+class KeplerCompute;
 }
 
 namespace D3D12 {
@@ -53,8 +58,18 @@ struct hash<D3D12::ComputePipelineCacheKey> {
 
 namespace D3D12 {
 
+/// What a compute pipeline binds its guest resources with (the rasterizer's caches and heaps).
+struct ComputeBindContext {
+    Tegra::Engines::KeplerCompute& kepler_compute;
+    Tegra::MemoryManager& gpu_memory;
+    BufferCache& buffer_cache;
+    TextureCache& texture_cache;
+    GuestDescriptorQueue& descriptor_queue;
+    SamplerHeap& sampler_heap;
+};
+
 /// A guest compute pipeline: signed DXIL, its root signature and the PSO, built on a worker when
-/// one is given. The dispatch itself arrives in phase 4.4.
+/// one is given. Mirrors Vulkan::ComputePipeline.
 class ComputePipeline {
 public:
     ComputePipeline(const Device& device, VideoCore::ShaderNotify* shader_notify,
@@ -84,6 +99,11 @@ public:
         return info;
     }
 
+    /// Port of Vulkan's ComputePipeline::Configure: binds the launch's buffers and textures and
+    /// writes the descriptor tables in root-signature order. Records no command-list state, like
+    /// GraphicsPipeline::Configure.
+    void Configure(const ComputeBindContext& context, PipelineBindings& out);
+
 private:
     void Build();
 
@@ -92,6 +112,7 @@ private:
     const PipelineLayout& layout;
     std::vector<u8> dxil;
     Shader::Info info;
+    VideoCommon::ComputeUniformBufferSizes uniform_buffer_sizes{};
 
     ComPtr<ID3D12PipelineState> pipeline_state;
 

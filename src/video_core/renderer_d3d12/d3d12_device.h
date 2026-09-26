@@ -54,6 +54,10 @@ public:
     /// Blocks until all submitted work is done.
     void WaitIdle();
 
+    /// With the debug layer on (renderer_debug), moves its stored errors and warnings to the log.
+    /// Called once per frame; cheap when the layer is off.
+    void LogDebugMessages();
+
 private:
     void LogCapabilities() const;
 
@@ -61,6 +65,8 @@ private:
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<IDXGIAdapter3> adapter3; ///< same adapter; null if it lacks IDXGIAdapter3
     ComPtr<ID3D12Device> device;
+    ComPtr<ID3D12InfoQueue> info_queue; ///< debug layer only
+    u32 debug_messages_logged{};
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12Fence> fence;
     HANDLE fence_event{};

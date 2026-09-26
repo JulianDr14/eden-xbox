@@ -7,13 +7,15 @@
 # before going to the console.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\xbox\local-run.ps1 [-NoBuild] [-TimeoutSec 75]
-#       [-BootNro path\to\payload.nro] [-RunSeconds 20]
+#       [-BootNro path\to\payload.nro] [-RunSeconds 20] [-DebugLayer]
 #
 # -RunSeconds runs payloads without the sentinels (deko3d examples, ...) for that long, then exits.
+# -DebugLayer turns on the D3D12 debug layer; its errors and warnings land in eden_log.txt.
 # The log is left in %LOCALAPPDATA%\Packages\<family>\LocalState\eden\log\eden_log.txt (path
 # printed at the end).
 
-param([int] $TimeoutSec = 75, [switch] $NoBuild, [string] $BootNro, [int] $RunSeconds = 0)
+param([int] $TimeoutSec = 75, [switch] $NoBuild, [string] $BootNro, [int] $RunSeconds = 0,
+      [switch] $DebugLayer)
 $ErrorActionPreference = 'Stop'
 $r = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $BootNro) { $BootNro = "$r\tools\xbox\boot_nro\boot.nro" }
@@ -29,7 +31,8 @@ if (-not $NoBuild) {
 Get-Process -Name eden-uwp -ErrorAction SilentlyContinue | Stop-Process -Force
 Push-Location $r
 try {
-    & "$r\tools\xbox\package-appx.ps1" -BootNro $BootNro -RunSeconds $RunSeconds *> $null
+    & "$r\tools\xbox\package-appx.ps1" -BootNro $BootNro -RunSeconds $RunSeconds `
+        -DebugLayer:$DebugLayer *> $null
 } finally {
     Pop-Location
 }

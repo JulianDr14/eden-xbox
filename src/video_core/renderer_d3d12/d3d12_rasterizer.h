@@ -8,6 +8,7 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/renderer_d3d12/d3d12_blit_image.h"
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_fence_manager.h"
@@ -45,7 +46,8 @@ public:
     RasterizerD3D12(Tegra::GPU& gpu, Tegra::MaxwellDeviceMemoryManager& device_memory,
                     const Device& device, Scheduler& scheduler, const ShaderCompiler& compiler,
                     BufferCacheRuntime& buffer_runtime, TextureCacheRuntime& texture_runtime,
-                    DescriptorRing& descriptor_ring, SamplerHeap& sampler_heap);
+                    DescriptorRing& descriptor_ring, SamplerHeap& sampler_heap,
+                    BlitImageHelper& blit_helper);
     ~RasterizerD3D12() override;
 
     void Draw(bool, u32) override;
@@ -130,7 +132,6 @@ private:
     ViewportState UpdateViewports(ID3D12GraphicsCommandList* cmd);
     void UpdateScissors(ID3D12GraphicsCommandList* cmd);
     [[nodiscard]] D3D12_RECT ScissorRect(size_t index) const;
-    void UnsupportedDraw(const char* operation);
     void QueryFallback(GPUVAddr, VideoCommon::QueryType, VideoCommon::QueryPropertiesFlags, u32);
 
     Tegra::GPU& gpu;
@@ -139,6 +140,7 @@ private:
     BufferCacheRuntime& buffer_runtime;
     DescriptorRing& descriptor_ring;
     SamplerHeap& sampler_heap;
+    BlitImageHelper& blit_helper;
     GuestDescriptorQueue descriptor_queue;
     BufferCache buffer_cache;
     TextureCache texture_cache;
@@ -146,11 +148,13 @@ private:
     QueryCache query_cache;
     AccelerateDMA accelerate_dma;
     FenceManager fence_manager;
-    bool logged_phase4_draw{};
+    bool logged_integer_clear{};
+    bool logged_draw_texture{};
     bool logged_first_draw{};
     bool logged_stencil_ref{};
     bool logged_layer_clear{};
-    bool logged_masked_clear{};
+    bool logged_first_dispatch{};
+    bool logged_indirect_dispatch{};
 };
 
 } // namespace D3D12

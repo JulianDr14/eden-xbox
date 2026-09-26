@@ -16,6 +16,7 @@
 #include "common/div_ceil.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "video_core/renderer_d3d12/d3d12_blit_image.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/surface.h"
@@ -245,6 +246,13 @@ bool logged_unsupported_transfer = false;
 bool logged_depth_stencil_transfer = false;
 bool logged_self_copy = false;
 bool logged_view_format = false;
+bool logged_self_blit = false;
+bool logged_msaa_blit = false;
+bool logged_mixed_blit = false;
+bool logged_integer_blit = false;
+bool logged_blit_target = false;
+bool logged_stencil_blit = false;
+bool logged_no_blit_helper = false;
 
 } // namespace
 
@@ -660,10 +668,99 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src, std::span<con
 void TextureCacheRuntime::ConvertImage(Framebuffer*, ImageView&, ImageView&) {
     LOG_WARNING(Render, "D3D12: shader texture conversion is deferred to phase 5");
 }
-void TextureCacheRuntime::BlitImage(Framebuffer*, ImageView&, ImageView&, const Region2D&,
-                                    const Region2D&, Tegra::Engines::Fermi2D::Filter,
+void TextureCacheRuntime::BlitImage(Framebuffer*, ImageView& dst, ImageView& src,
+                                    const Region2D& dst_region, const Region2D& src_region,
+                                    Tegra::Engines::Fermi2D::Filter filter,
                                     Tegra::Engines::Fermi2D::Operation) {
-    LOG_WARNING(Render, "D3D12: filtered texture blit is deferred to phase 4");
+    // Blend operations are drawn as copies, as in the Vulkan backend.
+    Image* const dst_image = dst.SourceImage();
+    Image* const src_image = src.SourceImage();
+    if (!dst_image || !src_image || !dst_image->Handle() || !src_image->Handle()) {
+        return;
+    }
+    if (dst_image == src_image) {
+        // Whole-resource state tracking cannot hold a shader resource and a target at once.
+        WarnOnce(logged_self_blit, "blits within one image are not supported yet; skipped");
+        return;
+    }
+    if (dst_image->info.num_samples > 1 || src_image->info.num_samples > 1) {
+        WarnOnce(logged_msaa_blit, "MSAA blits and resolves need phase 5; skipped");
+        return;
+    }
+    const SurfaceType src_type = VideoCore::Surface::GetFormatType(src.format);
+    const SurfaceType dst_type = VideoCore::Surface::GetFormatType(dst.format);
+    const bool src_color = src_type == SurfaceType::ColorTexture;
+    if (src_color != (dst_type == SurfaceType::ColorTexture)) {
+        WarnOnce(logged_mixed_blit, "blit between color and depth ({} -> {}) skipped", src.format,
+                 dst.format);
+        return;
+    }
+    const s32 dst_width = dst_region.end.x - dst_region.start.x;
+    const s32 dst_height = dst_region.end.y - dst_region.start.y;
+    const bool same_extent = dst_width > 0 && dst_height > 0 &&
+                             dst_width == src_region.end.x - src_region.start.x &&
+                             dst_height == src_region.end.y - src_region.start.y;
+    if (src_color && same_extent && src.format == dst.format) {
+        // An unscaled copy: exact for every format, integers included.
+        src_image->Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+        dst_image->Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+        const D3D12_TEXTURE_COPY_LOCATION source{
+            .pResource = src_image->Handle(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            .SubresourceIndex = src_image->Subresource(src.range.base.level, src.range.base.layer)};
+        const D3D12_TEXTURE_COPY_LOCATION target{
+            .pResource = dst_image->Handle(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            .SubresourceIndex = dst_image->Subresource(dst.range.base.level, dst.range.base.layer)};
+        const D3D12_BOX box{static_cast<u32>(src_region.start.x),
+                            static_cast<u32>(src_region.start.y), 0,
+                            static_cast<u32>(src_region.end.x),
+                            static_cast<u32>(src_region.end.y), 1};
+        scheduler.CommandList()->CopyTextureRegion(&target, static_cast<u32>(dst_region.start.x),
+                                                   static_cast<u32>(dst_region.start.y), 0,
+                                                   &source, &box);
+        return;
+    }
+    if (!blit_helper || !blit_helper->IsAvailable()) {
+        WarnOnce(logged_no_blit_helper, "scaled blits need the shader path; skipped");
+        return;
+    }
+    const VideoCommon::Extent2D src_size{src.size.width, src.size.height};
+    if (src_color) {
+        if (VideoCore::Surface::IsPixelFormatInteger(src.format) ||
+            VideoCore::Surface::IsPixelFormatInteger(dst.format)) {
+            // The blit shader samples and writes floats.
+            WarnOnce(logged_integer_blit, "scaled blits of integer formats ({} -> {}) skipped",
+                     src.format, dst.format);
+            return;
+        }
+        if (!dst.RenderTarget().ptr) {
+            WarnOnce(logged_blit_target, "blit target format {} cannot be rendered to; skipped",
+                     dst.format);
+            return;
+        }
+        src_image->Transition(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        dst_image->Transition(D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const bool linear = filter == Tegra::Engines::Fermi2D::Filter::Bilinear;
+        blit_helper->BlitColor({dst.RenderTarget(), Format(dst.format).view, 1},
+                               src.Handle(Shader::TextureType::Color2D),
+                               linear ? blit_helper->LinearSampler()
+                                      : blit_helper->NearestSampler(),
+                               dst_region, src_region, src_size);
+        return;
+    }
+    if (!dst.DepthStencil().ptr) {
+        WarnOnce(logged_blit_target, "blit target format {} cannot be rendered to; skipped",
+                 dst.format);
+        return;
+    }
+    if (dst_type == SurfaceType::DepthStencil) {
+        // Writing stencil from a shader needs SV_StencilRef, which the Series lacks.
+        WarnOnce(logged_stencil_blit, "depth-stencil blits copy depth only ({})", dst.format);
+    }
+    src_image->Transition(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    dst_image->Transition(D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    blit_helper->BlitDepth({dst.DepthStencil(), Format(dst.format).dsv, 1},
+                           src.Handle(Shader::TextureType::Color2D), dst_region, src_region,
+                           src_size);
 }
 void TextureCacheRuntime::TransitionImageLayout(Image& image) {
     image.Transition(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
@@ -688,9 +785,13 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
 
     srv_params = {
         .format = format_info.srv,
-        .mapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
-            Component(swizzle[0]), Component(swizzle[1]), Component(swizzle[2]),
-            Component(swizzle[3])),
+        // Render-target views (blits, the display) carry no swizzle: sample them as stored, as
+        // the Vulkan backend does.
+        .mapping = info.IsRenderTarget()
+                       ? D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING
+                       : D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+                             Component(swizzle[0]), Component(swizzle[1]),
+                             Component(swizzle[2]), Component(swizzle[3])),
         .base_level = base_level,
         .levels = levels,
         .base_layer = base_layer,
@@ -895,6 +996,10 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
     return handle;
 }
 
+Image* ImageView::SourceImage() const noexcept {
+    return slot_images && image ? &(*slot_images)[image_id] : nullptr;
+}
+
 void ImageView::TransitionImage(D3D12_RESOURCE_STATES state) const {
     if (slot_images && image) {
         (*slot_images)[image_id].Transition(state);
@@ -971,15 +1076,23 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
         if (!view || !view->RenderTarget().ptr) continue;
         colors[index] = view->RenderTarget();
         color_images[index] = view->image_id;
+        color_formats[index] = runtime.Format(view->format).view;
         images = view->slot_images ? view->slot_images : images;
         num_colors = static_cast<u32>(index) + 1;
+        if (const Image* const image = view->SourceImage()) {
+            samples = std::max(1U, image->info.num_samples);
+        }
     }
     if (depth_buffer && depth_buffer->DepthStencil().ptr) {
         depth = depth_buffer->DepthStencil();
         depth_image = depth_buffer->image_id;
+        depth_format = runtime.Format(depth_buffer->format).dsv;
         images = depth_buffer->slot_images ? depth_buffer->slot_images : images;
         has_stencil = VideoCore::Surface::GetFormatType(depth_buffer->format) ==
                       SurfaceType::DepthStencil;
+        if (const Image* const image = depth_buffer->SourceImage()) {
+            samples = std::max(1U, image->info.num_samples);
+        }
     }
 }
 

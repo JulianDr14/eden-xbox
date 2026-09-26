@@ -11,6 +11,7 @@
 
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/renderer_base.h"
+#include "video_core/renderer_d3d12/d3d12_blit_image.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
@@ -99,6 +100,7 @@ private:
     TextureCacheRuntime texture_cache_runtime;
     DescriptorRing descriptor_ring;
     SamplerHeap sampler_heap;
+    BlitImageHelper blit_helper;
     RasterizerD3D12 rasterizer;
 
     std::array<u64, Swapchain::IMAGE_COUNT> present_ticks{};

@@ -21,6 +21,7 @@ using VideoCommon::ImageId;
 using VideoCommon::NUM_RT;
 using VideoCommon::Region2D;
 
+class BlitImageHelper;
 class Device;
 class Scheduler;
 class Image;
@@ -58,6 +59,9 @@ public:
 
     void RunSelfTest();
     void Finish();
+
+    /// Where shader blits go (set by the renderer once the helper exists; null means skip).
+    void SetBlitHelper(BlitImageHelper* helper) noexcept { blit_helper = helper; }
     StagingBufferRef UploadStagingBuffer(size_t size, bool deferred = false);
     StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
@@ -109,6 +113,7 @@ private:
     CpuDescriptorAllocator& rtv_descriptors;
     CpuDescriptorAllocator& dsv_descriptors;
     D3D12_CPU_DESCRIPTOR_HANDLE null_rtv{};
+    BlitImageHelper* blit_helper{};
 };
 
 class Image : public VideoCommon::ImageBase {
@@ -192,6 +197,9 @@ public:
     [[nodiscard]] u32 BufferSize() const noexcept { return buffer_size; }
     [[nodiscard]] bool IsRescaled() const noexcept;
 
+    /// The texture cache image of this view; null for null and buffer views.
+    [[nodiscard]] Image* SourceImage() const noexcept;
+
     /// Transitions the whole image this view belongs to (no-op for null and buffer views).
     void TransitionImage(D3D12_RESOURCE_STATES state) const;
 
@@ -265,6 +273,13 @@ public:
     /// Null when there is no depth buffer.
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthTarget() const noexcept { return depth; }
     [[nodiscard]] bool HasStencil() const noexcept { return has_stencil; }
+    /// RTV format of render target index (UNKNOWN when empty) and the DSV format.
+    [[nodiscard]] DXGI_FORMAT ColorFormat(size_t index) const noexcept {
+        return index < NUM_RT ? color_formats[index] : DXGI_FORMAT_UNKNOWN;
+    }
+    [[nodiscard]] DXGI_FORMAT DepthFormat() const noexcept { return depth_format; }
+    /// Sample count of the attachments.
+    [[nodiscard]] u32 Samples() const noexcept { return samples; }
     [[nodiscard]] VideoCommon::Extent2D Extent() const noexcept { return extent; }
     [[nodiscard]] bool IsRescaled() const noexcept { return is_rescaled; }
 
@@ -274,7 +289,10 @@ public:
 private:
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, NUM_RT> colors{};
     std::array<ImageId, NUM_RT> color_images{};
+    std::array<DXGI_FORMAT, NUM_RT> color_formats{};
     ImageId depth_image{};
+    DXGI_FORMAT depth_format{DXGI_FORMAT_UNKNOWN};
+    u32 samples{1};
     SlotVector<Image>* images{};
     D3D12_CPU_DESCRIPTOR_HANDLE depth{};
     u32 num_colors{};

@@ -3,10 +3,13 @@
 
 #include <array>
 #include <stdexcept>
+#include <string_view>
+#include <vector>
 
 #include <fmt/format.h>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 
 namespace D3D12 {
@@ -41,9 +44,33 @@ void ThrowIfFailed(HRESULT hr, const char* what) {
 
 Device::Device() {
     ThrowIfFailed(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
+    // The debug layer (D3D12SDKLayers.dll, the "Graphics Tools" optional feature) is a PC-only aid:
+    // it must be enabled before the device exists.
+    const bool debug_layer = Settings::values.renderer_debug.GetValue();
+    if (debug_layer) {
+        ComPtr<ID3D12Debug> debug;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
+            debug->EnableDebugLayer();
+        } else {
+            LOG_WARNING(Render, "D3D12: debug layer requested but not installed");
+        }
+    }
     // Feature level 11.0 is all Xbox Series UWP offers; desktop GPUs accept it too.
     ThrowIfFailed(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)),
                   "D3D12CreateDevice");
+    if (debug_layer && SUCCEEDED(device.As(&info_queue))) {
+        // Guest images are created before the guest says what it clears them to, so every
+        // clear is "slower than it could be" by design; hide that one.
+        std::array<D3D12_MESSAGE_ID, 2> hidden{
+            D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+            D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
+        };
+        D3D12_INFO_QUEUE_FILTER filter{};
+        filter.DenyList.NumIDs = static_cast<UINT>(hidden.size());
+        filter.DenyList.pIDList = hidden.data();
+        info_queue->PushStorageFilter(&filter);
+        LOG_INFO(Render, "D3D12: debug layer active; its messages go to this log");
+    }
 
     ComPtr<IDXGIAdapter1> found;
     if (SUCCEEDED(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&found)))) {
@@ -77,6 +104,44 @@ Device::Device() {
     }
 
     LogCapabilities();
+}
+
+void Device::LogDebugMessages() {
+    if (!info_queue) {
+        return;
+    }
+    constexpr u32 MAX_LOGGED = 500;
+    const u64 count = info_queue->GetNumStoredMessages();
+    for (u64 index = 0; index < count && debug_messages_logged < MAX_LOGGED; ++index) {
+        SIZE_T size = 0;
+        if (FAILED(info_queue->GetMessage(index, nullptr, &size)) || size == 0) {
+            continue;
+        }
+        std::vector<u8> storage(size);
+        auto* const message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+        if (FAILED(info_queue->GetMessage(index, message, &size))) {
+            continue;
+        }
+        const std::string_view text{message->pDescription, message->DescriptionByteLength};
+        switch (message->Severity) {
+        case D3D12_MESSAGE_SEVERITY_CORRUPTION:
+        case D3D12_MESSAGE_SEVERITY_ERROR:
+            LOG_ERROR(Render, "D3D12 debug layer [{}]: {}", static_cast<u32>(message->ID), text);
+            ++debug_messages_logged;
+            break;
+        case D3D12_MESSAGE_SEVERITY_WARNING:
+            LOG_WARNING(Render, "D3D12 debug layer [{}]: {}", static_cast<u32>(message->ID), text);
+            ++debug_messages_logged;
+            break;
+        default:
+            break;
+        }
+        if (debug_messages_logged == MAX_LOGGED) {
+            LOG_WARNING(Render, "D3D12 debug layer: {} messages logged, the rest are dropped",
+                        MAX_LOGGED);
+        }
+    }
+    info_queue->ClearStoredMessages();
 }
 
 Device::~Device() {

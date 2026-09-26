@@ -77,6 +77,8 @@ static void ApplyHeadlessBootSettings(const BootSurface& surface) {
 struct BootConfig {
     /// > 0: the payload does not emit the sentinels (deko3d examples, ...); run it this long.
     u32 run_seconds{};
+    /// D3D12 debug layer (renderer_debug); PC only, the console has no SDK layers.
+    bool debug_layer{};
 };
 
 // Returns a process exit-style status. 0 == boot reached the run phase cleanly.
@@ -90,6 +92,10 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
               std::to_string(std::chrono::duration<double, std::milli>(timer_resolution).count()) +
               " ms");
     ApplyHeadlessBootSettings(surface);
+    if (config.debug_layer) {
+        Settings::values.renderer_debug = true;
+        WriteDiag("step: D3D12 debug layer requested");
+    }
     WriteDiag(surface.core_window != nullptr
                   ? "step: logging up, renderer Direct3D12 on a " + std::to_string(surface.width) +
                         "x" + std::to_string(surface.height) + " CoreWindow"
@@ -571,6 +577,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         config.run_seconds =
                             static_cast<u32>(std::strtoul(line.c_str() + key.size(), nullptr, 10));
                         WriteDiag("boot.cfg: run " + std::to_string(config.run_seconds) + " s");
+                    } else if (line == "debug_layer=1") {
+                        config.debug_layer = true;
+                        WriteDiag("boot.cfg: D3D12 debug layer");
                     }
                 }
             } catch (...) {

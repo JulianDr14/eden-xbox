@@ -13,7 +13,7 @@
 #   tools\xbox\local-run.ps1 -NoBuild -BootNro <nro> -RunSeconds 20
 
 param(
-    [int[]] $Examples = @(2, 3, 4, 9),
+    [int[]] $Examples = @(2, 3, 4, 9, 10),
     [string] $DevkitPro = "C:\devkitPro"
 )
 
@@ -30,6 +30,8 @@ foreach ($item in "Makefile", "romfs", "source") {
     Copy-Item (Join-Path $examplesSrc $item) $work -Recurse -Force
 }
 Copy-Item (Join-Path $PSScriptRoot "deko3d\main.cpp") (Join-Path $work "source\main.cpp") -Force
+# Our own payloads on the same framework (example 10: blits and masked clears, phase 4.4).
+Copy-Item (Join-Path $PSScriptRoot "deko3d\Example10_EdenBlit.cpp") (Join-Path $work "source") -Force
 
 # The devkitPro toolchain expects its own environment; the msys2 make needs a writable temp dir
 # without spaces (see docs/xbox_internal.md).

@@ -40,7 +40,7 @@ fallan ahí.
 | Configurar | `tools\xbox\build-env.bat cmake --preset uwp-x64` | La primera vez o si cambia CMake |
 | Compilar Eden | `tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp` | Siempre; son ~580 pasos desde cero |
 | Payload NRO | En `tools\xbox\boot_nro\`, con `TMP`/`TEMP`/`TMPDIR` apuntando a esa carpeta: `C:\devkitPro\msys2\usr\bin\make.exe` | Si cambia `main.c` |
-| Payloads deko3d | `powershell -ExecutionPolicy Bypass -File tools\xbox\build-deko3d-examples.ps1 [-Examples 2,4]` (necesita `switch-glm` y `deko3d`) | Para las pruebas de GPU de la fase 4 |
+| Payloads deko3d | `powershell -ExecutionPolicy Bypass -File tools\xbox\build-deko3d-examples.ps1 [-Examples 2,4]` (necesita `switch-glm` y `deko3d`; el 10 es nuestro: blits y clears con máscara) | Para las pruebas de GPU de la fase 4 |
 | Mesa | `powershell -ExecutionPolicy Bypass -File tools\xbox\build-spirv-to-dxil.ps1` | Una vez, y cuando cambie `tools\xbox\mesa\`; con `-Reconfigure` si cambian opciones |
 | Empaquetar | `powershell -ExecutionPolicy Bypass -File tools\xbox\package-appx.ps1` | Para cada prueba |
 
@@ -61,6 +61,9 @@ tools\xbox\build-env.bat ninja -C build-uwp src/video_core/CMakeFiles/video_core
 - Comando: `powershell -ExecutionPolicy Bypass -File tools\xbox\local-run.ps1 [-NoBuild]`.
   - Compila, empaqueta, registra el layout con `Add-AppxPackage -Register` y lanza la app.
   - Al terminar imprime el diag.
+  - Con `-DebugLayer` activa la capa de debug de D3D12, y sus errores y avisos acaban en
+    `eden_log.txt` como `D3D12 debug layer [id]: ...`. Necesita la función opcional "Herramientas
+    de gráficos" de Windows y solo sirve en el PC.
 - **Dónde quedan los archivos en el PC:**
   - El diag, en `%LOCALAPPDATA%\Packages\EdenEmuProject.EdenXbox_4qge6yz81zw0w\LocalState\`.
   - El log **no** está ahí, sino en `LocalState\eden\log\eden_log.txt`.
@@ -156,8 +159,8 @@ usa un buffer `DEFAULT` temporal: `CopyBufferRegion` reempaqueta/desempaqueta la
 El gate usa deliberadamente 13×7 RGBA8 (52 bytes por fila, no alineados), hace
 `UPLOAD → textura → READBACK`, compara 364 bytes y crea SRV/UAV/RTV/DSV, vistas nulas, sampler y
 framebuffer. Pasó con `RunHeadlessBoot returned 0` y sin warnings/errores de Render ni device removal.
-Los blits filtrados requieren los pipelines de fase 4; ASTC/ETC2 y conversiones shader avanzadas son
-trabajo de paridad de fase 5.
+Los blits filtrados llegaron en la fase 4.4 (`d3d12_blit_image`); ASTC/ETC2 y conversiones shader
+avanzadas son trabajo de paridad de fase 5.
 
 **Prueba Series de 3c (0.2.12.0, logs):** creó el runtime, ejercitó el reempaquetado de una textura
 13×7 RGBA8 desde 52 a 256 bytes por fila y recuperó correctamente los 364 bytes. Creó las vistas

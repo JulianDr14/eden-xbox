@@ -19,7 +19,7 @@ cuando un homebrew que dibuja con la GPU, y después un juego 2D, se ven igual e
 | 4.1 | Caché de pipelines y root signatures | Los VS/PS de deko3d se traducen, se enlazan y crean PSO |
 | 4.2 | Estado fijo → PSO | PSOs de deko3d válidos con la capa de debug |
 | 4.3 | Draw, clears, primitivas y present desde la caché de texturas | deko3d Example02/04 se ven igual en tele y PC |
-| 4.4 | Compute y helpers de blit y clear | deko3d Example09 y un homebrew de sprites 2D; después, un juego 2D |
+| 4.4 | Compute y helpers de blit y clear | deko3d Example09 y ex10 (blits y clears con máscara, nuestro); después, un juego 2D |
 
 ---
 
@@ -408,3 +408,137 @@ los draws se graban en la 4.3.
 - Pasar la capa de debug de D3D12.
 - State tracker (rendimiento).
 - Clears con máscara y `DrawTexture`, que llegan en la 4.4.
+
+## 4.4: implementación
+
+### Dispatch de compute
+
+- `ComputePipeline::Configure` porta el `Configure` de `vk_compute_pipeline.cpp`:
+  - Enlaza los SSBOs y los texel buffers de compute.
+  - Lee los handles de textura de los cbufs del QMD (`const_buffer_config`, `linked_tsc`).
+  - Llena la tabla de descriptores en el mismo orden que la root signature: primero los buffers,
+    mientras `BindHostComputeBuffers` los enlaza, y después las texturas y las imágenes.
+  - Como el `Configure` gráfico, no graba estado en la command list.
+- `RasterizerD3D12::DispatchCompute`:
+  - Fija la root signature de compute, el PSO, las push constants y las tablas.
+  - Pasa `dxil_spirv_compute_runtime_data` como root constants: el número de grupos, que
+    `gl_NumWorkGroups` lee de ahí.
+  - Llama a `Dispatch`.
+  - Los grupos por dimensión se limitan a 65535, como exige D3D12.
+- Las texturas que se muestrean en compute pasan a `NON_PIXEL_SHADER_RESOURCE` y las imágenes de
+  storage a `UNORDERED_ACCESS`.
+- Los buffers escritos por compute y leídos después por un draw (vértices, por ejemplo) cambian de
+  estado con `Buffer::Transition`. Entre dos usos como UAV se pone una barrera UAV.
+- **Dispatch indirecto:**
+  - De momento, los grupos se leen de la memoria del guest en la CPU, con un aviso único.
+  - Si una escritura de la GPU los dejó solo en la caché de buffers, el valor estaría viejo.
+  - Lo correcto sería `ExecuteIndirect` con una command signature de root constants + dispatch.
+    Queda pendiente hasta que un juego lo use.
+
+**Gate en PC:** deko3d ex09 ejecuta el shader de compute (8x1x1 grupos de 32 hilos), que genera
+256 vértices. El draw los pinta como una onda senoidal (de magenta a verde), visible en
+`frame.bmp`. Antes de la 4.4 esa curva no aparecía. El ex04 sigue igual y los dos terminan con
+`RunHeadlessBoot returned 0`, sin errores de Render.
+
+### Helpers de blit y clear (`d3d12_blit_image`)
+
+`BlitImageHelper` es el equivalente del `BlitImageHelper` de Vulkan.
+
+- **Shaders:** usa los shaders de host de Eden, traducidos al arrancar y enlazados como los
+  pipelines del guest:
+  - `full_screen_triangle.vert` con `blit_color_float.frag` o `blit_depth.frag`
+  - `vulkan_color_clear.vert` con `vulkan_color_clear.frag` o `vulkan_depthstencil_clear.frag`
+- **Root signature:** una sola para todos los helpers, con cuatro palabras de push constants, la
+  runtime data de vértice, una tabla de SRV y una de samplers.
+- **PSOs:** se crean la primera vez que se necesitan, uno por tipo, formato del destino, máscara y
+  número de muestras.
+- **Samplers:** dos propios (nearest y linear), con claves reservadas en `SamplerHeap` (`~0` y `~0-1`).
+
+Dónde se usa:
+
+- **`TextureCacheRuntime::BlitImage`** (blits del motor 2D, `Fermi2D`):
+  1. Si el origen y el destino tienen el mismo formato y el mismo tamaño, se hace una copia con
+     `CopyTextureRegion`. Es exacta para cualquier formato, enteros incluidos.
+  2. Si hay escalado, pasa por el shader, con filtro nearest o linear según `Fermi2D::Filter`.
+  3. Los blits de depth escriben solo la profundidad. El stencil necesitaría `SV_StencilRef`, que la
+     Series no tiene, y se avisa una vez.
+  4. Se saltan, con un aviso único: los formatos enteros escalados (el shader lee y escribe floats),
+     MSAA (fase 5), los blits dentro de la misma imagen y los blits entre color y depth.
+  5. Las operaciones de blend del motor 2D se dibujan como copias, igual que en Vulkan.
+- **`RasterizerD3D12::DrawTexture`:** blit escalado de la textura al render target 0, como en
+  Vulkan. No lo he probado: ningún payload usa `DrawTexture`.
+- **`Clear` con máscara de color parcial:** se dibuja con la máscara de escritura en el PSO. Vulkan
+  usa el truco de la constante de blend, pero D3D12 no permite blend en render targets enteros; la
+  máscara sirve para todos los formatos. Los render targets enteros se saltan, con aviso, porque el
+  shader escribe floats.
+- **`Clear` con máscara de stencil parcial:** el caso de Vulkan (`stencil_front_mask` distinto de
+  `0xFF` y de 0).
+  - Se dibuja con stencil `REPLACE`, la máscara de escritura en el PSO y la referencia dinámica
+    (`OMSetStencilRef`).
+  - Si también se pide depth, el mismo draw lo escribe.
+
+**Trampa: las vistas de render target no tienen swizzle.**
+
+- El texture cache crea las vistas de los blits con el swizzle `0xFF`, que significa "vista de
+  render target".
+- `Component()` lo traducía como R en los cuatro canales, así que el rojo se leía como blanco y el
+  azul como negro.
+- Ahora esas vistas usan `D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING`, como hace Vulkan.
+
+**Limitación genérica de Eden: `Fermi2D` trunca la región de origen.**
+
+- El final de la región se calcula como `src_x0 + du_dx * dst_width` en coma fija 32.32 y se
+  trunca. Un 2x2 escalado a 400x400 da 2/400·400 = 1,99999, es decir, un solo texel.
+- Afecta igual a Vulkan. No lo tocamos: es código común de Eden y los juegos suelen usar escalas
+  exactas.
+
+### Capa de debug de D3D12 (solo en PC)
+
+- **Cómo activarla:** `local-run.ps1 -DebugLayer`, o `package-appx.ps1 -DebugLayer`. Escribe
+  `debug_layer=1` en `boot.cfg`, y `uwp_boot` activa entonces `renderer_debug`.
+- **Qué hace `Device`:**
+  - Llama a `EnableDebugLayer()` antes de crear el dispositivo.
+  - Vuelca en cada frame los errores y avisos de `ID3D12InfoQueue` a `eden_log.txt`, con un máximo
+    de 500 mensajes.
+- **Mensajes ocultos:** los de "clear value" no coincidente (`CLEARRENDERTARGETVIEW_` y
+  `CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE`). Las imágenes del guest se crean antes de saber con
+  qué valor las limpiará, así que ese aviso de rendimiento sale siempre.
+- **Requisito:** necesita `D3D12SDKLayers.dll`, que viene con la función opcional "Herramientas de
+  gráficos" de Windows. La consola no la tiene.
+
+### Payload de prueba: deko3d ex10 (`tools/xbox/deko3d/Example10_EdenBlit.cpp`)
+
+Es un payload nuestro, no uno de los ejemplos oficiales. Usa el SampleFramework de los ejemplos y
+lo compila `build-deko3d-examples.ps1` (el ejemplo 10 va en la lista por defecto).
+
+Qué hace, en orden:
+1. Limpia todo en azul.
+2. Hace un clear solo del canal verde sobre la mitad izquierda, que debe quedar cian.
+3. Hace un clear de depth más los 4 bits bajos del stencil.
+4. Hace tres blits de una textura 2x2 (rojo y verde arriba, azul y blanco abajo):
+   - nearest a 256x256
+   - linear a 256x256
+   - nearest con volteo vertical a 128x128
+
+Las cajas son potencias de dos por el truncado de `Fermi2D`. En el blit linear, el borde derecho se
+oscurece: mezcla el texel 1 con el 2 de la superficie de 16 texels de ancho, que está vacía, igual
+que haría el hardware.
+
+**Gate 4.4 en PC:**
+
+| Payload | Resultado |
+|---|---|
+| deko3d ex10 | Mitad izquierda cian y derecha azul. Cuadrantes nearest correctos, degradado linear y el volteo vertical invertido. Se crean los PSOs de clear de color, clear de depth-stencil y blit |
+| deko3d ex09 | Onda senoidal generada por compute |
+| deko3d ex02 / ex04 | Sin cambios |
+
+Los cuatro terminan con `RunHeadlessBoot returned 0`. Con `-DebugLayer`, la capa de debug no da
+ningún error ni aviso en ninguno.
+
+**Pendiente de la 4.4:**
+- Probar en la Series.
+- `DrawTexture` sin payload que lo use.
+- Dispatch indirecto con `ExecuteIndirect`.
+- El gate final: un juego 2D del usuario, con sus keys y su firmware en `LocalState` y nunca en el
+  repo.
+- Pasan a la fase 5: blits con stencil, MSAA y conversiones de formato (`ConvertImage`).

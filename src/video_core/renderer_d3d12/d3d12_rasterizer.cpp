@@ -15,6 +15,7 @@
 #include "common/settings.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/engines/kepler_compute.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/framebuffer_config.h"
@@ -51,10 +52,12 @@ RasterizerD3D12::RasterizerD3D12(Tegra::GPU& gpu_,
                                  const ShaderCompiler& compiler,
                                  BufferCacheRuntime& buffer_runtime_,
                                  TextureCacheRuntime& texture_runtime,
-                                 DescriptorRing& descriptor_ring_, SamplerHeap& sampler_heap_)
+                                 DescriptorRing& descriptor_ring_, SamplerHeap& sampler_heap_,
+                                 BlitImageHelper& blit_helper_)
     : gpu{gpu_}, device_memory{device_memory_}, scheduler{scheduler_},
       buffer_runtime{buffer_runtime_}, descriptor_ring{descriptor_ring_},
-      sampler_heap{sampler_heap_}, descriptor_queue{device.Get(), descriptor_ring_},
+      sampler_heap{sampler_heap_}, blit_helper{blit_helper_},
+      descriptor_queue{device.Get(), descriptor_ring_},
       buffer_cache{device_memory_, buffer_runtime_}, texture_cache{texture_runtime, device_memory_},
       pipeline_cache{device_memory_, device, compiler, texture_runtime, gpu_.ShaderNotify()},
       query_cache{*this, device_memory_, device, scheduler_},
@@ -66,13 +69,6 @@ RasterizerD3D12::RasterizerD3D12(Tegra::GPU& gpu_,
 
 RasterizerD3D12::~RasterizerD3D12() {
     buffer_runtime.SetDescriptorQueue(nullptr);
-}
-
-void RasterizerD3D12::UnsupportedDraw(const char* operation) {
-    if (!logged_phase4_draw) {
-        LOG_WARNING(Render, "D3D12: guest {} skipped until phase 4.4", operation);
-        logged_phase4_draw = true;
-    }
 }
 
 void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
@@ -299,7 +295,45 @@ D3D12_RECT RasterizerD3D12::ScissorRect(size_t index) const {
     return {min_x, min_y, max_x, max_y};
 }
 
-void RasterizerD3D12::DrawTexture() { UnsupportedDraw("draw texture"); }
+void RasterizerD3D12::DrawTexture() {
+    SCOPE_EXIT {
+        gpu.TickWork();
+    };
+    std::scoped_lock lock{texture_cache.mutex};
+    texture_cache.SynchronizeDescriptors(false);
+    texture_cache.UpdateRenderTargets(false);
+
+    // Vulkan's DrawTexture: a scaled blit of the texture into render target 0.
+    const auto& state = maxwell3d->draw_manager.draw_texture_state;
+    const Sampler& sampler = *texture_cache.GetSampler(state.src_sampler, false);
+    const ImageView& texture = texture_cache.GetImageView(state.src_texture);
+    const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
+    if (!framebuffer->HasColor(0)) {
+        return;
+    }
+    using namespace VideoCore::Surface;
+    const PixelFormat format = PixelFormatFromRenderTargetFormat(maxwell3d->regs.rt[0].format);
+    if (IsPixelFormatInteger(format) || IsPixelFormatInteger(texture.format)) {
+        if (!logged_draw_texture) {
+            LOG_WARNING(Render, "D3D12: DrawTexture with integer formats is skipped");
+            logged_draw_texture = true;
+        }
+        return;
+    }
+    const VideoCommon::Region2D dst_region{
+        {static_cast<s32>(state.dst_x0), static_cast<s32>(state.dst_y0)},
+        {static_cast<s32>(state.dst_x1), static_cast<s32>(state.dst_y1)}};
+    const VideoCommon::Region2D src_region{
+        {static_cast<s32>(state.src_x0), static_cast<s32>(state.src_y0)},
+        {static_cast<s32>(state.src_x1), static_cast<s32>(state.src_y1)}};
+    framebuffer->PrepareAttachments();
+    texture.TransitionImage(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    blit_helper.BlitColor(
+        {framebuffer->ColorTargets()[0], framebuffer->ColorFormat(0), framebuffer->Samples()},
+        texture.Handle(Shader::TextureType::Color2D), {sampler.Handle(), sampler.Key()},
+        dst_region, src_region, {texture.size.width, texture.size.height});
+}
 
 void RasterizerD3D12::Clear(u32 layer_count) {
     gpu_memory->FlushCaching();
@@ -341,16 +375,27 @@ void RasterizerD3D12::Clear(u32 layer_count) {
     if (use_color && framebuffer->HasColor(color_attachment)) {
         const bool full_mask = regs.clear_surface.R && regs.clear_surface.G &&
                                regs.clear_surface.B && regs.clear_surface.A;
+        using namespace VideoCore::Surface;
+        const PixelFormat format =
+            PixelFormatFromRenderTargetFormat(regs.rt[color_attachment].format);
         if (!full_mask) {
-            // Needs the clear-by-draw helper (phase 4.4).
-            if (!logged_masked_clear) {
-                LOG_WARNING(Render, "D3D12: color clears with a partial mask are skipped");
-                logged_masked_clear = true;
+            // Drawn with the write mask in the PSO (Vulkan uses the blend constant instead).
+            if (IsPixelFormatInteger(format)) {
+                if (!logged_integer_clear) {
+                    LOG_WARNING(Render,
+                                "D3D12: masked clears of integer render targets are skipped");
+                    logged_integer_clear = true;
+                }
+            } else {
+                const u8 mask = static_cast<u8>(regs.clear_surface.R | regs.clear_surface.G << 1 |
+                                                regs.clear_surface.B << 2 |
+                                                regs.clear_surface.A << 3);
+                blit_helper.ClearColor({framebuffer->ColorTargets()[color_attachment],
+                                        framebuffer->ColorFormat(color_attachment),
+                                        framebuffer->Samples()},
+                                       mask, regs.clear_color, rect);
             }
         } else {
-            using namespace VideoCore::Surface;
-            const PixelFormat format =
-                PixelFormatFromRenderTargetFormat(regs.rt[color_attachment].format);
             std::array<f32, 4> color{};
             // Integer targets take the value converted to the integer range, as Vulkan's
             // clear; D3D12 converts the floats to integers.
@@ -380,12 +425,17 @@ void RasterizerD3D12::Clear(u32 layer_count) {
         if (use_depth) {
             clear_flags |= D3D12_CLEAR_FLAG_DEPTH;
         }
-        if (use_stencil && framebuffer->HasStencil()) {
-            if (regs.stencil_front_mask != 0xFF && regs.stencil_front_mask != 0 &&
-                !logged_masked_clear) {
-                LOG_WARNING(Render, "D3D12: masked stencil clears write every bit");
-                logged_masked_clear = true;
-            }
+        // A partial stencil mask (as Vulkan, 0 counts as full) is drawn, depth included.
+        const bool stencil_partial = use_stencil && framebuffer->HasStencil() &&
+                                     regs.stencil_front_mask != 0xFF &&
+                                     regs.stencil_front_mask != 0;
+        if (stencil_partial) {
+            blit_helper.ClearDepthStencil(
+                {depth, framebuffer->DepthFormat(), framebuffer->Samples()}, use_depth,
+                regs.clear_depth, static_cast<u8>(regs.stencil_front_mask),
+                static_cast<u8>(regs.clear_stencil), rect);
+            clear_flags = {};
+        } else if (use_stencil && framebuffer->HasStencil()) {
             clear_flags |= D3D12_CLEAR_FLAG_STENCIL;
         }
         if (clear_flags != 0) {
@@ -396,8 +446,73 @@ void RasterizerD3D12::Clear(u32 layer_count) {
 }
 
 void RasterizerD3D12::DispatchCompute() {
-    [[maybe_unused]] ComputePipeline* const pipeline = pipeline_cache.CurrentComputePipeline();
-    UnsupportedDraw("compute dispatch");
+    gpu_memory->FlushCaching();
+
+    ComputePipeline* const pipeline = pipeline_cache.CurrentComputePipeline();
+    if (!pipeline) {
+        return;
+    }
+    std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
+    PipelineBindings bindings;
+    pipeline->Configure({*kepler_compute, *gpu_memory, buffer_cache, texture_cache,
+                         descriptor_queue, sampler_heap},
+                        bindings);
+    if (!pipeline->Handle()) {
+        return; // D3D12 rejected the PSO (logged when it was built)
+    }
+
+    const auto& qmd = kepler_compute->launch_description;
+    std::array<u32, 3> dim{qmd.grid_dim_x, qmd.grid_dim_y, qmd.grid_dim_z};
+    if (const std::optional<GPUVAddr> indirect = kepler_compute->GetIndirectComputeAddress()) {
+        // The group counts reach the shader as root constants (runtime data), so they are read
+        // here instead of going through ExecuteIndirect. Counts a GPU write left only in the
+        // buffer cache would be stale.
+        if (!logged_indirect_dispatch) {
+            LOG_WARNING(Render, "D3D12: indirect dispatches read their group counts on the CPU");
+            logged_indirect_dispatch = true;
+        }
+        gpu_memory->ReadBlock(*indirect, dim.data(), sizeof(dim));
+    }
+    constexpr u32 max_dim = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+    if (dim[0] == 0 || dim[1] == 0 || dim[2] == 0) {
+        return;
+    }
+    if (dim[0] > max_dim || dim[1] > max_dim || dim[2] > max_dim) {
+        LOG_WARNING(Render, "D3D12: dispatch of {}x{}x{} groups exceeds the limit, skipped",
+                    dim[0], dim[1], dim[2]);
+        return;
+    }
+
+    const PipelineLayout& layout = pipeline->Layout();
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
+    cmd->SetDescriptorHeaps(2, heaps);
+    cmd->SetComputeRootSignature(layout.Handle());
+    cmd->SetPipelineState(pipeline->Handle());
+    cmd->SetComputeRoot32BitConstants(PipelineLayout::PUSH_CONSTANTS_INDEX, PUSH_CONSTANT_WORDS,
+                                      bindings.push_constants.data(), 0);
+    dxil_spirv_compute_runtime_data runtime_data{};
+    runtime_data.group_count_x = dim[0];
+    runtime_data.group_count_y = dim[1];
+    runtime_data.group_count_z = dim[2];
+    std::array<u32, sizeof(runtime_data) / sizeof(u32)> runtime_words{};
+    std::memcpy(runtime_words.data(), &runtime_data, sizeof(runtime_data));
+    cmd->SetComputeRoot32BitConstants(PipelineLayout::RUNTIME_DATA_INDEX,
+                                      std::min<UINT>(layout.RuntimeDataWords(),
+                                                     static_cast<UINT>(runtime_words.size())),
+                                      runtime_words.data(), 0);
+    if (layout.ResourceTableIndex() != PipelineLayout::NO_TABLE) {
+        cmd->SetComputeRootDescriptorTable(layout.ResourceTableIndex(), bindings.resource_table);
+    }
+    if (layout.SamplerTableIndex() != PipelineLayout::NO_TABLE) {
+        cmd->SetComputeRootDescriptorTable(layout.SamplerTableIndex(), bindings.sampler_table);
+    }
+    cmd->Dispatch(dim[0], dim[1], dim[2]);
+    if (!logged_first_dispatch) {
+        LOG_INFO(Render, "D3D12: first guest dispatch recorded ({}x{}x{} groups of {}x{}x{})",
+                 dim[0], dim[1], dim[2], qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z);
+        logged_first_dispatch = true;
+    }
 }
 
 std::optional<RasterizerD3D12::DisplayTexture> RasterizerD3D12::AccelerateDisplay(
