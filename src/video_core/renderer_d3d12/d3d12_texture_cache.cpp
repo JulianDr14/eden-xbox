@@ -254,6 +254,7 @@ bool logged_blit_target = false;
 bool logged_stencil_blit = false;
 bool logged_no_blit_helper = false;
 bool logged_missing_rtv = false;
+bool logged_min_max_filter = false;
 
 /// Typed UAV stores every feature level 11.0 device supports ("Format support for Direct3D
 /// feature level 11.0 hardware").
@@ -343,7 +344,13 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
         .Texture2D = {.MipSlice = 0, .PlaneSlice = 0},
     };
     device.Get()->CreateRenderTargetView(nullptr, &null_desc, null_rtv);
-    LOG_INFO(Render, "D3D12: texture cache runtime ready");
+    D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
+    supports_min_max_filter =
+        SUCCEEDED(device.Get()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options,
+                                                    sizeof(options))) &&
+        options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_2;
+    LOG_INFO(Render, "D3D12: texture cache runtime ready (min/max sampler reduction {})",
+             supports_min_max_filter ? "yes" : "no");
 }
 
 FormatInfo TextureCacheRuntime::Format(PixelFormat format) const { return NativeFormat(format); }
@@ -1179,6 +1186,13 @@ Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& 
         reduction = D3D12_FILTER_REDUCTION_TYPE_MINIMUM;
     } else if (config.reduction_filter == Tegra::Texture::SamplerReduction::Max) {
         reduction = D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
+    }
+    if ((reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM ||
+         reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM) &&
+        !runtime->supports_min_max_filter) {
+        WarnOnce(logged_min_max_filter, "min/max sampler reduction is not supported by this "
+                                        "device; filtering normally instead");
+        reduction = D3D12_FILTER_REDUCTION_TYPE_STANDARD;
     }
     const f32 anisotropy = std::clamp(config.MaxAnisotropy(), 1.0f, 16.0f);
     D3D12_FILTER filter = anisotropy > 1.0f ? D3D12_ENCODE_ANISOTROPIC_FILTER(reduction) :

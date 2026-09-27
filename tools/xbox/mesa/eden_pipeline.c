@@ -93,8 +93,13 @@ eden_spirv_to_dxil_pipeline(const struct eden_spirv_to_dxil_stage *stages, unsig
       if (debug_options->dump_nir)
          nir_print_shader(nir[i], stderr);
 
+      /* lower_int16: widen every 16-bit ALU op to 32 bits. The Xbox Series has no native 16-bit
+       * shader ops, and NIR still makes 16-bit ops out of mediump (RelaxedPrecision) code even
+       * with the recompiler's fp16/int16 off; the console driver then rejects the pixel shader
+       * (E_INVALIDARG). Dozen lowers only when the app enables 16-bit types, which misses those. */
       const struct nir_to_dxil_options opts = {
          .environment = DXIL_ENVIRONMENT_VULKAN,
+         .lower_int16 = true,
          .shader_model_max = stages[i].conf->shader_model_max,
          .validator_version_max = validator_version_max,
       };

@@ -171,6 +171,9 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     if (load_result != Core::SystemResultStatus::Success) {
         LOG_CRITICAL(Frontend, "Headless boot: failed to load {} (status {})", nro_path,
                      static_cast<int>(load_result));
+        // A failed Load leaves kernel objects behind; without ShutdownMainProcess the kernel's
+        // teardown in ~System reads freed memory and crashes.
+        shutdown();
         return 2;
     }
 
