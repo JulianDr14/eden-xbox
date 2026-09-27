@@ -128,7 +128,7 @@ if ($Game) {
 }
 
 # uwp_boot.cpp reads Package.InstalledLocation\boot.nro - the payload must sit at the layout root.
-if ($BootNro -or $gameName) {
+if ($BootNro -or $gameName -or $BootCfg.Count -gt 0) {
     if ($BootNro) {
         if (-not (Test-Path $BootNro)) { throw "BootNro not found: $BootNro" }
         Copy-Item $BootNro (Join-Path $layout "boot.nro")

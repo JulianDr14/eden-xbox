@@ -116,6 +116,9 @@ private:
     CpuDescriptorAllocator& dsv_descriptors;
     D3D12_CPU_DESCRIPTOR_HANDLE null_rtv{};
     BlitImageHelper* blit_helper{};
+    /// MIN/MAX sampler reductions need tiled resources tier 2; the Xbox Series reports tier 1 and
+    /// creating such a sampler there removes the device (DXGI_ERROR_INVALID_CALL).
+    bool supports_min_max_filter{};
     /// FORMAT_SUPPORT answers by format, each logged once (see SupportsView).
     mutable std::mutex format_support_mutex;
     mutable std::unordered_map<DXGI_FORMAT, D3D12_FEATURE_DATA_FORMAT_SUPPORT> format_support;

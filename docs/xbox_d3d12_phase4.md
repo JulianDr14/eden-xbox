@@ -777,6 +777,91 @@ Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
     `ReportDeviceRemoved` ahora dice cuántas listas quedaron sin terminar: si ninguna quedó
     abierta, la causa no fue la GPU.
 
+**Series (0.2.21.0): la causa era un sampler con reducción MAX.**
+- **Lo que marcó el tripwire:** a los 72,17 s, justo tras crear el sampler, el log dice
+  `right after sampler (filter 0x180 …)`. El filtro `0x180` es
+  `D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_POINT`, es decir, el `SamplerReduction::Max` del TSC.
+- **Por qué solo en la Series:**
+  - En D3D12, las reducciones MIN y MAX exigen `TiledResourcesTier >= 2`. La consola reporta
+    tier 1, y el PC uno mayor.
+  - La capa de debug del PC no puede avisarlo, porque allí la llamada es válida.
+  - En la consola, el driver pierde el dispositivo en silencio (`INVALID_CALL`).
+- **DRED confirma que no fue la GPU:** reporta 0 listas grabadas y 0 sin terminar.
+- **Corrección (0.2.22.0):**
+  - `TextureCacheRuntime` consulta el tier al arrancar. El log lo dice en
+    `texture cache runtime ready (min/max sampler reduction yes|no)`.
+  - Sin soporte, los samplers MIN/MAX pasan a filtrado estándar, con un aviso único.
+  - Es una aproximación: afecta a pases como los downsamples de profundidad (Hi-Z). Si se nota,
+    la alternativa es emular la reducción en el shader (fase 5).
+- **Regla nueva:** cada estado de sampler, vista o PSO que en D3D12 dependa de un tier o de un caps
+  bit se comprueba contra el probe del dispositivo, no contra lo que acepta el PC.
+- **La 0.2.22.0 no llegó a probarse:**
+  - El paquete salió sin `boot.cfg`: el juego iba dentro de `-BootCfg`, y `package-appx.ps1` solo
+    escribía el archivo con `-BootNro` o `-Game`. Ahora también lo escribe con solo `-BootCfg`.
+  - La app intentó cargar un `boot.nro` inexistente (status 2) y abortó con un access violation
+    en `~KAutoObjectWithListContainer`.
+  - Se reproduce en el PC con `local-run.ps1 -Game noexiste.nsp`.
+  - Causa: tras un `Load` fallido, `RunHeadlessBoot` volvía sin `ShutdownMainProcess`, y el
+    destructor de `System` desmontaba el kernel sobre memoria ya liberada. Ese camino ahora pasa
+    por el mismo `shutdown` que el exitoso.
+- **0.2.23.0:** la misma corrección del sampler, empaquetada con
+  `-Game wonder.nsp -RunSeconds 120 -BootCfg @('input=…')`.
+
+**Series (0.2.23.0): el juego llega a la intro y termina los 120 s.**
+- **Resultado:**
+  - Sin pérdida de dispositivo: `RunHeadlessBoot returned 0`.
+  - La intro ("Welcome to the Flower Kingdom") se ve igual que en el PC, con la escena 3D en
+    siluetas.
+  - La memoria tuvo un pico de 4,28 GiB a los 90 s y se asentó en 4,1 GiB, dentro del límite de
+    5 GiB.
+- **Pipelines rechazados:**
+  - Desde los 73,6 s, 44 de 255 `CreateGraphicsPipelineState` devuelven `E_INVALIDARG`
+    (`0x80070057`) solo en la consola. En el PC, los mismos 255 se construyen sin error.
+  - No depende del número de descriptores: la consola construye otros con 22 + 13.
+- **0.2.24.0 (diagnóstico):**
+  - En los primeros 6 fallos, `DiagnoseFailedPipeline` (`d3d12_graphics_pipeline.cpp`) vuelca el
+    desc: elementos de entrada (con el soporte `IA_VERTEX_BUFFER` de cada formato), tamaños de
+    DXIL, rasterizer, depth-stencil y blend por RT.
+  - Después reintenta con una sola parte simplificada cada vez: sin PS, atributos en RGBA32F,
+    rasterizer por defecto, sin blending, sin depth-stencil y sin strip cut.
+  - Las variantes que construyen señalan la parte que rechaza el driver.
+
+**Series (0.2.24.0): el driver rechaza pixel shaders con operaciones nativas de 16 bits.**
+- **Lo que dijo el diagnóstico:** en los 6 casos, la variante "sin pixel shader" construye y
+  todas las demás fallan. Formatos de vértice (todos con `IA_VERTEX_BUFFER`), rasterizer, blend y
+  profundidad están bien.
+- **El flag que los distingue:**
+  - Añadimos al log los feature flags del DXIL, la parte `SFI0` del contenedor: `features VS … PS …`.
+  - En el PC, 23 de los 24 PS que fallan en la consola piden `0x40000`
+    (`D3D_SHADER_REQUIRES_NATIVE_16BIT_OPS`), y casi ninguno de los que construyen lo pide.
+  - La Series reporta `native 16-bit shader ops no`.
+- **De dónde salen los 16 bits:**
+  - El `Profile` del recompilador ya tiene fp16 e int16 apagados.
+  - Los 16 bits los crea NIR a partir de código mediump (`RelaxedPrecision`), porque
+    `eden_pipeline.c` declara 16, 32 y 64 bits como soportados.
+  - Dozen solo pasa `lower_int16` cuando la app activa tipos de 16 bits, suponiendo que el resto
+    acaba en min-precision. Con los shaders de Eden sale nativo.
+- **Corrección (0.2.25.0):**
+  - `eden_pipeline.c` pasa `lower_int16 = true` a `nir_to_dxil`, siempre: toda la ALU de 16 bits
+    se ensancha a 32. Así el PC y la consola compilan el mismo DXIL.
+  - En el PC, todos los PS salen con features `0`, y sigue sin errores de Render.
+  - Hay que recompilar `spirv_to_dxil.dll`: copiar el parche al árbol de Mesa y ejecutar
+    `..\mesa-build\build-uwp.bat` (incremental, un solo archivo).
+- **Regla nueva:** los feature flags de cada DXIL tienen que ser un subconjunto de las caps de la
+  consola. El log de `pipeline built` los muestra para vigilarlo.
+
+**Series (0.2.25.0): todos los pipelines construyen.**
+- 247 pipelines creados, ningún fallo de `CreateGraphicsPipelineState`. Features: 235 × `VS 0 PS 0`
+  y 10 × `VS 4 PS 0`, igual que en el PC.
+- Carrera cronometrada de 120 s completa. La intro ("Welcome to the Flower Kingdom") se ve igual
+  que en el PC, incluidas las siluetas de la escena 3D.
+- Ritmo estable a 33,33 ms por frame (30 FPS) tras la carga, con un tirón de ~7 s mientras se
+  compilan los pipelines del nivel.
+- Quedan los avisos conocidos: depth-stencil sin transferir, min/max sampler sustituido y un
+  formato de atributo no soportado (leído como `RGBA32F`) que se ignora.
+- Con esto la consola y el PC dan el mismo resultado; lo siguiente (las siluetas) se depura en el
+  PC.
+
 **Pendiente de la 4.4:**
 - `DrawTexture` y `DrawIndirect` con `ExecuteIndirect`: no han salido en este juego.
 - Pasan a la fase 5:
