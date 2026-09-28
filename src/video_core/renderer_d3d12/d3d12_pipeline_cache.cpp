@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <bit>
 #include <exception>
-#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <thread>
@@ -24,7 +23,6 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
-#include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 #include "video_core/renderer_d3d12/d3d12_pipeline_cache.h"
 #include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
@@ -261,51 +259,6 @@ ShaderCaps QueryShaderCaps(const Device& device) {
         caps.int64 = options1.Int64ShaderOps != FALSE;
     }
     return caps;
-}
-
-// Debugging the Series NaN: the SPIR-V and DXIL of the pixel shaders the trace saw introduce
-// them, written next to the trace dumps (log/shaders/<hash>.spv, .dxil).
-void DumpTracedShaders(const GraphicsPipelineCacheKey& key,
-                       const std::array<std::vector<u32>, Maxwell::MaxShaderStage>& spirv,
-                       const std::array<std::vector<u8>, Maxwell::MaxShaderStage>& dxil) {
-    static constexpr std::array<u64, 15> TRACED{
-        0x66c8708c0b801e0bULL, 0x1da37940368bb8e8ULL, 0x6cc177734260f027ULL,
-        0x683d5efeab2fe3e6ULL, 0xc1a938718d97043cULL, 0xa55a4262916408ffULL,
-        0x601bfe68cd0a0f91ULL, 0x12e77d9c0d85442eULL, 0x9355e631d1dd8633ULL,
-        0x31538868f5bfd532ULL, 0x87510b7c5c30fc47ULL, 0x0e4d59f8fefd9466ULL, 0x946d5d69e5522128ULL,
-        0x144325c2f2af10a2ULL, 0xa1da74541be9abe1ULL,
-    };
-    constexpr size_t FS = static_cast<size_t>(Maxwell::ShaderType::Pixel);
-    const u64 hash = key.unique_hashes[FS];
-    if (std::find(TRACED.begin(), TRACED.end(), hash) == TRACED.end()) {
-        return;
-    }
-    const auto dir = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "shaders";
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    const auto write = [&](const std::string& name, const void* data, size_t size) {
-        std::ofstream stream(dir / name, std::ios::binary | std::ios::trunc);
-        stream.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
-    };
-    const size_t fs_stage = FS - 1;
-    // One pixel shader may pair with several vertex shaders: the name carries both.
-    const u64 vs_hash = key.unique_hashes[1];
-    write(fmt::format("{:016x}_{:016x}_fs.spv", hash, vs_hash), spirv[fs_stage].data(),
-          spirv[fs_stage].size() * sizeof(u32));
-    write(fmt::format("{:016x}_{:016x}_fs.dxil", hash, vs_hash), dxil[fs_stage].data(), dxil[fs_stage].size());
-    write(fmt::format("{:016x}_{:016x}_vs.spv", hash, vs_hash), spirv[0].data(), spirv[0].size() * sizeof(u32));
-    write(fmt::format("{:016x}_{:016x}_vs.dxil", hash, vs_hash), dxil[0].data(), dxil[0].size());
-    LOG_INFO(Render, "D3D12: dumped shaders of PS {:016x} with VS {:016x}", hash, vs_hash);
-    for (size_t index = 0; index < key.state.attributes.size(); ++index) {
-        const auto& attribute = key.state.attributes[index];
-        if (attribute.enabled == 0) {
-            continue;
-        }
-        LOG_INFO(Render, "D3D12:   attribute {} type {} size {} buffer {} offset {} dxgi {}",
-                 index, static_cast<u32>(attribute.Type()), static_cast<u32>(attribute.Size()),
-                 static_cast<u32>(attribute.buffer), static_cast<u32>(attribute.offset),
-                 static_cast<u32>(MaxwellToD3D12::VertexFormat(attribute.Type(), attribute.Size())));
-    }
 }
 
 } // Anonymous namespace
@@ -663,7 +616,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     for (size_t i = 0; i < compiled.size(); ++i) {
         dxil[stage_indices[i]] = std::move(compiled[i].dxil);
     }
-    DumpTracedShaders(key, spirv, dxil);
     const PipelineLayout& layout = root_signatures.Get(infos, false);
 
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};

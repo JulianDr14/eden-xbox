@@ -45,7 +45,7 @@
 namespace D3D12 {
 // renderer_d3d12.h; its includes need Mesa's headers, which only video_core sees.
 void SetTracedFrame(u32 frame);
-void SetArrayPadding(bool enabled); // d3d12_texture_cache.h
+void SetBcArrayDecode(bool enabled); // d3d12_texture_cache.h
 } // namespace D3D12
 
 namespace {
@@ -100,8 +100,8 @@ struct BootConfig {
     bool null_renderer{};
     /// Presented frame whose draws the D3D12 renderer logs; 0 keeps its default.
     u32 traced_frame{};
-    /// Diagnostic: D3D12 color array images get a power of two layer count.
-    bool array_pad{};
+    /// Keep D3D12 block-compressed 2D arrays compressed instead of decoding them on the CPU.
+    bool bc_arrays_native{};
     /// Buttons to press at given times ("input=25:L+R" lines).
     std::vector<InputStep> input_script;
 };
@@ -124,7 +124,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
               " ms");
     ApplyHeadlessBootSettings(config.null_renderer ? BootSurface{} : surface);
     D3D12::SetTracedFrame(config.traced_frame);
-    D3D12::SetArrayPadding(config.array_pad);
+    D3D12::SetBcArrayDecode(!config.bc_arrays_native);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
         WriteDiag("step: D3D12 debug layer requested");
@@ -746,9 +746,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         config.traced_frame =
                             static_cast<u32>(std::strtoul(line.c_str() + 12, nullptr, 10));
                         WriteDiag("boot.cfg: trace frame " + std::to_string(config.traced_frame));
-                    } else if (line == "array_pad=1") {
-                        config.array_pad = true;
-                        WriteDiag("boot.cfg: D3D12 color arrays padded to a power of two layers");
+                    } else if (line == "bc_arrays=native") {
+                        config.bc_arrays_native = true;
+                        WriteDiag("boot.cfg: D3D12 block-compressed arrays stay compressed");
                     } else if (line == "renderer=null") {
                         config.null_renderer = true;
                         WriteDiag("boot.cfg: Null renderer");
