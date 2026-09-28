@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <utility>
 
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Gaming.Input.h>
@@ -95,6 +97,40 @@ void ApplyDeadzone(double x, double y, float& out_x, float& out_y) {
     out_y = static_cast<float>(y * scale);
 }
 
+std::atomic<u32> pressed_keys{0};
+std::atomic<bool> quit_requested{false};
+
+constexpr u32 KeyBit(Key key) {
+    return 1U << static_cast<u32>(key);
+}
+
+/// The keyboard's buttons and stick; the stick only where the gamepad leaves it centered.
+void ApplyKeyboard(PadState& state) {
+    const u32 keys = pressed_keys.load(std::memory_order_relaxed);
+    if (keys == 0) {
+        return;
+    }
+    constexpr std::array<std::pair<Key, VirtualButton>, 4> KEY_BUTTONS{{
+        {Key::L, VirtualButton::TriggerL},
+        {Key::R, VirtualButton::TriggerR},
+        {Key::A, VirtualButton::ButtonA},
+        {Key::B, VirtualButton::ButtonB},
+    }};
+    for (const auto& [key, button] : KEY_BUTTONS) {
+        if (keys & KeyBit(key)) {
+            state.buttons |= Bit(button);
+        }
+    }
+    const float x = ((keys & KeyBit(Key::StickRight)) ? 1.0f : 0.0f) -
+                    ((keys & KeyBit(Key::StickLeft)) ? 1.0f : 0.0f);
+    const float y = ((keys & KeyBit(Key::StickUp)) ? 1.0f : 0.0f) -
+                    ((keys & KeyBit(Key::StickDown)) ? 1.0f : 0.0f);
+    if ((x != 0.0f || y != 0.0f) && state.left_x == 0.0f && state.left_y == 0.0f) {
+        state.left_x = x;
+        state.left_y = y;
+    }
+}
+
 PadState ReadGamepad(const Gamepad& pad) {
     const auto reading = pad.GetCurrentReading();
     PadState state{};
@@ -116,6 +152,22 @@ PadState ReadGamepad(const Gamepad& pad) {
 }
 
 } // namespace
+
+void SetKeyPressed(Key key, bool pressed) {
+    if (pressed) {
+        pressed_keys.fetch_or(KeyBit(key), std::memory_order_relaxed);
+    } else {
+        pressed_keys.fetch_and(~KeyBit(key), std::memory_order_relaxed);
+    }
+}
+
+void RequestQuit() {
+    quit_requested.store(true, std::memory_order_relaxed);
+}
+
+bool QuitRequested() {
+    return quit_requested.load(std::memory_order_relaxed);
+}
 
 std::optional<InputStep> ParseInputStep(std::string_view spec) {
     InputStep step{.duration_ms = DEFAULT_STEP_MS, .text = std::string{spec}};
@@ -224,6 +276,7 @@ void GamepadInput::Run(std::stop_token stop) {
                 pad.reset();
             }
         }
+        ApplyKeyboard(state);
         const auto elapsed = static_cast<u32>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                   std::chrono::steady_clock::now() - start)
                                                   .count());

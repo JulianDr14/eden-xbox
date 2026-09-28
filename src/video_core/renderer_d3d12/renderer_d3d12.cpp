@@ -11,7 +11,12 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <utility>
+
+#include <fmt/format.h>
+
 
 #include "common/fs/path_util.h"
 #include "common/logging.h"
@@ -23,6 +28,7 @@
 #include "video_core/gpu.h"
 #include "video_core/host_shaders/blit_color_float_frag_spv.h"
 #include "video_core/host_shaders/full_screen_triangle_vert_spv.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/renderer_d3d12.h"
 #include "video_core/shader_notify.h"
 #include "video_core/surface.h"
@@ -490,6 +496,10 @@ void RendererD3D12::RecordPacing(double wait_ms, double present_ms) {
         pacing.hitches += interval > HITCH_MS ? 1 : 0;
         pacing.max_wait_ms = std::max(pacing.max_wait_ms, wait_ms);
         pacing.max_present_ms = std::max(pacing.max_present_ms, present_ms);
+        ReportPerf(interval);
+    } else {
+        perf_frame = VideoCore::Perf::Read();
+        perf_window = perf_frame;
     }
     pacing.last_composite = now;
     if (pacing.frames == PACING_WINDOW) {
@@ -498,8 +508,113 @@ void RendererD3D12::RecordPacing(double wait_ms, double present_ms) {
                  "{:.2f} ms, max record+present {:.2f} ms",
                  pacing.frames, pacing.total_ms / pacing.frames, pacing.max_interval_ms,
                  pacing.hitches, pacing.max_wait_ms, pacing.max_present_ms);
+        ReportPerfWindow(pacing.frames, pacing.total_ms);
         pacing = PacingStats{.last_composite = now};
     }
+}
+
+namespace {
+
+using VideoCore::Perf::Counter;
+
+/// The change of every counter between two snapshots.
+VideoCore::Perf::Snapshot Delta(const VideoCore::Perf::Snapshot& now,
+                                const VideoCore::Perf::Snapshot& before) {
+    VideoCore::Perf::Snapshot delta{};
+    for (size_t i = 0; i < delta.size(); ++i) {
+        delta[i] = now[i] - before[i];
+    }
+    return delta;
+}
+
+double Ms(const VideoCore::Perf::Snapshot& delta, Counter counter) {
+    return static_cast<double>(VideoCore::Perf::Get(delta, counter)) / 1000.0;
+}
+
+/// Counters of one frame or window, one line. The GPU thread's time splits into idle (waiting
+/// for the guest), fence waits (waiting for the GPU), pipeline stalls, guest flushes, resource
+/// creation, and the rest: recording draws and running the caches.
+std::string DescribePerf(const VideoCore::Perf::Snapshot& d, double interval_ms) {
+    const double idle = Ms(d, Counter::GpuThreadIdleUs);
+    const double fence = Ms(d, Counter::FenceWaitUs);
+    const double pipelines = Ms(d, Counter::PipelineStallUs);
+    const double flushes = Ms(d, Counter::GpuThreadFlushUs);
+    const double creates = Ms(d, Counter::ResourceCreateUs);
+    const double decodes = Ms(d, Counter::TextureDecodeUs);
+    const double work =
+        std::max(0.0, interval_ms - idle - fence - pipelines - flushes - creates - decodes);
+    const auto get = [&d](Counter counter) { return VideoCore::Perf::Get(d, counter); };
+    return fmt::format(
+        "GPU thread: idle {:.1f} ms, fence waits {} ({:.1f} ms), pipeline stalls {} ({:.1f} ms), "
+        "guest flushes {} ({:.1f} ms), new resources {} ({:.1f} ms), CPU texture decode {:.1f} ms, "
+        "other work {:.1f} ms | GPU busy {:.1f} ms, {} submits | {} draws, {} dispatches | "
+        "uploads {} ({:.2f} MiB, {} GPU-decoded), downloads {} ({:.2f} MiB) | staging: {} "
+        "dedicated ({:.2f} MiB), {} ring waits",
+        idle, get(Counter::FenceWaits), fence, get(Counter::PipelineStalls), pipelines,
+        get(Counter::GpuThreadFlushes), flushes, get(Counter::ResourcesCreated), creates, decodes,
+        work,
+        Ms(d, Counter::GpuBusyUs), get(Counter::Submits), get(Counter::Draws),
+        get(Counter::Dispatches), get(Counter::TextureUploads),
+        static_cast<double>(get(Counter::TextureUploadBytes)) / (1024.0 * 1024.0),
+        get(Counter::TextureGpuDecodes), get(Counter::TextureDownloads),
+        static_cast<double>(get(Counter::TextureDownloadBytes)) / (1024.0 * 1024.0),
+        get(Counter::StagingDedicated),
+        static_cast<double>(get(Counter::StagingDedicatedBytes)) / (1024.0 * 1024.0),
+        get(Counter::StagingStreamWaits));
+}
+
+/// The largest share of a slow frame, in words.
+const char* LikelyCause(const VideoCore::Perf::Snapshot& d, double interval_ms) {
+    const std::array<std::pair<double, const char*>, 7> shares{{
+        {Ms(d, Counter::GpuThreadIdleUs), "guest CPU (the GPU thread waited for work)"},
+        {Ms(d, Counter::FenceWaitUs), "GPU (the GPU thread waited for the GPU)"},
+        {Ms(d, Counter::PipelineStallUs), "pipeline builds"},
+        {Ms(d, Counter::GpuThreadFlushUs), "guest reading back GPU memory"},
+        {Ms(d, Counter::ResourceCreateUs), "creating resources"},
+        {Ms(d, Counter::TextureDecodeUs), "decoding textures on the CPU"},
+        {0.0, "recording draws / texture and buffer caches"},
+    }};
+    double accounted = 0.0;
+    for (const auto& share : shares) {
+        accounted += share.first;
+    }
+    const double other = std::max(0.0, interval_ms - accounted);
+    const auto* best = &shares.back();
+    double best_ms = other;
+    for (const auto& share : shares) {
+        if (share.first > best_ms) {
+            best_ms = share.first;
+            best = &share;
+        }
+    }
+    return best->second;
+}
+
+} // Anonymous namespace
+
+void RendererD3D12::ReportPerf(double interval_ms) {
+    constexpr double REPORT_MS = 100.0;
+    const VideoCore::Perf::Snapshot now = VideoCore::Perf::Read();
+    const VideoCore::Perf::Snapshot delta = Delta(now, perf_frame);
+    perf_frame = now;
+    const auto time = std::chrono::steady_clock::now();
+    // At most one per second, so a stretch of slow frames does not flood the log.
+    if (interval_ms < REPORT_MS || time - last_hitch_report < std::chrono::seconds{1}) {
+        return;
+    }
+    last_hitch_report = time;
+    LOG_INFO(Render, "D3D12 hitch: {:.0f} ms frame, likely {} | {}", interval_ms,
+             LikelyCause(delta, interval_ms), DescribePerf(delta, interval_ms));
+}
+
+void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
+    const VideoCore::Perf::Snapshot now = VideoCore::Perf::Read();
+    const VideoCore::Perf::Snapshot delta = Delta(now, perf_window);
+    perf_window = now;
+    LOG_INFO(Render, "D3D12 perf over {} frames ({:.0f} ms), mostly {} | {}", frames, total_ms,
+             LikelyCause(delta, total_ms), DescribePerf(delta, total_ms));
+    // Who submits and waits (S/W, count, eden-uwp.exe RVAs from the innermost caller out).
+    LOG_INFO(Render, "D3D12 sync sites: {}", scheduler.TakeSyncSites(6));
 }
 
 bool RendererD3D12::ReadGuestLayer(const Tegra::FramebufferConfig& framebuffer) {

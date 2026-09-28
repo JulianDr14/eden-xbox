@@ -25,6 +25,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/framebuffer_config.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/surface.h"
@@ -189,7 +190,9 @@ RasterizerD3D12::~RasterizerD3D12() {
 }
 
 void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
+    ++draw_counter;
     SCOPE_EXIT {
+        FlushIfUploadHeavy();
         gpu.TickWork();
     };
     gpu_memory->FlushCaching();
@@ -297,6 +300,7 @@ void RasterizerD3D12::MarkVertexBuffersDirty() {
 }
 
 void RasterizerD3D12::DrawIndirect() {
+    ++draw_counter;
     const IndirectParams& params = maxwell3d->draw_manager.indirect_state;
     if (params.is_byte_count) {
         // Transform feedback draws; HasDrawTransformFeedback() is false, so the macro should
@@ -315,6 +319,7 @@ void RasterizerD3D12::DrawIndirect() {
         return;
     }
     SCOPE_EXIT {
+        FlushIfUploadHeavy();
         gpu.TickWork();
     };
     gpu_memory->FlushCaching();
@@ -458,6 +463,7 @@ void RasterizerD3D12::RecordDraw(const GraphicsPipeline& pipeline,
                                  Maxwell::PrimitiveTopology topology) {
     BindDrawState(pipeline, bindings, framebuffer, params, topology);
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::Draws, 1);
     if (params.is_indexed) {
         cmd->DrawIndexedInstanced(params.num_vertices, params.num_instances, params.first_index,
                                   static_cast<INT>(params.base_vertex), params.base_instance);
@@ -620,6 +626,7 @@ D3D12_RECT RasterizerD3D12::ScissorRect(size_t index) const {
 }
 
 void RasterizerD3D12::DrawTexture() {
+    ++draw_counter;
     SCOPE_EXIT {
         gpu.TickWork();
     };
@@ -665,6 +672,7 @@ void RasterizerD3D12::DrawTexture() {
 }
 
 void RasterizerD3D12::Clear(u32 layer_count) {
+    ++draw_counter;
     gpu_memory->FlushCaching();
     const auto& regs = maxwell3d->regs;
     const bool use_color = regs.clear_surface.R || regs.clear_surface.G || regs.clear_surface.B ||
@@ -785,6 +793,10 @@ void RasterizerD3D12::Clear(u32 layer_count) {
 }
 
 void RasterizerD3D12::DispatchCompute() {
+    ++draw_counter;
+    SCOPE_EXIT {
+        FlushIfUploadHeavy();
+    };
     gpu_memory->FlushCaching();
 
     ComputePipeline* const pipeline = pipeline_cache.CurrentComputePipeline();
@@ -859,6 +871,7 @@ void RasterizerD3D12::DispatchCompute() {
     if (layout.SamplerTableIndex() != PipelineLayout::NO_TABLE) {
         cmd->SetComputeRootDescriptorTable(layout.SamplerTableIndex(), bindings.sampler_table);
     }
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::Dispatches, 1);
     if (indirect_range) {
         cmd->ExecuteIndirect(layout.DispatchSignature(), 1, indirect_range->buffer,
                              indirect_range->offset, nullptr, 0);
@@ -1028,11 +1041,51 @@ void RasterizerD3D12::FlushAndInvalidateRegion(DAddr a, u64 s, VideoCommon::Cach
     if (Settings::IsGPULevelHigh()) FlushRegion(a, s, w);
     InvalidateRegion(a, s, w);
 }
-void RasterizerD3D12::WaitForIdle() { scheduler.Finish(); }
-void RasterizerD3D12::FragmentBarrier() { scheduler.Flush(); }
-void RasterizerD3D12::TiledCacheBarrier() { scheduler.Flush(); }
-void RasterizerD3D12::FlushCommands() { scheduler.Flush(); }
+void RasterizerD3D12::WaitForIdle() {
+    // As Vulkan's (an event set and waited on inside the command buffer): a GPU-side barrier,
+    // never a CPU wait. Games issue wait_for_idle dozens of times a frame; submitting and waiting
+    // for the GPU on each one took about half of every frame (0.2.49 perf counters). One queue
+    // runs in order and the caches transition what they hand over, so what is left to order are
+    // UAV writes: a UAV barrier on every resource.
+    const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV,
+                                         .UAV = {.pResource = nullptr}};
+    scheduler.CommandList()->ResourceBarrier(1, &barrier);
+    fence_manager.SignalOrdering();
+}
+void RasterizerD3D12::FragmentBarrier() {
+    // Fragment shaders' storage writes before later reads.
+    const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV,
+                                         .UAV = {.pResource = nullptr}};
+    scheduler.CommandList()->ResourceBarrier(1, &barrier);
+}
+void RasterizerD3D12::TiledCacheBarrier() {
+    // Nothing: the host has no tiled cache to flush (Vulkan does the same).
+}
+void RasterizerD3D12::FlushCommands() {
+    // Called at the end of every guest command list: submit when something was drawn, or when
+    // enough was uploaded. Loading screens upload thousands of small buffers without drawing;
+    // left unsubmitted, the staging stream cannot be reused and every upload became a new
+    // committed buffer until the console ran out of memory (0.2.49, 125 s into Wonder).
+    constexpr u64 UPLOAD_FLUSH_BYTES = 8ULL << 20;
+    if (draw_counter == 0 && staging.PendingUploadBytes() < UPLOAD_FLUSH_BYTES) {
+        return;
+    }
+    draw_counter = 0;
+    scheduler.Flush();
+}
+void RasterizerD3D12::FlushIfUploadHeavy() {
+    // A loading frame may upload more textures than the 128 MiB staging stream holds within one
+    // command list (151 MiB in Mario Wonder), and the stream only reuses submitted regions. Every
+    // draw records its whole state, so submitting between draws is safe.
+    constexpr u64 UPLOAD_SUBMIT_BYTES = 32ULL << 20;
+    if (staging.PendingUploadBytes() < UPLOAD_SUBMIT_BYTES) {
+        return;
+    }
+    draw_counter = 0;
+    scheduler.Flush();
+}
 void RasterizerD3D12::TickFrame() {
+    draw_counter = 0;
     fence_manager.TickFrame();
     { std::scoped_lock lock{texture_cache.mutex}; texture_cache.TickFrame(); }
     { std::scoped_lock lock{buffer_cache.mutex}; buffer_cache.TickFrame(); }

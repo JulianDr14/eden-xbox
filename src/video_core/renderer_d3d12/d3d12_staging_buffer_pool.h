@@ -56,6 +56,9 @@ public:
 
     void TickFrame();
 
+    /// Upload bytes requested for the command list being recorded (stream and dedicated).
+    [[nodiscard]] u64 PendingUploadBytes() const noexcept;
+
 private:
     struct StagingBuffer {
         ComPtr<ID3D12Resource> buffer;
@@ -118,6 +121,8 @@ private:
 
     size_t current_delete_level = 0;
     u64 unique_ids{};
+    u64 pending_tick{};
+    u64 pending_upload_bytes{};
 };
 
 /// Creates a buffer in heap_type (UPLOAD or READBACK) and maps it for its whole lifetime.

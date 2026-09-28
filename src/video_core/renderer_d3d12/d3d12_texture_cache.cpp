@@ -18,10 +18,12 @@
 #include "common/div_ceil.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_blit_image.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/surface.h"
+#include "video_core/texture_cache/accelerated_swizzle.h"
 #include "video_core/texture_cache/render_targets.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -117,6 +119,34 @@ FormatInfo BaseFormat(PixelFormat format) {
     }
 }
 
+/// No ASTC in D3D12: ASTC images hold what the guest blocks decode to (RGBA8, by the CPU or the
+/// ASTC compute shader) or, with recompression, what the CPU re-encodes them to (BC1/BC3), as the
+/// generic ConvertImage path produces them.
+FormatInfo AstcFormat(PixelFormat format, Settings::AstcRecompression recompression) {
+    FormatInfo info{};
+    const bool srgb = VideoCore::Surface::IsPixelFormatSRGB(format);
+    info.converted = true;
+    switch (recompression) {
+    case Settings::AstcRecompression::Bc1:
+        info.resource = DXGI_FORMAT_BC1_TYPELESS;
+        info.view = srgb ? DXGI_FORMAT_BC1_UNORM_SRGB : DXGI_FORMAT_BC1_UNORM;
+        info.copy_format = PixelFormat::BC1_RGBA_UNORM;
+        break;
+    case Settings::AstcRecompression::Bc3:
+        info.resource = DXGI_FORMAT_BC3_TYPELESS;
+        info.view = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB : DXGI_FORMAT_BC3_UNORM;
+        info.copy_format = PixelFormat::BC3_UNORM;
+        break;
+    default:
+        info.resource = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        info.view = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+        info.copy_format = PixelFormat::A8B8G8R8_UNORM;
+        break;
+    }
+    info.srv = info.view;
+    return info;
+}
+
 FormatInfo NativeFormat(PixelFormat format) {
     FormatInfo info = BaseFormat(format);
     info.copy_format = format;
@@ -124,29 +154,7 @@ FormatInfo NativeFormat(PixelFormat format) {
         return info;
     }
     if (VideoCore::Surface::IsPixelFormatASTC(format)) {
-        // No ASTC in D3D12: the CPU decodes it (and optionally re-encodes to BC1/BC3) on upload,
-        // exactly like the generic ConvertImage path expects.
-        const bool srgb = VideoCore::Surface::IsPixelFormatSRGB(format);
-        info.converted = true;
-        switch (Settings::values.astc_recompression.GetValue()) {
-        case Settings::AstcRecompression::Bc1:
-            info.resource = DXGI_FORMAT_BC1_TYPELESS;
-            info.view = srgb ? DXGI_FORMAT_BC1_UNORM_SRGB : DXGI_FORMAT_BC1_UNORM;
-            info.copy_format = PixelFormat::BC1_RGBA_UNORM;
-            break;
-        case Settings::AstcRecompression::Bc3:
-            info.resource = DXGI_FORMAT_BC3_TYPELESS;
-            info.view = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB : DXGI_FORMAT_BC3_UNORM;
-            info.copy_format = PixelFormat::BC3_UNORM;
-            break;
-        default:
-            info.resource = DXGI_FORMAT_R8G8B8A8_TYPELESS;
-            info.view = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
-            info.copy_format = PixelFormat::A8B8G8R8_UNORM;
-            break;
-        }
-        info.srv = info.view;
-        return info;
+        return AstcFormat(format, Settings::values.astc_recompression.GetValue());
     }
     // Formats without a DXGI mapping yet: keep an image so the cache works, never transfer data
     // into it (its bytes would not match the resource layout).
@@ -247,6 +255,8 @@ ComPtr<ID3D12Resource> CreateTransferBuffer(ID3D12Device* device, u64 size,
                                   : D3D12_RESOURCE_FLAG_NONE};
     // Buffers start in COMMON and are promoted on first use.
     ComPtr<ID3D12Resource> buffer;
+    VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
+                                       VideoCore::Perf::Counter::ResourcesCreated};
     ThrowIfFailed(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
                   D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&buffer)),
                   "Create texture transfer buffer");
@@ -315,6 +325,9 @@ bool logged_depth_stencil_upload = false;
 bool logged_depth_stencil_download = false;
 bool logged_self_copy = false;
 bool logged_decoded_copy = false;
+bool logged_gpu_astc = false;
+bool logged_reinterpret_copy = false;
+bool logged_depth_size = false;
 bool logged_view_format = false;
 bool logged_self_blit = false;
 bool logged_msaa_blit = false;
@@ -380,10 +393,15 @@ namespace {
 /// Sampler keys for SamplerHeap; 0 is the presenter's linear sampler.
 std::atomic<u64> next_sampler_key{1};
 std::atomic<bool> decode_bc_arrays{true};
+std::atomic<bool> gpu_astc_decode{true};
 } // Anonymous namespace
 
 void SetBcArrayDecode(bool enabled) {
     decode_bc_arrays.store(enabled, std::memory_order_relaxed);
+}
+
+void SetAstcGpuDecode(bool enabled) {
+    gpu_astc_decode.store(enabled, std::memory_order_relaxed);
 }
 
 /// How one BufferImageCopy is laid out in staging memory (tightly packed by the generic cache) and
@@ -492,8 +510,24 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
             format = *decoded;
         }
     }
+    if (VideoCore::Surface::IsPixelFormatASTC(info_.format)) {
+        // Per image: arrays may stay RGBA8 when the rest is recompressed (see
+        // VideoCommon::SetAstcArrayRecompression).
+        format = AstcFormat(info_.format, VideoCommon::AstcRecompressionFor(info_));
+        // What stays RGBA8 is decoded by the compute shader straight from the guest blocks, as
+        // Vulkan's accelerated ASTC: no CPU decode, and staging holds the compressed blocks.
+        const BlitImageHelper* const helper = runtime->blit_helper;
+        gpu_decoded = gpu_astc_decode.load(std::memory_order_relaxed) && helper &&
+                      helper->CanDecodeAstc() &&
+                      format.copy_format == PixelFormat::A8B8G8R8_UNORM &&
+                      info_.type == ImageType::e2D && info_.size.depth == 1 &&
+                      info_.num_samples == 1;
+    }
     if (format.converted) {
         flags |= VideoCommon::ImageFlagBits::Converted | VideoCommon::ImageFlagBits::CostlyLoad;
+    }
+    if (gpu_decoded) {
+        flags |= VideoCommon::ImageFlagBits::AcceleratedUpload;
     }
     const auto type = VideoCore::Surface::GetFormatType(info_.format);
     const bool is_color = type == SurfaceType::ColorTexture;
@@ -508,9 +542,10 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         resource_flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
     }
     // Multisampled resources cannot have UAVs.
+    // The ASTC decoder writes through an R8G8B8A8_UNORM UAV, sRGB images included.
     if (is_color && !is_msaa &&
-        runtime->SupportsView(format.view, D3D12_FORMAT_SUPPORT1_NONE,
-                              D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
+        (gpu_decoded || runtime->SupportsView(format.view, D3D12_FORMAT_SUPPORT1_NONE,
+                                              D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE))) {
         resource_flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     }
     const auto [samples_x, samples_y] = VideoCommon::SamplesLog2(info_.num_samples);
@@ -532,9 +567,14 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN, .Flags = resource_flags,
     };
     const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
-    ThrowIfFailed(runtime->device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                  D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource)),
-                  "Create texture cache image");
+    {
+        VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
+                                           VideoCore::Perf::Counter::ResourcesCreated};
+        ThrowIfFailed(runtime->device.Get()->CreateCommittedResource(
+                          &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
+                          nullptr, IID_PPV_ARGS(&resource)),
+                      "Create texture cache image");
+    }
     CheckRemovedAfter(runtime->device.Get(), [&] {
         return fmt::format("creating image {} ({} dim {} {}x{}x{} levels {} samples {} flags 0x{:x})",
                            info_.format, static_cast<u32>(desc.Format),
@@ -572,6 +612,7 @@ Image& Image::operator=(Image&& other) noexcept {
         runtime = other.runtime;
         resource = std::move(other.resource);
         format = other.format;
+        gpu_decoded = other.gpu_decoded;
         footprint_format = other.footprint_format;
         state = other.state;
         write_version = other.write_version;
@@ -727,6 +768,16 @@ Image::CopyLayout Image::Layout(const BufferImageCopy& copy) const {
     return layout;
 }
 
+u64 Image::TransferBytes(std::span<const BufferImageCopy> copies) const {
+    u64 bytes = 0;
+    for (const auto& copy : copies) {
+        const CopyLayout layout = Layout(copy);
+        bytes += layout.tight_slice * layout.depth *
+                 static_cast<u64>(std::max(1, copy.image_subresource.num_layers));
+    }
+    return bytes;
+}
+
 void Image::LogConvertedUpload(const u8* data, const CopyLayout& layout,
                                const BufferImageCopy& copy) const {
     // The CPU-decoded (ASTC) uploads of the first frames: a hash of what the decoder produced and
@@ -753,6 +804,19 @@ void Image::LogConvertedUpload(const u8* data, const CopyLayout& layout,
              info.format, copy.image_extent.width, copy.image_extent.height,
              copy.image_subresource.base_level, gpu_addr, size, hash,
              rgba8 ? transparent * 100 / texels : 0);
+}
+
+bool Image::AreCopyCompatible(const Image& a, const Image& b) noexcept {
+    if (!a.format.converted && !b.format.converted) {
+        return true;
+    }
+    const PixelFormat left = a.format.copy_format;
+    const PixelFormat right = b.format.copy_format;
+    return VideoCore::Surface::DefaultBlockWidth(left) ==
+               VideoCore::Surface::DefaultBlockWidth(right) &&
+           VideoCore::Surface::DefaultBlockHeight(left) ==
+               VideoCore::Surface::DefaultBlockHeight(right) &&
+           VideoCore::Surface::BytesPerBlock(left) == VideoCore::Surface::BytesPerBlock(right);
 }
 
 bool Image::CanTransfer() const {
@@ -1059,6 +1123,8 @@ void Image::UploadMemory(ID3D12Resource* buffer, size_t base_offset,
     if (!CanTransfer() || copies.empty()) {
         return;
     }
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureUploads, 1);
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureUploadBytes, TransferBytes(copies));
     if (IsDepthStencilPlanar()) {
         UploadDepthStencil(buffer, base_offset, copies);
         return;
@@ -1164,6 +1230,8 @@ void Image::DownloadMemory(std::span<ID3D12Resource*> buffers, std::span<size_t>
     if (!CanTransfer() || copies.empty()) {
         return;
     }
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureDownloads, 1);
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureDownloadBytes, TransferBytes(copies));
     if (IsDepthStencilPlanar()) {
         DownloadDepthStencil(buffers, offsets, copies);
         return;
@@ -1241,9 +1309,9 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
     if (!src.Handle() || !dst.Handle()) {
         return;
     }
-    if (src.IsBcDecoded() != dst.IsBcDecoded()) {
+    if (!Image::AreCopyCompatible(src, dst)) {
         // Plain texels on one side, compressed blocks on the other: not copyable.
-        WarnOnce(logged_decoded_copy, "copy between a CPU-decoded and a compressed image ({} -> "
+        WarnOnce(logged_decoded_copy, "copy between a host-decoded and a compressed image ({} -> "
                  "{}) skipped", src.info.format, dst.info.format);
         return;
     }
@@ -1264,6 +1332,14 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
     // In the resource's own blocks: a decoded array copies texel by texel.
     const u32 block_w = VideoCore::Surface::DefaultBlockWidth(src.TransferFormat().copy_format);
     const u32 block_h = VideoCore::Surface::DefaultBlockHeight(src.TransferFormat().copy_format);
+    const u32 dst_block_w = VideoCore::Surface::DefaultBlockWidth(dst.TransferFormat().copy_format);
+    if (src.ResourceFormat() != dst.ResourceFormat() && block_w == 1 && dst_block_w == 1) {
+        // Guest reinterpretations (RGBA8 texels read as R11G11B10, R32 as RGBA8...) cross DXGI
+        // format families, which CopyTextureRegion rejects (the debug layer invalidates the list;
+        // without it the result is undefined). The bytes go through a buffer instead.
+        CopyThroughBuffer(dst, src, copies);
+        return;
+    }
     for (const auto& copy : copies) {
         const u32 depth = src.info.type == ImageType::e3D ? copy.extent.depth : 1U;
         for (s32 layer = 0; layer < copy.src_subresource.num_layers; ++layer) {
@@ -1281,6 +1357,57 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
         }
     }
 }
+void TextureCacheRuntime::CopyThroughBuffer(Image& dst, Image& src,
+                                            std::span<const ImageCopy> copies) {
+    const u32 texel_bytes = VideoCore::Surface::BytesPerBlock(src.TransferFormat().copy_format);
+    if (texel_bytes != VideoCore::Surface::BytesPerBlock(dst.TransferFormat().copy_format)) {
+        WarnOnce(logged_reinterpret_copy, "copy between formats of different texel sizes ({} -> "
+                 "{}) skipped", src.info.format, dst.info.format);
+        return;
+    }
+    auto* const commands = scheduler.CommandList();
+    for (const auto& copy : copies) {
+        const u32 depth = src.info.type == ImageType::e3D ? std::max(1U, copy.extent.depth) : 1U;
+        const u32 row_pitch = AlignPitch(copy.extent.width * texel_bytes);
+        const u64 size = static_cast<u64>(row_pitch) * copy.extent.height * depth;
+        if (size == 0) {
+            continue;
+        }
+        for (s32 layer = 0; layer < copy.src_subresource.num_layers; ++layer) {
+            ComPtr<ID3D12Resource> transfer = CreateTransferBuffer(device.Get(), size);
+            D3D12_TEXTURE_COPY_LOCATION footprint{.pResource = transfer.Get(),
+                                                  .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+            footprint.PlacedFootprint.Footprint = {.Format = src.FootprintFormat(),
+                                                   .Width = copy.extent.width,
+                                                   .Height = copy.extent.height,
+                                                   .Depth = depth,
+                                                   .RowPitch = row_pitch};
+            const D3D12_TEXTURE_COPY_LOCATION source{
+                .pResource = src.Handle(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .SubresourceIndex = src.Subresource(copy.src_subresource.base_level,
+                                                    copy.src_subresource.base_layer + layer)};
+            const D3D12_BOX box{static_cast<u32>(copy.src_offset.x),
+                                static_cast<u32>(copy.src_offset.y),
+                                static_cast<u32>(copy.src_offset.z),
+                                static_cast<u32>(copy.src_offset.x) + copy.extent.width,
+                                static_cast<u32>(copy.src_offset.y) + copy.extent.height,
+                                static_cast<u32>(copy.src_offset.z) + depth};
+            commands->CopyTextureRegion(&footprint, 0, 0, 0, &source, &box);
+            TransitionBuffer(commands, transfer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                             D3D12_RESOURCE_STATE_COPY_SOURCE);
+            // Same bytes, described in the destination's format.
+            footprint.PlacedFootprint.Footprint.Format = dst.FootprintFormat();
+            const D3D12_TEXTURE_COPY_LOCATION target{
+                .pResource = dst.Handle(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .SubresourceIndex = dst.Subresource(copy.dst_subresource.base_level,
+                                                    copy.dst_subresource.base_layer + layer)};
+            commands->CopyTextureRegion(&target, copy.dst_offset.x, copy.dst_offset.y,
+                                        copy.dst_offset.z, &footprint, nullptr);
+            scheduler.DeferRelease(std::move(transfer));
+        }
+    }
+}
+
 void TextureCacheRuntime::CopyImageMSAA(Image&, Image&, std::span<const ImageCopy>) {
     LOG_WARNING(Render, "D3D12: MSAA texture copies are deferred to phase 5");
 }
@@ -1325,8 +1452,8 @@ void TextureCacheRuntime::BlitImage(Framebuffer*, ImageView& dst, ImageView& src
                              dst_width == src_region.end.x - src_region.start.x &&
                              dst_height == src_region.end.y - src_region.start.y;
     if (src_color && same_extent && src.format == dst.format) {
-        if (src_image->IsBcDecoded() != dst_image->IsBcDecoded()) {
-            WarnOnce(logged_decoded_copy, "copy between a CPU-decoded and a compressed image ({} "
+        if (!Image::AreCopyCompatible(*src_image, *dst_image)) {
+            WarnOnce(logged_decoded_copy, "copy between a host-decoded and a compressed image ({} "
                      "-> {}) skipped", src.format, dst.format);
             return;
         }
@@ -1391,6 +1518,69 @@ void TextureCacheRuntime::BlitImage(Framebuffer*, ImageView& dst, ImageView& src
                            src.Handle(Shader::TextureType::Color2D), dst_region, src_region,
                            src_size);
 }
+void TextureCacheRuntime::AccelerateImageUpload(
+    Image& image, const StagingBufferRef& map,
+    std::span<const VideoCommon::SwizzleParameters> swizzles, u32, u32) {
+    if (!image.IsGpuDecoded() || !image.Handle() || !blit_helper) {
+        return;
+    }
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureUploads, 1);
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureUploadBytes, image.guest_size_bytes);
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureGpuDecodes, 1);
+    if (!logged_gpu_astc) {
+        LOG_INFO(Render, "D3D12: first ASTC image decoded on the GPU ({} {}x{}, {} layers, {} "
+                 "levels)", image.info.format, image.info.size.width, image.info.size.height,
+                 image.info.resources.layers, image.info.resources.levels);
+        logged_gpu_astc = true;
+    }
+    image.Transition(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    const D3D12_GPU_VIRTUAL_ADDRESS base = map.buffer->GetGPUVirtualAddress() + map.offset;
+    static u32 logged_ranges = 0;
+    if (logged_ranges < 16) {
+        ++logged_ranges;
+        const D3D12_RESOURCE_DESC buffer_desc = map.buffer->GetDesc();
+        LOG_INFO(Render, "D3D12: ASTC GPU decode {} {}x{}x{} levels {}: blocks at 0x{:X}+0x{:X} "
+                 "(buffer 0x{:X}, {} bytes), {} swizzles, layer stride {}",
+                 image.info.format, image.info.size.width, image.info.size.height,
+                 image.info.resources.layers, image.info.resources.levels, base,
+                 image.guest_size_bytes, map.buffer->GetGPUVirtualAddress(), buffer_desc.Width,
+                 swizzles.size(), image.info.layer_stride);
+    }
+    const u32 layers = static_cast<u32>(image.info.resources.layers);
+    for (const VideoCommon::SwizzleParameters& swizzle : swizzles) {
+        const auto params = VideoCommon::Accelerated::MakeBlockLinearSwizzle2DParams(swizzle,
+                                                                                     image.info);
+        // Each level through its own UAV; the levels are distinct subresources, so consecutive
+        // dispatches need no barrier between them.
+        const D3D12_CPU_DESCRIPTOR_HANDLE uav = view_descriptors.Allocate();
+        const D3D12_UNORDERED_ACCESS_VIEW_DESC desc{
+            .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY,
+            .Texture2DArray = {.MipSlice = static_cast<UINT>(swizzle.level),
+                               .FirstArraySlice = 0,
+                               .ArraySize = layers,
+                               .PlaneSlice = 0},
+        };
+        device.Get()->CreateUnorderedAccessView(image.Handle(), nullptr, &desc, uav);
+        blit_helper->DecodeAstc({
+            .source = base + swizzle.buffer_offset,
+            .destination = uav,
+            .block_width = VideoCore::Surface::DefaultBlockWidth(image.info.format),
+            .block_height = VideoCore::Surface::DefaultBlockHeight(image.info.format),
+            .layer_stride = params.layer_stride,
+            .block_size = params.block_size,
+            .x_shift = params.x_shift,
+            .gob_block_height = params.block_height,
+            .gob_block_height_mask = params.block_height_mask,
+            .blocks_x = swizzle.num_tiles.width,
+            .blocks_y = swizzle.num_tiles.height,
+            .layers = layers,
+        });
+        // The ring holds its own copy once uploaded.
+        view_descriptors.Free(uav);
+    }
+}
+
 void TextureCacheRuntime::TransitionImageLayout(Image& image) {
     image.Transition(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1405,9 +1595,13 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
     }
     // Views of a decoded block-compressed array read its plain texels (a view in another format
     // reinterprets the same resource format).
-    const FormatInfo format_info = !source.IsBcDecoded()
-                                       ? runtime->Format(info.format)
-                                       : DecodedBcFormat(info.format).value_or(source.TransferFormat());
+    FormatInfo format_info = runtime->Format(info.format);
+    if (source.IsBcDecoded()) {
+        format_info = DecodedBcFormat(info.format).value_or(source.TransferFormat());
+    } else if (VideoCore::Surface::IsPixelFormatASTC(info.format)) {
+        // ASTC arrays may be RGBA8 where the rest is recompressed: as the image decided.
+        format_info = AstcFormat(info.format, VideoCommon::AstcRecompressionFor(source.info));
+    }
     auto swizzle = info.Swizzle();
     if (const SurfaceType surface_type = VideoCore::Surface::GetFormatType(info.format);
         surface_type == SurfaceType::Depth || surface_type == SurfaceType::DepthStencil) {
@@ -1851,7 +2045,25 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
             samples = std::max(1U, image->info.num_samples);
         }
     }
-    if (depth_buffer && depth_buffer->DepthStencil().ptr) {
+    // D3D12 only binds a depth view at least as large as every render target; drivers accept a
+    // smaller one (Vulkan draws in the intersection), but the debug layer invalidates the command
+    // list. With the debug layer (PC), such a pass is drawn without depth so the run goes on.
+    bool depth_too_small = false;
+    if (depth_buffer && Settings::values.renderer_debug.GetValue()) {
+        for (size_t index = 0; index < num_colors; ++index) {
+            const ImageView* const view = color_buffers[index];
+            if (view && (view->size.width > depth_buffer->size.width ||
+                         view->size.height > depth_buffer->size.height)) {
+                depth_too_small = true;
+            }
+        }
+        if (depth_too_small) {
+            WarnOnce(logged_depth_size, "depth buffer smaller than a render target ({}x{}); "
+                     "drawn without depth under the debug layer", depth_buffer->size.width,
+                     depth_buffer->size.height);
+        }
+    }
+    if (depth_buffer && depth_buffer->DepthStencil().ptr && !depth_too_small) {
         depth = depth_buffer->DepthStencil();
         depth_read_only = depth_buffer->DepthStencilReadOnly();
         depth_image = depth_buffer->image_id;

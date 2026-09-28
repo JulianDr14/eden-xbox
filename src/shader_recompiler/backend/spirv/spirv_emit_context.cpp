@@ -967,6 +967,19 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     }
     using DefPtr = Id StorageDefinitions::*;
     const Id zero{u32_zero_value};
+    // Without descriptor aliasing each constant buffer only has its U32x4 view and each storage
+    // buffer its U32 view, so the descriptor is read and the data accessed one word at a time.
+    const bool aliasing{profile.support_descriptor_aliasing};
+    const auto load_cbuf_word{[&](const StorageBufferDescriptor& ssbo, u32 word) {
+        const Id pointer{OpAccessChain(uniform_types.U32x4, cbufs[ssbo.cbuf_index].U32x4, zero,
+                                       Const(word / 4))};
+        return OpCompositeExtract(U32[1], OpLoad(U32[4], pointer), word % 4);
+    }};
+    const auto word_pointer{[&](size_t index, Id word_index, u32 component) {
+        const Id element{component == 0 ? word_index
+                                        : OpIAdd(U32[1], word_index, Const(component))};
+        return OpAccessChain(storage_types.U32.element, ssbos[index].U32, zero, element);
+    }};
     const auto define_body{[&](DefPtr ssbo_member, Id addr, Id element_pointer, u32 shift,
                                auto&& callback) {
         AddLabel();
@@ -976,17 +989,29 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
                 continue;
             }
             const auto& ssbo{info.storage_buffers_descriptors[index]};
-            const Id ssbo_addr_cbuf_offset{Const(ssbo.cbuf_offset / 8)};
-            const Id ssbo_size_cbuf_offset{Const(ssbo.cbuf_offset / 4 + 2)};
-            const Id ssbo_addr_pointer{OpAccessChain(
-                uniform_types.U32x2, cbufs[ssbo.cbuf_index].U32x2, zero, ssbo_addr_cbuf_offset)};
-            const Id ssbo_size_pointer{OpAccessChain(uniform_types.U32, cbufs[ssbo.cbuf_index].U32,
-                                                     zero, ssbo_size_cbuf_offset)};
+            Id unaligned_addr;
+            Id size_word;
+            if (aliasing) {
+                const Id ssbo_addr_cbuf_offset{Const(ssbo.cbuf_offset / 8)};
+                const Id ssbo_size_cbuf_offset{Const(ssbo.cbuf_offset / 4 + 2)};
+                const Id ssbo_addr_pointer{OpAccessChain(uniform_types.U32x2,
+                                                         cbufs[ssbo.cbuf_index].U32x2, zero,
+                                                         ssbo_addr_cbuf_offset)};
+                const Id ssbo_size_pointer{OpAccessChain(
+                    uniform_types.U32, cbufs[ssbo.cbuf_index].U32, zero, ssbo_size_cbuf_offset)};
+                unaligned_addr = OpBitcast(U64, OpLoad(U32[2], ssbo_addr_pointer));
+                size_word = OpLoad(U32[1], ssbo_size_pointer);
+            } else {
+                const u32 word{ssbo.cbuf_offset / 4};
+                unaligned_addr = OpBitcast(U64, OpCompositeConstruct(U32[2],
+                                                                     load_cbuf_word(ssbo, word),
+                                                                     load_cbuf_word(ssbo, word + 1)));
+                size_word = load_cbuf_word(ssbo, word + 2);
+            }
 
             const u64 ssbo_align_mask{~(profile.min_ssbo_alignment - 1U)};
-            const Id unaligned_addr{OpBitcast(U64, OpLoad(U32[2], ssbo_addr_pointer))};
             const Id ssbo_addr{OpBitwiseAnd(U64, unaligned_addr, Constant(U64, ssbo_align_mask))};
-            const Id ssbo_size{OpUConvert(U64, OpLoad(U32[1], ssbo_size_pointer))};
+            const Id ssbo_size{OpUConvert(U64, size_word)};
             const Id ssbo_end{OpIAdd(U64, ssbo_addr, ssbo_size)};
             const Id cond{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, ssbo_addr),
                                        OpULessThan(U1, addr, ssbo_end))};
@@ -995,20 +1020,39 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
             OpSelectionMerge(else_label, spv::SelectionControlMask::MaskNone);
             OpBranchConditional(cond, then_label, else_label);
             AddLabel(then_label);
-            const Id ssbo_id{ssbos[index].*ssbo_member};
             const Id ssbo_offset{OpUConvert(U32[1], OpISub(U64, addr, ssbo_addr))};
-            const Id ssbo_index{OpShiftRightLogical(U32[1], ssbo_offset, Const(shift))};
-            const Id ssbo_pointer{OpAccessChain(element_pointer, ssbo_id, zero, ssbo_index)};
-            callback(ssbo_pointer);
+            if (aliasing) {
+                const Id ssbo_id{ssbos[index].*ssbo_member};
+                const Id ssbo_index{OpShiftRightLogical(U32[1], ssbo_offset, Const(shift))};
+                callback(OpAccessChain(element_pointer, ssbo_id, zero, ssbo_index), index);
+            } else {
+                callback(OpShiftRightLogical(U32[1], ssbo_offset, Const(2U)), index);
+            }
             AddLabel(else_label);
         }
     }};
+    // With aliasing the callbacks get a pointer to the element; without it, the index of its
+    // first word in the U32 view.
     const auto define_load{[&](DefPtr ssbo_member, Id element_pointer, Id type, u32 shift) {
         const Id function_type{TypeFunction(type, U64)};
         const Id func_id{OpFunction(type, spv::FunctionControlMask::MaskNone, function_type)};
         const Id addr{OpFunctionParameter(U64)};
-        define_body(ssbo_member, addr, element_pointer, shift,
-                    [&](Id ssbo_pointer) { OpReturnValue(OpLoad(type, ssbo_pointer)); });
+        const u32 words{1U << (shift - 2)};
+        define_body(ssbo_member, addr, element_pointer, shift, [&](Id location, size_t index) {
+            if (aliasing) {
+                OpReturnValue(OpLoad(type, location));
+                return;
+            }
+            if (words == 1) {
+                OpReturnValue(OpLoad(U32[1], word_pointer(index, location, 0)));
+                return;
+            }
+            std::array<Id, 4> values;
+            for (u32 component = 0; component < words; ++component) {
+                values[component] = OpLoad(U32[1], word_pointer(index, location, component));
+            }
+            OpReturnValue(OpCompositeConstruct(type, std::span<const Id>(values.data(), words)));
+        });
         OpReturnValue(ConstantNull(type));
         OpFunctionEnd();
         return func_id;
@@ -1018,8 +1062,18 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         const Id func_id{OpFunction(void_id, spv::FunctionControlMask::MaskNone, function_type)};
         const Id addr{OpFunctionParameter(U64)};
         const Id data{OpFunctionParameter(type)};
-        define_body(ssbo_member, addr, element_pointer, shift, [&](Id ssbo_pointer) {
-            OpStore(ssbo_pointer, data);
+        const u32 words{1U << (shift - 2)};
+        define_body(ssbo_member, addr, element_pointer, shift, [&](Id location, size_t index) {
+            if (aliasing) {
+                OpStore(location, data);
+            } else if (words == 1) {
+                OpStore(word_pointer(index, location, 0), data);
+            } else {
+                for (u32 component = 0; component < words; ++component) {
+                    OpStore(word_pointer(index, location, component),
+                            OpCompositeExtract(U32[1], data, component));
+                }
+            }
             OpReturn();
         });
         OpReturn();

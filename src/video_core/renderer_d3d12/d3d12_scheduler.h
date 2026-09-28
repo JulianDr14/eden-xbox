@@ -3,11 +3,15 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -64,6 +68,11 @@ public:
         return tick <= known_gpu_tick.load(std::memory_order_acquire) || tick <= KnownGpuTick();
     }
 
+    /// Whether the caller is the thread recording into CommandList().
+    [[nodiscard]] bool IsRecordingThread() const {
+        return recording_thread.load(std::memory_order_relaxed) == std::this_thread::get_id();
+    }
+
     /// Keeps object alive until the GPU is done with everything recorded so far.
     void DeferRelease(ComPtr<IUnknown> object);
 
@@ -85,16 +94,44 @@ public:
     /// Frees retired allocators and released objects; called on every flush and frame.
     void CollectGarbage();
 
+    /// The most frequent call stacks of submissions and blocking waits on the recording thread
+    /// since the last call, as "count x rva<rva<..." (eden-uwp.exe RVAs for the build's PDB).
+    /// Resets the histogram.
+    [[nodiscard]] std::string TakeSyncSites(size_t max_sites);
+
 private:
+    /// Counts the caller's stack in the sync histogram (recording thread only).
+    void RecordSyncSite(char kind);
     struct PooledAllocator {
         ComPtr<ID3D12CommandAllocator> allocator;
         u64 tick;
     };
 
     ComPtr<ID3D12CommandAllocator> AcquireAllocator();
-    bool IsRecordingThread() const {
-        return recording_thread.load(std::memory_order_relaxed) == std::this_thread::get_id();
-    }
+
+    /// GPU time of every submission, from timestamps at the start and end of its list
+    /// (VideoCore::Perf GpuBusyUs). Begin runs on a fresh list, End right before it closes.
+    void CreateTimestamps();
+    void BeginTimestamp();
+    void EndTimestamp(u64 tick);
+    /// Adds the timings of the submissions the GPU has finished.
+    void ReadTimestamps(u64 gpu_tick);
+
+    static constexpr u32 TIMESTAMP_SLOTS = 64;
+    ComPtr<ID3D12QueryHeap> timestamp_heap;
+    ComPtr<ID3D12Resource> timestamp_readback;
+    const u64* timestamp_data{};
+    double timestamp_us_per_tick{};
+    u32 timestamp_next{};
+    u32 timestamp_slot{};
+    bool timestamp_open{};
+    std::mutex timestamp_mutex;
+    std::deque<std::pair<u64, u32>> pending_timestamps; ///< (tick, slot)
+
+    static constexpr size_t SYNC_SITE_FRAMES = 6;
+    /// Kind ('S' submit, 'W' wait) and return addresses -> count.
+    std::mutex sync_sites_mutex;
+    std::map<std::pair<char, std::array<uintptr_t, SYNC_SITE_FRAMES>>, u64> sync_sites;
 
     Device& device;
     ComPtr<ID3D12Fence> fence;

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_d3d12/d3d12_blit_image.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
@@ -164,6 +165,12 @@ private:
         double max_present_ms{};
     } pacing;
     void RecordPacing(double wait_ms, double present_ms);
+    /// Where a slow frame (or a pacing window) spent its time, from VideoCore::Perf.
+    void ReportPerf(double interval_ms);
+    void ReportPerfWindow(u32 frames, double total_ms);
+    VideoCore::Perf::Snapshot perf_frame{};  ///< counters at the previous present
+    VideoCore::Perf::Snapshot perf_window{}; ///< counters at the start of the pacing window
+    std::chrono::steady_clock::time_point last_hitch_report{};
 };
 
 } // namespace D3D12

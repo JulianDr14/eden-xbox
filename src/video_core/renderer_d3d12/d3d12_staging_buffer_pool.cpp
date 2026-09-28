@@ -11,6 +11,7 @@
 #include "common/literals.h"
 #include "common/logging.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
 
 namespace D3D12 {
@@ -20,6 +21,14 @@ namespace {
 using namespace Common::Literals;
 
 constexpr u64 STREAM_BUFFER_SIZE = 128_MiB;
+/// Largest upload the stream serves; it may span several regions. Larger ones (and deferred ones)
+/// get dedicated buffers. Up to 0.2.50 only one region (8 MiB) was served: a 2048x2048 texture
+/// with mips decoded to RGBA8 (22 MB) then took a new 32 MiB buffer, and a loading screen in
+/// Mario Wonder created a dozen of them in three seconds on top of a nearly full memory budget.
+constexpr u64 MAX_STREAM_REQUEST = STREAM_BUFFER_SIZE / 4;
+/// Uploads at least this large wait for the GPU to release submitted regions instead of
+/// allocating a dedicated buffer; smaller ones never stall the CPU.
+constexpr u64 WAIT_FOR_STREAM_SIZE = 1_MiB;
 
 } // Anonymous namespace
 
@@ -46,6 +55,8 @@ ComPtr<ID3D12Resource> CreateMappedBuffer(ID3D12Device* device, u64 size,
                                             ? D3D12_RESOURCE_STATE_COPY_DEST
                                             : D3D12_RESOURCE_STATE_GENERIC_READ;
     ComPtr<ID3D12Resource> buffer;
+    VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
+                                       VideoCore::Perf::Counter::ResourcesCreated};
     ThrowIfFailed(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
                                                   nullptr, IID_PPV_ARGS(&buffer)),
                   "CreateCommittedResource (staging)");
@@ -78,7 +89,15 @@ StagingBufferRef StagingBufferPool::Request(size_t size, MemoryUsage usage, bool
     // The generic caches may ask for zero bytes (e.g. a download batch with no images); hand out a
     // minimal allocation rather than throwing on what may be Eden's fence thread.
     size = std::max<size_t>(size, 1);
-    if (!deferred && usage == MemoryUsage::Upload && size <= region_size) {
+    if (usage == MemoryUsage::Upload) {
+        const u64 tick = scheduler.CurrentTick();
+        if (pending_tick != tick) {
+            pending_tick = tick;
+            pending_upload_bytes = 0;
+        }
+        pending_upload_bytes += size;
+    }
+    if (!deferred && usage == MemoryUsage::Upload && size <= MAX_STREAM_REQUEST) {
         return GetStreamBuffer(size);
     }
     return GetStagingBuffer(size, usage, deferred);
@@ -119,8 +138,19 @@ StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
         ++check_begin;
     }
     if (check_begin < end_region && AreRegionsActive(check_begin, end_region)) {
-        // Do not stall the CPU on memory still consumed by the GPU.
-        return GetStagingBuffer(size, MemoryUsage::Upload);
+        // Small uploads do not stall the CPU on memory still consumed by the GPU. Large ones wait
+        // for it when that work is already submitted: a dedicated buffer per texture is what ran
+        // the console out of memory. Regions of the list being recorded cannot be waited on here
+        // (flushing mid-draw would lose its state); the rasterizer submits upload-heavy lists
+        // between draws instead (RasterizerD3D12::FlushIfUploadHeavy).
+        const u64 busy_tick = *std::max_element(sync_ticks.begin() + check_begin,
+                                                sync_ticks.begin() + end_region);
+        if (size < WAIT_FOR_STREAM_SIZE || busy_tick >= scheduler.CurrentTick() ||
+            !scheduler.IsRecordingThread()) {
+            return GetStagingBuffer(size, MemoryUsage::Upload);
+        }
+        scheduler.Wait(busy_tick);
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::StagingStreamWaits, 1);
     }
 
     std::fill(sync_ticks.begin() + first_region, sync_ticks.begin() + end_region,
@@ -196,6 +226,8 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     std::span<u8> mapped;
     ComPtr<ID3D12Resource> buffer = CreateMappedBuffer(device.Get(), 1ULL << log2, heap_type,
                                                        mapped);
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::StagingDedicated, 1);
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::StagingDedicatedBytes, 1ULL << log2);
     StagingBuffer& entry = GetCache(usage)[log2].entries.emplace_back(StagingBuffer{
         .buffer = std::move(buffer),
         .mapped_span = mapped,
@@ -205,9 +237,19 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .tick = deferred ? std::numeric_limits<u64>::max() : scheduler.CurrentTick(),
         .deferred = deferred,
     });
-    LOG_INFO(Render, "D3D12: created dedicated staging {} buffer ({} bytes, request {} bytes)",
-             usage == MemoryUsage::Download ? "readback" : "upload", 1ULL << log2, size);
+    // Every one used to be logged; a loading screen creates thousands of small ones, and the log
+    // itself then slowed the frame. Large ones and the first few still are.
+    constexpr u64 LOGGED_SIZE = 1_MiB;
+    constexpr u64 LOGGED_FIRST = 32;
+    if ((1ULL << log2) >= LOGGED_SIZE || unique_ids <= LOGGED_FIRST) {
+        LOG_INFO(Render, "D3D12: created dedicated staging {} buffer ({} bytes, request {} bytes)",
+                 usage == MemoryUsage::Download ? "readback" : "upload", 1ULL << log2, size);
+    }
     return entry.Ref();
+}
+
+u64 StagingBufferPool::PendingUploadBytes() const noexcept {
+    return pending_tick == scheduler.CurrentTick() ? pending_upload_bytes : 0;
 }
 
 StagingBufferPool::StagingBuffersCache& StagingBufferPool::GetCache(MemoryUsage usage) {

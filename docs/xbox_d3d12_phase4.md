@@ -1299,6 +1299,195 @@ Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
     - `OnAbort` vacía el log de Eden antes de salir.
     - El `.exe` y el `.pdb` de esta build se guardan aparte para resolver las RVAs.
 
+### Rendimiento: perfilador de tirones y WaitForIdle (0.2.49)
+
+**Perfilador.** `video_core/perf_counters.h` tiene contadores atómicos globales. Cualquier hilo
+suma y el presentador calcula la diferencia en cada frame. Qué se mide:
+
+| Contador | Dónde se mide | Qué significa |
+|---|---|---|
+| `GpuThreadIdleUs` | `gpu_thread.cpp`, en `PopWait` | el hilo de GPU espera trabajo, así que la CPU emulada va por detrás |
+| `GpuThreadFlushes/Us` | `gpu_thread.cpp` | `FlushRegion`: el juego lee memoria de la GPU |
+| `FenceWaits/Us` | `Scheduler::Wait`, solo en el hilo que graba | el hilo de GPU espera a la GPU |
+| `Submits` | `Scheduler::Flush` | listas enviadas |
+| `GpuBusyUs` | timestamps al principio y al final de cada lista | tiempo real de GPU |
+| `PipelineStalls/Us` | `PipelineCache` | espera a que se construya un pipeline, más la traducción de uno nuevo |
+| `Draws`, `Dispatches` | rasterizer | |
+| `TextureUploads/Downloads` (+ bytes) | `Image::UploadMemory` / `DownloadMemory` | |
+| `ResourcesCreated/Us` | imágenes, staging y buffers de transferencia | `CreateCommittedResource` |
+
+Líneas del log:
+- `D3D12 hitch: N ms frame, likely <causa> | ...` para cada frame de más de 100 ms, como mucho una
+  por segundo. La causa es el mayor de los tiempos medidos; lo que no se mide queda como "grabar
+  draws o las cachés".
+- `D3D12 perf over 300 frames ...` junto a cada línea `D3D12 pacing`.
+- `D3D12 sync sites: S|W <n>x rva rva ...`: las pilas más frecuentes de los envíos (S) y las
+  esperas (W). Se resuelven con el PDB de la build:
+  `llvm-symbolizer --obj=eden-uwp.exe --relative-address 0x...`, usando el `llvm-symbolizer.exe`
+  de MSVC `Hostx64\x64`. Hay copias del `.exe` y el `.pdb` en `..\eden-builds\<versión>`.
+
+**Primer hallazgo (en PC):** el hilo de GPU esperaba a la GPU unas 50 veces por frame y hacía
+~90 envíos por frame. Las pilas llevan a `Maxwell3D::CallMethod` → `Scheduler::Finish`.
+`RasterizerD3D12::WaitForIdle()` era `scheduler.Finish()`, es decir, un envío más una espera de
+CPU por cada `wait_for_idle` del juego. Vulkan hace una barrera dentro del command buffer
+(`SetEvent`/`WaitEvents`). Además `FlushCommands` enviaba al final de cada lista del guest aunque
+no se hubiera grabado nada.
+
+**Corrección:**
+- `WaitForIdle` pasa a ser una barrera UAV global (`pResource = nullptr`) más `SignalOrdering`,
+  sin espera de CPU. Una sola cola ejecuta en orden y las cachés hacen sus transiciones, así que lo
+  único que queda por ordenar son las escrituras UAV.
+- `FragmentBarrier` también es una barrera UAV.
+- `TiledCacheBarrier` no hace nada, como en Vulkan.
+- `FlushCommands` solo envía si hubo draws, clears o dispatches (`draw_counter`, como Vulkan).
+
+Resultado en PC, con el mismo guion de 100 s:
+
+| Por cada 300 frames | Antes | Después |
+|---|---|---|
+| Envíos | ~25 000 | ~600 |
+| Esperas a la GPU | ~14 000 (~2 s) | ~7 (~10 ms) |
+
+El juego llega al gameplay a ~17 ms por frame, y la imagen es la misma.
+
+**Series (0.2.49.0, jugando a mano):**
+- **La caída, por fin con causa.** A los 125 s el diag registra
+  `C++ throw runtime_error: CreateCommittedResource (staging) failed (HRESULT 0x8007000E)`, seguido
+  de `abort()`. Es `E_OUTOFMEMORY`.
+  - El log muestra 4044 buffers de staging dedicados: 2730 en la carga de los 70 s y 1209 en la de
+    los 120 s, de 256 B a 4 KiB cada uno. Cada recurso comprometido ocupa como mínimo 64 KiB.
+  - **Causa:** al quitar los `Finish()` de `WaitForIdle`, una carga (miles de subidas pequeñas sin
+    draws) ya no enviaba la lista. `FlushCommands` solo enviaba con draws, el anillo de staging de
+    128 MiB no se liberaba nunca dentro del mismo tick, y cada subida caía a un buffer dedicado
+    nuevo.
+  - Las caídas anteriores (125–198 s, antes de este cambio) eran también `abort()` con la memoria
+    cerca del límite, probablemente de la misma familia.
+- **Rendimiento en juego (ventanas de 300 frames):**
+  - ~34 ms por frame (~30 fps). La GPU trabaja ~3 ms por frame, así que la GPU no es el límite.
+  - El hilo de GPU pasa el 60–75 % esperando trabajo: **el cuello de botella es la CPU emulada**
+    (el JIT).
+  - El resto es trabajo propio del hilo de GPU (~13 ms por frame para ~480 draws, unos 28 µs por
+    draw).
+- **Tirones grandes:** son de carga. Suben 150–260 MiB de texturas en un frame, con 0,6–1,9 s de
+  "otro trabajo": el deswizzle y la decodificación ASTC/BC en la CPU.
+
+**0.2.50.0:**
+- `FlushCommands` también envía cuando el staging pedido para la lista en curso pasa de 8 MiB
+  (`StagingBufferPool::PendingUploadBytes`).
+- El aviso "created dedicated staging buffer" solo se registra para buffers de 1 MiB o más, o para
+  los primeros 32.
+- En PC, 150 s de Wonder crean 85 buffers dedicados en toda la sesión, y el juego va estable a
+  ~17 ms por frame.
+
+**Siguientes pasos de rendimiento:**
+- decodificar ASTC/BC en la GPU (quita los tirones de carga y memoria);
+- reducir el coste por draw del hilo de GPU;
+- revisar la CPU emulada: JIT, fastmem y núcleos.
+
+**Series (0.2.50.0, jugando a mano):** la misma caída, a los 127 s. `CreateCommittedResource
+(staging)` devuelve `E_OUTOFMEMORY` con la app en 4,3–4,5 GB de 5,1 GB.
+- Los buffers pequeños ya no son el problema: 110 dedicados en toda la sesión.
+- La carga de los 124 s sube 151 MiB de texturas en un frame. Varias texturas de 2048×2048 con
+  mips, decodificadas de ASTC a RGBA8, son de 22 MB cada una. Cada una pedía un buffer de staging
+  dedicado de 32 MiB (el anillo solo servía una región de 8 MiB), y se crearon 13 en 3 s.
+- **Raíz:** ASTC 8×8 ocupa 2 bits por píxel; en RGBA8 ocupa 32, 16 veces más.
+
+**0.2.51.0: memoria de texturas y staging**
+- **Staging** (`d3d12_staging_buffer_pool.cpp`):
+  - El anillo de 128 MiB sirve peticiones de hasta 32 MiB, repartidas en varias regiones.
+  - Si una petición de 1 MiB o más encuentra regiones aún en uso por listas ya enviadas, espera a la
+    GPU en lugar de crear un buffer dedicado.
+  - Las regiones de la lista que se está grabando no se esperan, porque habría que enviarla a mitad
+    de un draw. En su lugar, `RasterizerD3D12::FlushIfUploadHeavy` envía la lista entre draws y
+    dispatches cuando lleva 32 MiB de subidas.
+- **ASTC → BC3 por imagen** (`AstcRecompressionFor`, en `texture_cache/util`):
+  - Las texturas ASTC de una capa se recomprimen a BC3 en la CPU (`astc_recompression`): ocupan la
+    cuarta parte que en RGBA8.
+  - Los arrays 2D y las texturas 3D siguen en RGBA8 (`SetAstcArrayRecompression(false)`), porque
+    la Series lee mal algunas capas de los arrays comprimidos por bloques (el fallo del suelo,
+    0.2.45).
+  - El tamaño que cuenta la caché para el recolector es `converted_size_bytes` de cada imagen.
+  - Las vistas ASTC usan el formato que eligió su imagen.
+  - `Image::AreCopyCompatible` generaliza la regla de `IsBcDecoded`: nunca se copian bloques
+    comprimidos contra texels decodificados.
+- **Decodificador ASTC en la GPU** (experimental):
+  - Es el `astc_decoder.comp` de Vulkan traducido con spirv_to_dxil. Los bloques se leen del
+    staging por SRV raíz y se escriben por UAV `R8G8B8A8_UNORM` a cada nivel
+    (`TextureCacheRuntime::AccelerateImageUpload`, `BlitImageHelper::DecodeAstc`).
+  - El staging lleva solo los bloques ASTC comprimidos, sin decodificación en la CPU.
+  - Con texturas de una capa funciona desde los menús.
+  - Con los arrays ASTC de 128×128×105 y 8 niveles del suelo (6x5 sRGB y 4x4), la GPU del PC se
+    colgó en 3 de 4 corridas sin la capa de debug: page fault fuera del staging y TDR.
+  - Con validación en GPU (`debug_layer=gbv`), esos dispatches pasan sin errores y el juego sigue
+    de largo. Apunta a una carrera, no a datos inválidos.
+  - Queda detrás de `astc=gpu` hasta encontrar la causa.
+- **`boot.cfg`:**
+  - `astc=bc3` (por defecto): BC3 para texturas de una capa, RGBA8 para arrays, todo en la CPU.
+  - `astc=gpu`: todo a RGBA8 por el decodificador de la GPU.
+  - `astc=cpu`: todo a RGBA8 en la CPU, como en la 0.2.50.
+  - `debug_layer=gbv`: capa de debug con validación en GPU, solo en PC.
+- **Copias entre familias de formato:** el juego reinterpreta texturas RGBA8 como R11G11B10 (mismo
+  tamaño de texel). `CopyTextureRegion` no copia entre familias DXGI: la capa de debug invalida la
+  lista (`Close` → `E_INVALIDARG`), y sin ella el resultado es indefinido. Ahora pasan por un
+  buffer (`TextureCacheRuntime::CopyThroughBuffer`).
+- **Depth más pequeño que un render target** (864 frente a 896): D3D12 solo lo admite al revés. El
+  driver lo dibuja, pero la capa de debug invalida la lista. Solo con la capa de debug, ese pase se
+  dibuja sin depth; en la consola no cambia nada.
+- **Contadores nuevos:** buffers dedicados de staging y sus MiB, esperas del anillo, tiempo de
+  decodificación en CPU y texturas decodificadas en GPU. Las líneas de perf los incluyen.
+- **Diagnóstico:**
+  - Cada `throw` de C++ registrado en el diag lleva su pila (`thrown at:`). Así se vio que el
+    `bad_alloc` salía de `CreateShaderResourceView` en `D3D12Core.dll`, con el dispositivo ya
+    colgado.
+  - Si `Close` falla, se vuelcan antes los mensajes de la capa de debug.
+- **Control por teclado en PC (modo `play=1`):** C/V = L/R, B/N = A/B, WASD = stick izquierdo.
+  Q cierra la sesión limpiamente y deja `Q pressed ... shutting down` en el diag.
+- **Prueba de fastmem** (`src/eden_uwp/uwp_fastmem_probe.cpp`): al arrancar, antes del emulador,
+  prueba lo que fastmem necesita y lo libera. Deja líneas `fastmem probe:` en el diag:
+  - reserva de un placeholder de 512 GiB (`VirtualAlloc2FromApp`);
+  - sección de 4 GiB con `SEC_COMMIT` (y cuánta memoria se carga al crearla), y con `SEC_RESERVE`
+    más commit bajo demanda en una vista;
+  - dos vistas de una sección dentro del placeholder: aliasing, `VirtualProtectFromApp` en solo
+    lectura y que la escritura falle y se capture.
+  No cambia cómo corre el emulador: fastmem sigue apagado.
+
+**Resultado de la 0.2.51.0 en la Series (manual):**
+- **Fastmem es viable:**
+  - el placeholder de 512 GiB se reserva;
+  - las dos vistas de una sección dentro de él funcionan, con aliasing;
+  - `VirtualProtectFromApp` funciona y la escritura a solo lectura se captura.
+- **Memoria de la sección:**
+  - la sección de 4 GiB con `SEC_COMMIT` falla (error 1455, sin memoria de commit);
+  - con `SEC_RESERVE` se crea, y hacer commit de páginas en una vista funciona.
+  - Fastmem tiene que usar `SEC_RESERVE` más commit bajo demanda.
+- **Cierre a los 168 s de juego:** `abort()` en sirit (`Stream::operator<<(Id)` con id 0) desde
+  `DefineGlobalMemoryFunctions`, al traducir un shader de compute con "Storage buffer failed to
+  track".
+  - El perfil D3D12 no tiene aliasing de descriptores: cada constant buffer solo tiene la vista
+    `U32x4` y cada SSBO la `U32`, pero esa función usaba las vistas `U32x2`/`U32x4`, que no
+    existen.
+  - **0.2.52.0:** sin aliasing, lee el descriptor del SSBO palabra a palabra desde `U32x4` y
+    accede a los datos por la vista `U32`.
+- **ASTC en GPU:** `CreateComputePipelineState` del decodificador falla en la consola
+  (`E_INVALIDARG`); en el PC se crea. No afecta al modo por defecto (`astc=bc3`).
+- **Memoria:** 4.2 GiB de 5 GiB a los 2 min, sin OOM.
+- **Ritmo:** fijo a 33.3 ms (30 fps). La GPU trabaja ~0.86 s de cada 10 s y el hilo de GPU
+  pasa ~58 % esperando: sigue mandando la CPU emulada.
+
+**Resultado de la 0.2.52.0 en la Series (manual, ~4 min, cerrada a mano):**
+- **Arreglo confirmado:** 8 shaders con "Storage buffer failed to track" traducidos sin
+  `abort()`.
+- **Memoria:** 4.27 GiB de 5 GiB a los 4 min. La subida se aplana después del minuto 2.
+- **Tirones al entrar en zonas nuevas:** la compilación de pipelines bloquea el hilo de GPU.
+  - Ventanas con 29–50 esperas de pipeline, que suman 2.3–5 s por ventana, y frames sueltos de
+    1.3–3.9 s.
+  - En zonas ya vistas va fijo a 33.3 ms.
+
+**Trampa de la build:** ninja no recompiló los `.cpp` que incluyen `d3d12_scheduler.h` cuando cambió
+el header. Quedaron objetos con el layout viejo y el resultado fue un access violation en
+`HostCounter::HostCounter` al arrancar. Al cambiar un header del backend, hay que tocar los `.cpp`
+que lo incluyen (o todo `renderer_d3d12/*.cpp`) antes de compilar.
+
 ### Transferencias depth-stencil (0.2.48)
 
 **El problema.** El guest guarda profundidad y stencil juntos en cada texel. Un recurso

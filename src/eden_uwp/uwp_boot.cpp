@@ -43,6 +43,7 @@
 #include "video_core/renderer_base.h"
 
 #include "eden_uwp/headless_emu_window.h"
+#include "eden_uwp/uwp_fastmem_probe.h"
 #include "eden_uwp/uwp_input.h"
 
 namespace D3D12 {
@@ -51,7 +52,13 @@ void SetTracedFrame(u32 frame);
 void SetFrameDiagnostics(bool enabled);
 void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
 void SetBcArrayDecode(bool enabled); // d3d12_texture_cache.h
+void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
+void SetGpuBasedValidation(bool enabled); // d3d12_device.h
 } // namespace D3D12
+
+namespace VideoCommon {
+void SetAstcArrayRecompression(bool enabled) noexcept; // texture_cache/util.h
+} // namespace VideoCommon
 
 namespace {
 void WriteDiag(const std::string& msg); // defined with the UWP entry point below
@@ -97,6 +104,8 @@ struct BootConfig {
     u32 run_seconds{};
     /// D3D12 debug layer (renderer_debug); PC only, the console has no SDK layers.
     bool debug_layer{};
+    /// With the debug layer, GPU-based validation too ("debug_layer=gbv").
+    bool gpu_validation{};
     /// File name of a game in LocalState\games to boot instead of boot.nro (package-appx.ps1 -Game).
     std::string game;
     /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
@@ -107,6 +116,10 @@ struct BootConfig {
     u32 traced_frame{};
     /// Keep D3D12 block-compressed 2D arrays compressed instead of decoding them on the CPU.
     bool bc_arrays_native{};
+    /// How ASTC reaches D3D12 ("astc="): BC3 for single textures and RGBA8 for arrays, both by the
+    /// CPU (the default); the GPU decoder to RGBA8 for everything (experimental); or the CPU to
+    /// RGBA8 for everything (0.2.50).
+    enum class Astc { Bc3, Gpu, Cpu } astc{Astc::Bc3};
     /// Played by hand ("play=1"): runs until the app is closed, without frame dumps or draw trace.
     bool play{};
     /// Buttons to press at given times ("input=25:L+R" lines).
@@ -133,8 +146,20 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     D3D12::SetTracedFrame(config.traced_frame);
     D3D12::SetFrameDiagnostics(!config.play);
     D3D12::SetBcArrayDecode(!config.bc_arrays_native);
+    // RGBA8 ASTC made loading frames upload 150-260 MiB at once and the console run out of memory
+    // (0.2.50): single textures become BC3 (a quarter of the memory), 2D arrays stay RGBA8 (a
+    // block-compressed array misreads layers on the Series) and are decoded on the GPU.
+    Settings::values.astc_recompression.SetValue(config.astc == BootConfig::Astc::Bc3
+                                                     ? Settings::AstcRecompression::Bc3
+                                                     : Settings::AstcRecompression::Uncompressed);
+    VideoCommon::SetAstcArrayRecompression(false);
+    // The compute decoder is opt-in ("astc=gpu"): Mario Wonder's 105-layer ASTC arrays decoded
+    // with it hung the GPU on the PC without the debug layer, and ran clean with GPU-based
+    // validation (see docs/xbox_d3d12_phase4.md, 0.2.51).
+    D3D12::SetAstcGpuDecode(config.astc == BootConfig::Astc::Gpu);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
+        D3D12::SetGpuBasedValidation(config.gpu_validation);
         WriteDiag("step: D3D12 debug layer requested");
     }
     WriteDiag(surface.core_window != nullptr && !config.null_renderer
@@ -241,11 +266,21 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     if (config.play) {
         // Played by hand: the guest runs until the app is closed from the console, which ends the
         // process. The diag keeps a heartbeat of how long it ran and how much memory it used.
+        // Q on a keyboard (the PC) ends the session cleanly instead, so the run can be told apart
+        // from a crash.
         WriteDiag("step: system.Run() issued, playing until the app is closed | " + MemoryReport());
-        for (u32 second = 1;; ++second) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (second % 60 == 0) {
-                WriteDiag("step: playing, " + std::to_string(second / 60) + " min | " +
+        constexpr auto TICK = std::chrono::milliseconds(100);
+        for (u32 tick = 1;; ++tick) {
+            std::this_thread::sleep_for(TICK);
+            if (EdenXbox::QuitRequested()) {
+                WriteDiag("step: Q pressed after " + std::to_string(tick / 10) +
+                          " s, shutting down | " + MemoryReport());
+                shutdown();
+                LOG_INFO(Frontend, "Headless boot: session closed with Q.");
+                return 0;
+            }
+            if (tick % 600 == 0) {
+                WriteDiag("step: playing, " + std::to_string(tick / 600) + " min | " +
                           MemoryReport());
             }
         }
@@ -445,6 +480,8 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* info) {
     return EXCEPTION_CONTINUE_SEARCH; // let the OS finish the crash (and WER take its dump)
 }
 
+std::string FormatStack(const char* prefix);
+
 // Eden's fatal ASSERT/UNREACHABLE and the default std::terminate both end in abort(). SIGABRT is
 // process-wide in the UCRT, so this sees it from any thread.
 void OnAbort(int) {
@@ -454,14 +491,22 @@ void OnAbort(int) {
                   "(see eden\\log\\eden_log.txt) or an exception escaped a thread\n",
                   ElapsedMs(), GetCurrentThreadId());
     WriteDiagRaw(line);
-    // The aborting thread's stack, as RVAs into eden-uwp.exe (resolve them with the build's PDB):
-    // an exception escaping a worker thread leaves nothing else behind.
+    // An exception escaping a worker thread leaves nothing else behind.
+    WriteDiagRaw(FormatStack("[eden-uwp] abort stack:").c_str());
+    // Without this the async logger loses whatever it had queued (the last lines before a
+    // std::terminate on a worker thread, which never passes through AssertFatalImpl).
+    Common::Log::Stop();
+}
+
+// The calling thread's stack, as RVAs into eden-uwp.exe (resolve them with the build's PDB) or
+// module+offset elsewhere, after prefix, as one line.
+std::string FormatStack(const char* prefix) {
     void* frames[48];
     const USHORT count = RtlCaptureStackBackTrace(0, static_cast<DWORD>(std::size(frames)),
                                                   frames, nullptr);
     const auto base = reinterpret_cast<std::uintptr_t>(&__ImageBase);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + __ImageBase.e_lfanew);
-    std::string stack = "[eden-uwp] abort stack:";
+    std::string stack = prefix;
     for (USHORT i = 0; i < count; ++i) {
         const auto addr = reinterpret_cast<std::uintptr_t>(frames[i]);
         char frame[160];
@@ -485,10 +530,7 @@ void OnAbort(int) {
         stack += frame;
     }
     stack += '\n';
-    WriteDiagRaw(stack.c_str());
-    // Without this the async logger loses whatever it had queued (the last lines before a
-    // std::terminate on a worker thread, which never passes through AssertFatalImpl).
-    Common::Log::Stop();
+    return stack;
 }
 
 // Terminate handlers are per-thread in the MSVC runtime; installed on the boot worker, this names the
@@ -610,6 +652,9 @@ void LogCxxThrow(const EXCEPTION_RECORD* rec) {
     std::snprintf(line, sizeof(line), "[eden-uwp] [+%llums] C++ throw %s: %s | thread %lu\n",
                   ElapsedMs(), first_name, what, GetCurrentThreadId());
     WriteDiagRaw(line, /*debugger_channel=*/false);
+    // Where it was thrown from: a caught exception (a bad_alloc a cache recovers from) is
+    // otherwise untraceable.
+    WriteDiagRaw(FormatStack("[eden-uwp]   thrown at:").c_str(), /*debugger_channel=*/false);
 }
 
 LONG NTAPI FirstChanceLogger(EXCEPTION_POINTERS* ep) {
@@ -763,6 +808,7 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         WriteDiag("BootView::Run entered"); // also resolves + caches the diag path
         WriteDiag(MemoryReport());
         InstallCrashHandlers();
+        EdenXbox::ProbeFastmem([](const std::string& line) { WriteDiag(line); }, MemoryReport);
 
         // A UWP app MUST activate its CoreWindow and pump the dispatcher, or the OS terminates it a
         // couple seconds after launch (no crash, no dump - exactly the "flashes then closes" symptom).
@@ -775,6 +821,35 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         // app to the background. B is a game button here (uwp_input.h).
         SystemNavigationManager::GetForCurrentView().BackRequested(
             [](auto&&, BackRequestedEventArgs const& args) { args.Handled(true); });
+        // Keyboard play on the PC (uwp_input.h): C/V = L/R, B/N = A/B, WASD = left stick, Q quits.
+        const auto on_key = [](Windows::System::VirtualKey key, bool pressed) {
+            using Windows::System::VirtualKey;
+            using EdenXbox::Key;
+            switch (key) {
+            case VirtualKey::C: EdenXbox::SetKeyPressed(Key::L, pressed); break;
+            case VirtualKey::V: EdenXbox::SetKeyPressed(Key::R, pressed); break;
+            case VirtualKey::B: EdenXbox::SetKeyPressed(Key::A, pressed); break;
+            case VirtualKey::N: EdenXbox::SetKeyPressed(Key::B, pressed); break;
+            case VirtualKey::W: EdenXbox::SetKeyPressed(Key::StickUp, pressed); break;
+            case VirtualKey::S: EdenXbox::SetKeyPressed(Key::StickDown, pressed); break;
+            case VirtualKey::A: EdenXbox::SetKeyPressed(Key::StickLeft, pressed); break;
+            case VirtualKey::D: EdenXbox::SetKeyPressed(Key::StickRight, pressed); break;
+            case VirtualKey::Q:
+                if (pressed) {
+                    EdenXbox::RequestQuit();
+                }
+                break;
+            default: break;
+            }
+        };
+        window.KeyDown([on_key](auto&&, KeyEventArgs const& args) {
+            on_key(args.VirtualKey(), true);
+            args.Handled(true);
+        });
+        window.KeyUp([on_key](auto&&, KeyEventArgs const& args) {
+            on_key(args.VirtualKey(), false);
+            args.Handled(true);
+        });
 
         // The swapchain is sized in physical pixels: CoreWindow bounds are in view pixels (DIPs).
         EdenXbox::BootSurface surface{};
@@ -810,9 +885,12 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         config.run_seconds =
                             static_cast<u32>(std::strtoul(line.c_str() + key.size(), nullptr, 10));
                         WriteDiag("boot.cfg: run " + std::to_string(config.run_seconds) + " s");
-                    } else if (line == "debug_layer=1") {
+                    } else if (line == "debug_layer=1" || line == "debug_layer=gbv") {
                         config.debug_layer = true;
-                        WriteDiag("boot.cfg: D3D12 debug layer");
+                        config.gpu_validation = line == "debug_layer=gbv";
+                        WriteDiag(config.gpu_validation
+                                      ? "boot.cfg: D3D12 debug layer with GPU-based validation"
+                                      : "boot.cfg: D3D12 debug layer");
                     } else if (line.starts_with("log_filter=")) {
                         config.log_filter = line.substr(11);
                         WriteDiag("boot.cfg: log filter " + config.log_filter);
@@ -823,6 +901,12 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "bc_arrays=native") {
                         config.bc_arrays_native = true;
                         WriteDiag("boot.cfg: D3D12 block-compressed arrays stay compressed");
+                    } else if (line == "astc=gpu" || line == "astc=cpu" || line == "astc=bc3") {
+                        using Astc = decltype(config.astc);
+                        config.astc = line == "astc=gpu"   ? Astc::Gpu
+                                      : line == "astc=cpu" ? Astc::Cpu
+                                                          : Astc::Bc3;
+                        WriteDiag("boot.cfg: ASTC " + line.substr(5));
                     } else if (line == "play=1") {
                         config.play = true;
                         WriteDiag("boot.cfg: played by hand, no time limit or frame dumps");

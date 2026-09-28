@@ -82,6 +82,8 @@ public:
 
     void CopyImage(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
     void CopyImageMSAA(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
+    /// CopyImage between resource formats of different DXGI families: through a buffer.
+    void CopyThroughBuffer(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
     bool ShouldReinterpret(Image&, Image&) const noexcept { return false; }
     void ReinterpretImage(Image& dst, Image& src,
                           std::span<const VideoCommon::ImageCopy> copies);
@@ -91,8 +93,10 @@ public:
 
     bool CanAccelerateImageUpload(Image&) const noexcept { return false; }
     bool CanUploadMSAA() const noexcept { return false; }
-    void AccelerateImageUpload(Image&, const StagingBufferRef&,
-                               std::span<const VideoCommon::SwizzleParameters>, u32, u32) {}
+    /// Decodes an ASTC image with the compute shader (images flagged AcceleratedUpload): map
+    /// holds the guest's swizzled blocks.
+    void AccelerateImageUpload(Image& image, const StagingBufferRef& map,
+                               std::span<const VideoCommon::SwizzleParameters> swizzles, u32, u32);
     void InsertUploadMemoryBarrier() {}
     /// Clears are recorded immediately; nothing is deferred.
     void FlushDeferredClear() {}
@@ -158,6 +162,8 @@ public:
     [[nodiscard]] ID3D12Resource* Handle() const noexcept { return resource.Get(); }
     [[nodiscard]] DXGI_FORMAT ResourceFormat() const noexcept { return format.resource; }
     [[nodiscard]] DXGI_FORMAT ViewFormat() const noexcept { return format.view; }
+    /// Format of plane 0's copy footprints (the resource format, typeless included).
+    [[nodiscard]] DXGI_FORMAT FootprintFormat() const noexcept { return footprint_format; }
     /// How the guest data is laid out for transfers (converted formats: what the CPU decodes to).
     [[nodiscard]] const FormatInfo& TransferFormat() const noexcept { return format; }
     /// A block-compressed 2D array the CPU decodes on upload (see DecodedBcFormat): its resource
@@ -165,6 +171,14 @@ public:
     [[nodiscard]] bool IsBcDecoded() const noexcept {
         return format.converted && !VideoCore::Surface::IsPixelFormatASTC(info.format);
     }
+    /// An ASTC image the compute shader decodes into RGBA8 (see AccelerateImageUpload).
+    [[nodiscard]] bool IsGpuDecoded() const noexcept {
+        return gpu_decoded;
+    }
+    /// Whether a texture copy between the two resources moves meaningful data: not when one
+    /// holds data the host converted (decoded BCn arrays, ASTC) and the other a different block
+    /// layout.
+    [[nodiscard]] static bool AreCopyCompatible(const Image& a, const Image& b) noexcept;
     /// A depth format with a stencil plane (D24S8, D32S8): D3D12 keeps depth and stencil in two
     /// planes, which the guest packs into one texel.
     [[nodiscard]] bool IsDepthStencilPlanar() const noexcept {
@@ -193,6 +207,8 @@ private:
     /// Staging layout of one BufferImageCopy (see d3d12_texture_cache.cpp).
     struct CopyLayout;
     [[nodiscard]] CopyLayout Layout(const VideoCommon::BufferImageCopy& copy) const;
+    /// Guest bytes the copies move (for the performance counters).
+    [[nodiscard]] u64 TransferBytes(std::span<const VideoCommon::BufferImageCopy> copies) const;
     /// False (logged once) when this image's data cannot be transferred yet.
     [[nodiscard]] bool CanTransfer() const;
     /// Hash and transparency of a CPU-decoded upload (first ones only), to compare machines.
@@ -219,6 +235,7 @@ private:
     TextureCacheRuntime* runtime{};
     ComPtr<ID3D12Resource> resource;
     FormatInfo format{};
+    bool gpu_decoded{};
     DXGI_FORMAT footprint_format{}; ///< format GetCopyableFootprints uses for plane 0
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     /// Bumped by every transition into a writable state: every GPU write to the image follows one.
@@ -308,6 +325,10 @@ class ImageAlloc : public VideoCommon::ImageAllocBase {};
 /// Whether block-compressed 2D arrays are decoded on the CPU (the default; boot.cfg
 /// "bc_arrays=native" keeps them compressed). Applies to images created from now on.
 void SetBcArrayDecode(bool enabled);
+
+/// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
+/// the CPU. Applies to images created from now on.
+void SetAstcGpuDecode(bool enabled);
 
 class Sampler {
 public:

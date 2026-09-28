@@ -90,6 +90,8 @@ public:
     void FragmentBarrier() override;
     void TiledCacheBarrier() override;
     void FlushCommands() override;
+    /// Submits between draws once the list being recorded holds many uploads.
+    void FlushIfUploadHeavy();
     void TickFrame() override;
     bool AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface&,
                                const Tegra::Engines::Fermi2D::Surface&,
@@ -214,6 +216,8 @@ private:
     bool logged_cpu_indirect_draw{};
     bool logged_byte_count_draw{};
     bool trace_draws{};
+    /// Draws, clears and dispatches since the last FlushCommands submission.
+    u32 draw_counter{};
     bool trace_dumps{};
     u32 trace_index{};
     /// Color targets then depth of the framebuffer the traced draws go to (ids, not the
