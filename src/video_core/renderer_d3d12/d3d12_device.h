@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <string>
+#include <utility>
 
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -21,8 +22,14 @@ void ThrowIfFailed(HRESULT hr, const char* what);
 
 namespace removal_tripwire {
 extern std::atomic_bool removal_tripped;
+extern std::atomic_bool check_descriptors;
 void ReportRemovedAfter(HRESULT reason, const std::string& what);
 } // namespace removal_tripwire
+
+/// Also checks after every descriptor a draw writes ("descriptor_checks=1"). Off by default:
+/// GetDeviceRemovedReason enters the kernel, and once per descriptor it was 40% of the draws' CPU
+/// time (0.2.59 profile). The check after each submission still catches the removal.
+void SetDescriptorRemovalChecks(bool enabled);
 
 /// Removal tripwire: a view, resource or pipeline created with parameters the driver rejects
 /// removes the device (DXGI_ERROR_INVALID_CALL) without any other error, and the Xbox driver
@@ -35,6 +42,14 @@ void CheckRemovedAfter(ID3D12Device* device, Describe&& describe) {
     }
     if (const HRESULT reason = device->GetDeviceRemovedReason(); FAILED(reason)) {
         removal_tripwire::ReportRemovedAfter(reason, describe());
+    }
+}
+
+/// CheckRemovedAfter for the descriptors written on every draw, only with SetDescriptorRemovalChecks.
+template <typename Describe>
+void CheckRemovedAfterDescriptor(ID3D12Device* device, Describe&& describe) {
+    if (removal_tripwire::check_descriptors.load(std::memory_order_relaxed)) {
+        CheckRemovedAfter(device, std::forward<Describe>(describe));
     }
 }
 

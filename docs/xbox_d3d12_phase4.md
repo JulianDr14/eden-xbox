@@ -1923,7 +1923,7 @@ Lecciones:
   - MSAA;
   - conversiones de formato (`ConvertImage`).
 
-### ASTC por GPU y recompresion BC3 (0.2.58.0: PC correcto, Series pendiente)
+### ASTC por GPU y recompresion BC3 (0.2.58.0; predeterminado desde 0.2.59.0)
 
 - `astc=gpu` conserva ASTC comprimido en staging y usa dos compute PSO: el decoder ASTC y un
   encoder BC3 de calidad equilibrada. Ambos se traducen por `CompilePipeline`, para que el parche
@@ -1972,5 +1972,44 @@ Diagnosticos de `boot.cfg` que quedan (solo para depurar esta ruta):
 - `astc_fresh=1`: temporales RGBA8 y BC3 nuevos en cada subida.
 
 Gate: en PC, Mario Wonder se ve bien con `astc=gpu` (HUD, globo del mapa, niveles) y sin errores
-de la capa de debug. Pendiente la prueba de al menos cuatro minutos en Series X|S (0.2.58.0 se
-empaqueta con `astc=gpu`). No hacer `astc=gpu` predeterminado antes de ese gate.
+de la capa de debug. **Series (0.2.58.0): superado.** Unos 4 minutos sin errores graficos ni caidas;
+la decodificacion ASTC en CPU paso de ~6 s a 0 ms en los tirones de carga. Desde 0.2.59.0
+`astc=gpu` es el valor por defecto y `astc=bc3` vuelve a la ruta de CPU.
+
+### Coste por draw: el chivato de device removal (0.2.59.0)
+
+Tras ASTC por GPU seguian los tirones en Series: en el nivel, ~600 draws por frame y ~35 ms por
+frame. El hilo de la GPU pasaba ~17 ms por frame grabando draws y el juego lo esperaba en cada
+frame, asi que el coste de los draws se sumaba al del juego en vez de solaparse.
+
+Instrumentacion nueva (`perf_counters.h`, una linea `D3D12 GPU thread:` por ventana de 300 frames):
+- Coste medio por draw en ns, por fases de `GraphicsPipeline::Configure`: texturas, buffers,
+  descriptores, targets y samplers. Aparte, la grabacion (`PrepareAttachments` + `RecordDraw`).
+- Tiempo en clears y dispatches, y lo que queda fuera (metodos de Maxwell, macros, DMA, present).
+- Esperas del juego a la GPU: tiempo entre cada `IocCtrlEventWait` que se queda esperando y la
+  senal del syncpoint (`nvhost_ctrl.cpp`). Las esperas pueden solaparse.
+
+Perfilado en PC (reproduce los costes de la consola) con `xperf` muestreando la CPU a 1 ms y la
+vista butterfly de las pilas que pasan por `RasterizerD3D12`:
+- La fase "descriptores" costaba ~14 de ~28 us por draw. `GuestDescriptorQueue` llamaba a
+  `CheckRemovedAfter` tras cada CBV/SRV/UAV/copia, y `GetDeviceRemovedReason` entra al kernel
+  (D3D12Core -> win32u). Era ~40% del tiempo de CPU de los draws.
+- **Arreglo:** esas comprobaciones por descriptor (`CheckRemovedAfterDescriptor`) solo corren con
+  `descriptor_checks=1` en `boot.cfg`. La comprobacion tras cada submit del scheduler sigue
+  detectando la caida del device. Las de creacion de recursos, vistas y PSO no cambian.
+
+Resultado en PC, mismo nivel:
+
+| | Antes | Despues |
+|---|---|---|
+| us por draw | 28-43 | 10-13,5 |
+| fase descriptores | ~14 us | 1,9 us |
+| frame medio en el nivel | 34-42 ms | 20-36 ms |
+| esperas del juego a la GPU por ventana | 58-116 (0,6-2 s) | 11-28 (0,08-0,26 s) |
+
+Lo que quedaba despues: la CPU emulada es ahora el cuello de botella (el hilo de la GPU espera
+trabajo mas de la mitad del tiempo), y la traduccion SPIR-V -> DXIL de pipelines nuevos corre en
+el hilo de la GPU (picos de 150-490 ms al entrar en zonas nuevas).
+
+**Regla:** nada que entre al kernel por draw o por descriptor. Los chivatos caros van detras de una
+opcion de `boot.cfg`.

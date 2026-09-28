@@ -317,7 +317,7 @@ vez:
   - `ResolveCallerProgramId: Could not resolve caller process_id=0` también sale en escritorio.
   - `Pin count imbalance` sale al cerrar.
 
-### Ruta ASTC GPU + BC3 (PC correcto en 0.2.58.0, Series pendiente)
+### Ruta ASTC GPU + BC3 (predeterminada desde 0.2.59.0)
 
 - `astc=gpu` selecciona BC3 para texturas 2D de una capa y RGBA8 para arrays. El staging conserva
   los bloques ASTC del guest; no hay decode ni recompression en CPU.
@@ -334,4 +334,13 @@ vez:
   cero). Sin ella, el grupo base heredaba basura de la root signature anterior y las texturas
   salian con bloques rojos o con el contenido de otra imagen (ver `xbox_d3d12_phase4.md`).
 - Diagnosticos: `astc_verify=1`, `astc_sync=1`, `astc_fresh=1`.
-- PC verificado con Mario Wonder; falta la Series antes de cambiar el valor predeterminado.
+- Verificado con Mario Wonder en PC y Series (0.2.58.0). Es el valor por defecto desde 0.2.59.0;
+  `astc=bc3` vuelve a la ruta de CPU.
+
+### Chivato de device removal y coste por draw (0.2.59.0)
+
+- `CheckRemovedAfter` llama a `GetDeviceRemovedReason`, que entra al kernel. Tras cada descriptor
+  de cada draw costaba ~40% de la CPU de los draws. Esos sitios usan `CheckRemovedAfterDescriptor`,
+  activo solo con `descriptor_checks=1`. El resto de los chivatos (creacion y submit) sigue igual.
+- Contadores por ventana (`D3D12 GPU thread:` en el log): coste por draw por fases, clears,
+  dispatches, trabajo fuera de draws y esperas del juego a la GPU (`nvhost_ctrl`).

@@ -45,6 +45,7 @@ void ThrowIfFailed(HRESULT hr, const char* what) {
 
 namespace removal_tripwire {
 std::atomic_bool removal_tripped{false};
+std::atomic_bool check_descriptors{false};
 
 void ReportRemovedAfter(HRESULT reason, const std::string& what) {
     if (!removal_tripped.exchange(true)) {
@@ -53,6 +54,10 @@ void ReportRemovedAfter(HRESULT reason, const std::string& what) {
     }
 }
 } // namespace removal_tripwire
+
+void SetDescriptorRemovalChecks(bool enabled) {
+    removal_tripwire::check_descriptors.store(enabled, std::memory_order_relaxed);
+}
 
 namespace {
 bool gpu_based_validation = false;

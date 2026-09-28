@@ -21,6 +21,7 @@
 #include "core/hle/service/nvdrv/devices/nvhost_ctrl.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/perf_counters.h"
 
 namespace Service::Nvidia::Devices {
 
@@ -199,7 +200,12 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
     params.value.raw |= slot;
 
     event.wait_handle =
-        host1x_syncpoint_manager.RegisterHostAction(fence_id, target_value, [this, slot]() {
+        host1x_syncpoint_manager.RegisterHostAction(fence_id, target_value,
+                                                    [this, slot,
+                                                     start = std::chrono::steady_clock::now()]() {
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestGpuWaits, 1);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestGpuWaitUs,
+                                 VideoCore::Perf::ElapsedUs(start));
             auto& event_ = events[slot];
             if (event_.status.exchange(EventState::Signalling, std::memory_order_acq_rel) ==
                 EventState::Waiting) {

@@ -38,6 +38,17 @@ enum class Counter : size_t {
     StagingStreamWaits,    ///< large uploads that waited for the GPU to free the stream ring
     TextureDecodeUs,       ///< CPU decoding/re-encoding of converted textures (ASTC, BCn arrays)
     TextureGpuDecodes,     ///< textures decoded by a compute shader (ASTC)
+    DrawNs,                ///< whole draws (direct and indirect), nested counters included
+    DrawTexturesNs,        ///< of which: reading texture handles and finding the image views
+    DrawBuffersNs,         ///< uniform, storage, texel, vertex and index buffers
+    DrawDescriptorsNs,     ///< writing the descriptor table (and each stage's host buffers)
+    DrawTargetsNs,         ///< render targets, feedback loops and image transitions
+    DrawSamplersNs,        ///< the sampler table
+    DrawRecordNs,          ///< preparing attachments and recording state and the draw
+    ClearNs,
+    DispatchNs,
+    GuestGpuWaits,         ///< guest fence waits (nvhost_ctrl events) that the GPU signalled later
+    GuestGpuWaitUs,        ///< time from each of those waits to its signal; waits can overlap
     Count,
 };
 
@@ -87,6 +98,38 @@ private:
     Counter us_counter;
     Counter count_counter;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+};
+
+/// Splits a function into consecutive phases: each Lap adds the nanoseconds since the previous one
+/// (the phases of a draw last a few microseconds, too short to truncate to microseconds).
+class LapTimer {
+public:
+    void Lap(Counter ns_counter) {
+        const auto now = std::chrono::steady_clock::now();
+        Add(ns_counter, static_cast<u64>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(now - last)
+                                .count()));
+        last = now;
+    }
+
+private:
+    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+};
+
+/// Adds the scope's duration to a nanosecond counter.
+class ScopedNsTimer {
+public:
+    explicit ScopedNsTimer(Counter ns_counter_) : ns_counter{ns_counter_} {}
+    ~ScopedNsTimer() {
+        lap.Lap(ns_counter);
+    }
+
+    ScopedNsTimer(const ScopedNsTimer&) = delete;
+    ScopedNsTimer& operator=(const ScopedNsTimer&) = delete;
+
+private:
+    Counter ns_counter;
+    LapTimer lap;
 };
 
 } // namespace VideoCore::Perf

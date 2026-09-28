@@ -14,6 +14,7 @@
 #include "common/logging.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "video_core/memory_manager.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_graphics_pipeline.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
@@ -389,6 +390,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
 
     boost::container::small_vector<ImageViewInOut, 64> views;
     boost::container::small_vector<SamplerId, 64> samplers;
+    VideoCore::Perf::LapTimer lap;
 
     texture_cache.SynchronizeDescriptors(false);
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
@@ -452,6 +454,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
         }
     }
     texture_cache.FillImageViews(std::span(views.data(), views.size()), false, has_images);
+    lap.Lap(VideoCore::Perf::Counter::DrawTexturesNs);
 
     ImageViewInOut* texture_buffer_it = views.data();
     const auto bind_stage_info = [&](size_t stage) {
@@ -496,6 +499,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
 
     buffer_cache.UpdateGraphicsBuffers(is_indexed);
     buffer_cache.BindHostGeometryBuffers(is_indexed);
+    lap.Lap(VideoCore::Perf::Counter::DrawBuffersNs);
 
     // The table is written in root-signature order while the caches bind, stage by stage:
     // uniform, storage and texel buffers from the buffer cache, then textures and images.
@@ -554,6 +558,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;
     }
+    lap.Lap(VideoCore::Perf::Counter::DrawDescriptorsNs);
     texture_cache.UpdateRenderTargets(false);
     texture_cache.CheckFeedbackLoop(std::span<const ImageViewInOut>{views.data(), views.size()});
 
@@ -575,6 +580,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     if (out.depth_sampled && key.state.dynamic_state.depth_write_enable != 0) {
         WarnOnce(warned_depth_feedback, "writing depth while sampling the depth buffer");
     }
+    lap.Lap(VideoCore::Perf::Counter::DrawTargetsNs);
 
     out.resource_table = queue.Table();
     out.sampler_table = {};
@@ -584,6 +590,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
             std::span<const D3D12_CPU_DESCRIPTOR_HANDLE>(sampler_handles.data(),
                                                          sampler_handles.size()));
     }
+    lap.Lap(VideoCore::Perf::Counter::DrawSamplersNs);
 
     // Push constants: no resolution scaling yet (all rescaling bits clear, down factor 1), then
     // the render area, which shares the first words exactly as in the Vulkan backend.

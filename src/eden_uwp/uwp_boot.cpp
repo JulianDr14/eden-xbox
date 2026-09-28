@@ -59,6 +59,7 @@ void SetAstcGpuVerify(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuSync(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuFresh(bool enabled); // d3d12_texture_cache.h
 void SetGpuBasedValidation(bool enabled); // d3d12_device.h
+void SetDescriptorRemovalChecks(bool enabled); // d3d12_device.h
 using AppMemoryQuery = bool (*)(u64& used, u64& limit); // d3d12_device.h
 void SetAppMemoryQuery(AppMemoryQuery query);            // d3d12_device.h
 } // namespace D3D12
@@ -113,6 +114,9 @@ struct BootConfig {
     bool debug_layer{};
     /// With the debug layer, GPU-based validation too ("debug_layer=gbv").
     bool gpu_validation{};
+    /// Look for a removed device after every descriptor a draw writes ("descriptor_checks=1"), to
+    /// name the view that removed it; costs a kernel call per descriptor.
+    bool descriptor_checks{};
     /// File name of a game in LocalState\games to boot instead of boot.nro (package-appx.ps1 -Game).
     std::string game;
     /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
@@ -123,10 +127,10 @@ struct BootConfig {
     u32 traced_frame{};
     /// Keep D3D12 block-compressed 2D arrays compressed instead of decoding them on the CPU.
     bool bc_arrays_native{};
-    /// How ASTC reaches D3D12 ("astc="): BC3 for single textures and RGBA8 for arrays. "gpu"
-    /// performs both decode and BC3 encode on the GPU; "bc3" keeps the CPU reference path and
-    /// "cpu" expands every image to RGBA8.
-    enum class Astc { Bc3, Gpu, GpuRgba, Cpu } astc{Astc::Bc3};
+    /// How ASTC reaches D3D12 ("astc="): BC3 for single textures and RGBA8 for arrays. "gpu" (the
+    /// default since 0.2.59) performs both decode and BC3 encode on the GPU; "bc3" keeps the CPU
+    /// reference path and "cpu" expands every image to RGBA8.
+    enum class Astc { Bc3, Gpu, GpuRgba, Cpu } astc{Astc::Gpu};
     bool astc_verify{};
     bool astc_sync{};
     bool astc_fresh{};
@@ -182,14 +186,15 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                                                      ? Settings::AstcRecompression::Uncompressed
                                                      : Settings::AstcRecompression::Bc3);
     VideoCommon::SetAstcArrayRecompression(false);
-    // The compute decoder is opt-in ("astc=gpu"): Mario Wonder's 105-layer ASTC arrays decoded
-    // with it hung the GPU on the PC without the debug layer, and ran clean with GPU-based
-    // validation (see docs/xbox_d3d12_phase4.md, 0.2.51).
+    // The compute decoder was opt-in until its dispatches set spirv_to_dxil's compute runtime data
+    // (0.2.58): 4 minutes of Mario Wonder on the Series decoded no ASTC on the CPU, without
+    // corruption or hangs. "astc=bc3" brings back the CPU path.
     D3D12::SetAstcGpuDecode(config.astc == BootConfig::Astc::Gpu ||
                             config.astc == BootConfig::Astc::GpuRgba);
     D3D12::SetAstcGpuVerify(config.astc_verify);
     D3D12::SetAstcGpuSync(config.astc_sync);
     D3D12::SetAstcGpuFresh(config.astc_fresh);
+    D3D12::SetDescriptorRemovalChecks(config.descriptor_checks);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
         D3D12::SetGpuBasedValidation(config.gpu_validation);
@@ -1028,6 +1033,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         config.run_seconds =
                             static_cast<u32>(std::strtoul(line.c_str() + key.size(), nullptr, 10));
                         WriteDiag("boot.cfg: run " + std::to_string(config.run_seconds) + " s");
+                    } else if (line == "descriptor_checks=1") {
+                        config.descriptor_checks = true;
+                        WriteDiag("boot.cfg: device removal checks after every draw descriptor");
                     } else if (line == "debug_layer=1" || line == "debug_layer=gbv") {
                         config.debug_layer = true;
                         config.gpu_validation = line == "debug_layer=gbv";
