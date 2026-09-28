@@ -316,3 +316,22 @@ vez:
   - `playtime.bin` no existe la primera vez.
   - `ResolveCallerProgramId: Could not resolve caller process_id=0` también sale en escritorio.
   - `Pin count imbalance` sale al cerrar.
+
+### Ruta ASTC GPU + BC3 (PC correcto en 0.2.58.0, Series pendiente)
+
+- `astc=gpu` selecciona BC3 para texturas 2D de una capa y RGBA8 para arrays. El staging conserva
+  los bloques ASTC del guest; no hay decode ni recompression en CPU.
+- El decoder D3D12 es una variante del shader ASTC compartido con dos constantes adicionales:
+  longitud del SRV raw y primera fila de bloques. Vulkan conserva sin cambios su ABI de siete
+  push constants.
+- Un dispatch ASTC produce una banda RGBA8, una barrera UAV la hace legible, el segundo dispatch
+  genera BC3 en un buffer raw y `CopyTextureRegion` copia su footprint a la textura final.
+- Los temporales persistentes tienen presupuestos de 32 MiB RGBA8 y 8 MiB BC3. Al crecer se libera
+  el recurso anterior mediante `Scheduler::DeferRelease`; no se espera un fence en el upload.
+- Si falta el decoder o el encoder, la imagen no recibe `AcceleratedUpload` y el texture cache usa
+  la conversion CPU existente. `astc=bc3` queda como referencia CPU durante los gates.
+- Ambos dispatches rellenan la runtime data de compute de `spirv_to_dxil` (grupos y grupo base
+  cero). Sin ella, el grupo base heredaba basura de la root signature anterior y las texturas
+  salian con bloques rojos o con el contenido de otra imagen (ver `xbox_d3d12_phase4.md`).
+- Diagnosticos: `astc_verify=1`, `astc_sync=1`, `astc_fresh=1`.
+- PC verificado con Mario Wonder; falta la Series antes de cambiar el valor predeterminado.

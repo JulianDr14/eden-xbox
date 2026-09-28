@@ -91,7 +91,7 @@ public:
     void BlitImage(Framebuffer*, ImageView&, ImageView&, const Region2D&, const Region2D&,
                    Tegra::Engines::Fermi2D::Filter, Tegra::Engines::Fermi2D::Operation);
 
-    bool CanAccelerateImageUpload(Image&) const noexcept { return false; }
+    bool CanAccelerateImageUpload(Image& image) const noexcept;
     bool CanUploadMSAA() const noexcept { return false; }
     /// Decodes an ASTC image with the compute shader (images flagged AcceleratedUpload): map
     /// holds the guest's swizzled blocks.
@@ -118,6 +118,9 @@ public:
     }
 
 private:
+    void EnsureAstcRgbaScratch(u32 width, u32 height);
+    void EnsureAstcBc3Scratch(u64 size);
+
     const Device& device;
     Scheduler& scheduler;
     StagingBufferPool& staging;
@@ -127,6 +130,14 @@ private:
     CpuDescriptorAllocator& dsv_descriptors;
     D3D12_CPU_DESCRIPTOR_HANDLE null_rtv{};
     BlitImageHelper* blit_helper{};
+    /// Reused by single-layer ASTC uploads. Bands cap the live decode/encode workspace at 40 MiB.
+    ComPtr<ID3D12Resource> astc_rgba_scratch;
+    ComPtr<ID3D12Resource> astc_bc3_scratch;
+    D3D12_RESOURCE_STATES astc_rgba_state{D3D12_RESOURCE_STATE_COMMON};
+    D3D12_RESOURCE_STATES astc_bc3_state{D3D12_RESOURCE_STATE_COMMON};
+    u32 astc_rgba_width{};
+    u32 astc_rgba_height{};
+    u64 astc_bc3_size{};
     /// MIN/MAX sampler reductions need tiled resources tier 2; the Xbox Series reports tier 1 and
     /// creating such a sampler there removes the device (DXGI_ERROR_INVALID_CALL).
     bool supports_min_max_filter{};
@@ -358,6 +369,12 @@ void SetBcArrayDecode(bool enabled);
 /// Whether ASTC images kept as RGBA8 are decoded by the compute shader (the default) rather than
 /// the CPU. Applies to images created from now on.
 void SetAstcGpuDecode(bool enabled);
+/// One-shot diagnostic: compare the first GPU BC3 result with the existing CPU pipeline.
+void SetAstcGpuVerify(bool enabled);
+/// Diagnostic: wait for the GPU after every GPU ASTC upload (tells races from wrong results).
+void SetAstcGpuSync(bool enabled);
+/// Diagnostic: new scratch resources for every GPU ASTC upload (no reuse between images).
+void SetAstcGpuFresh(bool enabled);
 
 class Sampler {
 public:

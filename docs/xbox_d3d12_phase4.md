@@ -1922,3 +1922,55 @@ Lecciones:
   - transferencias depth-stencil (hechas en la 0.2.48);
   - MSAA;
   - conversiones de formato (`ConvertImage`).
+
+### ASTC por GPU y recompresion BC3 (0.2.58.0: PC correcto, Series pendiente)
+
+- `astc=gpu` conserva ASTC comprimido en staging y usa dos compute PSO: el decoder ASTC y un
+  encoder BC3 de calidad equilibrada. Ambos se traducen por `CompilePipeline`, para que el parche
+  de Mesa baje las operaciones de 16 bits antes de producir DXIL SM 6.4.
+- El decoder recibe el staging mediante un SRV raw acotado y comprueba el numero de palabras antes
+  de leer cada bloque de 128 bits. Esto elimina el root SRV sin limites que podia convertir un
+  layout erroneo en page fault de GPU.
+- Las texturas 2D de una capa siguen `ASTC -> RGBA8 temporal -> BC3 temporal -> textura BC3`.
+  Se procesan por bandas alineadas al footprint ASTC y a cuatro filas: el temporal RGBA8 esta
+  limitado a 32 MiB y el BC3 a 8 MiB. Ambos recursos default se reutilizan sin esperas de CPU.
+- Arrays y cubemaps siguen `ASTC -> RGBA8` directamente: la Series ya demostro que algunas capas
+  de recursos BCn array se muestrean con otro direccionamiento que el motor de copia.
+- El encoder usa un eje principal aproximado para RGB565, seleccion por error cuadratico y la
+  paleta BC4 completa para alpha. Solo usa enteros de 32 bits y float32.
+- `astc=bc3` conserva la referencia CPU y `astc=cpu` fuerza RGBA8 CPU. El modo GPU cae a CPU antes
+  de crear la imagen si falta cualquiera de los PSO.
+- Referencias: [ASTC de ARM](https://github.com/ARM-software/astc-encoder/blob/main/Docs/FormatOverview.md),
+  [root descriptors de D3D12](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-descriptors-directly-in-the-root-signature),
+  [GetCopyableFootprints](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-getcopyablefootprints)
+  y [Granite ASTC](https://github.com/Themaister/Granite/blob/master/assets/shaders/decode/astc.comp).
+
+**Fallo del HUD y del mapa (rectangulos rojos, iconos con el contenido de otra textura).**
+- Con `astc_verify=1` el decoder GPU coincidia con el de CPU (diferencias de +-1 por redondeo) y el
+  BC3 de GPU tenia errores pequenos, en todas las imagenes del HUD. Los shaders estaban bien.
+- `astc_sync=1` (esperar a la GPU tras cada subida) arreglaba casi todo: era un problema de estado
+  dentro de la command list, no de calculo.
+- `astc_fresh=1` (temporales nuevos en cada subida) dejaba las texturas vacias: el resultado del
+  decoder/encoder no caia donde la copia final lo lee. Con temporales reutilizados, la copia leia
+  lo que otra imagen habia dejado alli; de ahi los rojos y los iconos cambiados.
+- **Causa:** las root signatures del decoder ASTC y del encoder BC3 declaran la "runtime data" de
+  compute de `spirv_to_dxil` (numero de grupos y grupo base de `vkCmdDispatchBase`), pero nunca la
+  rellenaban. Una root constant sin fijar es indefinida en D3D12: conserva lo que dejo la
+  signature anterior en esa posicion (por ejemplo, el runtime data del dispatch guest). Lo que
+  encaja con las tres pruebas es que el DXIL sume el grupo base a `gl_WorkGroupID` y escriba en
+  coordenadas desplazadas; tras un `Finish` la lista se reinicia y ese valor vuelve a cero, por eso
+  `astc_sync` lo tapaba. No se inspecciono el DXIL: lo confirma que el arreglo quita el fallo.
+- **Arreglo (0.2.58.0):** `SetComputeRuntimeData` en `d3d12_blit_image.cpp` fija el numero de
+  grupos real y el grupo base a cero antes de cada dispatch del decoder y del encoder.
+- La capa de debug no avisa de root constants sin fijar; solo la validacion GPU-based podria.
+  **Regla:** todo dispatch o draw con una root signature que declara runtime data la rellena.
+
+Diagnosticos de `boot.cfg` que quedan (solo para depurar esta ruta):
+- `astc_verify=1`: compara las 64 primeras subidas GPU con CPU (RGBA y BC3) y registra cuantos
+  bloques difieren, el primer pixel distinto y el bloque ASTC de origen. Espera a la GPU.
+- `astc_sync=1`: `Finish` tras cada subida ASTC por GPU.
+- `astc_fresh=1`: temporales RGBA8 y BC3 nuevos en cada subida.
+
+Gate: en PC, Mario Wonder se ve bien con `astc=gpu` (HUD, globo del mapa, niveles) y sin errores
+de la capa de debug. Pendiente la prueba de al menos cuatro minutos en Series X|S (0.2.58.0 se
+empaqueta con `astc=gpu`). No hacer `astc=gpu` predeterminado antes de ese gate.

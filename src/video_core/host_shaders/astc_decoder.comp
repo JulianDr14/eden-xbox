@@ -33,6 +33,10 @@ UNIFORM(3) uint block_size;
 UNIFORM(4) uint x_shift;
 UNIFORM(5) uint block_height;
 UNIFORM(6) uint block_height_mask;
+#ifdef D3D12_ASTC
+UNIFORM(7) uint input_words;
+UNIFORM(8) uint first_block_row;
+#endif
 END_PUSH_CONSTANTS
 
 struct EncodingData {
@@ -1403,6 +1407,9 @@ uint SwizzleOffset(uvec2 pos) {
 
 void main() {
     uvec3 pos = gl_GlobalInvocationID;
+#ifdef D3D12_ASTC
+    pos.y += first_block_row;
+#endif
     pos.x <<= BYTES_PER_BLOCK_LOG2;
     const uint swizzle = SwizzleOffset(pos.xy);
     const uint block_y = pos.y >> GOB_SIZE_Y_SHIFT;
@@ -1418,6 +1425,15 @@ void main() {
     if (any(greaterThanEqual(coord, imageSize(dest_image)))) {
         return;
     }
+#ifdef D3D12_ASTC
+    // D3D12 root descriptors do not perform bounds checking. The D3D12 backend binds a bounded
+    // raw SRV as well, but keep the explicit check so a malformed guest layout cannot reset the
+    // device on drivers without robust buffer access.
+    if (offset / 4u + 3u >= input_words) {
+        FillError(coord);
+        return;
+    }
+#endif
     local_buff = astc_data[offset / 16];
     DecompressBlock(coord);
 }

@@ -55,6 +55,9 @@ void SetFrameDiagnostics(bool enabled);
 void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
 void SetBcArrayDecode(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
+void SetAstcGpuVerify(bool enabled); // d3d12_texture_cache.h
+void SetAstcGpuSync(bool enabled); // d3d12_texture_cache.h
+void SetAstcGpuFresh(bool enabled); // d3d12_texture_cache.h
 void SetGpuBasedValidation(bool enabled); // d3d12_device.h
 using AppMemoryQuery = bool (*)(u64& used, u64& limit); // d3d12_device.h
 void SetAppMemoryQuery(AppMemoryQuery query);            // d3d12_device.h
@@ -120,10 +123,13 @@ struct BootConfig {
     u32 traced_frame{};
     /// Keep D3D12 block-compressed 2D arrays compressed instead of decoding them on the CPU.
     bool bc_arrays_native{};
-    /// How ASTC reaches D3D12 ("astc="): BC3 for single textures and RGBA8 for arrays, both by the
-    /// CPU (the default); the GPU decoder to RGBA8 for everything (experimental); or the CPU to
-    /// RGBA8 for everything (0.2.50).
-    enum class Astc { Bc3, Gpu, Cpu } astc{Astc::Bc3};
+    /// How ASTC reaches D3D12 ("astc="): BC3 for single textures and RGBA8 for arrays. "gpu"
+    /// performs both decode and BC3 encode on the GPU; "bc3" keeps the CPU reference path and
+    /// "cpu" expands every image to RGBA8.
+    enum class Astc { Bc3, Gpu, GpuRgba, Cpu } astc{Astc::Bc3};
+    bool astc_verify{};
+    bool astc_sync{};
+    bool astc_fresh{};
     /// Played by hand ("play=1"): runs until the app is closed, without frame dumps or draw trace.
     bool play{};
     /// Guest memory through the host-mapped arena instead of the bounds-checked page table
@@ -170,14 +176,20 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     // RGBA8 ASTC made loading frames upload 150-260 MiB at once and the console run out of memory
     // (0.2.50): single textures become BC3 (a quarter of the memory), 2D arrays stay RGBA8 (a
     // block-compressed array misreads layers on the Series) and are decoded on the GPU.
-    Settings::values.astc_recompression.SetValue(config.astc == BootConfig::Astc::Bc3
-                                                     ? Settings::AstcRecompression::Bc3
-                                                     : Settings::AstcRecompression::Uncompressed);
+    const bool astc_rgba = config.astc == BootConfig::Astc::Cpu ||
+                           config.astc == BootConfig::Astc::GpuRgba;
+    Settings::values.astc_recompression.SetValue(astc_rgba
+                                                     ? Settings::AstcRecompression::Uncompressed
+                                                     : Settings::AstcRecompression::Bc3);
     VideoCommon::SetAstcArrayRecompression(false);
     // The compute decoder is opt-in ("astc=gpu"): Mario Wonder's 105-layer ASTC arrays decoded
     // with it hung the GPU on the PC without the debug layer, and ran clean with GPU-based
     // validation (see docs/xbox_d3d12_phase4.md, 0.2.51).
-    D3D12::SetAstcGpuDecode(config.astc == BootConfig::Astc::Gpu);
+    D3D12::SetAstcGpuDecode(config.astc == BootConfig::Astc::Gpu ||
+                            config.astc == BootConfig::Astc::GpuRgba);
+    D3D12::SetAstcGpuVerify(config.astc_verify);
+    D3D12::SetAstcGpuSync(config.astc_sync);
+    D3D12::SetAstcGpuFresh(config.astc_fresh);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
         D3D12::SetGpuBasedValidation(config.gpu_validation);
@@ -1032,12 +1044,23 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "bc_arrays=native") {
                         config.bc_arrays_native = true;
                         WriteDiag("boot.cfg: D3D12 block-compressed arrays stay compressed");
-                    } else if (line == "astc=gpu" || line == "astc=cpu" || line == "astc=bc3") {
+                    } else if (line == "astc=gpu" || line == "astc=gpu-rgba" ||
+                               line == "astc=cpu" || line == "astc=bc3") {
                         using Astc = decltype(config.astc);
-                        config.astc = line == "astc=gpu"   ? Astc::Gpu
-                                      : line == "astc=cpu" ? Astc::Cpu
-                                                          : Astc::Bc3;
+                        config.astc = line == "astc=gpu"        ? Astc::Gpu
+                                      : line == "astc=gpu-rgba" ? Astc::GpuRgba
+                                      : line == "astc=cpu"      ? Astc::Cpu
+                                                               : Astc::Bc3;
                         WriteDiag("boot.cfg: ASTC " + line.substr(5));
+                    } else if (line == "astc_fresh=1") {
+                        config.astc_fresh = true;
+                        WriteDiag("boot.cfg: new ASTC scratch resources for every GPU upload");
+                    } else if (line == "astc_sync=1") {
+                        config.astc_sync = true;
+                        WriteDiag("boot.cfg: wait for the GPU after every GPU ASTC upload");
+                    } else if (line == "astc_verify=1") {
+                        config.astc_verify = true;
+                        WriteDiag("boot.cfg: verify first GPU BC3 upload against CPU");
                     } else if (line == "fastmem=0" || line == "fastmem=1") {
                         config.fastmem = line == "fastmem=1";
                         WriteDiag(std::string("boot.cfg: fastmem ") +

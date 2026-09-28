@@ -1,0 +1,281 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+
+// A fast balanced-quality BC3 encoder for the D3D12 ASTC upload path. One invocation encodes one
+// 4x4 block. RGB endpoints are selected along an approximated principal axis and refined after
+// RGB565 quantization; alpha uses the full eight-entry BC4 palette. The output is the exact
+// little-endian 16-byte BC3 block stream expected by CopyTextureRegion.
+
+#ifdef VULKAN
+#define BEGIN_PUSH_CONSTANTS layout(push_constant) uniform PushConstants {
+#define END_PUSH_CONSTANTS };
+#define UNIFORM(n)
+#else
+#define BEGIN_PUSH_CONSTANTS
+#define END_PUSH_CONSTANTS
+#define UNIFORM(n) layout(location = n) uniform
+#endif
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+BEGIN_PUSH_CONSTANTS
+UNIFORM(0) uint image_width;
+UNIFORM(1) uint image_height;
+UNIFORM(2) uint band_height;
+UNIFORM(3) uint output_row_words;
+END_PUSH_CONSTANTS
+
+layout(binding = 0) uniform sampler2D source_image;
+layout(binding = 1, std430) writeonly restrict buffer OutputBuffer {
+    uvec4 output_blocks[];
+};
+
+uint Pack565(uvec3 color) {
+    const uvec3 q = (color * uvec3(31u, 63u, 31u) + 127u) / 255u;
+    return (q.r << 11u) | (q.g << 5u) | q.b;
+}
+
+uvec3 Unpack565(uint value) {
+    const uvec3 q = uvec3(value >> 11u, value >> 5u, value) & uvec3(31u, 63u, 31u);
+    return (q * 255u + uvec3(15u, 31u, 15u)) / uvec3(31u, 63u, 31u);
+}
+
+void EvaluateColors(uint color0, uint color1, out uvec3 colors[4]) {
+    colors[0] = Unpack565(color0);
+    colors[1] = Unpack565(color1);
+    colors[2] = (2u * colors[0] + colors[1]) / 3u;
+    colors[3] = (colors[0] + 2u * colors[1]) / 3u;
+}
+
+int Dot3(ivec3 a, ivec3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+uint MatchColors(const uvec4 texels[16], const uvec3 colors[4]) {
+    // stb_dxt deliberately matches on the endpoint axis instead of doing four Euclidean
+    // distances. Besides being cheaper, its crossover points are part of the NORMAL-quality
+    // output and matter on small UI atlases.
+    const ivec3 direction = ivec3(colors[0]) - ivec3(colors[1]);
+    int stops[4];
+    for (uint i = 0u; i < 4u; ++i) {
+        stops[i] = Dot3(ivec3(colors[i]), direction);
+    }
+    const int point0 = stops[1] + stops[3];
+    const int half_point = stops[3] + stops[2];
+    const int point3 = stops[2] + stops[0];
+    uint mask = 0u;
+    for (uint i = 0u; i < 16u; ++i) {
+        const int projection = 2 * Dot3(ivec3(texels[i].rgb), direction);
+        const uint index = projection < half_point
+                               ? (projection < point0 ? 1u : 3u)
+                               : (projection < point3 ? 2u : 0u);
+        mask |= index << (i * 2u);
+    }
+    return mask;
+}
+
+uint Quantize5(float value) {
+    const float x = clamp(value, 0.0, 1.0);
+    uint q = min(31u, uint(x * 31.0));
+    if (q < 31u) {
+        const uint a = (q * 33u) >> 2u;
+        const uint b = ((q + 1u) * 33u) >> 2u;
+        q += x > float(a + b) / 510.0 ? 1u : 0u;
+    }
+    return q;
+}
+
+uint Quantize6(float value) {
+    const float x = clamp(value, 0.0, 1.0);
+    uint q = min(63u, uint(x * 63.0));
+    if (q < 63u) {
+        const uint a = (q * 65u) >> 4u;
+        const uint b = ((q + 1u) * 65u) >> 4u;
+        q += x > float(a + b) / 510.0 ? 1u : 0u;
+    }
+    return q;
+}
+
+// One least-squares refinement, equivalent to STB_DXT_NORMAL. The packed constants are stb_dxt's
+// products of endpoint weights; using float here avoids native 64-bit requirements in DXIL.
+bool RefineColors(const uvec4 texels[16], uint mask, inout uint color0, inout uint color1) {
+    const int weights[4] = int[](3, 0, 2, 1);
+    const int products[4] = int[](0x090000, 0x000900, 0x040102, 0x010402);
+    int accumulator = 0;
+    ivec3 at1 = ivec3(0);
+    ivec3 at2 = ivec3(0);
+    uint indices = mask;
+    for (uint i = 0u; i < 16u; ++i, indices >>= 2u) {
+        const uint step = indices & 3u;
+        const ivec3 color = ivec3(texels[i].rgb);
+        accumulator += products[step];
+        at1 += color * weights[step];
+        at2 += color;
+    }
+    at2 = 3 * at2 - at1;
+    const int xx_i = accumulator >> 16;
+    const int yy_i = (accumulator >> 8) & 255;
+    const int xy_i = accumulator & 255;
+    const float xx = float(xx_i);
+    const float yy = float(yy_i);
+    const float xy = float(xy_i);
+    const float determinant = xx * yy - xy * xy;
+    if (determinant == 0.0) {
+        return false;
+    }
+    const float scale = 3.0 / 255.0 / determinant;
+    const vec3 endpoint0 = vec3(at1 * yy_i - at2 * xy_i) * scale;
+    const vec3 endpoint1 = vec3(at2 * xx_i - at1 * xy_i) * scale;
+    const uint refined0 = Quantize5(endpoint0.r) << 11u |
+                          Quantize6(endpoint0.g) << 5u | Quantize5(endpoint0.b);
+    const uint refined1 = Quantize5(endpoint1.r) << 11u |
+                          Quantize6(endpoint1.g) << 5u | Quantize5(endpoint1.b);
+    const bool changed = refined0 != color0 || refined1 != color1;
+    color0 = refined0;
+    color1 = refined1;
+    return changed;
+}
+
+void PutAlphaIndex(inout uint lo, inout uint hi, uint lane, uint index) {
+    const uint bit = 16u + lane * 3u;
+    if (bit < 32u) {
+        lo |= index << bit;
+        if (bit == 31u) {
+            hi |= index >> 1u;
+        }
+    } else {
+        hi |= index << (bit - 32u);
+    }
+}
+
+void main() {
+    const uvec2 block = gl_GlobalInvocationID.xy;
+    const uvec2 origin = block * 4u;
+    if (origin.x >= image_width || origin.y >= band_height) {
+        return;
+    }
+
+    uvec4 texels[16];
+    uvec3 rgb_min = uvec3(255u);
+    uvec3 rgb_max = uvec3(0u);
+    uint alpha_min = 255u;
+    uint alpha_max = 0u;
+    uvec3 sum = uvec3(0u);
+    for (uint i = 0u; i < 16u; ++i) {
+        const uvec2 local = uvec2(i & 3u, i >> 2u);
+        const uvec2 p = origin + local;
+        texels[i] = p.x < image_width && p.y < image_height
+                        ? uvec4(round(clamp(texelFetch(source_image, ivec2(p), 0), 0.0, 1.0) *
+                                           255.0))
+                        : uvec4(0u);
+        rgb_min = min(rgb_min, texels[i].rgb);
+        rgb_max = max(rgb_max, texels[i].rgb);
+        alpha_min = min(alpha_min, texels[i].a);
+        alpha_max = max(alpha_max, texels[i].a);
+        sum += texels[i].rgb;
+    }
+    const ivec3 mean = ivec3((sum + 8u) >> 4u);
+
+    // Four power iterations over the color covariance approximate stb_dxt's principal-axis fit
+    // without per-block shared memory or divergent searches.
+    int covariance[6] = int[](0, 0, 0, 0, 0, 0);
+    for (uint i = 0u; i < 16u; ++i) {
+        const ivec3 d = ivec3(texels[i].rgb) - mean;
+        covariance[0] += d.r * d.r;
+        covariance[1] += d.r * d.g;
+        covariance[2] += d.r * d.b;
+        covariance[3] += d.g * d.g;
+        covariance[4] += d.g * d.b;
+        covariance[5] += d.b * d.b;
+    }
+    vec3 axis = vec3(rgb_max - rgb_min);
+    const vec3 covariance0 = vec3(covariance[0], covariance[1], covariance[2]) / 255.0;
+    const vec3 covariance1 = vec3(covariance[1], covariance[3], covariance[4]) / 255.0;
+    const vec3 covariance2 = vec3(covariance[2], covariance[4], covariance[5]) / 255.0;
+    for (uint i = 0u; i < 4u; ++i) {
+        axis = vec3(dot(axis, covariance0), dot(axis, covariance1), dot(axis, covariance2));
+    }
+    const float magnitude = max(abs(axis.x), max(abs(axis.y), abs(axis.z)));
+    const ivec3 integer_axis = magnitude < 4.0
+                                   ? ivec3(299, 587, 114)
+                                   : ivec3(axis * (512.0 / magnitude));
+    int projection_min = 0x7fffffff;
+    int projection_max = -0x7fffffff;
+    uvec3 endpoint_min = rgb_min;
+    uvec3 endpoint_max = rgb_max;
+    for (uint i = 0u; i < 16u; ++i) {
+        const int projection = Dot3(ivec3(texels[i].rgb), integer_axis);
+        if (projection < projection_min) {
+            projection_min = projection;
+            endpoint_min = texels[i].rgb;
+        }
+        if (projection > projection_max) {
+            projection_max = projection;
+            endpoint_max = texels[i].rgb;
+        }
+    }
+    uint color0 = Pack565(endpoint_max);
+    uint color1 = Pack565(endpoint_min);
+    if (color0 == color1) {
+        color0 = Pack565(rgb_max);
+        color1 = Pack565(rgb_min);
+    }
+    if (color0 <= color1) {
+        const uint swap = color0;
+        color0 = color1;
+        color1 = swap;
+        if (color0 == color1) {
+            color0 = min(65535u, color0 + 1u);
+        }
+    }
+    uvec3 colors[4];
+    EvaluateColors(color0, color1, colors);
+    uint color_indices = MatchColors(texels, colors);
+    if (RefineColors(texels, color_indices, color0, color1) && color0 != color1) {
+        EvaluateColors(color0, color1, colors);
+        color_indices = MatchColors(texels, colors);
+    }
+    // BC3 color always uses BC1's four-color mode. Swapping the endpoints requires exchanging
+    // indices 0/1 and 2/3, which is exactly xor 01 in every two-bit field.
+    if (color0 < color1) {
+        const uint swap = color0;
+        color0 = color1;
+        color1 = swap;
+        color_indices ^= 0x55555555u;
+    } else if (color0 == color1 && color0 != 65535u) {
+        ++color0;
+    }
+
+    uint alpha_lo = alpha_max | (alpha_min << 8u);
+    uint alpha_hi = 0u;
+    // stb_dxt's optimal DXT5 index finder. The palette-nearest version looks equivalent but its
+    // rounding boundaries differ enough to turn soft masks into black or transparent texels.
+    const int distance = int(alpha_max) - int(alpha_min);
+    const int distance4 = distance * 4;
+    const int distance2 = distance * 2;
+    const int bias = (distance < 8 ? distance - 1 : distance / 2 + 2) - int(alpha_min) * 7;
+    for (uint i = 0u; i < 16u; ++i) {
+        int value = int(texels[i].a) * 7 + bias;
+        int index = 0;
+        if (value >= distance4) {
+            index = 4;
+            value -= distance4;
+        }
+        if (value >= distance2) {
+            index += 2;
+            value -= distance2;
+        }
+        if (value >= distance) {
+            ++index;
+        }
+        index = (-index) & 7;
+        index ^= index < 2 ? 1 : 0;
+        PutAlphaIndex(alpha_lo, alpha_hi, i, uint(index));
+    }
+
+    const uint output_word = block.y * output_row_words + block.x * 4u;
+    output_blocks[output_word / 4u] = uvec4(alpha_lo, alpha_hi,
+                                            color0 | (color1 << 16u), color_indices);
+}
