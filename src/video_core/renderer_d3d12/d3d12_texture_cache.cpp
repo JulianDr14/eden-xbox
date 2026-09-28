@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <optional>
 #include <array>
 #include <atomic>
 #include <cstring>
@@ -156,6 +157,48 @@ FormatInfo NativeFormat(PixelFormat format) {
     return info;
 }
 
+/// What a block-compressed format decodes to on the CPU (VideoCommon::DecompressBCn), or nothing
+/// for other formats.
+///
+/// The Series' texture unit and its copy engine disagree on where some layers of block-compressed
+/// 2D arrays live: in Mario Wonder's 128x128x105 BC4 tile arrays, layers 84 and 100 read 32 rows
+/// off and others read other texels, while CopyTextureRegion reads back the guest data (see
+/// docs/xbox_d3d12_phase4.md, 0.2.44). Plain texels are copied without reinterpreting blocks.
+std::optional<FormatInfo> DecodedBcFormat(PixelFormat format) {
+    const auto make = [](DXGI_FORMAT resource, DXGI_FORMAT view, PixelFormat copy_format) {
+        return FormatInfo{.resource = resource, .view = view, .srv = view, .converted = true,
+                          .copy_format = copy_format};
+    };
+    switch (format) {
+    case PixelFormat::BC1_RGBA_UNORM:
+    case PixelFormat::BC2_UNORM:
+    case PixelFormat::BC3_UNORM:
+    case PixelFormat::BC7_UNORM:
+        return make(DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM,
+                    PixelFormat::A8B8G8R8_UNORM);
+    case PixelFormat::BC1_RGBA_SRGB:
+    case PixelFormat::BC2_SRGB:
+    case PixelFormat::BC3_SRGB:
+    case PixelFormat::BC7_SRGB:
+        return make(DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                    PixelFormat::A8B8G8R8_SRGB);
+    case PixelFormat::BC4_UNORM:
+        return make(DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R8_UNORM, PixelFormat::R8_UNORM);
+    case PixelFormat::BC4_SNORM:
+        return make(DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R8_SNORM, PixelFormat::R8_SNORM);
+    case PixelFormat::BC5_UNORM:
+        return make(DXGI_FORMAT_R8G8_TYPELESS, DXGI_FORMAT_R8G8_UNORM, PixelFormat::R8G8_UNORM);
+    case PixelFormat::BC5_SNORM:
+        return make(DXGI_FORMAT_R8G8_TYPELESS, DXGI_FORMAT_R8G8_SNORM, PixelFormat::R8G8_SNORM);
+    case PixelFormat::BC6H_UFLOAT:
+    case PixelFormat::BC6H_SFLOAT:
+        return make(DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    PixelFormat::R16G16B16A16_FLOAT);
+    default:
+        return std::nullopt;
+    }
+}
+
 D3D12_RESOURCE_DIMENSION Dimension(ImageType type) {
     switch (type) {
     case ImageType::e1D: return D3D12_RESOURCE_DIMENSION_TEXTURE1D;
@@ -246,6 +289,7 @@ void WarnOnce(bool& logged, fmt::format_string<Args...> format, Args&&... args) 
 bool logged_unsupported_transfer = false;
 bool logged_depth_stencil_transfer = false;
 bool logged_self_copy = false;
+bool logged_decoded_copy = false;
 bool logged_view_format = false;
 bool logged_self_blit = false;
 bool logged_msaa_blit = false;
@@ -310,11 +354,11 @@ FormatInfo SurfaceFormat(PixelFormat format) {
 namespace {
 /// Sampler keys for SamplerHeap; 0 is the presenter's linear sampler.
 std::atomic<u64> next_sampler_key{1};
-std::atomic<bool> pad_array_layers{};
+std::atomic<bool> decode_bc_arrays{true};
 } // Anonymous namespace
 
-void SetArrayPadding(bool enabled) {
-    pad_array_layers.store(enabled, std::memory_order_relaxed);
+void SetBcArrayDecode(bool enabled) {
+    decode_bc_arrays.store(enabled, std::memory_order_relaxed);
 }
 
 /// How one BufferImageCopy is laid out in staging memory (tightly packed by the generic cache) and
@@ -417,6 +461,12 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
              VAddr cpu_addr_)
     : VideoCommon::ImageBase{info_, gpu_addr_, cpu_addr_}, runtime{&runtime_},
       format{runtime_.Format(info_.format)} {
+    if (decode_bc_arrays.load(std::memory_order_relaxed) && info_.type == ImageType::e2D &&
+        info_.resources.layers > 1 && info_.num_samples == 1) {
+        if (const std::optional<FormatInfo> decoded = DecodedBcFormat(info_.format)) {
+            format = *decoded;
+        }
+    }
     if (format.converted) {
         flags |= VideoCommon::ImageFlagBits::Converted | VideoCommon::ImageFlagBits::CostlyLoad;
     }
@@ -448,20 +498,10 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         width = Common::AlignUp(width, block_w);
         height = Common::AlignUp(height, block_h);
     }
-    u32 array_size = info_.type == ImageType::e3D ? info_.size.depth
-                                                  : static_cast<u32>(info_.resources.layers);
-    if (pad_array_layers.load(std::memory_order_relaxed) && is_color && !is_msaa &&
-        info_.type == ImageType::e2D && array_size > 1 && !std::has_single_bit(array_size)) {
-        // Only the layer count changes: subresource indices of color images do not depend on it.
-        const u32 padded = std::min(std::bit_ceil(array_size), 2048U);
-        LOG_INFO(Render, "D3D12: array {} {}x{} L{} @{:x} padded from {} to {} layers",
-                 info_.format, width, height, info_.resources.levels, gpu_addr_, array_size,
-                 padded);
-        array_size = padded;
-    }
     const D3D12_RESOURCE_DESC desc{
         .Dimension = Dimension(info_.type), .Alignment = 0, .Width = width, .Height = height,
-        .DepthOrArraySize = static_cast<u16>(array_size),
+        .DepthOrArraySize = static_cast<u16>(info_.type == ImageType::e3D ? info_.size.depth
+                                                                          : info_.resources.layers),
         .MipLevels = static_cast<u16>(info_.resources.levels), .Format = format.resource,
         .SampleDesc = {.Count = info_.num_samples, .Quality = 0},
         .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN, .Flags = resource_flags,
@@ -887,10 +927,17 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
     if (!src.Handle() || !dst.Handle()) {
         return;
     }
+    if (src.IsBcDecoded() != dst.IsBcDecoded()) {
+        // Plain texels on one side, compressed blocks on the other: not copyable.
+        WarnOnce(logged_decoded_copy, "copy between a CPU-decoded and a compressed image ({} -> "
+                 "{}) skipped", src.info.format, dst.info.format);
+        return;
+    }
     src.Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
     dst.Transition(D3D12_RESOURCE_STATE_COPY_DEST);
-    const u32 block_w = VideoCore::Surface::DefaultBlockWidth(src.info.format);
-    const u32 block_h = VideoCore::Surface::DefaultBlockHeight(src.info.format);
+    // In the resource's own blocks: a decoded array copies texel by texel.
+    const u32 block_w = VideoCore::Surface::DefaultBlockWidth(src.TransferFormat().copy_format);
+    const u32 block_h = VideoCore::Surface::DefaultBlockHeight(src.TransferFormat().copy_format);
     for (const auto& copy : copies) {
         const u32 depth = src.info.type == ImageType::e3D ? copy.extent.depth : 1U;
         for (s32 layer = 0; layer < copy.src_subresource.num_layers; ++layer) {
@@ -952,6 +999,11 @@ void TextureCacheRuntime::BlitImage(Framebuffer*, ImageView& dst, ImageView& src
                              dst_width == src_region.end.x - src_region.start.x &&
                              dst_height == src_region.end.y - src_region.start.y;
     if (src_color && same_extent && src.format == dst.format) {
+        if (src_image->IsBcDecoded() != dst_image->IsBcDecoded()) {
+            WarnOnce(logged_decoded_copy, "copy between a CPU-decoded and a compressed image ({} "
+                     "-> {}) skipped", src.format, dst.format);
+            return;
+        }
         // An unscaled copy: exact for every format, integers included.
         src_image->Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
         dst_image->Transition(D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1025,7 +1077,11 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
     if (!image) {
         return;
     }
-    const FormatInfo format_info = runtime->Format(info.format);
+    // Views of a decoded block-compressed array read its plain texels (a view in another format
+    // reinterprets the same resource format).
+    const FormatInfo format_info = !source.IsBcDecoded()
+                                       ? runtime->Format(info.format)
+                                       : DecodedBcFormat(info.format).value_or(source.TransferFormat());
     auto swizzle = info.Swizzle();
     if (const SurfaceType surface_type = VideoCore::Surface::GetFormatType(info.format);
         surface_type == SurfaceType::Depth || surface_type == SurfaceType::DepthStencil) {

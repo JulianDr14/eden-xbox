@@ -1178,6 +1178,143 @@ Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
     los arrays 2D de color con un número de capas que no es potencia de 2 se crean con la siguiente
     (105 → 128), y las capas extra no se usan. Si los huecos desaparecen, se confirma un desacuerdo
     de direccionamiento por capa en la consola y eso mismo sirve de workaround.
+- **Resultado de la 0.2.43.**
+  - No aparece ningún aviso `exceeds its image`: todas las vistas caben en su recurso, así que la
+    vista fuera de rango queda descartada.
+  - El padding se aplicó (20 arrays; los BC4 pasan de 105 a 128 capas). El layout del host es
+    formato 79 (BC4_TYPELESS), 8 mips, 1 572 864 bytes con alineación de 64 KiB.
+  - Los huecos siguen, pero **cambian de forma**: aparecen manchas blancas y negras nuevas. Lo que
+    lee la GPU depende del layout del recurso, mientras que la copia sigue coincidiendo con el
+    guest.
+  - No encontré ninguna barrera faltante en la subida (`UploadMemory`: `COPY_DEST`, una
+    `CopyTextureRegion` por capa y la transición a SRV antes de muestrear). Una caché vieja
+    tampoco explicaría huecos idénticos durante 170 s.
+- **0.2.44.0.** Sonda directa de la unidad de texturas.
+  - Nuevo host shader `d3d12_array_probe.comp`. Por cada texel del nivel 0 de una capa escribe el
+    rojo y el alfa de un `texelFetch` y de un `textureLod` nearest en el centro del texel.
+  - `RasterizerD3D12::ProbeArrayLayer` lo ejecuta con un SRV de array completo (el mismo tipo de
+    vista que usa el suelo), un sampler estático point y un UAV raw, y lo lee con una copia.
+  - En el volcado BC4 (capas 81–84 y 97–100), la traza compara la sonda con lo leído por copia.
+    Registra cuántos texels difieren y el desplazamiento vertical que mejor explica la diferencia,
+    y guarda `probe_<addr>_<capa>.bmp`.
+  - Se empaqueta sin `array_pad`, para medir el layout original.
+- **Resultado de la 0.2.44: causa confirmada.** La unidad de texturas de la Series y
+  `CopyTextureRegion` no leen lo mismo en ciertas capas de los arrays BC4 de 128×128×105.
+  `texelFetch` y el sample nearest coinciden entre sí, así que no es el filtro.
+  - En la máscara del suelo, las capas 81–83 y 97–99 coinciden exactamente. Las **84 y 100** salen
+    corridas exactamente 32 filas: con ese desplazamiento quedan 0 texels distintos. Son 8 filas de
+    bloques, 2 KiB, que es justo el tamaño del mip 1.
+  - En los otros dos arrays, las capas 82–84 y 98–100 difieren en 1 560–5 536 texels sin un
+    desplazamiento simple, mientras que la 81 y la 97 coinciden.
+  - El patrón de capas se repite con período 16 y cambia con el layout (0.2.43). Es un
+    desacuerdo de direccionamiento de la consola entre la copia BC, que reinterpreta los bloques
+    como texels, y el muestreo. Nuestros datos son correctos.
+- **0.2.45.0: rodeo.** Los arrays 2D comprimidos (BC1–7, más de una capa, sin MSAA) se
+  decodifican en la CPU al subirse (`DecodedBcFormat`, por la ruta `Converted` de la cache
+  genérica y `DecompressBCn`).
+  - BC4 → R8, BC5 → RG8, BC1/2/3/7 → RGBA8 (sRGB se conserva) y BC6H → RGBA16F. Las copias ya
+    no reinterpretan bloques.
+  - Las vistas de esas imágenes usan el formato decodificado. `CopyImage` y la copia directa de
+    `BlitImage` calculan los bloques con el formato del recurso y se saltan, con aviso, las
+    copias entre una imagen decodificada y una comprimida.
+  - Coste: más memoria para esos arrays, ×2 en BC4 y ×4 en BC1, y decodificación en CPU al
+    subirlos.
+  - Viene activado por defecto. `bc_arrays=native` en boot.cfg lo desactiva para comparar.
+  - Se retira `array_pad`. El volcado y la sonda también leen el array decodificado (R8) para
+    verificar el arreglo.
+- **Resultado de la 0.2.45: arreglado.** El borde del suelo se ve completo en la tele.
+  - La sonda da 0 texels distintos en las 8 capas de los tres arrays, que ahora son R8
+    (formato 60).
+  - Las BC4 de una sola capa siguen comprimidas y coinciden con el guest.
+  - No aparece ningún aviso de copias saltadas.
+  - Cada array pasa de 1,5 MB a 6,9 MB. El pico de la app fue de 4 316 MiB (4 258 MiB en la
+    0.2.42).
+- **Limpieza.** Se retiran:
+  - la sonda (`d3d12_array_probe.comp`, `ProbeArrayLayer`);
+  - el volcado BMP de capas;
+  - el log por tile de c6/c7;
+  - el foco por hash de PS en `Draw`;
+  - `DumpTracedShaders` con su lista fija de hashes.
+
+  Queda el trace genérico: comprobación de buffers y texturas contra el guest, `dz` de profundidad,
+  volcado de targets, samplers y tipos, y layout del host. La sonda está reproducida más abajo
+  porque nunca llegó a un commit.
+
+### Cómo se diagnosticó (método reutilizable)
+
+Síntoma: huecos con forma de tile en el borde del suelo de Mario Wonder, solo en la Series; en el
+PC, con el mismo código, se veía bien. Tardó de la 0.2.37 a la 0.2.45. Lo que funcionó, en orden:
+
+1. **Trazar un frame fijo** con boot.cfg y sin tocar el PC:
+   - `trace_frame=N` activa `TraceDraw` en todos los draws de ese frame;
+   - `run_seconds` y los `input=` llevan siempre al mismo punto del juego;
+   - todo cae en `log\trace\` y se trae de la consola como `log.zip`.
+2. **Identificar draws por hash (VS/PS)**, no por número: el orden cambia entre corridas.
+3. **Ver quién escribe cada píxel** con los `dz`: máscara de los texels de profundidad que cambió
+   cada draw, a ¼ de resolución.
+   - Superponer los `dz` de dos draws sobre el frame (overlay en C# con `Add-Type`, porque no hay
+     Pillow) o imprimirlos como mapa ASCII (`X` = ambos, `#` = solo A, `+` = solo B).
+   - Así se vio que los huecos eran píxeles que el PS del suelo descartaba, y más tarde que en uno
+     de cada cuatro tiles la banda descartada estaba 20 px más abajo.
+4. **Descartar entradas comparándolas con el guest**: `CheckTracedBuffers` (cbufs, vértices e
+   índices) y `CheckTracedTexture` (cada nivel y capa por `CopyTextureRegion` contra el unswizzle
+   del guest). Todo coincidía, así que el fallo estaba en cómo la GPU leía, no en qué leía.
+5. **Leer el DXIL** (antes con `DumpTracedShaders`: `log\shaders\<ps>_<vs>_{fs,vs}.{spv,dxil}`,
+   desensamblado con `dxc -dumpbin`):
+   - de dónde sale cada varying: capa = `c7[idx*32+80]`, UV = matriz 2×3 de c4 igual para todos
+     los tiles;
+   - si hay `fast`/FMA, que descartó la invariancia entre el prepass y los pases `EQUAL`.
+6. **Experimentos por boot.cfg, uno por versión**, cada uno partiendo las hipótesis en dos:
+   - `sampler_lod0` (0.2.42) descartó los mips;
+   - `array_pad` (0.2.43) mostró que el patrón dependía del layout del recurso;
+   - las vistas se recortaron al rango del recurso, y como no salió ningún aviso quedó descartada
+     la vista fuera de rango.
+7. **Prueba directa de la unidad de texturas** (0.2.44), que fue la decisiva: un compute que lee
+   el nivel 0 de una capa por el mismo tipo de SRV que el juego (array completo, índice de capa) y
+   lo compara texel a texel con lo que devuelve `CopyTextureRegion`, más el desplazamiento
+   vertical que mejor explica la diferencia. Mostró desplazamientos exactos (32 filas) en capas
+   concretas.
+
+La sonda, para rehacerla si vuelve a hacer falta:
+
+```glsl
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2DArray tex;                        // -> t0 + s0
+layout(binding = 1, std430) writeonly buffer Texels { uint texels[]; }; // -> u1 (raw)
+layout(push_constant) uniform Probe { uint layer; uint width; uint height; uint unused; };
+uint Unorm8(float v) { return uint(round(clamp(v, 0.0, 1.0) * 255.0)); }
+void main() {
+    const uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= width || p.y >= height) return;
+    const vec4 f = texelFetch(tex, ivec3(p, layer), 0);
+    const vec4 s = textureLod(tex, vec3((vec2(p) + 0.5) / vec2(width, height), float(layer)), 0.0);
+    texels[p.y * width + p.x] = Unorm8(f.r) | (Unorm8(f.a) << 8) | (Unorm8(s.r) << 16) |
+                                (Unorm8(s.a) << 24);
+}
+```
+
+- Se añade a `host_shaders/CMakeLists.txt` y se compila con `ShaderCompiler::CompilePipeline`
+  (etapa `DXIL_SPIRV_SHADER_COMPUTE`).
+- Root signature:
+  - `[0]`: 4 constantes en `PUSH_CONSTANT_SPACE`;
+  - `[1]`: 12 constantes en `RUNTIME_DATA_SPACE`;
+  - `[2]`: tabla del anillo con SRV `t0` y UAV `u1`;
+  - un sampler estático point en `s0`.
+- En el draw trazado:
+  - SRV `TEXTURE2DARRAY` de todo el recurso;
+  - UAV raw `R32_TYPELESS` sobre un buffer default;
+  - `SetDescriptorHeaps` con el anillo y el heap de samplers;
+  - `Dispatch(w/8, h/8)`;
+  - `Finish` y `CopyBufferRegion` a un staging de readback.
+
+Lecciones:
+- **"La copia coincide con el guest" no demuestra que el shader lea eso.** En la Series, la copia
+  y el muestreo pueden direccionar distinto. Hay que medir el muestreo directamente.
+- **Si un bug solo aparece en la consola y el patrón se repite con período potencia de 2** (aquí,
+  16 capas), sospechar del layout y tiling del recurso antes que de los datos o los shaders.
+- **Un cambio de layout que cambia el patrón sin quitarlo** (`array_pad`) apunta al
+  direccionamiento, no al contenido.
 - **Texturas 3D leídas como array 2D.** El juego crea 256 vistas 2D array sobre imágenes 3D
   (64×64×1, formato 12). Es lo que en Vulkan permite `2D_ARRAY_COMPATIBLE`, y D3D12 no tiene esa
   vista.

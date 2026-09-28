@@ -175,10 +175,9 @@ private:
     void DumpTextureNonFinite(const Image& image);
     /// For every traced draw: reads each bound cbuf, vertex and index buffer back from the GPU and
     /// compares it with guest memory. Logs the ones that differ, or all of them (with the index
-    /// range against the vertex buffer sizes) when verbose. With ground_tiles (the ground of
-    /// Mario Wonder), also logs what its vertex shader reads for each tile.
+    /// range against the vertex buffer sizes) when verbose.
     void CheckTracedBuffers(std::span<const TracedBuffer> buffers, const DrawParams& params,
-                            bool verbose, bool ground_tiles = false);
+                            bool verbose);
     /// Decodes a sampled image again from guest memory (as the texture cache uploads it) and
     /// compares every level and layer with what the GPU holds. Logs the levels that differ.
     void CheckTracedTexture(const Image& image);

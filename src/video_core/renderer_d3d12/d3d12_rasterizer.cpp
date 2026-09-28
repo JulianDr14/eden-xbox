@@ -10,7 +10,6 @@
 #include <fstream>
 #include <limits>
 #include <optional>
-#include <set>
 
 #include <spirv_to_dxil.h>
 
@@ -273,10 +272,7 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         TraceDraw(params.is_indexed ? "draw indexed" : "draw", pipeline, framebuffer,
                   traced_views, params.num_vertices, params.num_instances);
         if (trace_dumps) {
-            // The ground tiles of Mario Wonder: every buffer of them, sizes included.
-            const u64 ps_hash = pipeline->Key().unique_hashes[5];
-            const bool focus = ps_hash == 0x144325c2f2af10a2ULL || ps_hash == 0xa1da74541be9abe1ULL;
-            CheckTracedBuffers(traced_buffers, params, trace_non_finite_grew || focus, focus);
+            CheckTracedBuffers(traced_buffers, params, trace_non_finite_grew);
         }
     }
     if (!logged_first_draw) {
@@ -1112,8 +1108,7 @@ void RasterizerD3D12::DumpTextureNonFinite(const Image& image) {
              levels, image.gpu_addr, static_cast<u32>(image.flags), total, bad);
 }
 void RasterizerD3D12::CheckTracedBuffers(std::span<const TracedBuffer> buffers,
-                                         const DrawParams& params, bool verbose,
-                                         bool ground_tiles) {
+                                         const DrawParams& params, bool verbose) {
     using Kind = TracedBuffer::Kind;
     constexpr u32 max_checked = 8U << 20;
     std::optional<std::pair<u32, u32>> index_range; // vertex numbers, base vertex included
@@ -1248,86 +1243,6 @@ void RasterizerD3D12::CheckTracedBuffers(std::span<const TracedBuffer> buffers,
             }
         }
         LOG_INFO(Render, "{}", line);
-    }
-    if (!ground_tiles || !index_range) {
-        return;
-    }
-    // The vertex shader of the ground tiles binds guest cbufs 3, 4, 6 and 7 (D3D12 slots 0-3).
-    // For tile i = trunc(attr1.z) it reads its layer at c7[80 + 32i], k = trunc(c7[84 + 32i]),
-    // then its transform at c6[1152 + 16k] and c6[1664 + 16k]. c6 is streamed: what the GPU
-    // reads is the staging copy.
-    const auto& cbufs = maxwell3d->state.shader_stages[0].const_buffers;
-    const auto read_cbuf = [&](size_t index) {
-        std::vector<u8> data;
-        if (cbufs[index].enabled && cbufs[index].size != 0) {
-            data.resize(std::min<u32>(cbufs[index].size, 0x10000));
-            gpu_memory->ReadBlockUnsafe(cbufs[index].address, data.data(), data.size());
-        }
-        return data;
-    };
-    const std::vector<u8> c2_guest = read_cbuf(6);
-    const std::vector<u8> c3 = read_cbuf(7);
-    const TracedBuffer* c2_gpu = nullptr;
-    const TracedBuffer* vertex1 = nullptr;
-    for (const TracedBuffer& traced : buffers) {
-        if (traced.kind == Kind::StreamedUniform && traced.slot == 2 && traced.mapped) {
-            c2_gpu = &traced;
-        } else if (traced.kind == Kind::Vertex && traced.slot == 1 && traced.stride == 12) {
-            vertex1 = &traced;
-        }
-    }
-    if (!c2_gpu || !vertex1) {
-        LOG_INFO(Render, "D3D12 trace tiles #{}: c2 streamed {} vertex 1 {}", trace_index - 1,
-                 c2_gpu != nullptr, vertex1 != nullptr);
-        return;
-    }
-    u32 c2_differ = 0;
-    const size_t c2_common = std::min<size_t>(c2_gpu->size, c2_guest.size());
-    for (size_t at = 0; at + 4 <= c2_common; at += 4) {
-        c2_differ += std::memcmp(c2_gpu->mapped + at, c2_guest.data() + at, 4) != 0 ? 1 : 0;
-    }
-    LOG_INFO(Render,
-             "D3D12 trace tiles #{}: c6 @{:x} guest size {} streamed {}: {} words differ; c7 @{:x} "
-             "guest size {}",
-             trace_index - 1, cbufs[6].address, cbufs[6].size, c2_gpu->size, c2_differ,
-             cbufs[7].address, cbufs[7].size);
-    const auto word = [](const u8* data, size_t size, u32 at) -> std::string {
-        if (static_cast<size_t>(at) + 4 > size) {
-            return "OOB";
-        }
-        float value;
-        std::memcpy(&value, data + at, 4);
-        return fmt::format("{:.6g}", value);
-    };
-    const auto vec4 = [&](const u8* data, size_t size, u32 at) {
-        return fmt::format("{} {} {} {}", word(data, size, at), word(data, size, at + 4),
-                           word(data, size, at + 8), word(data, size, at + 12));
-    };
-    std::vector<u8> vertices(vertex1->size);
-    device_memory.ReadBlockUnsafe(vertex1->device_addr, vertices.data(), vertices.size());
-    std::set<s32> tiles;
-    for (u32 vertex = index_range->first; vertex <= index_range->second; ++vertex) {
-        const size_t at = static_cast<size_t>(vertex) * 12 + 8;
-        if (at + 4 > vertices.size()) {
-            break;
-        }
-        float z;
-        std::memcpy(&z, vertices.data() + at, 4);
-        tiles.insert(static_cast<s32>(std::trunc(z)));
-    }
-    for (const s32 tile : tiles) {
-        const u32 base = 80 + 32 * static_cast<u32>(tile);
-        float k_value = 0.0f;
-        if (static_cast<size_t>(base) + 8 <= c3.size()) {
-            std::memcpy(&k_value, c3.data() + base + 4, 4);
-        }
-        const u32 k = static_cast<u32>(std::max(0.0f, std::trunc(k_value)));
-        LOG_INFO(Render,
-                 "D3D12 trace tiles #{}: tile {} c7[{}] {} | c7[{}] {} | k {} c6[{}] {} | c6[{}] {}",
-                 trace_index - 1, tile, base - 16, vec4(c3.data(), c3.size(), base - 16), base,
-                 vec4(c3.data(), c3.size(), base), k, 1152 + 16 * k,
-                 vec4(c2_gpu->mapped, c2_gpu->size, 1152 + 16 * k), 1664 + 16 * k,
-                 vec4(c2_gpu->mapped, c2_gpu->size, 1664 + 16 * k));
     }
 }
 
@@ -1464,77 +1379,6 @@ void RasterizerD3D12::CheckTracedTexture(const Image& target) {
                                             gpu_word, guest_word);
                     }
                 }
-            }
-            // The tile arrays of the Mario Wonder ground (BC4, 105 layers): a few of the layers its
-            // tiles use (81/97 and 83/84/99/100 leave holes, 82/98 do not), every level, as the
-            // GPU holds them.
-            constexpr std::array<u32, 8> dumped_layers{81, 82, 83, 84, 97, 98, 99, 100};
-            if (copy_format == VideoCore::Surface::PixelFormat::BC4_UNORM &&
-                info.resources.layers == 105 &&
-                std::ranges::find(dumped_layers, layer) != dumped_layers.end()) {
-                const u32 width = std::max(1U, info.size.width >> level);
-                const u32 height = std::max(1U, info.size.height >> level);
-                std::vector<u8> texels(static_cast<size_t>(width) * height);
-                for (u32 by = 0; by < rows; ++by) {
-                    const u8* const row = readback.mapped_span.data() +
-                                          static_cast<size_t>(by) * footprint.Footprint.RowPitch;
-                    for (u32 bx = 0; bx < blocks_x; ++bx) {
-                        const u8* const block = row + static_cast<size_t>(bx) * 8;
-                        std::array<u32, 8> palette{block[0], block[1]};
-                        if (block[0] > block[1]) {
-                            for (u32 i = 2; i < 8; ++i) {
-                                palette[i] = ((8 - i) * block[0] + (i - 1) * block[1]) / 7;
-                            }
-                        } else {
-                            for (u32 i = 2; i < 6; ++i) {
-                                palette[i] = ((6 - i) * block[0] + (i - 1) * block[1]) / 5;
-                            }
-                            palette[6] = 0;
-                            palette[7] = 255;
-                        }
-                        u64 bits = 0;
-                        std::memcpy(&bits, block + 2, 6);
-                        for (u32 k = 0; k < 16; ++k) {
-                            const u32 x = bx * 4 + k % 4;
-                            const u32 y = by * 4 + k / 4;
-                            if (x < width && y < height) {
-                                texels[static_cast<size_t>(y) * width + x] =
-                                    static_cast<u8>(palette[(bits >> (3 * k)) & 7]);
-                            }
-                        }
-                    }
-                }
-                const u32 bmp_row = width * 4;
-                std::vector<u8> file(54 + static_cast<size_t>(bmp_row) * height);
-                const auto put32 = [&file](size_t at, u32 value) {
-                    std::memcpy(&file[at], &value, 4);
-                };
-                file[0] = 'B';
-                file[1] = 'M';
-                put32(2, static_cast<u32>(file.size()));
-                put32(10, 54);
-                put32(14, 40);
-                put32(18, width);
-                put32(22, height);
-                file[26] = 1;
-                file[28] = 32;
-                put32(34, bmp_row * height);
-                for (u32 y = 0; y < height; ++y) {
-                    u8* const out = file.data() + 54 + static_cast<size_t>(height - 1 - y) * bmp_row;
-                    for (u32 x = 0; x < width; ++x) {
-                        const u8 value = texels[static_cast<size_t>(y) * width + x];
-                        out[x * 4 + 0] = value;
-                        out[x * 4 + 1] = value;
-                        out[x * 4 + 2] = value;
-                        out[x * 4 + 3] = 255;
-                    }
-                }
-                const std::filesystem::path path =
-                    Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "trace" /
-                    fmt::format("tex_{:x}_L{}_{:03}.bmp", target.gpu_addr, level, layer);
-                std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-                stream.write(reinterpret_cast<const char*>(file.data()),
-                             static_cast<std::streamsize>(file.size()));
             }
             staging.FreeDeferred(readback);
             if (differing == 0) {
