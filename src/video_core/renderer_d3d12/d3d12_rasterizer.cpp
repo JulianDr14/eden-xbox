@@ -191,6 +191,7 @@ RasterizerD3D12::~RasterizerD3D12() {
 
 void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     ++draw_counter;
+    VideoCore::Perf::ScopedNsTimer draw_timer{VideoCore::Perf::Counter::DrawNs};
     SCOPE_EXIT {
         FlushIfUploadHeavy();
         gpu.TickWork();
@@ -232,6 +233,7 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         }
         return; // D3D12 rejected the PSO (logged when it was built)
     }
+    VideoCore::Perf::ScopedNsTimer record_timer{VideoCore::Perf::Counter::DrawRecordNs};
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
     framebuffer->PrepareAttachments(bindings.depth_sampled);
 
@@ -318,6 +320,7 @@ void RasterizerD3D12::DrawIndirect() {
         DrawIndirectOnCpu(params);
         return;
     }
+    VideoCore::Perf::ScopedNsTimer draw_timer{VideoCore::Perf::Counter::DrawNs};
     SCOPE_EXIT {
         FlushIfUploadHeavy();
         gpu.TickWork();
@@ -673,6 +676,7 @@ void RasterizerD3D12::DrawTexture() {
 
 void RasterizerD3D12::Clear(u32 layer_count) {
     ++draw_counter;
+    VideoCore::Perf::ScopedNsTimer clear_timer{VideoCore::Perf::Counter::ClearNs};
     gpu_memory->FlushCaching();
     const auto& regs = maxwell3d->regs;
     const bool use_color = regs.clear_surface.R || regs.clear_surface.G || regs.clear_surface.B ||
@@ -794,6 +798,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
 
 void RasterizerD3D12::DispatchCompute() {
     ++draw_counter;
+    VideoCore::Perf::ScopedNsTimer dispatch_timer{VideoCore::Perf::Counter::DispatchNs};
     SCOPE_EXIT {
         FlushIfUploadHeavy();
     };
