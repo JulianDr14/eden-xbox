@@ -19,6 +19,36 @@ class SamplerHeap;
 class Scheduler;
 class ShaderCompiler;
 
+/// How guest memory packs one depth-stencil texel (the layout_mode of the pack shaders). The
+/// Maxwell names list the bits from the most significant (as Ryujinx and nouveau use them).
+enum class DepthStencilLayout : u32 {
+    Z24S8,      ///< S8_UINT_D24_UNORM: depth in bits 31:8, stencil in 7:0
+    S8Z24,      ///< D24_UNORM_S8_UINT: stencil in bits 31:24, depth in 23:0
+    X8Z24,      ///< X8_D24_UNORM: depth in bits 23:0, nothing in 31:24
+    ZF32_X24S8, ///< D32_FLOAT_S8_UINT: the float depth, then a word with the stencil in 7:0
+};
+
+/// One region repacked between guest depth-stencil texels and the copy footprints of both planes
+/// of a D3D12 depth-stencil subresource (depth: 32-bit words, stencil: bytes). Offsets, rows and
+/// pitches are in 32-bit words; the region is in texels of the footprints.
+struct DepthStencilPack {
+    /// Read through a root SRV: the guest texels (split) or the footprints (merge). 4-byte aligned.
+    D3D12_GPU_VIRTUAL_ADDRESS source;
+    /// Written through a root UAV: the footprints (split) or the guest texels (merge).
+    D3D12_GPU_VIRTUAL_ADDRESS destination;
+    u32 packed_offset;  ///< first guest texel, from the packed buffer's address
+    u32 packed_row;     ///< words per guest row
+    u32 depth_pitch;    ///< words per depth footprint row
+    u32 stencil_offset; ///< start of the stencil footprint, from the footprints' address
+    u32 stencil_pitch;  ///< words per stencil footprint row
+    u32 x;
+    u32 y;
+    u32 width;
+    u32 height;
+    u32 row_texels; ///< merge: guest texels per row (at least width; the rest is written as zero)
+    DepthStencilLayout layout;
+};
+
 /// Draws Eden's host blit and clear shaders into guest images: the D3D12 counterpart of Vulkan's
 /// BlitImageHelper. Serves scaled texture blits (Fermi2D), DrawTexture and the clears D3D12 cannot
 /// express with ClearRenderTargetView/ClearDepthStencilView (partial color or stencil masks).
@@ -79,6 +109,17 @@ public:
     void ClearDepthStencil(const Target& dst, bool clear_depth, f32 depth, u8 stencil_mask,
                            u8 stencil_value, const D3D12_RECT& rect);
 
+    /// False when the depth-stencil pack shaders are missing (logged): guest depth-stencil
+    /// texels then cannot move to or from D3D12 depth-stencil resources.
+    [[nodiscard]] bool CanPackDepthStencil() const noexcept {
+        return pack_available;
+    }
+    /// Guest texels -> both footprints (d3d12_depth_stencil_split.comp). The caller puts the
+    /// source in a shader-readable state and the footprints in UNORDERED_ACCESS.
+    void SplitDepthStencil(const DepthStencilPack& pack);
+    /// Both footprints -> guest texels (d3d12_depth_stencil_merge.comp), same states.
+    void MergeDepthStencil(const DepthStencilPack& pack);
+
 private:
     enum class Kind : u8 {
         BlitColor,
@@ -103,6 +144,10 @@ private:
     void Blit(Kind kind, const Target& dst, D3D12_CPU_DESCRIPTOR_HANDLE src_srv,
               const Sampling& sampler, const VideoCommon::Region2D& dst_region,
               const VideoCommon::Region2D& src_region, const VideoCommon::Extent2D& src_size);
+    /// Builds the pack root signature and both compute pipelines; throws on failure.
+    void CreatePackPipelines(const ShaderCompiler& compiler);
+    void DispatchPack(ID3D12PipelineState* pipeline, const DepthStencilPack& pack, u32 groups_x,
+                      u32 groups_y);
 
     const Device& device;
     Scheduler& scheduler;
@@ -115,6 +160,11 @@ private:
     Sampling nearest_sampler{};
     Sampling linear_sampler{};
     bool available{};
+
+    ComPtr<ID3D12RootSignature> pack_root_signature;
+    ComPtr<ID3D12PipelineState> split_pipeline;
+    ComPtr<ID3D12PipelineState> merge_pipeline;
+    bool pack_available{};
 };
 
 } // namespace D3D12

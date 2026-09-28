@@ -236,12 +236,15 @@ u32 Component(Tegra::Texture::SwizzleSource source) {
     return D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0;
 }
 
-ComPtr<ID3D12Resource> CreateTransferBuffer(ID3D12Device* device, u64 size) {
+ComPtr<ID3D12Resource> CreateTransferBuffer(ID3D12Device* device, u64 size,
+                                            bool unordered_access = false) {
     const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
     const D3D12_RESOURCE_DESC desc{.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER, .Alignment = 0,
         .Width = size, .Height = 1, .DepthOrArraySize = 1, .MipLevels = 1,
         .Format = DXGI_FORMAT_UNKNOWN, .SampleDesc = {.Count = 1, .Quality = 0},
-        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR, .Flags = D3D12_RESOURCE_FLAG_NONE};
+        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        .Flags = unordered_access ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+                                  : D3D12_RESOURCE_FLAG_NONE};
     // Buffers start in COMMON and are promoted on first use.
     ComPtr<ID3D12Resource> buffer;
     ThrowIfFailed(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
@@ -286,8 +289,30 @@ void WarnOnce(bool& logged, fmt::format_string<Args...> format, Args&&... args) 
     }
 }
 
+/// How the guest packs the texels of a two-plane depth-stencil format.
+std::optional<DepthStencilLayout> GuestDepthStencilLayout(PixelFormat format) {
+    switch (format) {
+    case PixelFormat::S8_UINT_D24_UNORM: return DepthStencilLayout::Z24S8;
+    case PixelFormat::D24_UNORM_S8_UINT: return DepthStencilLayout::S8Z24;
+    case PixelFormat::X8_D24_UNORM: return DepthStencilLayout::X8Z24;
+    case PixelFormat::D32_FLOAT_S8_UINT: return DepthStencilLayout::ZF32_X24S8;
+    default: return std::nullopt;
+    }
+}
+
+/// Bytes per texel of a depth-stencil plane in a copy footprint: the depth plane of D24S8 and
+/// D32S8 copies as R32 (D24 in the low 24 bits), the stencil plane as R8 ("Planar Depth
+/// Stencil", DirectX-Specs).
+constexpr u32 PlaneTexelBytes(u32 plane) {
+    return plane == 0 ? 4 : 1;
+}
+
 bool logged_unsupported_transfer = false;
 bool logged_depth_stencil_transfer = false;
+bool logged_depth_stencil_unaligned = false;
+bool logged_depth_stencil_copy = false;
+bool logged_depth_stencil_upload = false;
+bool logged_depth_stencil_download = false;
 bool logged_self_copy = false;
 bool logged_decoded_copy = false;
 bool logged_view_format = false;
@@ -739,18 +764,303 @@ bool Image::CanTransfer() const {
                  "contents are not transferred", info.format);
         return false;
     }
-    if (format.stencil_srv != DXGI_FORMAT_UNKNOWN) {
-        // D3D12 stores depth and stencil in separate planes; the guest packs them together.
-        WarnOnce(logged_depth_stencil_transfer, "depth-stencil ({}) transfers need plane "
-                 "splitting (phase 5); contents are not transferred", info.format);
-        return false;
+    if (IsDepthStencilPlanar()) {
+        // D3D12 stores depth and stencil in separate planes; the guest packs them together, so
+        // the pack shaders move them (UploadDepthStencil, DownloadDepthStencil).
+        const BlitImageHelper* const helper = runtime->blit_helper;
+        if (!helper || !helper->CanPackDepthStencil() || info.num_samples > 1 ||
+            !GuestDepthStencilLayout(info.format)) {
+            WarnOnce(logged_depth_stencil_transfer, "depth-stencil ({}, {} samples) contents "
+                     "are not transferred: {}", info.format, info.num_samples,
+                     info.num_samples > 1 ? "multisampled" : "no pack shaders");
+            return false;
+        }
     }
     return true;
+}
+
+Image::PlaneFootprints Image::Footprints(s32 level) const {
+    // Both planes of one subresource in one buffer: plane 1 starts at the next placement
+    // boundary after plane 0. The footprint of a level does not depend on its layer.
+    const D3D12_RESOURCE_DESC desc = resource->GetDesc();
+    PlaneFootprints result{};
+    u64 depth_bytes = 0;
+    runtime->device.Get()->GetCopyableFootprints(&desc, Subresource(level, 0, 0), 1, 0,
+                                                 &result.planes[0], nullptr, nullptr,
+                                                 &depth_bytes);
+    const u64 stencil_offset = Common::AlignUp(depth_bytes, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+    u64 stencil_bytes = 0;
+    runtime->device.Get()->GetCopyableFootprints(&desc, Subresource(level, 0, 1), 1,
+                                                 stencil_offset, &result.planes[1], nullptr,
+                                                 nullptr, &stencil_bytes);
+    result.size = stencil_offset + stencil_bytes;
+    return result;
+}
+
+void Image::CopyPlanes(s32 level, s32 layer, ID3D12Resource* buffer,
+                       const PlaneFootprints& footprints, bool to_buffer) {
+    Transition(to_buffer ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COPY_DEST);
+    auto* const commands = runtime->scheduler.CommandList();
+    for (u32 plane = 0; plane < 2; ++plane) {
+        const D3D12_TEXTURE_COPY_LOCATION texture{
+            .pResource = resource.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            .SubresourceIndex = Subresource(level, layer, plane)};
+        const D3D12_TEXTURE_COPY_LOCATION placed{.pResource = buffer,
+                                                 .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                                                 .PlacedFootprint = footprints.planes[plane]};
+        // Whole subresources only: CopyTextureRegion does not copy part of a depth-stencil one
+        // (offsets 0 and no source box).
+        if (to_buffer) {
+            commands->CopyTextureRegion(&placed, 0, 0, 0, &texture, nullptr);
+        } else {
+            commands->CopyTextureRegion(&texture, 0, 0, 0, &placed, nullptr);
+        }
+    }
+}
+
+void Image::UploadDepthStencil(ID3D12Resource* buffer, size_t base_offset,
+                               std::span<const BufferImageCopy> copies) {
+    BlitImageHelper* const helper = runtime->blit_helper;
+    const DepthStencilLayout guest_layout = *GuestDepthStencilLayout(info.format);
+    ID3D12Device* const device = runtime->device.Get();
+    // The pack shader reads the staging memory directly: UPLOAD buffers already are readable,
+    // the buffer cache's DEFAULT ones rest in COMMON.
+    const bool source_default = HeapType(buffer) == D3D12_HEAP_TYPE_DEFAULT;
+    if (source_default) {
+        TransitionBuffer(runtime->scheduler.CommandList(), buffer, D3D12_RESOURCE_STATE_COMMON,
+                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+    const D3D12_GPU_VIRTUAL_ADDRESS source_base = buffer->GetGPUVirtualAddress();
+    for (const auto& copy : copies) {
+        const CopyLayout layout = Layout(copy);
+        const s32 level = copy.image_subresource.base_level;
+        const PlaneFootprints footprints = Footprints(level);
+        const u32 level_width = footprints.planes[0].Footprint.Width;
+        const u32 level_height = footprints.planes[0].Footprint.Height;
+        const u32 x = std::min(static_cast<u32>(copy.image_offset.x), level_width);
+        const u32 y = std::min(static_cast<u32>(copy.image_offset.y), level_height);
+        const u32 width = std::min(copy.image_extent.width, level_width - x);
+        const u32 height = std::min(copy.image_extent.height, level_height - y);
+        const bool whole = x == 0 && y == 0 && width == level_width && height == level_height;
+        const u32 layers = static_cast<u32>(std::max(1, copy.image_subresource.num_layers));
+        for (u32 layer = 0; layer < layers; ++layer) {
+            const s32 image_layer = copy.image_subresource.base_layer + static_cast<s32>(layer);
+            const u64 source_offset = base_offset + copy.buffer_offset +
+                                      static_cast<u64>(layer) * layout.tight_slice;
+            if (source_offset % sizeof(u32) != 0 || layout.row_bytes % sizeof(u32) != 0) {
+                WarnOnce(logged_depth_stencil_unaligned, "depth-stencil ({}) upload at offset {} "
+                         "is not word aligned; skipped", info.format, source_offset);
+                continue;
+            }
+            auto* const commands = runtime->scheduler.CommandList();
+            ComPtr<ID3D12Resource> planes = CreateTransferBuffer(device, footprints.size, true);
+            if (whole) {
+                TransitionBuffer(commands, planes.Get(), D3D12_RESOURCE_STATE_COMMON,
+                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            } else {
+                // The planes go back as whole subresources: start from what the image holds so
+                // the texels outside the region stay.
+                CopyPlanes(level, image_layer, planes.Get(), footprints, true);
+                TransitionBuffer(commands, planes.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+            const D3D12_GPU_VIRTUAL_ADDRESS address = source_base + source_offset;
+            const D3D12_GPU_VIRTUAL_ADDRESS aligned = address & ~D3D12_GPU_VIRTUAL_ADDRESS{15};
+            helper->SplitDepthStencil({
+                .source = aligned,
+                .destination = planes->GetGPUVirtualAddress(),
+                .packed_offset = static_cast<u32>((address - aligned) / sizeof(u32)),
+                .packed_row = layout.row_bytes / static_cast<u32>(sizeof(u32)),
+                .depth_pitch = footprints.planes[0].Footprint.RowPitch / 4,
+                .stencil_offset = static_cast<u32>(footprints.planes[1].Offset / 4),
+                .stencil_pitch = footprints.planes[1].Footprint.RowPitch / 4,
+                .x = x,
+                .y = y,
+                .width = width,
+                .height = height,
+                .row_texels = 0,
+                .layout = guest_layout,
+            });
+            TransitionBuffer(commands, planes.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                             D3D12_RESOURCE_STATE_COPY_SOURCE);
+            CopyPlanes(level, image_layer, planes.Get(), footprints, false);
+            runtime->scheduler.DeferRelease(std::move(planes));
+            if (!logged_depth_stencil_upload) {
+                logged_depth_stencil_upload = true;
+                LOG_INFO(Render, "D3D12: first depth-stencil upload ({} {}x{} level {} region "
+                         "{},{} {}x{}, {} source) split into its planes",
+                         info.format, level_width, level_height, level, x, y, width, height,
+                         source_default ? "GPU" : "staging");
+            }
+        }
+    }
+    if (source_default) {
+        TransitionBuffer(runtime->scheduler.CommandList(), buffer,
+                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                         D3D12_RESOURCE_STATE_COMMON);
+    }
+}
+
+void Image::DownloadDepthStencil(std::span<ID3D12Resource*> buffers, std::span<size_t> offsets,
+                                 std::span<const BufferImageCopy> copies) {
+    BlitImageHelper* const helper = runtime->blit_helper;
+    const DepthStencilLayout guest_layout = *GuestDepthStencilLayout(info.format);
+    const u32 texel_bytes = VideoCore::Surface::BytesPerBlock(format.copy_format);
+    ID3D12Device* const device = runtime->device.Get();
+    bool copied = false;
+    for (const auto& copy : copies) {
+        const CopyLayout layout = Layout(copy);
+        const s32 level = copy.image_subresource.base_level;
+        const PlaneFootprints footprints = Footprints(level);
+        const u32 level_width = footprints.planes[0].Footprint.Width;
+        const u32 level_height = footprints.planes[0].Footprint.Height;
+        const u32 x = std::min(static_cast<u32>(copy.image_offset.x), level_width);
+        const u32 y = std::min(static_cast<u32>(copy.image_offset.y), level_height);
+        const u32 width = std::min(copy.image_extent.width, level_width - x);
+        const u32 height = std::min(copy.image_extent.height, level_height - y);
+        const u64 packed_size = static_cast<u64>(layout.row_bytes) * height;
+        if (packed_size == 0 || layout.row_bytes % sizeof(u32) != 0) {
+            continue;
+        }
+        const u32 layers = static_cast<u32>(std::max(1, copy.image_subresource.num_layers));
+        for (u32 layer = 0; layer < layers; ++layer) {
+            const s32 image_layer = copy.image_subresource.base_layer + static_cast<s32>(layer);
+            auto* const commands = runtime->scheduler.CommandList();
+            ComPtr<ID3D12Resource> planes = CreateTransferBuffer(device, footprints.size);
+            CopyPlanes(level, image_layer, planes.Get(), footprints, true);
+            TransitionBuffer(commands, planes.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            ComPtr<ID3D12Resource> packed = CreateTransferBuffer(device, packed_size, true);
+            TransitionBuffer(commands, packed.Get(), D3D12_RESOURCE_STATE_COMMON,
+                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            helper->MergeDepthStencil({
+                .source = planes->GetGPUVirtualAddress(),
+                .destination = packed->GetGPUVirtualAddress(),
+                .packed_offset = 0,
+                .packed_row = layout.row_bytes / static_cast<u32>(sizeof(u32)),
+                .depth_pitch = footprints.planes[0].Footprint.RowPitch / 4,
+                .stencil_offset = static_cast<u32>(footprints.planes[1].Offset / 4),
+                .stencil_pitch = footprints.planes[1].Footprint.RowPitch / 4,
+                .x = x,
+                .y = y,
+                .width = width,
+                .height = height,
+                .row_texels = layout.row_bytes / texel_bytes,
+                .layout = guest_layout,
+            });
+            TransitionBuffer(commands, packed.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                             D3D12_RESOURCE_STATE_COPY_SOURCE);
+            // As in the color path: every buffer receives every copy, each at its own offset.
+            for (size_t target = 0; target < buffers.size(); ++target) {
+                const u64 dest_offset = offsets[target] + copy.buffer_offset +
+                                        static_cast<u64>(layer) * layout.tight_slice;
+                commands->CopyBufferRegion(buffers[target], dest_offset, packed.Get(), 0,
+                                           packed_size);
+            }
+            copied = true;
+            runtime->scheduler.DeferRelease(std::move(planes));
+            runtime->scheduler.DeferRelease(std::move(packed));
+            if (!logged_depth_stencil_download) {
+                logged_depth_stencil_download = true;
+                LOG_INFO(Render, "D3D12: first depth-stencil download ({} {}x{} level {} region "
+                         "{},{} {}x{}) merged from its planes",
+                         info.format, level_width, level_height, level, x, y, width, height);
+            }
+        }
+    }
+    if (copied) {
+        for (ID3D12Resource* const buffer : buffers) {
+            DecayIfDefault(runtime->scheduler.CommandList(), buffer,
+                           D3D12_RESOURCE_STATE_COPY_DEST);
+        }
+    }
+}
+
+void Image::CopyDepthStencilFrom(Image& src, std::span<const ImageCopy> copies) {
+    ID3D12Device* const device = runtime->device.Get();
+    for (const auto& copy : copies) {
+        const PlaneFootprints src_footprints = src.Footprints(copy.src_subresource.base_level);
+        const PlaneFootprints dst_footprints = Footprints(copy.dst_subresource.base_level);
+        const auto& src_size = src_footprints.planes[0].Footprint;
+        const auto& dst_size = dst_footprints.planes[0].Footprint;
+        const u32 src_x = std::min(static_cast<u32>(copy.src_offset.x), src_size.Width);
+        const u32 src_y = std::min(static_cast<u32>(copy.src_offset.y), src_size.Height);
+        const u32 dst_x = std::min(static_cast<u32>(copy.dst_offset.x), dst_size.Width);
+        const u32 dst_y = std::min(static_cast<u32>(copy.dst_offset.y), dst_size.Height);
+        const u32 width = std::min({copy.extent.width, src_size.Width - src_x,
+                                    dst_size.Width - dst_x});
+        const u32 height = std::min({copy.extent.height, src_size.Height - src_y,
+                                     dst_size.Height - dst_y});
+        if (width == 0 || height == 0) {
+            continue;
+        }
+        const bool whole = src_x == 0 && src_y == 0 && dst_x == 0 && dst_y == 0 &&
+                           width == src_size.Width && height == src_size.Height &&
+                           width == dst_size.Width && height == dst_size.Height;
+        for (s32 layer = 0; layer < copy.src_subresource.num_layers; ++layer) {
+            const s32 src_layer = copy.src_subresource.base_layer + layer;
+            const s32 dst_layer = copy.dst_subresource.base_layer + layer;
+            auto* const commands = runtime->scheduler.CommandList();
+            if (whole) {
+                src.Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+                Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+                for (u32 plane = 0; plane < 2; ++plane) {
+                    const D3D12_TEXTURE_COPY_LOCATION source{
+                        .pResource = src.Handle(),
+                        .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                        .SubresourceIndex =
+                            src.Subresource(copy.src_subresource.base_level, src_layer, plane)};
+                    const D3D12_TEXTURE_COPY_LOCATION target{
+                        .pResource = resource.Get(),
+                        .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                        .SubresourceIndex =
+                            Subresource(copy.dst_subresource.base_level, dst_layer, plane)};
+                    commands->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+                }
+                continue;
+            }
+            // Part of a subresource: both go through footprints, the region is copied row by
+            // row between them, and the destination returns whole.
+            ComPtr<ID3D12Resource> src_planes = CreateTransferBuffer(device, src_footprints.size);
+            ComPtr<ID3D12Resource> dst_planes = CreateTransferBuffer(device, dst_footprints.size);
+            src.CopyPlanes(copy.src_subresource.base_level, src_layer, src_planes.Get(),
+                           src_footprints, true);
+            CopyPlanes(copy.dst_subresource.base_level, dst_layer, dst_planes.Get(),
+                       dst_footprints, true);
+            TransitionBuffer(commands, src_planes.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                             D3D12_RESOURCE_STATE_COPY_SOURCE);
+            for (u32 plane = 0; plane < 2; ++plane) {
+                const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& from = src_footprints.planes[plane];
+                const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& to = dst_footprints.planes[plane];
+                const u32 bytes = PlaneTexelBytes(plane);
+                for (u32 row = 0; row < height; ++row) {
+                    commands->CopyBufferRegion(
+                        dst_planes.Get(),
+                        to.Offset + static_cast<u64>(dst_y + row) * to.Footprint.RowPitch +
+                            static_cast<u64>(dst_x) * bytes,
+                        src_planes.Get(),
+                        from.Offset + static_cast<u64>(src_y + row) * from.Footprint.RowPitch +
+                            static_cast<u64>(src_x) * bytes,
+                        static_cast<u64>(width) * bytes);
+                }
+            }
+            TransitionBuffer(commands, dst_planes.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                             D3D12_RESOURCE_STATE_COPY_SOURCE);
+            CopyPlanes(copy.dst_subresource.base_level, dst_layer, dst_planes.Get(),
+                       dst_footprints, false);
+            runtime->scheduler.DeferRelease(std::move(src_planes));
+            runtime->scheduler.DeferRelease(std::move(dst_planes));
+        }
+    }
 }
 
 void Image::UploadMemory(ID3D12Resource* buffer, size_t base_offset,
                          std::span<const BufferImageCopy> copies) {
     if (!CanTransfer() || copies.empty()) {
+        return;
+    }
+    if (IsDepthStencilPlanar()) {
+        UploadDepthStencil(buffer, base_offset, copies);
         return;
     }
     Transition(D3D12_RESOURCE_STATE_COPY_DEST);
@@ -854,6 +1164,10 @@ void Image::DownloadMemory(std::span<ID3D12Resource*> buffers, std::span<size_t>
     if (!CanTransfer() || copies.empty()) {
         return;
     }
+    if (IsDepthStencilPlanar()) {
+        DownloadDepthStencil(buffers, offsets, copies);
+        return;
+    }
     Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
     auto* const commands = runtime->scheduler.CommandList();
     // As in the Vulkan backend: every buffer receives every copy, each at its own base offset.
@@ -931,6 +1245,18 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
         // Plain texels on one side, compressed blocks on the other: not copyable.
         WarnOnce(logged_decoded_copy, "copy between a CPU-decoded and a compressed image ({} -> "
                  "{}) skipped", src.info.format, dst.info.format);
+        return;
+    }
+    if (src.IsDepthStencilPlanar() || dst.IsDepthStencilPlanar()) {
+        // Plane by plane, and only between the same host layout (D24S8 or D32S8): anything else
+        // reinterprets depth bits and needs a conversion shader.
+        if (src.ResourceFormat() != dst.ResourceFormat() || src.info.num_samples > 1 ||
+            dst.info.num_samples > 1) {
+            WarnOnce(logged_depth_stencil_copy, "depth-stencil copy {} -> {} needs a conversion; "
+                     "skipped", src.info.format, dst.info.format);
+            return;
+        }
+        dst.CopyDepthStencilFrom(src, copies);
         return;
     }
     src.Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);

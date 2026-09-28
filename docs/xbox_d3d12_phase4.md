@@ -1268,6 +1268,129 @@ Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
     `DrawShaderIndicator` con `ClearRenderTargetView` por rectángulos (fuente de 3×5 celdas), sin
     shaders propios. Un tirón con el panel visible es por compilación de shaders.
 
+- **0.2.48.0: transferencias depth-stencil.** Wonder sube y baja contenido de su depth buffer
+  `S8_UINT_D24_UNORM` (formato 110), que hasta ahora se descartaba con el aviso `transfers need
+  plane splitting`. Ver la sección "Transferencias depth-stencil" más abajo.
+
+- **Series (0.2.48.0, jugando a mano): las transferencias funcionan, y el juego llega más lejos
+  pero se cierra.**
+  - **Qué funcionó:**
+    - `depth-stencil pack shaders ready`;
+    - `first depth-stencil upload (110 64x36 ...)` a los 33,7 s;
+    - desaparece el aviso `plane splitting`.
+  - **La caída:** `CRASH: abort()` a los 171 s.
+    - Justo antes, un shader nuevo cae al fallback de memoria global (`Storage buffer failed to
+      track`).
+    - El log termina ahí sin ninguna línea crítica, así que no fue un `UNREACHABLE` de Eden (ese
+      vacía el log antes de abortar). Encaja con una excepción que escapa de un hilo, o con un
+      abort dentro de una DLL.
+    - La memoria de la app llegó a **5084 de 5120 MiB** a los 120 s y estaba en 4760 al caer, así
+      que un `bad_alloc` también es candidato.
+    - Las sesiones anteriores (antes de la 0.2.48) también terminaban en `abort()`, a los 125, 160
+      y 198 s. Las transferencias no son la causa: esta vez llegó más lejos.
+  - **Qué le faltaba al diag:**
+    - Solo registra las primeras 16 excepciones C++, y las 16 se gastaban al arrancar con
+      `_com_error` de la plataforma.
+    - El `abort()` no dejaba pila de llamadas, y el logger asíncrono perdía sus últimas líneas.
+  - **0.2.49.0 (diagnóstico):**
+    - `_com_error` ya no gasta el cupo de excepciones.
+    - `OnAbort` escribe la pila del hilo como `+0xRVA` (dentro de `eden-uwp.exe`) o
+      `modulo.dll+0xoffset`.
+    - `OnAbort` vacía el log de Eden antes de salir.
+    - El `.exe` y el `.pdb` de esta build se guardan aparte para resolver las RVAs.
+
+### Transferencias depth-stencil (0.2.48)
+
+**El problema.** El guest guarda profundidad y stencil juntos en cada texel. Un recurso
+depth-stencil de D3D12 los guarda en dos planos, y cada plano es su propio subrecurso
+(`D3D12CalcSubresource(mip, capa, plano, ...)`). Una copia de un plano a un buffer usa un
+footprint `R32_TYPELESS` para la profundidad (D24 en los bits 0–23, y al subir los 8 bits altos
+deben ser cero) y `R8_TYPELESS` para el stencil. No hay forma de copiar el texel empaquetado de
+una vez.
+
+**Cómo lo hacen otros:**
+- **vkd3d-proton:** tiene la misma tabla de footprints de copia para todos los formatos
+  depth-stencil (plano 0 de 4 bytes, plano 1 de 1 byte).
+- **Xenia (D3D12):** mueve la profundidad entre render targets dibujando con un shader. Escribir
+  stencil desde un shader necesita `SV_StencilRef`, que solo tiene AMD; sin él se hace en 8
+  pasadas, una por bit, con máscara de escritura de stencil y `discard`.
+- **Ryujinx (OpenGL):** rota el texel 8 bits para pasar de S8Z24 al D24S8 nativo
+  (`FormatConverter.ConvertS8D24ToD24S8`). Su tabla (`FormatTable.cs`) confirma el empaquetado
+  del guest.
+
+**Empaquetado del guest.** Los nombres de Maxwell van del bit más significativo al menos
+significativo, como en Ryujinx y nouveau:
+
+| PixelFormat de Eden | Maxwell | Texel del guest |
+|---|---|---|
+| `S8_UINT_D24_UNORM` | Z24S8 | profundidad en 31:8, stencil en 7:0 |
+| `D24_UNORM_S8_UINT` | S8Z24 | stencil en 31:24, profundidad en 23:0 |
+| `X8_D24_UNORM` | X8Z24 | profundidad en 23:0 |
+| `D32_FLOAT_S8_UINT` | ZF32_X24S8 | float de profundidad, luego una palabra con el stencil en 7:0 |
+
+El backend Vulkan de upstream copia los bytes del guest al aspecto de profundidad sin
+reordenarlos, y el de OpenGL sube los dos D24 como `GL_UNSIGNED_INT_24_8`. Por eso los shaders
+`convert_*d24*` de yuzu no sirven como referencia de este layout.
+
+**Implementación:**
+- **Dos compute shaders nuevos:**
+  - `d3d12_depth_stencil_split.comp` (subida): de texels empaquetados a los dos footprints. Cada
+    invocación es dueña de una palabra del footprint de stencil (4 texels) y conserva los bytes
+    fuera de la región.
+  - `d3d12_depth_stencil_merge.comp` (bajada): de los footprints a texels empaquetados.
+  - Los dos pasan por `ShaderCompiler::Compile` (compute) y usan una root signature propia: 12
+    root constants (espacio 30), un **root SRV** `t0` (el SSBO `readonly` de binding 0, que
+    spirv_to_dxil emite como SRV raw) y un **root UAV** `u1`. No usan heap de descriptores; el
+    buffer de subida (heap UPLOAD) se lee directamente como SRV.
+- **Subida (`Image::UploadDepthStencil`):**
+  1. Split a un buffer con los dos footprints.
+  2. `CopyTextureRegion` de cada plano con el **subrecurso completo**, porque la documentación de
+     `CopyTextureRegion` exige offsets 0 y sin caja para depth-stencil.
+  3. Si la copia del guest es solo una parte del subrecurso, primero se copia el subrecurso
+     entero al buffer, el shader actualiza la región y vuelve entero.
+- **Bajada (`Image::DownloadDepthStencil`):**
+  1. Planos completos a footprints.
+  2. Merge a un buffer UAV.
+  3. `CopyBufferRegion` a cada destino (staging de readback o buffer de la caché).
+
+  Funciona con las bajadas asíncronas de la caché, porque todo ocurre en la GPU y no hay que
+  tocar la CPU después del fence.
+- **Copias imagen → imagen (`Image::CopyDepthStencilFrom`):**
+  - Plano a plano, entre imágenes con el mismo formato de recurso (D24S8 con D24S8, D32S8 con
+    D32S8).
+  - Una región parcial pasa por footprints, se copia fila a fila con `CopyBufferRegion` y vuelve
+    entera.
+  - Las copias entre depth-stencil y color, o entre D24 y D32, se saltan con un aviso: necesitan
+    conversión (`ConvertImage`, pendiente).
+- **Logs para verificar en la consola:**
+  - `depth-stencil pack shaders ready` al arrancar;
+  - `first depth-stencil upload (...) split into its planes`;
+  - `first depth-stencil download (...) merged from its planes`.
+
+**Prueba en PC (0.2.48.0, guion automático de 170 s, capa de debug):**
+- `depth-stencil pack shaders ready`, y a los ~21 s `first depth-stencil upload (110 64x36
+  level 0 region 0,0 64x36, staging source)`.
+- No hubo bajadas ni copias depth-stencil en este tramo.
+- Cero errores de la capa de debug en toda la sesión. Para eso se dejó de registrar el aviso
+  [1008] (`RESOURCE_BARRIER_DUPLICATE_SUBRESOURCE_TRANSITIONS`): lo produce el par de barreras
+  write-after-write de `Image::Transition` y llenaba el tope de 500 mensajes a los 30 s.
+- `RunHeadlessBoot returned 0`, y la intro se ve igual que antes.
+
+**Sigue pendiente:**
+- blits de depth-stencil que escriben stencil (la Series no tiene `SV_StencilRef`; la salida
+  sería la técnica de 8 pasadas de Xenia);
+- `ConvertImage` (depth ↔ color);
+- MSAA depth-stencil.
+- Las copias parciales de D16/D32 sin stencil siguen usando una caja sobre el subrecurso, que la
+  especificación no permite para depth. No han dado problemas hasta ahora.
+
+Fuentes:
+- [CopyTextureRegion](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-copytextureregion)
+- [Subresources: plane slice](https://learn.microsoft.com/en-us/windows/win32/direct3d12/subresources)
+- [Planar Depth Stencil (DirectX-Specs)](https://microsoft.github.io/DirectX-Specs/d3d/PlanarDepthStencilDDISpec.html)
+- [vkd3d-proton utils.c](https://github.com/HansKristian-Work/vkd3d-proton/blob/master/libs/vkd3d/utils.c)
+- [Xenia: render target cache](https://xenia.jp/updates/2021/04/27/leaving-no-pixel-behind-new-render-target-cache-3x3-resolution-scaling.html)
+
 ### Cómo se diagnosticó (método reutilizable)
 
 Síntoma: huecos con forma de tile en el borde del suelo de Mario Wonder, solo en la Series; en el
@@ -1359,7 +1482,6 @@ Lecciones:
 - `DrawTexture` y `DrawIndirect` con `ExecuteIndirect`: no han salido en este juego.
 - Pasan a la fase 5:
   - blits con stencil;
-  - transferencias depth-stencil (el aviso `depth-stencil (110) transfers need plane splitting`
-    ya sale en este juego);
+  - transferencias depth-stencil (hechas en la 0.2.48);
   - MSAA;
   - conversiones de formato (`ConvertImage`).

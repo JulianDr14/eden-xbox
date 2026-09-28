@@ -155,6 +155,11 @@ void Device::LogDebugMessages() {
             ++debug_messages_logged;
             break;
         case D3D12_MESSAGE_SEVERITY_WARNING:
+            // Duplicate transitions in one ResourceBarrier call (Image::Transition's write-after-
+            // write pair) are only inefficient, and would fill the log before any real error.
+            if (message->ID == D3D12_MESSAGE_ID_RESOURCE_BARRIER_DUPLICATE_SUBRESOURCE_TRANSITIONS) {
+                break;
+            }
             LOG_WARNING(Render, "D3D12 debug layer [{}]: {}", static_cast<u32>(message->ID), text);
             ++debug_messages_logged;
             break;
