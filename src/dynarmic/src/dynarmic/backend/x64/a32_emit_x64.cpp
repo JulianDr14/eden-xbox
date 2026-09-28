@@ -85,14 +85,15 @@ A32EmitX64::A32EmitX64(BlockOfCode& code, A32::UserConfig conf, A32::Jit* jit_in
         : EmitX64(code), conf(std::move(conf)), jit_interface(jit_interface) {
     GenFastmemFallbacks();
     GenTerminalHandlers();
-    code.PreludeComplete();
-    ClearFastDispatchTable();
-
+    // Before PreludeComplete: the callback lives in the unwind data in code space, which the
+    // paged W^X of the UWP build makes read-execute from then on.
     if (conf.fastmem_pointer.has_value()) {
         exception_handler.SetFastmemCallback([this](u64 rip_) {
             return FastmemCallback(rip_);
         });
     }
+    code.PreludeComplete();
+    ClearFastDispatchTable();
 }
 
 A32EmitX64::~A32EmitX64() = default;

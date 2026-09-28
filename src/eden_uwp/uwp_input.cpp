@@ -110,11 +110,15 @@ void ApplyKeyboard(PadState& state) {
     if (keys == 0) {
         return;
     }
-    constexpr std::array<std::pair<Key, VirtualButton>, 4> KEY_BUTTONS{{
+    constexpr std::array<std::pair<Key, VirtualButton>, 8> KEY_BUTTONS{{
         {Key::L, VirtualButton::TriggerL},
         {Key::R, VirtualButton::TriggerR},
         {Key::A, VirtualButton::ButtonA},
         {Key::B, VirtualButton::ButtonB},
+        {Key::Plus, VirtualButton::ButtonPlus},
+        {Key::Minus, VirtualButton::ButtonMinus},
+        {Key::X, VirtualButton::ButtonX},
+        {Key::Y, VirtualButton::ButtonY},
     }};
     for (const auto& [key, button] : KEY_BUTTONS) {
         if (keys & KeyBit(key)) {

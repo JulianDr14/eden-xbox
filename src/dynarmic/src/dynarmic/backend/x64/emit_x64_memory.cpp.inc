@@ -44,9 +44,13 @@ FakeCall AxxEmitX64::FastmemCallback(u64 rip_) {
         }
         return result;
     }
-    fmt::print("dynarmic: Segfault happened within JITted code at rip = {:016x}\n"
-        "Segfault wasn't at a fastmem patch location!\n", rip_);
-    UNREACHABLE(); //("iter != fastmem_patch_info.end()");
+    // Offsets from the code base tell a fault in the prelude thunks (below the code begin) from one
+    // in a compiled block.
+    const u64 base = std::bit_cast<u64>(code.getCode());
+    UNREACHABLE_MSG("dynarmic: fault in JIT code at rip {:016x} (code +{:#x}, blocks begin at +{:#x}), "
+                    "not a fastmem patch location ({} patch sites)",
+                    rip_, rip_ - base, std::bit_cast<u64>(code.GetCodeBegin()) - base,
+                    fastmem_patch_info.size());
 }
 
 template<std::size_t bitsize, auto callback>

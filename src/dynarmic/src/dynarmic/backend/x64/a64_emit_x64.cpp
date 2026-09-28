@@ -60,14 +60,15 @@ A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_in
     GenMemory128Accessors();
     GenFastmemFallbacks();
     GenTerminalHandlers();
-    code.PreludeComplete();
-    ClearFastDispatchTable();
-
+    // Before PreludeComplete: the callback lives in the unwind data in code space, which the
+    // paged W^X of the UWP build makes read-execute from then on.
     if (conf.fastmem_pointer.has_value()) {
         exception_handler.SetFastmemCallback([this](u64 rip_) {
             return FastmemCallback(rip_);
         });
     }
+    code.PreludeComplete();
+    ClearFastDispatchTable();
 }
 
 A64EmitX64::~A64EmitX64() = default;

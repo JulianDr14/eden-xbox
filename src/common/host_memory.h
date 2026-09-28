@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <optional>
+#include <string>
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 
@@ -87,5 +88,9 @@ private:
     // Windows requires it for kernels whom lack proper support for some functions!
     bool fallback_buffer{false};
 };
+
+/// Xbox fastmem: MiB committed in the DRAM section and the demand-commit failures so far, for the
+/// diag. Empty elsewhere.
+std::string HostMemoryCommitStats();
 
 } // namespace Common

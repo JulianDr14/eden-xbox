@@ -412,9 +412,8 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
         return nullptr;
     }
     if (!pipeline->IsBuilt()) {
-        if (use_asynchronous_shaders) {
-            return nullptr;
-        }
+        // Compute always waits, even with asynchronous shaders: a skipped dispatch leaves the
+        // buffers or images it writes stale for the rest of the frame and beyond.
         VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs,
                                            VideoCore::Perf::Counter::PipelineStalls};
         pipeline->WaitBuilt();

@@ -180,13 +180,11 @@ bool IsGPUFenceBehaviorAccurate() {
 
 bool IsFastmemEnabled() {
 #ifdef YUZU_UWP_APPCONTAINER
-    // Xbox/UWP AppContainer (Phase 2): fastmem is always off. Its host-mapped arena and SEH
-    // page-fault path are not viable in the sandbox (no large pre-reserved arena fits the Series-S
-    // budget, and the fault handler is unproven there), so the JIT uses dynarmic's bounds-checked
-    // page-table memory accesses instead. This nulls the arena pointer in memory.cpp, which in turn
-    // disables fastmem exclusives in arm_dynarmic. Re-evaluate for Phase 4 once the *FromApp arena
-    // reservation is proven on-console and sized to the Series-S budget.
-    return false;
+    // Xbox/UWP AppContainer: the 0.2.51 probe showed the Series reserves the 512 GiB arena and
+    // maps aliased views of a SEC_RESERVE section into it, so fastmem follows cpuopt_fastmem
+    // (boot.cfg "fastmem=0" turns it off). HostMemory builds the arena only when it is on, and a
+    // failed arena leaves VirtualBasePointer() null, which memory.cpp treats as fastmem off.
+    return values.cpuopt_fastmem.GetValue();
 #else
     if (values.cpu_accuracy.GetValue() == Settings::CpuAccuracy::Debugging)
         return bool(values.cpuopt_fastmem);

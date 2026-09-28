@@ -615,6 +615,9 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
              LikelyCause(delta, total_ms), DescribePerf(delta, total_ms));
     // Who submits and waits (S/W, count, eden-uwp.exe RVAs from the innermost caller out).
     LOG_INFO(Render, "D3D12 sync sites: {}", scheduler.TakeSyncSites(6));
+    const DXGI_QUERY_VIDEO_MEMORY_INFO video = device.QueryVideoMemory();
+    LOG_INFO(Render, "D3D12 memory: GPU {} MiB, DXGI budget {} MiB, caches see {} MiB used",
+             video.CurrentUsage >> 20, video.Budget >> 20, device.CacheMemoryUsage() >> 20);
 }
 
 bool RendererD3D12::ReadGuestLayer(const Tegra::FramebufferConfig& framebuffer) {

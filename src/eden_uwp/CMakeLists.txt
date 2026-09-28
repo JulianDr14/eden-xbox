@@ -8,8 +8,6 @@
 add_executable(eden-uwp WIN32
     headless_emu_window.h
     uwp_boot.cpp
-    uwp_fastmem_probe.cpp
-    uwp_fastmem_probe.h
     uwp_input.cpp
     uwp_input.h
     vma_impl.cpp
