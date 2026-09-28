@@ -43,6 +43,10 @@ void CheckRemovedAfter(ID3D12Device* device, Describe&& describe) {
 /// Xbox Series UWP (Dev Mode) exposes feature level 11.0 and shader model <= 6.4 with no Agility SDK,
 /// and no public document lists the rest of its caps, so the constructor logs everything the
 /// renderer will later depend on (LogCapabilities). That report is the ground truth for the backend.
+/// Enables GPU-based validation along with the debug layer (renderer_debug) for devices created
+/// from now on. PC only.
+void SetGpuBasedValidation(bool enabled);
+
 class Device {
 public:
     Device();

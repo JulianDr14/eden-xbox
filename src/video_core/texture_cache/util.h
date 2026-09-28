@@ -12,6 +12,7 @@
 
 #include "common/common_types.h"
 #include "common/scratch_buffer.h"
+#include "common/settings_enums.h"
 
 #include "video_core/surface.h"
 #include "video_core/texture_cache/image_base.h"
@@ -35,6 +36,15 @@ struct OverlapResult {
 [[nodiscard]] u32 CalculateUnswizzledSizeBytes(const ImageInfo& info) noexcept;
 
 [[nodiscard]] u32 CalculateConvertedSizeBytes(const ImageInfo& info) noexcept;
+
+/// Keeps ASTC 2D arrays and 3D images decoded to RGBA8 even when astc_recompression asks for BC1
+/// or BC3 (the default is to recompress them too). The Xbox Series samples some layers of
+/// block-compressed 2D arrays from the wrong place (see renderer_d3d12's DecodedBcFormat).
+void SetAstcArrayRecompression(bool enabled) noexcept;
+
+/// The ASTC re-encoding this image gets: astc_recompression, unless it is an array kept
+/// uncompressed (SetAstcArrayRecompression).
+[[nodiscard]] Settings::AstcRecompression AstcRecompressionFor(const ImageInfo& info) noexcept;
 
 [[nodiscard]] u32 CalculateLayerStride(const ImageInfo& info) noexcept;
 

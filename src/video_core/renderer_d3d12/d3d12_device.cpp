@@ -54,6 +54,14 @@ void ReportRemovedAfter(HRESULT reason, const std::string& what) {
 }
 } // namespace removal_tripwire
 
+namespace {
+bool gpu_based_validation = false;
+} // Anonymous namespace
+
+void SetGpuBasedValidation(bool enabled) {
+    gpu_based_validation = enabled;
+}
+
 Device::Device() {
     ThrowIfFailed(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
     // The debug layer (D3D12SDKLayers.dll, the "Graphics Tools" optional feature) is a PC-only aid:
@@ -63,6 +71,13 @@ Device::Device() {
         ComPtr<ID3D12Debug> debug;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
             debug->EnableDebugLayer();
+            // GPU-based validation checks every descriptor and resource access as the GPU runs it;
+            // far slower, for chasing page faults and hangs.
+            ComPtr<ID3D12Debug1> debug1;
+            if (gpu_based_validation && SUCCEEDED(debug.As(&debug1))) {
+                debug1->SetEnableGPUBasedValidation(TRUE);
+                LOG_INFO(Render, "D3D12: GPU-based validation on");
+            }
         } else {
             LOG_WARNING(Render, "D3D12: debug layer requested but not installed");
         }

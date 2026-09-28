@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -603,16 +604,31 @@ u32 CalculateUnswizzledSizeBytes(const ImageInfo& info) noexcept {
     return NumBlocksPerLayer(info, tile_size) * info.resources.layers * BytesPerBlock(info.format);
 }
 
+namespace {
+std::atomic<bool> recompress_astc_arrays{true};
+} // Anonymous namespace
+
+void SetAstcArrayRecompression(bool enabled) noexcept {
+    recompress_astc_arrays.store(enabled, std::memory_order_relaxed);
+}
+
+Settings::AstcRecompression AstcRecompressionFor(const ImageInfo& info) noexcept {
+    const bool is_array = info.resources.layers > 1 || info.size.depth > 1;
+    if (is_array && !recompress_astc_arrays.load(std::memory_order_relaxed)) {
+        return Settings::AstcRecompression::Uncompressed;
+    }
+    return Settings::values.astc_recompression.GetValue();
+}
+
 u32 CalculateConvertedSizeBytes(const ImageInfo& info) noexcept {
     if (info.type == ImageType::Buffer) {
         return info.size.width * BytesPerBlock(info.format);
     }
     static constexpr Extent2D TILE_SIZE{1, 1};
-    if (IsPixelFormatASTC(info.format) && Settings::values.astc_recompression.GetValue() !=
-                                              Settings::AstcRecompression::Uncompressed) {
-        const u32 bpp_div =
-            Settings::values.astc_recompression.GetValue() == Settings::AstcRecompression::Bc1 ? 2
-                                                                                               : 1;
+    const Settings::AstcRecompression recompression = AstcRecompressionFor(info);
+    if (IsPixelFormatASTC(info.format) &&
+        recompression != Settings::AstcRecompression::Uncompressed) {
+        const u32 bpp_div = recompression == Settings::AstcRecompression::Bc1 ? 2 : 1;
         // NumBlocksPerLayer doesn't account for this correctly, so we have to do it manually.
         u32 output_size = 0;
         for (s32 i = 0; i < info.resources.levels; i++) {
@@ -940,7 +956,7 @@ void ConvertImage(std::span<const u8> input, const ImageInfo& info, std::span<u8
         const auto input_offset = input.subspan(copy.buffer_offset);
         copy.buffer_offset = output_offset;
 
-        const auto recompression_setting = Settings::values.astc_recompression.GetValue();
+        const auto recompression_setting = AstcRecompressionFor(info);
         const bool astc = IsPixelFormatASTC(info.format);
 
         if (astc && recompression_setting == Settings::AstcRecompression::Uncompressed) {

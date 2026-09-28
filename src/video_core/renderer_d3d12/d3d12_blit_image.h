@@ -49,6 +49,26 @@ struct DepthStencilPack {
     DepthStencilLayout layout;
 };
 
+/// One mip level of a guest ASTC image decoded on the GPU (astc_decoder.comp, Vulkan's shader):
+/// the guest's block-linear blocks straight from staging into an RGBA8 texture array.
+struct AstcDecode {
+    /// Read through a root SRV: the level's swizzled ASTC blocks. 4-byte aligned.
+    D3D12_GPU_VIRTUAL_ADDRESS source;
+    /// Offline UAV (R8G8B8A8_UNORM, Texture2DArray) of the level; copied into the ring.
+    D3D12_CPU_DESCRIPTOR_HANDLE destination;
+    u32 block_width;  ///< ASTC block size in texels
+    u32 block_height;
+    /// The block-linear layout (VideoCommon::Accelerated::BlockLinearSwizzle2DParams).
+    u32 layer_stride;
+    u32 block_size;
+    u32 x_shift;
+    u32 gob_block_height;
+    u32 gob_block_height_mask;
+    u32 blocks_x; ///< ASTC blocks per row and column of the level
+    u32 blocks_y;
+    u32 layers;
+};
+
 /// Draws Eden's host blit and clear shaders into guest images: the D3D12 counterpart of Vulkan's
 /// BlitImageHelper. Serves scaled texture blits (Fermi2D), DrawTexture and the clears D3D12 cannot
 /// express with ClearRenderTargetView/ClearDepthStencilView (partial color or stencil masks).
@@ -120,6 +140,14 @@ public:
     /// Both footprints -> guest texels (d3d12_depth_stencil_merge.comp), same states.
     void MergeDepthStencil(const DepthStencilPack& pack);
 
+    /// False when the ASTC decoder failed to translate or build (logged): ASTC is then decoded
+    /// on the CPU.
+    [[nodiscard]] bool CanDecodeAstc() const noexcept {
+        return astc_available;
+    }
+    /// Records the decode of one level; the caller puts the image in UNORDERED_ACCESS.
+    void DecodeAstc(const AstcDecode& decode);
+
 private:
     enum class Kind : u8 {
         BlitColor,
@@ -148,6 +176,8 @@ private:
     void CreatePackPipelines(const ShaderCompiler& compiler);
     void DispatchPack(ID3D12PipelineState* pipeline, const DepthStencilPack& pack, u32 groups_x,
                       u32 groups_y);
+    /// Builds the ASTC decoder's root signature and pipeline; throws on failure.
+    void CreateAstcPipeline(const ShaderCompiler& compiler);
 
     const Device& device;
     Scheduler& scheduler;
@@ -165,6 +195,10 @@ private:
     ComPtr<ID3D12PipelineState> split_pipeline;
     ComPtr<ID3D12PipelineState> merge_pipeline;
     bool pack_available{};
+
+    ComPtr<ID3D12RootSignature> astc_root_signature;
+    ComPtr<ID3D12PipelineState> astc_pipeline;
+    bool astc_available{};
 };
 
 } // namespace D3D12

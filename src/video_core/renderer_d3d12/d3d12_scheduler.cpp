@@ -2,13 +2,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <stdexcept>
 
 #include <fmt/format.h>
 
 #include "common/logging.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
+
+extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace D3D12 {
 
@@ -51,6 +55,85 @@ Scheduler::Scheduler(Device& device_) : device{device_} {
                                          current_allocator.Get(), nullptr,
                                          IID_PPV_ARGS(&command_list)),
                   "CreateCommandList");
+    CreateTimestamps();
+    BeginTimestamp();
+}
+
+void Scheduler::CreateTimestamps() {
+    u64 frequency = 0;
+    if (FAILED(device.Queue()->GetTimestampFrequency(&frequency)) || frequency == 0) {
+        LOG_WARNING(Render, "D3D12: no queue timestamps; GPU time is not measured");
+        return;
+    }
+    ID3D12Device* const dev = device.Get();
+    const D3D12_QUERY_HEAP_DESC heap_desc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
+                                          .Count = TIMESTAMP_SLOTS * 2, .NodeMask = 0};
+    const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_READBACK};
+    const D3D12_RESOURCE_DESC desc{.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER, .Alignment = 0,
+        .Width = TIMESTAMP_SLOTS * 2 * sizeof(u64), .Height = 1, .DepthOrArraySize = 1,
+        .MipLevels = 1, .Format = DXGI_FORMAT_UNKNOWN, .SampleDesc = {.Count = 1, .Quality = 0},
+        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR, .Flags = D3D12_RESOURCE_FLAG_NONE};
+    void* mapped = nullptr;
+    if (FAILED(dev->CreateQueryHeap(&heap_desc, IID_PPV_ARGS(&timestamp_heap))) ||
+        FAILED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                            IID_PPV_ARGS(&timestamp_readback))) ||
+        FAILED(timestamp_readback->Map(0, nullptr, &mapped))) {
+        LOG_WARNING(Render, "D3D12: timestamp queries unavailable; GPU time is not measured");
+        timestamp_heap.Reset();
+        timestamp_readback.Reset();
+        return;
+    }
+    timestamp_data = static_cast<const u64*>(mapped);
+    timestamp_us_per_tick = 1'000'000.0 / static_cast<double>(frequency);
+}
+
+void Scheduler::BeginTimestamp() {
+    timestamp_open = false;
+    if (!timestamp_heap) {
+        return;
+    }
+    {
+        std::scoped_lock lock{timestamp_mutex};
+        if (pending_timestamps.size() >= TIMESTAMP_SLOTS) {
+            return; // every slot is still waiting for the GPU: this list goes unmeasured
+        }
+    }
+    timestamp_slot = timestamp_next;
+    timestamp_next = (timestamp_next + 1) % TIMESTAMP_SLOTS;
+    command_list->EndQuery(timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, timestamp_slot * 2);
+    timestamp_open = true;
+}
+
+void Scheduler::EndTimestamp(u64 tick) {
+    if (!timestamp_open) {
+        return;
+    }
+    command_list->EndQuery(timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                           timestamp_slot * 2 + 1);
+    command_list->ResolveQueryData(timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                   timestamp_slot * 2, 2, timestamp_readback.Get(),
+                                   timestamp_slot * 2 * sizeof(u64));
+    std::scoped_lock lock{timestamp_mutex};
+    pending_timestamps.emplace_back(tick, timestamp_slot);
+}
+
+void Scheduler::ReadTimestamps(u64 gpu_tick) {
+    if (!timestamp_data) {
+        return;
+    }
+    std::scoped_lock lock{timestamp_mutex};
+    while (!pending_timestamps.empty() && pending_timestamps.front().first <= gpu_tick) {
+        const u32 slot = pending_timestamps.front().second;
+        pending_timestamps.pop_front();
+        const u64 begin = timestamp_data[slot * 2];
+        const u64 end = timestamp_data[slot * 2 + 1];
+        if (end > begin) {
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::GpuBusyUs,
+                                 static_cast<u64>(static_cast<double>(end - begin) *
+                                                  timestamp_us_per_tick));
+        }
+    }
 }
 
 Scheduler::~Scheduler() {
@@ -65,14 +148,63 @@ Scheduler::~Scheduler() {
     pending_releases.clear();
 }
 
+void Scheduler::RecordSyncSite(char kind) {
+    void* frames[SYNC_SITE_FRAMES + 2]{};
+    // Skip this function and its caller inside the scheduler (Flush or Wait).
+    const USHORT count = RtlCaptureStackBackTrace(2, static_cast<DWORD>(std::size(frames)),
+                                                  frames, nullptr);
+    const auto base = reinterpret_cast<uintptr_t>(&__ImageBase);
+    std::array<uintptr_t, SYNC_SITE_FRAMES> key{};
+    size_t used = 0;
+    // Several frames, because the direct caller is often Finish or Wait itself.
+    for (USHORT i = 0; i < count && used < key.size(); ++i) {
+        key[used++] = reinterpret_cast<uintptr_t>(frames[i]) - base;
+    }
+    std::scoped_lock lock{sync_sites_mutex};
+    ++sync_sites[{kind, key}];
+}
+
+std::string Scheduler::TakeSyncSites(size_t max_sites) {
+    std::vector<std::pair<u64, std::pair<char, std::array<uintptr_t, SYNC_SITE_FRAMES>>>> sorted;
+    {
+        std::scoped_lock lock{sync_sites_mutex};
+        for (const auto& [key, count] : sync_sites) {
+            sorted.emplace_back(count, key);
+        }
+        sync_sites.clear();
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::string result;
+    for (size_t i = 0; i < std::min(max_sites, sorted.size()); ++i) {
+        const auto& [count, key] = sorted[i];
+        result += fmt::format("{}{} {}x", i == 0 ? "" : " ; ", key.first, count);
+        for (const uintptr_t rva : key.second) {
+            if (rva != 0) {
+                result += fmt::format(" 0x{:x}", rva);
+            }
+        }
+    }
+    return result;
+}
+
 u64 Scheduler::Flush() {
+    if (IsRecordingThread()) {
+        RecordSyncSite('S');
+    }
     std::scoped_lock lock{submit_mutex};
     for (auto& callback : on_submit) {
         callback();
     }
-    ThrowIfFailed(command_list->Close(), "ID3D12GraphicsCommandList::Close");
+    EndTimestamp(current_tick.load(std::memory_order_relaxed));
+    if (const HRESULT closed = command_list->Close(); FAILED(closed)) {
+        // An invalid command was recorded; the debug layer (PC) says which before the throw.
+        device.LogDebugMessages();
+        ThrowIfFailed(closed, "ID3D12GraphicsCommandList::Close");
+    }
     ID3D12CommandList* const lists[] = {command_list.Get()};
     device.Queue()->ExecuteCommandLists(1, lists);
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::Submits, 1);
     CheckRemovedAfter(device.Get(), [&] {
         return fmt::format("submitting tick {} (removed by the GPU or by a recorded command)",
                            current_tick.load(std::memory_order_relaxed));
@@ -92,6 +224,7 @@ u64 Scheduler::Flush() {
     current_allocator = AcquireAllocator();
     ThrowIfFailed(command_list->Reset(current_allocator.Get(), nullptr),
                   "ID3D12GraphicsCommandList::Reset");
+    BeginTimestamp();
     for (auto& callback : on_reset) {
         callback();
     }
@@ -116,10 +249,22 @@ void Scheduler::Wait(u64 tick) {
     if (IsFree(tick)) {
         return;
     }
+    // Only the recording (GPU) thread stalls the frame by waiting; the fence thread waits by
+    // design.
+    const bool counted = IsRecordingThread();
+    if (counted) {
+        RecordSyncSite('W');
+    }
+    const auto start = std::chrono::steady_clock::now();
     const HANDLE event = ThreadWaitEvent();
     ThrowIfFailed(fence->SetEventOnCompletion(tick, event), "ID3D12Fence::SetEventOnCompletion");
     WaitForSingleObjectEx(event, INFINITE, FALSE);
     StoreMax(known_gpu_tick, tick);
+    if (counted) {
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::FenceWaits, 1);
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::FenceWaitUs,
+                             VideoCore::Perf::ElapsedUs(start));
+    }
 }
 
 u64 Scheduler::KnownGpuTick() const {
@@ -144,6 +289,7 @@ void Scheduler::DeferRelease(ComPtr<IUnknown> object) {
 
 void Scheduler::CollectGarbage() {
     const u64 gpu_tick = KnownGpuTick();
+    ReadTimestamps(gpu_tick);
     std::scoped_lock lock{release_mutex};
     while (!pending_releases.empty() && pending_releases.front().first <= gpu_tick) {
         pending_releases.pop_front();

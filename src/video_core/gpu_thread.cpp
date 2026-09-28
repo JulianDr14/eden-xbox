@@ -15,6 +15,7 @@
 #include "video_core/gpu.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_base.h"
 
 namespace VideoCommon::GPUThread {
@@ -36,7 +37,11 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto current_context = context.Acquire();
         CommandDataContainer next;
         while (!stop_token.stop_requested()) {
-            state.queue.PopWait(next, stop_token);
+            {
+                // Time with nothing to do: the guest CPU has not produced the next work yet.
+                VideoCore::Perf::ScopedTimer idle{VideoCore::Perf::Counter::GpuThreadIdleUs};
+                state.queue.PopWait(next, stop_token);
+            }
             if (stop_token.stop_requested()) {
                 break;
             }
@@ -45,6 +50,8 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
                 system.GPU().TickWork();
             } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
+                VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::GpuThreadFlushUs,
+                                                   VideoCore::Perf::Counter::GpuThreadFlushes};
                 renderer.ReadRasterizer()->FlushRegion(flush->addr, flush->size);
             } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
                 renderer.ReadRasterizer()->OnCacheInvalidation(invalidate->addr, invalidate->size);

@@ -23,6 +23,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_pipeline_cache.h"
 #include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
@@ -404,6 +405,7 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
     auto& pipeline{pair->second};
     if (is_new) {
+        VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs};
         pipeline = CreateComputePipeline(key, shader);
     }
     if (!pipeline) {
@@ -413,6 +415,8 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
         if (use_asynchronous_shaders) {
             return nullptr;
         }
+        VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs,
+                                           VideoCore::Perf::Counter::PipelineStalls};
         pipeline->WaitBuilt();
     }
     return pipeline.get();
@@ -499,6 +503,8 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
     auto& pipeline{pair->second};
     if (is_new) {
+        // Translating the shaders runs here, on the GPU thread, before the build is queued.
+        VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs};
         pipeline = CreateGraphicsPipeline();
     }
     if (!pipeline) {
@@ -515,14 +521,13 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     if (pipeline->IsBuilt()) {
         return pipeline;
     }
-    if (!use_asynchronous_shaders) {
-        pipeline->WaitBuilt();
-        return pipeline;
-    }
     // Small draws are usually full-screen passes that build textures once: skipping them would
     // lose the texture, so wait for those like Vulkan does.
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
-    if (draw_state.index_buffer.count <= 6 || draw_state.vertex_buffer.count <= 6) {
+    if (!use_asynchronous_shaders || draw_state.index_buffer.count <= 6 ||
+        draw_state.vertex_buffer.count <= 6) {
+        VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs,
+                                           VideoCore::Perf::Counter::PipelineStalls};
         pipeline->WaitBuilt();
         return pipeline;
     }

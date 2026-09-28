@@ -20,6 +20,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/perf_counters.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
@@ -1169,7 +1170,10 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
     if (True(image.flags & ImageFlagBits::Converted)) {
         unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
         auto copies = FixSmallVectorADL(UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, unswizzle_data_buffer));
-        ConvertImage(unswizzle_data_buffer, image.info, mapped_span, copies);
+        {
+            VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::TextureDecodeUs};
+            ConvertImage(unswizzle_data_buffer, image.info, mapped_span, copies);
+        }
         image.UploadMemory(staging, copies);
     } else {
         const auto copies = FixSmallVectorADL(UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, mapped_span));
@@ -2151,7 +2155,8 @@ void TextureCache<P>::RegisterImage(ImageId image_id) {
     if ((IsPixelFormatASTC(image.info.format) &&
          True(image.flags & ImageFlagBits::AcceleratedUpload)) ||
         True(image.flags & ImageFlagBits::Converted)) {
-        tentative_size = TranscodedAstcSize(tentative_size, image.info.format);
+        // What the host image holds: per image, since ASTC arrays may skip recompression.
+        tentative_size = image.converted_size_bytes;
     }
     total_used_memory += Common::AlignUp(tentative_size, 1024);
     image.lru_index = lru_cache.Insert(image_id, frame_tick);
@@ -2323,7 +2328,8 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     if ((IsPixelFormatASTC(image.info.format) &&
          True(image.flags & ImageFlagBits::AcceleratedUpload)) ||
         True(image.flags & ImageFlagBits::Converted)) {
-        tentative_size = TranscodedAstcSize(tentative_size, image.info.format);
+        // What the host image holds: per image, since ASTC arrays may skip recompression.
+        tentative_size = image.converted_size_bytes;
     }
     total_used_memory -= Common::AlignUp(tentative_size, 1024);
     const GPUVAddr gpu_addr = image.gpu_addr;
