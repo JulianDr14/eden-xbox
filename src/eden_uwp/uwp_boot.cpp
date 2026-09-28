@@ -38,6 +38,8 @@
 #include "core/hle/service/filesystem/filesystem.h"
 #include "hid_core/hid_core.h"
 #include "video_core/gpu.h"
+#include "video_core/rasterizer_interface.h"
+#include "video_core/renderer_base.h"
 
 #include "eden_uwp/headless_emu_window.h"
 #include "eden_uwp/uwp_input.h"
@@ -45,6 +47,8 @@
 namespace D3D12 {
 // renderer_d3d12.h; its includes need Mesa's headers, which only video_core sees.
 void SetTracedFrame(u32 frame);
+void SetFrameDiagnostics(bool enabled);
+void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
 void SetBcArrayDecode(bool enabled); // d3d12_texture_cache.h
 } // namespace D3D12
 
@@ -102,6 +106,8 @@ struct BootConfig {
     u32 traced_frame{};
     /// Keep D3D12 block-compressed 2D arrays compressed instead of decoding them on the CPU.
     bool bc_arrays_native{};
+    /// Played by hand ("play=1"): runs until the app is closed, without frame dumps or draw trace.
+    bool play{};
     /// Buttons to press at given times ("input=25:L+R" lines).
     std::vector<InputStep> input_script;
 };
@@ -124,6 +130,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
               " ms");
     ApplyHeadlessBootSettings(config.null_renderer ? BootSurface{} : surface);
     D3D12::SetTracedFrame(config.traced_frame);
+    D3D12::SetFrameDiagnostics(!config.play);
     D3D12::SetBcArrayDecode(!config.bc_arrays_native);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
@@ -212,10 +219,36 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     WriteDiag("step: GPU host thread started");
     system.GetCpuManager().OnGpuReady();
 
+    if (Settings::values.use_disk_shader_cache.GetValue()) {
+        // As yuzu_cmd: build the pipelines earlier sessions saved (LocalState/eden/shader/<title>/
+        // d3d12.bin) before the guest runs, so they do not stutter in; the ones the game meets
+        // later are appended to the file. The renderer shows the progress on screen.
+        WriteDiag("step: building the disk shader cache | " + MemoryReport());
+        VideoCore::RendererBase& renderer = system.Renderer();
+        renderer.ReadRasterizer()->LoadDiskResources(
+            system.GetApplicationProcessProgramID(), std::stop_token{},
+            [&renderer](VideoCore::LoadCallbackStage, size_t done, size_t total) {
+                D3D12::ShowLoadProgress(renderer, done, total);
+            });
+        WriteDiag("step: disk shader cache built | " + MemoryReport());
+    }
+
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
     void(system.Run());
     input.Start();
 
+    if (config.play) {
+        // Played by hand: the guest runs until the app is closed from the console, which ends the
+        // process. The diag keeps a heartbeat of how long it ran and how much memory it used.
+        WriteDiag("step: system.Run() issued, playing until the app is closed | " + MemoryReport());
+        for (u32 second = 1;; ++second) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (second % 60 == 0) {
+                WriteDiag("step: playing, " + std::to_string(second / 60) + " min | " +
+                          MemoryReport());
+            }
+        }
+    }
     if (config.run_seconds > 0) {
         // Timed mode: nothing to wait for but the clock. The payload counts as having run if the
         // process is still alive when the time is up; the log says what it drew.
@@ -749,6 +782,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "bc_arrays=native") {
                         config.bc_arrays_native = true;
                         WriteDiag("boot.cfg: D3D12 block-compressed arrays stay compressed");
+                    } else if (line == "play=1") {
+                        config.play = true;
+                        WriteDiag("boot.cfg: played by hand, no time limit or frame dumps");
                     } else if (line == "renderer=null") {
                         config.null_renderer = true;
                         WriteDiag("boot.cfg: Null renderer");
@@ -770,11 +806,12 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                              std::filesystem::path{winrt::to_hstring(local_path).c_str()});
                 if (!config.game.empty()) {
                     nro_path = local_path + "\\games\\" + config.game;
-                    if (config.run_seconds == 0) {
+                    if (config.run_seconds == 0 && !config.play) {
                         config.run_seconds = EdenXbox::DEFAULT_GAME_RUN_SECONDS;
                     }
                     WriteDiag("resolved game path: " + nro_path + ", running " +
-                              std::to_string(config.run_seconds) + " s");
+                              (config.play ? std::string("until closed")
+                                           : std::to_string(config.run_seconds) + " s"));
                 }
             } catch (...) {
                 WriteDiag("FAILED resolving Package.InstalledLocation");
