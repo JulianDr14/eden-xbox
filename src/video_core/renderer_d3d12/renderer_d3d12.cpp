@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -30,6 +31,8 @@ namespace {
 /// Shader-visible CBV/SRV/UAV descriptors in the ring. Far below the 1,000,000 tier limit; enough
 /// for many frames of draws with room for the ring never to stall in practice.
 constexpr u32 DESCRIPTOR_RING_SIZE = 256 * 1024;
+
+std::atomic<u32> traced_frame_override{};
 
 IUnknown* CoreWindowOf(const Core::Frontend::EmuWindow& emu_window) {
     const auto& info = emu_window.GetWindowInfo();
@@ -116,6 +119,10 @@ D3D12_TEXTURE_COPY_LOCATION StagingSource(const StagingBufferRef& ref,
 }
 
 } // Anonymous namespace
+
+void SetTracedFrame(u32 frame) {
+    traced_frame_override.store(frame, std::memory_order_relaxed);
+}
 
 RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
                              Tegra::MaxwellDeviceMemoryManager& device_memory_, Tegra::GPU& gpu_,
@@ -352,13 +359,16 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                 }
                 // Every draw of the frame that ends in frame_1.bmp goes to the log, to compare
                 // a console run with a PC run draw by draw.
-                constexpr u32 TRACED_FRAME = DUMP_FRAME + DUMP_INTERVAL;
-                if (accelerated_frames == TRACED_FRAME - 1) {
-                    LOG_INFO(Render, "D3D12: tracing the draws of frame {}", TRACED_FRAME);
-                    rasterizer.SetDrawTrace(true);
-                } else if (accelerated_frames == TRACED_FRAME) {
+                const u32 override_frame = traced_frame_override.load(std::memory_order_relaxed);
+                const u32 traced_frame =
+                    override_frame != 0 ? override_frame : DUMP_FRAME + DUMP_INTERVAL;
+                if (accelerated_frames == traced_frame - 1) {
+                    LOG_INFO(Render, "D3D12: tracing the draws of frame {}", traced_frame);
+                    // An explicit trace_frame also writes its render targets (trace\*.bmp).
+                    rasterizer.SetDrawTrace(true, override_frame != 0);
+                } else if (accelerated_frames == traced_frame) {
                     rasterizer.SetDrawTrace(false);
-                    LOG_INFO(Render, "D3D12: draw trace of frame {} complete", TRACED_FRAME);
+                    LOG_INFO(Render, "D3D12: draw trace of frame {} complete", traced_frame);
                 }
             } else if (const bool has_image = ReadGuestLayer(framebuffer);
                        blit_ready && has_image) {

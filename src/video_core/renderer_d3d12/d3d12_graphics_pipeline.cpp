@@ -107,6 +107,7 @@ std::atomic_bool warned_logic_op;
 std::atomic_bool warned_depth_bounds;
 std::atomic_bool warned_point_fill;
 std::atomic_bool warned_vertex_format;
+std::atomic_bool warned_depth_feedback;
 std::atomic_bool warned_conservative;
 
 /// The shader feature flags (the SFI0 part of the DXIL container): the optional features the
@@ -519,6 +520,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
             for (u32 index = 0; index < desc.count; ++index) {
                 const VideoCommon::ImageViewId view_id = (views_it++)->id;
                 const ImageView& image_view = texture_cache.GetImageView(view_id);
+                image_view.PrepareRead(desc.type);
                 queue.AddCopy(image_view.Handle(desc.type));
                 const Sampler& sampler = texture_cache.GetSampler(*(samplers_it++));
                 sampler_handles.push_back(sampler.Handle());
@@ -526,6 +528,12 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
                 image_transitions.emplace_back(view_id, false);
                 if (out.trace_views) {
                     out.trace_views->push_back(view_id);
+                }
+                if (out.trace_filters) {
+                    out.trace_filters->push_back(sampler.Describe());
+                }
+                if (out.trace_types) {
+                    out.trace_types->push_back(static_cast<u32>(desc.type));
                 }
             }
         }
@@ -549,11 +557,23 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     texture_cache.UpdateRenderTargets(false);
     texture_cache.CheckFeedbackLoop(std::span<const ImageViewInOut>{views.data(), views.size()});
 
+    // Depth-based effects sample the bound depth buffer: both uses then share a read-only state
+    // (DEPTH_SAMPLED_STATE) and the draw binds the read-only DSV.
+    const VideoCommon::ImageId depth_image = texture_cache.GetFramebuffer()->DepthImageId();
     for (const auto& [view_id, is_storage] : image_transitions) {
-        texture_cache.GetImageView(view_id).TransitionImage(
-            is_storage ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
-                       : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        ImageView& image_view = texture_cache.GetImageView(view_id);
+        if (!is_storage && depth_image != VideoCommon::ImageId{} &&
+            image_view.image_id == depth_image) {
+            out.depth_sampled = true;
+            image_view.TransitionImage(DEPTH_SAMPLED_STATE);
+            continue;
+        }
+        image_view.TransitionImage(is_storage ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                              : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+    if (out.depth_sampled && key.state.dynamic_state.depth_write_enable != 0) {
+        WarnOnce(warned_depth_feedback, "writing depth while sampling the depth buffer");
     }
 
     out.resource_table = queue.Table();

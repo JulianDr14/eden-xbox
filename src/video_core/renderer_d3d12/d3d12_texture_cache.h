@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -30,6 +31,12 @@ class Image;
 class ImageView;
 class Framebuffer;
 class Sampler;
+
+/// A depth buffer bound read-only while shaders sample it: D3D12 cannot read a resource in
+/// DEPTH_WRITE (the reads return garbage, zeros on the PC), so both uses share this state.
+constexpr D3D12_RESOURCE_STATES DEPTH_SAMPLED_STATE =
+    D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
 struct FormatInfo {
     DXGI_FORMAT resource;
@@ -151,11 +158,22 @@ public:
     [[nodiscard]] ID3D12Resource* Handle() const noexcept { return resource.Get(); }
     [[nodiscard]] DXGI_FORMAT ResourceFormat() const noexcept { return format.resource; }
     [[nodiscard]] DXGI_FORMAT ViewFormat() const noexcept { return format.view; }
+    /// How the guest data is laid out for transfers (converted formats: what the CPU decodes to).
+    [[nodiscard]] const FormatInfo& TransferFormat() const noexcept { return format; }
     [[nodiscard]] u32 Subresource(s32 level, s32 layer, u32 plane = 0) const noexcept;
     void Transition(D3D12_RESOURCE_STATES next);
+    [[nodiscard]] D3D12_RESOURCE_STATES State() const noexcept { return state; }
     bool IsRescaled() const noexcept { return false; }
     bool ScaleUp(bool = false) { return false; }
     bool ScaleDown(bool = false) { return false; }
+
+    /// 2D array holding the depth slices of this 3D image, for shaders that sample it as a 2D
+    /// array (Vulkan's 2D_ARRAY_COMPATIBLE views; D3D12 has no such view, and a 3D SRV where the
+    /// shader declares an array reads garbage on the Series). Created on first use.
+    [[nodiscard]] ID3D12Resource* SliceArray();
+    /// Copies the slices again if the image was written since the last copy; call before a
+    /// draw or dispatch that reads SliceArray().
+    void RefreshSliceArray();
 
     u64 allocation_tick{};
 
@@ -174,6 +192,11 @@ private:
     FormatInfo format{};
     DXGI_FORMAT footprint_format{}; ///< format GetCopyableFootprints uses for plane 0
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
+    /// Bumped by every transition into a writable state: every GPU write to the image follows one.
+    u64 write_version{1};
+    ComPtr<ID3D12Resource> slice_array;
+    D3D12_RESOURCE_STATES slice_array_state{D3D12_RESOURCE_STATE_COMMON};
+    u64 slice_array_version{};
 };
 
 class ImageView : public VideoCommon::ImageViewBase {
@@ -203,6 +226,10 @@ public:
     }
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE RenderTarget() const noexcept { return rtv; }
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthStencil() const noexcept { return dsv; }
+    /// DSV with depth (and stencil) read-only, for draws that also sample the image.
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilReadOnly() const noexcept {
+        return dsv_read_only;
+    }
     [[nodiscard]] ID3D12Resource* ImageHandle() const noexcept { return image; }
     [[nodiscard]] GPUVAddr GpuAddr() const noexcept { return gpu_addr; }
     [[nodiscard]] u32 BufferSize() const noexcept { return buffer_size; }
@@ -213,6 +240,10 @@ public:
 
     /// Transitions the whole image this view belongs to (no-op for null and buffer views).
     void TransitionImage(D3D12_RESOURCE_STATES state) const;
+
+    /// Records what reading Handle(texture_type) needs first (a 3D image read as a 2D array
+    /// refreshes its slice copy); call before the draw or dispatch, outside any other copy.
+    void PrepareRead(Shader::TextureType texture_type) const;
 
 private:
     /// What the per-type SRVs are created from.
@@ -239,10 +270,15 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE uav{};
     D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
     D3D12_CPU_DESCRIPTOR_HANDLE dsv{};
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv_read_only{};
     u32 buffer_size{};
 };
 
 class ImageAlloc : public VideoCommon::ImageAllocBase {};
+
+/// Diagnostic (boot.cfg "array_pad=1"): color 2D array images created from now on get a power of
+/// two layer count on the host (the extra layers are never used).
+void SetArrayPadding(bool enabled);
 
 class Sampler {
 public:
@@ -261,11 +297,17 @@ public:
 
     /// Never reused by another sampler: SamplerHeap deduplicates tables by these keys.
     [[nodiscard]] u64 Key() const noexcept { return key; }
+    /// The D3D12 filter it was created with (draw trace).
+    [[nodiscard]] D3D12_FILTER Filter() const noexcept { return filter; }
+    /// Everything it was created with, for the draw trace.
+    [[nodiscard]] std::string Describe() const;
 
 private:
     TextureCacheRuntime* runtime{};
     D3D12_CPU_DESCRIPTOR_HANDLE handle{};
     u64 key{};
+    D3D12_FILTER filter{};
+    D3D12_SAMPLER_DESC desc{};
 };
 
 class Framebuffer {
@@ -281,8 +323,17 @@ public:
     [[nodiscard]] bool HasColor(size_t index) const noexcept {
         return index < NUM_RT && color_images[index] != ImageId{};
     }
-    /// Null when there is no depth buffer.
-    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthTarget() const noexcept { return depth; }
+    /// Null when there is no depth buffer. read_only: the draw also samples it (see
+    /// PrepareAttachments).
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthTarget(bool read_only = false) const noexcept {
+        return read_only && depth_read_only.ptr ? depth_read_only : depth;
+    }
+    [[nodiscard]] ImageId DepthImageId() const noexcept { return depth_image; }
+    /// The texture cache's image slots (null when the framebuffer has no images).
+    [[nodiscard]] SlotVector<Image>* Images() const noexcept { return images; }
+    [[nodiscard]] ImageId ColorImageId(size_t index) const noexcept {
+        return index < NUM_RT ? color_images[index] : ImageId{};
+    }
     [[nodiscard]] bool HasStencil() const noexcept { return has_stencil; }
     /// RTV format of render target index (UNKNOWN when empty) and the DSV format.
     [[nodiscard]] DXGI_FORMAT ColorFormat(size_t index) const noexcept {
@@ -299,8 +350,9 @@ public:
     [[nodiscard]] VideoCommon::Extent2D Extent() const noexcept { return extent; }
     [[nodiscard]] bool IsRescaled() const noexcept { return is_rescaled; }
 
-    /// Transitions the attachments to RENDER_TARGET and DEPTH_WRITE.
-    void PrepareAttachments() const;
+    /// Transitions the attachments to RENDER_TARGET and DEPTH_WRITE, or the depth buffer to
+    /// DEPTH_SAMPLED_STATE when the draw also samples it (bind DepthTarget(true) then).
+    void PrepareAttachments(bool depth_sampled = false) const;
 
 private:
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, NUM_RT> colors{};
@@ -311,6 +363,7 @@ private:
     u32 samples{1};
     SlotVector<Image>* images{};
     D3D12_CPU_DESCRIPTOR_HANDLE depth{};
+    D3D12_CPU_DESCRIPTOR_HANDLE depth_read_only{};
     u32 num_colors{};
     u32 missing_colors{};
     VideoCommon::Extent2D extent{};

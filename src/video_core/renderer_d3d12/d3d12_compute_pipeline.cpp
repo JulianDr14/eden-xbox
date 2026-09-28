@@ -205,6 +205,7 @@ void ComputePipeline::Configure(const ComputeBindContext& context, PipelineBindi
         for (u32 index = 0; index < desc.count; ++index) {
             const VideoCommon::ImageViewId view_id = (views_it++)->id;
             const ImageView& image_view = texture_cache.GetImageView(view_id);
+            image_view.PrepareRead(desc.type);
             queue.AddCopy(image_view.Handle(desc.type));
             const Sampler& sampler = texture_cache.GetSampler(*(samplers_it++));
             sampler_handles.push_back(sampler.Handle());

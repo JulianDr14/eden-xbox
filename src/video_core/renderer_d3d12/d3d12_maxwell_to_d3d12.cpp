@@ -338,13 +338,17 @@ DXGI_FORMAT VertexFormat(Type type, Size size) {
         return Pick(ROW_32, type, 4);
     case Size::Size_A2_B10_G10_R10:
         // Same bit layout as Vulkan's A2B10G10R10_PACK32: R in the low bits. DXGI has only the
-        // unsigned variants.
+        // unsigned variants; SNORM is fetched as the packed word and unpacked in the shader
+        // (Shader::AttributeType::SignedNormA2B10G10R10). R32_UINT is the one fetch every IA
+        // handles; on the Series every object whose normals came as R10G10B10A2_UINT went NaN.
         switch (type) {
         case Type::UNorm:
             return DXGI_FORMAT_R10G10B10A2_UNORM;
         case Type::UInt:
         case Type::UScaled:
             return DXGI_FORMAT_R10G10B10A2_UINT;
+        case Type::SNorm:
+            return DXGI_FORMAT_R32_UINT;
         default:
             return DXGI_FORMAT_UNKNOWN;
         }

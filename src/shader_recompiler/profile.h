@@ -34,6 +34,9 @@ struct Profile {
     bool support_fp32_denorm_preserve{};
     bool support_fp16_denorm_flush{};
     bool support_fp32_denorm_flush{};
+    /// Flush fp32 denorms in every shader, as Maxwell does, instead of leaving shaders that do
+    /// not ask for it (or ask for both modes) to the driver's default
+    bool force_fp32_denorm_flush{};
     bool support_fp16_signed_zero_nan_preserve{};
     bool support_fp32_signed_zero_nan_preserve{};
     bool support_fp64_signed_zero_nan_preserve{};

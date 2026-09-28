@@ -147,6 +147,7 @@ enum class InputGenericLoadOp {
     Bitcast,
     SToF,
     UToF,
+    SNormA2B10G10R10, ///< sign-extend the field, then normalize (see UnpackSNormA2B10G10R10)
 };
 
 struct InputGenericInfo {
@@ -210,6 +211,10 @@ public:
     Id Const(f32 value) {
         return Constant(F32[1], value);
     }
+
+    /// One component of a packed SNORM 10:10:10:2 attribute fetched as uints: sign-extends its
+    /// 10 bits (2 for w, component 3) and normalizes to [-1, 1] as the hardware would.
+    Id UnpackSNormA2B10G10R10(Id value, Id component);
 
     const Profile& profile;
     const RuntimeInfo& runtime_info;
