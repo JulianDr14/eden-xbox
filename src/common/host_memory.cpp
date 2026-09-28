@@ -6,10 +6,13 @@
 
 #ifdef _WIN32
 
+#include <cstdio>
 #include <iterator>
+#include <string>
 #include "common/container/unordered_map.h"
 #include <boost/icl/separate_interval_set.hpp>
 #include <windows.h>
+#include <winioctl.h>
 #include "common/dynamic_library.h"
 
 #else // ^^^ Windows ^^^ vvv POSIX vvv
@@ -60,6 +63,7 @@
 #include "common/free_region_manager.h"
 #include "common/host_memory.h"
 #include "common/logging.h"
+#include "common/settings.h"
 
 #if defined(__ANDROID__) && __ANDROID_API__ < 30
 #include <sys/syscall.h>
@@ -175,15 +179,79 @@ static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn
 //
 // There is exactly one emulated-DRAM backing (Core::DeviceMemory), so a single file-scope range +
 // committer suffices; the handler is allocation-free and re-entrancy-safe (atomic loads + one commit).
+//
+// With fastmem the backing is instead a SEC_RESERVE section: its views (the linear backing view and
+// the ones mapped into the fastmem arena) are MEM_MAPPED, and committing a page through any view
+// commits the section page for all of them. The 4 GiB SEC_COMMIT section the desktop path uses does
+// not fit the console's commit budget (ERROR_COMMITMENT_LIMIT, measured by the 0.2.51 probe).
 namespace {
 std::atomic<u8*> g_backing_base{nullptr};
 std::atomic<size_t> g_backing_size{0};
+std::atomic<u8*> g_arena_base{nullptr};
+std::atomic<size_t> g_arena_size{0};
+std::atomic<bool> g_backing_is_section{false};
+std::atomic<bool> g_backing_is_file{false};
+std::atomic<bool> g_backing_file_sparse{false};
 PFN_VirtualAllocFromApp g_pfn_virtual_alloc_from_app{nullptr};
 PFN_AddVectoredExceptionHandler g_pfn_add_veh{nullptr};
 PFN_RemoveVectoredExceptionHandler g_pfn_remove_veh{nullptr};
 void* g_backing_veh{nullptr};
 
 constexpr size_t BACKING_COMMIT_GRANULARITY = 64 * 1024; // commit in 64 KiB chunks to limit faults
+constexpr uintptr_t HOST_PAGE_SIZE = 4096;
+
+// Section commit accounting for the diag (0.2.55 died with commit far below the app limit, so the
+// error the console returns is what is missing). Written from the handler: atomics only.
+std::atomic<u64> g_section_commit_bytes{0};
+std::atomic<u64> g_commit_failures{0};
+std::atomic<u64> g_page_retry_saves{0};
+std::atomic<u32> g_last_commit_error{0};
+std::atomic<uintptr_t> g_last_failed_address{0};
+std::atomic<u64> g_last_failed_length{0};
+
+bool CommitSectionRange(uintptr_t begin, uintptr_t end) {
+    if (g_pfn_virtual_alloc_from_app(reinterpret_cast<void*>(begin), end - begin, MEM_COMMIT,
+                                     PAGE_READWRITE)) {
+        g_section_commit_bytes.fetch_add(end - begin, std::memory_order_relaxed);
+        return true;
+    }
+    g_last_commit_error.store(GetLastError(), std::memory_order_relaxed);
+    g_last_failed_address.store(begin, std::memory_order_relaxed);
+    g_last_failed_length.store(end - begin, std::memory_order_relaxed);
+    g_commit_failures.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+// Section mode: commits the reserved pages of the view around the fault. A committed read-write
+// page means another thread committed it first, so the access is retried; anything else (an
+// unmapped arena placeholder, a page the rasterizer protected) is left to dynarmic's handler.
+LONG SectionDemandCommit(u8* fault_addr) {
+    const uintptr_t page = reinterpret_cast<uintptr_t>(fault_addr) & ~(HOST_PAGE_SIZE - 1);
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<void*>(page), &info, sizeof(info)) == 0 ||
+        info.Type != MEM_MAPPED) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (info.State == MEM_COMMIT) {
+        return info.Protect == PAGE_READWRITE ? EXCEPTION_CONTINUE_EXECUTION
+                                              : EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (info.State != MEM_RESERVE) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const uintptr_t region_end = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
+    const uintptr_t chunk_end = (page + BACKING_COMMIT_GRANULARITY) & ~(BACKING_COMMIT_GRANULARITY - 1);
+    const uintptr_t end = (std::min)(region_end, chunk_end);
+    if (CommitSectionRange(page, end)) {
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    // The chunk failed: try the faulting page alone before giving up.
+    if (end - page > HOST_PAGE_SIZE && CommitSectionRange(page, page + HOST_PAGE_SIZE)) {
+        g_page_retry_saves.fetch_add(1, std::memory_order_relaxed);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 
 LONG NTAPI BackingDemandCommitHandler(EXCEPTION_POINTERS* ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
@@ -196,6 +264,13 @@ LONG NTAPI BackingDemandCommitHandler(EXCEPTION_POINTERS* ep) {
     }
     const auto fault_addr =
         reinterpret_cast<u8*>(ep->ExceptionRecord->ExceptionInformation[1]); // [1] = faulting address
+    if (g_backing_is_section.load(std::memory_order_acquire)) {
+        u8* const arena = g_arena_base.load(std::memory_order_acquire);
+        const size_t arena_size = g_arena_size.load(std::memory_order_acquire);
+        const bool in_backing = fault_addr >= base && fault_addr < base + size;
+        const bool in_arena = arena != nullptr && fault_addr >= arena && fault_addr < arena + arena_size;
+        return in_backing || in_arena ? SectionDemandCommit(fault_addr) : EXCEPTION_CONTINUE_SEARCH;
+    }
     if (fault_addr < base || fault_addr >= base + size) {
         return EXCEPTION_CONTINUE_SEARCH; // not our backing — let other handlers run
     }
@@ -253,6 +328,13 @@ public:
         // api-set the Xbox loader lacks — a direct call there makes the app fail to activate on-console.
         GetFuncAddress(kernelbase_dll, "AddVectoredExceptionHandler", g_pfn_add_veh);
         GetFuncAddress(kernelbase_dll, "RemoveVectoredExceptionHandler", g_pfn_remove_veh);
+        if (Settings::values.cpuopt_fastmem.GetValue()) {
+            if (InitSection()) {
+                return true;
+            }
+            LOG_WARNING(HW_Memory, "Fastmem arena unavailable, using the private backing");
+            Release();
+        }
         backing_base = static_cast<u8*>(
             g_pfn_virtual_alloc_from_app(nullptr, backing_size, MEM_RESERVE, PAGE_READWRITE));
         if (backing_base == nullptr) {
@@ -313,6 +395,239 @@ public:
         Release();
     }
 
+#ifdef HOST_MEMORY_USE_FROM_APP
+    /// Fastmem layout for the AppContainer: the DRAM is a SEC_RESERVE section mapped once as the
+    /// linear backing, plus the address-space placeholder that Map() fills with views of it. Pages
+    /// are committed on first touch by the demand-commit handler.
+    bool InitSection() {
+        if (!pfn_CreateFileMappingFromApp || !pfn_VirtualAlloc2 || !pfn_MapViewOfFile3 ||
+            !pfn_UnmapViewOfFile2 || !g_pfn_virtual_alloc_from_app || !g_pfn_add_veh) {
+            LOG_CRITICAL(HW_Memory, "Failed to find functions for the fastmem arena");
+            return false;
+        }
+        // A pagefile-backed section charges system commit, of which the console leaves the app
+        // about 1.1 GiB in all sections (0.2.56 probe), and the game ran out a minute in. A section
+        // over a real file charges no commit: its pages are backed by the file.
+        backing_file = OpenBackingFile();
+        if (backing_file == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+        backing_handle = pfn_CreateFileMappingFromApp(backing_file, nullptr, PAGE_READWRITE,
+                                                      backing_size, nullptr);
+        if (!backing_handle) {
+            LOG_CRITICAL(HW_Memory, "Failed to create a {} MiB file-backed section, error {}",
+                         backing_size >> 20, GetLastError());
+            return false;
+        }
+        backing_base = static_cast<u8*>(pfn_VirtualAlloc2(process, nullptr, backing_size,
+                                                          MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                                                          PAGE_NOACCESS, nullptr, 0));
+        if (!backing_base) {
+            LOG_CRITICAL(HW_Memory, "Failed to reserve {} MiB of virtual memory, error {}",
+                         backing_size >> 20, GetLastError());
+            return false;
+        }
+        if (!MapBackingViews()) {
+            return false;
+        }
+        virtual_base = static_cast<u8*>(pfn_VirtualAlloc2(process, nullptr, virtual_size,
+                                                          MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                                                          PAGE_NOACCESS, nullptr, 0));
+        if (!virtual_base) {
+            LOG_CRITICAL(HW_Memory, "Failed to reserve {} GiB of virtual memory, error {}",
+                         virtual_size >> 30, GetLastError());
+            return false;
+        }
+        g_backing_base.store(backing_base, std::memory_order_release);
+        g_backing_size.store(backing_size, std::memory_order_release);
+        g_arena_base.store(virtual_base, std::memory_order_release);
+        g_arena_size.store(virtual_size, std::memory_order_release);
+        g_backing_is_section.store(true, std::memory_order_release);
+        g_backing_veh = g_pfn_add_veh(/*first=*/1, BackingDemandCommitHandler);
+        if (g_backing_veh == nullptr) {
+            LOG_CRITICAL(HW_Memory, "Failed to install backing demand-commit handler");
+            return false;
+        }
+        LOG_INFO(HW_Memory, "Fastmem arena: {} GiB reserved over a {} MiB file-backed section",
+                 virtual_size >> 30, backing_size >> 20);
+        return true;
+    }
+
+    /// Maps the section over the backing placeholder: one view, or, when the console refuses a
+    /// view that large (error 8 for 4 GiB of a file, 0.2.56.1), one view per piece of the
+    /// placeholder, split first.
+    bool MapBackingViews() {
+        if (pfn_MapViewOfFile3(backing_handle, process, backing_base, 0, backing_size,
+                               MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr,
+                               0) == backing_base) {
+            backing_mapped = true;
+            return true;
+        }
+        const DWORD whole_error = GetLastError();
+        for (const size_t piece : {size_t{1} << 30, size_t{256} << 20}) {
+            if (backing_size % piece != 0) {
+                continue;
+            }
+            const size_t count = backing_size / piece;
+            size_t mapped = 0;
+            DWORD error = 0;
+            for (; mapped < count; ++mapped) {
+                u8* const address = backing_base + mapped * piece;
+                if (mapped + 1 < count &&
+                    !VirtualFree(address, piece, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) {
+                    error = GetLastError();
+                    break;
+                }
+                if (pfn_MapViewOfFile3(backing_handle, process, address, mapped * piece, piece,
+                                       MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr,
+                                       0) != address) {
+                    error = GetLastError();
+                    break;
+                }
+            }
+            backing_piece = piece;
+            backing_pieces = mapped;
+            if (mapped == count) {
+                LOG_INFO(HW_Memory,
+                         "A {} MiB view of the DRAM failed (error {}), mapped it as {} views of "
+                         "{} MiB",
+                         backing_size >> 20, whole_error, count, piece >> 20);
+                return true;
+            }
+            LOG_WARNING(HW_Memory, "Mapping the DRAM as {} MiB views stopped at {} of {}, error {}",
+                        piece >> 20, mapped, count, error);
+            UnmapBackingViews(); // the placeholder is split now: release it and start over
+            backing_base = static_cast<u8*>(pfn_VirtualAlloc2(
+                process, nullptr, backing_size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                PAGE_NOACCESS, nullptr, 0));
+            if (!backing_base) {
+                return false;
+            }
+        }
+        LOG_CRITICAL(HW_Memory, "Failed to map {} MiB of backing memory, error {}",
+                     backing_size >> 20, whole_error);
+        return false;
+    }
+
+    /// Unmaps the backing views and releases the backing placeholder, whole or in pieces.
+    void UnmapBackingViews() {
+        if (!backing_base) {
+            return;
+        }
+        if (backing_piece != 0) {
+            const size_t count = backing_size / backing_piece;
+            for (size_t i = 0; i < count; ++i) {
+                u8* const address = backing_base + i * backing_piece;
+                if (i < backing_pieces) {
+                    pfn_UnmapViewOfFile2(process, address, MEM_PRESERVE_PLACEHOLDER);
+                }
+                // Past the last split the rest is one placeholder: only its first piece is an
+                // allocation base, and releasing inside it just fails.
+                VirtualFree(address, 0, MEM_RELEASE);
+            }
+        } else {
+            if (backing_mapped) {
+                pfn_UnmapViewOfFile2(process, backing_base, MEM_PRESERVE_PLACEHOLDER);
+            }
+            VirtualFreeEx(process, backing_base, 0, MEM_RELEASE);
+        }
+        backing_base = nullptr;
+        backing_mapped = false;
+        backing_piece = 0;
+        backing_pieces = 0;
+    }
+
+    /// The file behind the DRAM section: in the app's temp folder, deleted when the handle closes
+    /// (also when the process dies), marked temporary so the OS keeps its pages in memory rather
+    /// than writing them out, and sparse so pages written far into it do not make the file system
+    /// zero everything before them on disk.
+    HANDLE OpenBackingFile() {
+        using PFN_CreateFile2 = HANDLE(WINAPI*)(LPCWSTR, DWORD, DWORD, DWORD,
+                                                LPCREATEFILE2_EXTENDED_PARAMETERS);
+        using PFN_GetTempPathW = DWORD(WINAPI*)(DWORD, LPWSTR);
+        using PFN_DeviceIoControl = BOOL(WINAPI*)(HANDLE, DWORD, LPVOID, DWORD, LPVOID, DWORD,
+                                                  LPDWORD, LPOVERLAPPED);
+        PFN_CreateFile2 create_file2{};
+        PFN_GetTempPathW get_temp_path{};
+        PFN_DeviceIoControl device_io_control{};
+        GetFuncAddress(kernelbase_dll, "CreateFile2", create_file2);
+        GetFuncAddress(kernelbase_dll, "GetTempPathW", get_temp_path);
+        GetFuncAddress(kernelbase_dll, "DeviceIoControl", device_io_control);
+        if (!create_file2 || !get_temp_path) {
+            return INVALID_HANDLE_VALUE;
+        }
+        wchar_t temp[MAX_PATH]{};
+        const DWORD length = get_temp_path(MAX_PATH, temp);
+        if (length == 0 || length >= MAX_PATH) {
+            LOG_CRITICAL(HW_Memory, "Failed to get the temp folder, error {}", GetLastError());
+            return INVALID_HANDLE_VALUE;
+        }
+        const std::wstring path = std::wstring(temp) + L"eden_dram.bin";
+        CREATEFILE2_EXTENDED_PARAMETERS params{};
+        params.dwSize = sizeof(params);
+        params.dwFileAttributes = FILE_ATTRIBUTE_TEMPORARY;
+        params.dwFileFlags = FILE_FLAG_DELETE_ON_CLOSE;
+        const HANDLE file = create_file2(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                                         CREATE_ALWAYS, &params);
+        if (file == INVALID_HANDLE_VALUE) {
+            LOG_CRITICAL(HW_Memory, "Failed to create the DRAM file in the temp folder, error {}",
+                         GetLastError());
+            return INVALID_HANDLE_VALUE;
+        }
+        DWORD returned{};
+        const bool sparse = device_io_control &&
+                            device_io_control(file, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0,
+                                              &returned, nullptr);
+        if (!sparse) {
+            LOG_WARNING(HW_Memory, "The DRAM file could not be made sparse, error {}",
+                        GetLastError());
+        }
+        g_backing_is_file.store(true, std::memory_order_release);
+        g_backing_file_sparse.store(sparse, std::memory_order_release);
+        return file;
+    }
+
+    bool IsSection() const {
+        return backing_handle != nullptr;
+    }
+
+    /// VirtualProtect over a view of the reserved section fails on pages still only reserved, and
+    /// ProtectRegion hands whole heap regions here. Committing them all to protect them (0.2.53)
+    /// ran the console out of commit a minute in, with the demand-commit handler then failing. So
+    /// only committed runs are protected. Reserved runs asked for read-write are skipped, since
+    /// the handler commits them read-write on first touch; anything stricter (rasterizer-cached
+    /// ranges) is committed so a later fastmem access still traps.
+    void ProtectSectionView(u8* begin, size_t length, DWORD new_flags) {
+        u8* address = begin;
+        u8* const end = begin + length;
+        while (address < end) {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(address, &info, sizeof(info)) == 0) {
+                LOG_CRITICAL(HW_Memory, "Failed to query virtual memory, error {}", GetLastError());
+                return;
+            }
+            u8* const region_end =
+                (std::min)(static_cast<u8*>(info.BaseAddress) + info.RegionSize, end);
+            const size_t region_length = static_cast<size_t>(region_end - address);
+            bool apply = info.State == MEM_COMMIT;
+            if (info.State == MEM_RESERVE && new_flags != PAGE_READWRITE) {
+                apply = CommitSectionRange(reinterpret_cast<uintptr_t>(address),
+                                           reinterpret_cast<uintptr_t>(region_end));
+                if (!apply) {
+                    LOG_CRITICAL(HW_Memory, "Failed to commit {} KiB to protect it, error {}",
+                                 region_length >> 10, GetLastError());
+                }
+            }
+            DWORD old_flags{};
+            if (apply && !HOST_MEMORY_VIRTUAL_PROTECT(address, region_length, new_flags, &old_flags)) {
+                LOG_CRITICAL(HW_Memory, "Failed to change virtual memory protect rules, error {}",
+                             GetLastError());
+            }
+            address = region_end;
+        }
+    }
+#endif
+
     void* Allocate(size_t size) {
         auto* ptr = VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         if (ptr == nullptr) {
@@ -359,8 +674,17 @@ public:
             const size_t offset = (std::max)(it->lower(), virtual_offset);
             const size_t protect_length = (std::min)(it->upper(), virtual_end) - offset;
             DWORD old_flags{};
-            if (!HOST_MEMORY_VIRTUAL_PROTECT(virtual_base + offset, protect_length, new_flags,
-                                             &old_flags)) {
+#ifdef HOST_MEMORY_USE_FROM_APP
+            if (IsSection()) {
+                ProtectSectionView(virtual_base + offset, protect_length, new_flags);
+                ++it;
+                continue;
+            }
+#endif
+            const bool protected_ok = HOST_MEMORY_VIRTUAL_PROTECT(virtual_base + offset,
+                                                                  protect_length, new_flags,
+                                                                  &old_flags);
+            if (!protected_ok) {
                 LOG_CRITICAL(HW_Memory, "Failed to change virtual memory protect rules");
             }
             ++it;
@@ -388,14 +712,47 @@ private:
             g_pfn_remove_veh(g_backing_veh);
             g_backing_veh = nullptr;
         }
+        g_backing_is_section.store(false, std::memory_order_release);
+        g_arena_base.store(nullptr, std::memory_order_release);
+        g_arena_size.store(0, std::memory_order_release);
         g_backing_base.store(nullptr, std::memory_order_release);
         g_backing_size.store(0, std::memory_order_release);
+        if (backing_handle || backing_file != INVALID_HANDLE_VALUE) {
+            ReleaseSection();
+            return;
+        }
         if (backing_base) {
             if (!VirtualFree(backing_base, 0, MEM_RELEASE)) {
                 LOG_CRITICAL(HW_Memory, "Failed to free backing memory");
             }
             backing_base = nullptr;
         }
+    }
+
+    void ReleaseSection() {
+        if (!placeholders.empty()) {
+            for (const auto& placeholder : placeholders) {
+                pfn_UnmapViewOfFile2(process, virtual_base + placeholder.lower(),
+                                     MEM_PRESERVE_PLACEHOLDER);
+            }
+            Coalesce(0, virtual_size);
+            placeholders.clear();
+            placeholder_host_pointers.clear();
+        }
+        if (virtual_base) {
+            VirtualFree(virtual_base, 0, MEM_RELEASE);
+            virtual_base = nullptr;
+        }
+        UnmapBackingViews();
+        if (backing_handle) {
+            CloseHandle(backing_handle);
+        }
+        backing_handle = nullptr;
+        if (backing_file != INVALID_HANDLE_VALUE) {
+            CloseHandle(backing_file); // deletes it (FILE_FLAG_DELETE_ON_CLOSE)
+            backing_file = INVALID_HANDLE_VALUE;
+        }
+        g_backing_is_file.store(false, std::memory_order_release);
 #else
         if (!placeholders.empty()) {
             for (const auto& placeholder : placeholders) {
@@ -542,6 +899,10 @@ private:
 
     HANDLE process{};        ///< Current process handle
     HANDLE backing_handle{}; ///< File based backing memory
+    bool backing_mapped{};   ///< UWP fastmem: the section view replaced the backing placeholder
+    HANDLE backing_file{INVALID_HANDLE_VALUE}; ///< UWP fastmem: the file behind the section
+    size_t backing_piece{};  ///< UWP fastmem: size of each backing view, 0 for a single view
+    size_t backing_pieces{}; ///< UWP fastmem: backing views mapped in pieces
 
     DynamicLibrary kernelbase_dll;
     PFN_CreateFileMapping2 pfn_CreateFileMapping2{};
@@ -957,6 +1318,49 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
     // Same contents for the guest, but it returns budget rather than spending it. The partial pages
     // at either end are memset as before. VirtualFree(MEM_DECOMMIT) accepts pages that were never
     // committed.
+    // With fastmem the backing is a section view, which cannot be decommitted. Only the pages
+    // already committed are cleared; the reserved ones read as zero whenever they get committed,
+    // so the heap clear does not commit memory the guest never touched.
+    // Over a file every page reads as committed. A page never written is a hole of the file and
+    // reads as zero, and memset would dirty it and give it a disk block, so pages already zero are
+    // only read.
+    if (fill_value == 0 && g_backing_is_file.load(std::memory_order_acquire)) {
+        constexpr uintptr_t HostPageSize = 4096;
+        const auto begin = reinterpret_cast<uintptr_t>(backing_base + physical_offset);
+        const auto end = begin + length;
+        const uintptr_t pages_begin = (std::min)(Common::AlignUp(begin, HostPageSize), end);
+        const uintptr_t pages_end = (std::max)(Common::AlignDown(end, HostPageSize), pages_begin);
+        std::memset(reinterpret_cast<void*>(begin), 0, pages_begin - begin);
+        for (uintptr_t page = pages_begin; page < pages_end; page += HostPageSize) {
+            const auto* const words = reinterpret_cast<const u64*>(page);
+            for (size_t i = 0; i < HostPageSize / sizeof(u64); ++i) {
+                if (words[i] != 0) {
+                    std::memset(reinterpret_cast<void*>(page), 0, HostPageSize);
+                    break;
+                }
+            }
+        }
+        std::memset(reinterpret_cast<void*>(pages_end), 0, end - pages_end);
+        return;
+    }
+    if (fill_value == 0 && impl && impl->IsSection()) {
+        u8* address = backing_base + physical_offset;
+        u8* const end = address + length;
+        while (address < end) {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(address, &info, sizeof(info)) == 0) {
+                std::memset(address, 0, end - address);
+                return;
+            }
+            u8* const region_end = (std::min)(
+                static_cast<u8*>(info.BaseAddress) + info.RegionSize, end);
+            if (info.State == MEM_COMMIT) {
+                std::memset(address, 0, region_end - address);
+            }
+            address = region_end;
+        }
+        return;
+    }
     if (fill_value == 0) {
         constexpr uintptr_t HostPageSize = 4096;
         const auto begin = reinterpret_cast<uintptr_t>(backing_base + physical_offset);
@@ -981,6 +1385,60 @@ void HostMemory::EnableDirectMappedAddress() {
         impl->EnableDirectMappedAddress();
         virtual_size += reinterpret_cast<uintptr_t>(virtual_base);
     }
+#endif
+}
+
+std::string HostMemoryCommitStats() {
+#ifdef HOST_MEMORY_USE_FROM_APP
+    if (!g_backing_is_section.load(std::memory_order_acquire)) {
+        // Private backing: sum what is committed, to split the app's memory into emulated DRAM
+        // and the rest (JIT, GPU, caches).
+        u8* const base = g_backing_base.load(std::memory_order_acquire);
+        const size_t size = g_backing_size.load(std::memory_order_acquire);
+        if (base == nullptr) {
+            return {};
+        }
+        u64 committed = 0;
+        for (u8* address = base; address < base + size;) {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(address, &info, sizeof(info)) == 0) {
+                break;
+            }
+            u8* const region_end = (std::min)(
+                static_cast<u8*>(info.BaseAddress) + info.RegionSize, base + size);
+            if (info.State == MEM_COMMIT) {
+                committed += static_cast<u64>(region_end - address);
+            }
+            address = region_end;
+        }
+        return "emulated DRAM " + std::to_string(committed >> 20) + " MiB";
+    }
+    if (g_backing_is_file.load(std::memory_order_acquire)) {
+        return g_backing_file_sparse.load(std::memory_order_acquire)
+                   ? "DRAM in a sparse file-backed section"
+                   : "DRAM in a file-backed section (not sparse)";
+    }
+    std::string stats = "section commit " +
+                        std::to_string(g_section_commit_bytes.load(std::memory_order_relaxed) >> 20) +
+                        " MiB";
+    if (const u64 failures = g_commit_failures.load(std::memory_order_relaxed); failures != 0) {
+        char failure[160];
+        std::snprintf(failure, sizeof(failure),
+                      ", %llu commit failures (last: error %u, %llu KiB at 0x%llx), %llu saved by "
+                      "a single-page retry",
+                      static_cast<unsigned long long>(failures),
+                      g_last_commit_error.load(std::memory_order_relaxed),
+                      static_cast<unsigned long long>(
+                          g_last_failed_length.load(std::memory_order_relaxed) >> 10),
+                      static_cast<unsigned long long>(
+                          g_last_failed_address.load(std::memory_order_relaxed)),
+                      static_cast<unsigned long long>(
+                          g_page_retry_saves.load(std::memory_order_relaxed)));
+        stats += failure;
+    }
+    return stats;
+#else
+    return {};
 #endif
 }
 

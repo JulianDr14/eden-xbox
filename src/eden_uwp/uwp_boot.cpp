@@ -16,6 +16,7 @@
 // house rule) issues svcOutputDebugString with the exact sentinel below; Eden's SVC handler logs
 // OutputDebugString, so observing this line is positive proof the JIT decoded + executed guest code.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -26,7 +27,9 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
+#include "common/host_memory.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/windows/timer_resolution.h"
@@ -43,7 +46,6 @@
 #include "video_core/renderer_base.h"
 
 #include "eden_uwp/headless_emu_window.h"
-#include "eden_uwp/uwp_fastmem_probe.h"
 #include "eden_uwp/uwp_input.h"
 
 namespace D3D12 {
@@ -54,6 +56,8 @@ void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t tot
 void SetBcArrayDecode(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetGpuBasedValidation(bool enabled); // d3d12_device.h
+using AppMemoryQuery = bool (*)(u64& used, u64& limit); // d3d12_device.h
+void SetAppMemoryQuery(AppMemoryQuery query);            // d3d12_device.h
 } // namespace D3D12
 
 namespace VideoCommon {
@@ -63,6 +67,8 @@ void SetAstcArrayRecompression(bool enabled) noexcept; // texture_cache/util.h
 namespace {
 void WriteDiag(const std::string& msg); // defined with the UWP entry point below
 std::string MemoryReport();             // likewise
+std::string LargestAllocations();       // likewise
+bool QueryAppMemory(u64& used, u64& limit);  // likewise
 } // namespace
 
 namespace EdenXbox {
@@ -85,8 +91,6 @@ static void ApplyHeadlessBootSettings(const BootSurface& surface) {
                                             ? Settings::RendererBackend::Direct3D12
                                             : Settings::RendererBackend::Null;
     Settings::values.sink_id = Settings::AudioEngine::Null;              // audio_core/sink/null_sink
-    Settings::values.cpuopt_fastmem = false;        // Phase-2: bounds-checked page-table path
-    Settings::values.cpuopt_fastmem_exclusives = false;
     // The on-console failure mode is a hard crash with no eden_log.txt; the default 4 KiB write
     // buffering loses exactly the lines that say where it died. Flush every line instead.
     Settings::values.log_flush_line = true;
@@ -122,6 +126,12 @@ struct BootConfig {
     enum class Astc { Bc3, Gpu, Cpu } astc{Astc::Bc3};
     /// Played by hand ("play=1"): runs until the app is closed, without frame dumps or draw trace.
     bool play{};
+    /// Guest memory through the host-mapped arena instead of the bounds-checked page table
+    /// ("fastmem=1" turns it on). Off: the console maps at most ~1 GiB of section views in all
+    /// (0.2.56 probes), and the arena needs the 4 GiB DRAM mapped at least twice.
+    bool fastmem{};
+    /// Draw without waiting for pipelines still compiling ("async_shaders=0" turns it off).
+    bool async_shaders{true};
     /// Buttons to press at given times ("input=25:L+R" lines).
     std::vector<InputStep> input_script;
 };
@@ -143,8 +153,19 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
               std::to_string(std::chrono::duration<double, std::milli>(timer_resolution).count()) +
               " ms");
     ApplyHeadlessBootSettings(config.null_renderer ? BootSurface{} : surface);
+    // Read by HostMemory when Core::System builds the DRAM, so it has to be set before that.
+    Settings::values.cpuopt_fastmem = config.fastmem;
+    Settings::values.cpuopt_fastmem_exclusives = config.fastmem;
+    // Pipelines that compile while playing stalled whole seconds on entering new areas (0.2.52):
+    // skip those draws until the pipeline is ready, as Eden does with asynchronous shaders.
+    Settings::values.use_asynchronous_shaders.SetValue(config.async_shaders);
+    WriteDiag(std::string("step: fastmem ") + (config.fastmem ? "on" : "off") +
+              ", asynchronous shaders " + (config.async_shaders ? "on" : "off"));
     D3D12::SetTracedFrame(config.traced_frame);
     D3D12::SetFrameDiagnostics(!config.play);
+    // The GPU spends the same 5 GiB as the emulated DRAM and the JIT: the texture and buffer
+    // caches evict against what the whole app has left, not DXGI's budget.
+    D3D12::SetAppMemoryQuery(QueryAppMemory);
     D3D12::SetBcArrayDecode(!config.bc_arrays_native);
     // RGBA8 ASTC made loading frames upload 150-260 MiB at once and the console run out of memory
     // (0.2.50): single textures become BC3 (a quarter of the memory), 2D arrays stay RGBA8 (a
@@ -213,6 +234,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     const Core::SystemResultStatus load_result = system.Load(emu_window, nro_path, load_parameters);
     WriteDiag("step: system.Load() returned status " +
               std::to_string(static_cast<int>(load_result)) + " | " + MemoryReport());
+    WriteDiag("memory map: " + LargestAllocations());
     if (load_result != Core::SystemResultStatus::Success) {
         LOG_CRITICAL(Frontend, "Headless boot: failed to load {} (status {})", nro_path,
                      static_cast<int>(load_result));
@@ -282,6 +304,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
             if (tick % 600 == 0) {
                 WriteDiag("step: playing, " + std::to_string(tick / 600) + " min | " +
                           MemoryReport());
+                WriteDiag("memory map: " + LargestAllocations());
             }
         }
     }
@@ -294,6 +317,9 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
             std::this_thread::sleep_for(std::chrono::seconds(1));
             if (second % 10 == 0) {
                 WriteDiag("step: running, " + std::to_string(second) + " s | " + MemoryReport());
+                if (second % 30 == 0) {
+                    WriteDiag("memory map: " + LargestAllocations());
+                }
             }
         }
         shutdown();
@@ -417,10 +443,99 @@ void WriteDiag(const std::string& msg) {
 std::string MemoryReport() {
     try {
         using winrt::Windows::System::MemoryManager;
+        // Commit is what runs out: section pages committed but never touched count there and
+        // not in AppMemoryUsage (0.2.53 died at 2.8 GiB of usage).
+        const auto report = MemoryManager::GetAppMemoryReport();
+        const std::string stats = Common::HostMemoryCommitStats();
         return "app memory " + std::to_string(MemoryManager::AppMemoryUsage() >> 20) + " MiB of " +
-               std::to_string(MemoryManager::AppMemoryUsageLimit() >> 20) + " MiB limit";
+               std::to_string(MemoryManager::AppMemoryUsageLimit() >> 20) + " MiB limit, commit " +
+               std::to_string(report.TotalCommitUsage() >> 20) + " of " +
+               std::to_string(report.TotalCommitLimit() >> 20) + " MiB" +
+               (stats.empty() ? "" : ", " + stats);
     } catch (...) {
         return "app memory: MemoryManager unavailable";
+    }
+}
+
+// Where the app's memory is: committed bytes by kind over the whole address space, then the
+// largest allocations (base, committed MiB, kind), whose sizes tell their owners apart.
+std::string LargestAllocations() {
+    struct Allocation {
+        uintptr_t base;
+        u64 committed;
+        DWORD type;
+    };
+    std::vector<Allocation> allocations;
+    u64 by_type[3]{}; // private, mapped, image
+    uintptr_t address = 0;
+    MEMORY_BASIC_INFORMATION info{};
+    while (VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info)) != 0) {
+        const auto base = reinterpret_cast<uintptr_t>(info.AllocationBase);
+        if (info.State == MEM_COMMIT) {
+            by_type[info.Type == MEM_PRIVATE ? 0 : info.Type == MEM_MAPPED ? 1 : 2] +=
+                info.RegionSize;
+            if (allocations.empty() || allocations.back().base != base) {
+                allocations.push_back({base, 0, info.Type});
+            }
+            allocations.back().committed += info.RegionSize;
+        }
+        const uintptr_t next = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
+        if (next <= address) {
+            break;
+        }
+        address = next;
+    }
+    std::sort(allocations.begin(), allocations.end(),
+              [](const Allocation& a, const Allocation& b) { return a.committed > b.committed; });
+    // Committed private memory by allocation size: many equal pieces are one owner's pool.
+    constexpr u64 BUCKETS[] = {1ULL << 20, 8ULL << 20, 24ULL << 20, 40ULL << 20, 1ULL << 62};
+    u64 bucket_bytes[std::size(BUCKETS)]{};
+    u32 bucket_count[std::size(BUCKETS)]{};
+    for (const Allocation& allocation : allocations) {
+        if (allocation.type != MEM_PRIVATE) {
+            continue;
+        }
+        size_t b = 0;
+        while (allocation.committed >= BUCKETS[b]) {
+            ++b;
+        }
+        bucket_bytes[b] += allocation.committed;
+        ++bucket_count[b];
+    }
+    std::string text = "private " + std::to_string(by_type[0] >> 20) + " MiB, mapped " +
+                       std::to_string(by_type[1] >> 20) + " MiB, image " +
+                       std::to_string(by_type[2] >> 20) + " MiB; private by size: <1M " +
+                       std::to_string(bucket_count[0]) + "x=" +
+                       std::to_string(bucket_bytes[0] >> 20) + "M, 1-8M " +
+                       std::to_string(bucket_count[1]) + "x=" +
+                       std::to_string(bucket_bytes[1] >> 20) + "M, 8-24M " +
+                       std::to_string(bucket_count[2]) + "x=" +
+                       std::to_string(bucket_bytes[2] >> 20) + "M, 24-40M " +
+                       std::to_string(bucket_count[3]) + "x=" +
+                       std::to_string(bucket_bytes[3] >> 20) + "M, >=40M " +
+                       std::to_string(bucket_count[4]) + "x=" +
+                       std::to_string(bucket_bytes[4] >> 20) + "M; largest:";
+    for (size_t i = 0; i < allocations.size() && i < 12; ++i) {
+        char entry[64];
+        std::snprintf(entry, sizeof(entry), " %llx=%lluM%s",
+                      static_cast<unsigned long long>(allocations[i].base),
+                      static_cast<unsigned long long>(allocations[i].committed >> 20),
+                      allocations[i].type == MEM_PRIVATE  ? ""
+                      : allocations[i].type == MEM_MAPPED ? "(map)"
+                                                          : "(img)");
+        text += entry;
+    }
+    return text;
+}
+
+bool QueryAppMemory(u64& used, u64& limit) {
+    try {
+        using winrt::Windows::System::MemoryManager;
+        used = MemoryManager::AppMemoryUsage();
+        limit = MemoryManager::AppMemoryUsageLimit();
+        return true;
+    } catch (...) {
+        return false;
     }
 }
 
@@ -480,6 +595,10 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* info) {
     return EXCEPTION_CONTINUE_SEARCH; // let the OS finish the crash (and WER take its dump)
 }
 
+// Fastmem faults are expected and use up the line budget within seconds, so every thread also
+// keeps its latest exception; OnAbort prints it, since a fault dynarmic cannot place aborts there.
+thread_local char t_last_exception[512];
+
 std::string FormatStack(const char* prefix);
 
 // Eden's fatal ASSERT/UNREACHABLE and the default std::terminate both end in abort(). SIGABRT is
@@ -491,6 +610,13 @@ void OnAbort(int) {
                   "(see eden\\log\\eden_log.txt) or an exception escaped a thread\n",
                   ElapsedMs(), GetCurrentThreadId());
     WriteDiagRaw(line);
+    if (t_last_exception[0] != '\0') {
+        WriteDiagRaw("[eden-uwp] last exception on this thread:\n");
+        WriteDiagRaw(t_last_exception);
+    }
+    if (const std::string stats = Common::HostMemoryCommitStats(); !stats.empty()) {
+        WriteDiagRaw(("[eden-uwp] " + stats + "\n").c_str());
+    }
     // An exception escaping a worker thread leaves nothing else behind.
     WriteDiagRaw(FormatStack("[eden-uwp] abort stack:").c_str());
     // Without this the async logger loses whatever it had queued (the last lines before a
@@ -670,10 +796,6 @@ LONG NTAPI FirstChanceLogger(EXCEPTION_POINTERS* ep) {
     default:
         break;
     }
-    if (g_first_chance_lines.fetch_add(1, std::memory_order_relaxed) >= MAX_FIRST_CHANCE_LINES) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
     char at[160];
     DescribeAddress(reinterpret_cast<std::uintptr_t>(rec->ExceptionAddress), at, sizeof(at));
 
@@ -713,7 +835,10 @@ LONG NTAPI FirstChanceLogger(EXCEPTION_POINTERS* ep) {
                           rec->NumberParameters > 1 ? rec->ExceptionInformation[1] : 0),
                       GetCurrentThreadId());
     }
-    WriteDiagRaw(line, /*debugger_channel=*/false);
+    std::memcpy(t_last_exception, line, sizeof(t_last_exception));
+    if (g_first_chance_lines.fetch_add(1, std::memory_order_relaxed) < MAX_FIRST_CHANCE_LINES) {
+        WriteDiagRaw(line, /*debugger_channel=*/false);
+    }
     return EXCEPTION_CONTINUE_SEARCH; // observe only
 }
 
@@ -808,7 +933,6 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         WriteDiag("BootView::Run entered"); // also resolves + caches the diag path
         WriteDiag(MemoryReport());
         InstallCrashHandlers();
-        EdenXbox::ProbeFastmem([](const std::string& line) { WriteDiag(line); }, MemoryReport);
 
         // A UWP app MUST activate its CoreWindow and pump the dispatcher, or the OS terminates it a
         // couple seconds after launch (no crash, no dump - exactly the "flashes then closes" symptom).
@@ -821,7 +945,8 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         // app to the background. B is a game button here (uwp_input.h).
         SystemNavigationManager::GetForCurrentView().BackRequested(
             [](auto&&, BackRequestedEventArgs const& args) { args.Handled(true); });
-        // Keyboard play on the PC (uwp_input.h): C/V = L/R, B/N = A/B, WASD = left stick, Q quits.
+        // Keyboard play on the PC (uwp_input.h): C/V = L/R, B/N = A/B, M or numpad + = Plus,
+        // K or numpad - = Minus, X/Y = X/Y, WASD = left stick, Q quits.
         const auto on_key = [](Windows::System::VirtualKey key, bool pressed) {
             using Windows::System::VirtualKey;
             using EdenXbox::Key;
@@ -834,6 +959,12 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
             case VirtualKey::S: EdenXbox::SetKeyPressed(Key::StickDown, pressed); break;
             case VirtualKey::A: EdenXbox::SetKeyPressed(Key::StickLeft, pressed); break;
             case VirtualKey::D: EdenXbox::SetKeyPressed(Key::StickRight, pressed); break;
+            case VirtualKey::M:
+            case VirtualKey::Add: EdenXbox::SetKeyPressed(Key::Plus, pressed); break;
+            case VirtualKey::K:
+            case VirtualKey::Subtract: EdenXbox::SetKeyPressed(Key::Minus, pressed); break;
+            case VirtualKey::X: EdenXbox::SetKeyPressed(Key::X, pressed); break;
+            case VirtualKey::Y: EdenXbox::SetKeyPressed(Key::Y, pressed); break;
             case VirtualKey::Q:
                 if (pressed) {
                     EdenXbox::RequestQuit();
@@ -907,6 +1038,13 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                                       : line == "astc=cpu" ? Astc::Cpu
                                                           : Astc::Bc3;
                         WriteDiag("boot.cfg: ASTC " + line.substr(5));
+                    } else if (line == "fastmem=0" || line == "fastmem=1") {
+                        config.fastmem = line == "fastmem=1";
+                        WriteDiag(std::string("boot.cfg: fastmem ") +
+                                  (config.fastmem ? "on" : "off"));
+                    } else if (line == "async_shaders=0") {
+                        config.async_shaders = false;
+                        WriteDiag("boot.cfg: asynchronous shaders off");
                     } else if (line == "play=1") {
                         config.play = true;
                         WriteDiag("boot.cfg: played by hand, no time limit or frame dumps");

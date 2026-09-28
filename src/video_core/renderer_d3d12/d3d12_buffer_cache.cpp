@@ -199,7 +199,7 @@ u64 BufferCacheRuntime::GetDeviceLocalMemory() const {
     return budget != 0 ? budget : 4ULL * 1024 * 1024 * 1024;
 }
 u64 BufferCacheRuntime::GetDeviceMemoryUsage() const {
-    return device.QueryVideoMemory().CurrentUsage;
+    return device.CacheMemoryUsage();
 }
 StagingBufferRef BufferCacheRuntime::UploadStagingBuffer(size_t size) { return staging.Request(size, MemoryUsage::Upload); }
 StagingBufferRef BufferCacheRuntime::DownloadStagingBuffer(size_t size, bool deferred) { return staging.Request(size, MemoryUsage::Download, deferred); }

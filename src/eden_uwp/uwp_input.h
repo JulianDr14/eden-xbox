@@ -39,9 +39,9 @@ struct InputStep {
 /// LS_UP LS_DOWN LS_LEFT LS_RIGHT and the RS_ ones. Without a duration a step lasts 200 ms.
 [[nodiscard]] std::optional<InputStep> ParseInputStep(std::string_view spec);
 
-/// Keyboard keys a PC run maps to the controller: C/V are L/R, B/N are A/B, W/A/S/D the left
-/// stick. The CoreWindow's key events set them (UI thread); the input thread reads them.
-enum class Key : u32 { L, R, A, B, StickUp, StickDown, StickLeft, StickRight };
+/// Keyboard keys a PC run maps to the controller: C/V are L/R, B/N are A/B, M (or numpad +) is
+/// Plus, K (or numpad -) is Minus, X/Y are X/Y, W/A/S/D the left stick. The CoreWindow's key events set them (UI thread); the input thread reads them.
+enum class Key : u32 { L, R, A, B, StickUp, StickDown, StickLeft, StickRight, Plus, Minus, X, Y };
 void SetKeyPressed(Key key, bool pressed);
 
 /// Q on the keyboard: the player asked to close the app (play mode shuts the guest down).

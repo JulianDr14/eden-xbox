@@ -56,10 +56,15 @@ void ReportRemovedAfter(HRESULT reason, const std::string& what) {
 
 namespace {
 bool gpu_based_validation = false;
+std::atomic<AppMemoryQuery> app_memory_query{nullptr};
 } // Anonymous namespace
 
 void SetGpuBasedValidation(bool enabled) {
     gpu_based_validation = enabled;
+}
+
+void SetAppMemoryQuery(AppMemoryQuery query) {
+    app_memory_query.store(query, std::memory_order_release);
 }
 
 Device::Device() {
@@ -100,10 +105,12 @@ Device::Device() {
                   "D3D12CreateDevice");
     if (debug_layer && SUCCEEDED(device.As(&info_queue))) {
         // Guest images are created before the guest says what it clears them to, so every
-        // clear is "slower than it could be" by design; hide that one.
-        std::array<D3D12_MESSAGE_ID, 2> hidden{
+        // clear is "slower than it could be" by design; hide that one. Guest pixel shaders often
+        // write more outputs than the draw binds (harmless, writes are discarded): hide it too.
+        std::array<D3D12_MESSAGE_ID, 3> hidden{
             D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
             D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
+            D3D12_MESSAGE_ID_CREATEGRAPHICSPIPELINESTATE_RENDERTARGETVIEW_NOT_SET,
         };
         D3D12_INFO_QUEUE_FILTER filter{};
         filter.DenyList.NumIDs = static_cast<UINT>(hidden.size());
@@ -144,6 +151,7 @@ Device::Device() {
     }
 
     LogCapabilities();
+    initial_budget = QueryVideoMemory().Budget;
 }
 
 void Device::LogDebugMessages() {
@@ -433,6 +441,19 @@ void Device::LogCapabilities() const {
         LOG_INFO(Render, "D3D12: local video memory budget {} MiB, in use {} MiB",
                  local.Budget >> 20, local.CurrentUsage >> 20);
     }
+}
+
+u64 Device::CacheMemoryUsage() const {
+    const DXGI_QUERY_VIDEO_MEMORY_INFO local = QueryVideoMemory();
+    const AppMemoryQuery query = app_memory_query.load(std::memory_order_acquire);
+    u64 used{};
+    u64 limit{};
+    if (query == nullptr || initial_budget == 0 || !query(used, limit) || limit == 0) {
+        return local.CurrentUsage;
+    }
+    const u64 app_free = limit > used ? limit - used : 0;
+    const u64 usage = initial_budget > app_free ? initial_budget - app_free : 0;
+    return (std::max)(usage, local.CurrentUsage);
 }
 
 DXGI_QUERY_VIDEO_MEMORY_INFO Device::QueryVideoMemory() const {

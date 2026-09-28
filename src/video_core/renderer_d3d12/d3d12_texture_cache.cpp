@@ -339,6 +339,55 @@ bool logged_no_blit_helper = false;
 bool logged_missing_rtv = false;
 bool logged_min_max_filter = false;
 bool logged_srv_fallback = false;
+bool logged_view_family = false;
+
+/// The typeless format a DXGI format belongs to (views may only use formats of their resource's
+/// family). Formats without a family are their own.
+DXGI_FORMAT TypelessFamily(DXGI_FORMAT format) {
+    struct Family {
+        u32 first; ///< the TYPELESS format
+        u32 last;
+    };
+    // DXGI lists each family's typed formats right after its typeless one.
+    static constexpr Family FAMILIES[] = {
+        {DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_SINT},
+        {DXGI_FORMAT_R32G32B32_TYPELESS, DXGI_FORMAT_R32G32B32_SINT},
+        {DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R16G16B16A16_SINT},
+        {DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_SINT},
+        {DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_X32_TYPELESS_G8X24_UINT},
+        {DXGI_FORMAT_R10G10B10A2_TYPELESS, DXGI_FORMAT_R10G10B10A2_UINT},
+        {DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_SINT},
+        {DXGI_FORMAT_R16G16_TYPELESS, DXGI_FORMAT_R16G16_SINT},
+        {DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32_SINT},
+        {DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_X24_TYPELESS_G8_UINT},
+        {DXGI_FORMAT_R8G8_TYPELESS, DXGI_FORMAT_R8G8_SINT},
+        {DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_SINT},
+        {DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R8_SINT},
+        {DXGI_FORMAT_BC1_TYPELESS, DXGI_FORMAT_BC1_UNORM_SRGB},
+        {DXGI_FORMAT_BC2_TYPELESS, DXGI_FORMAT_BC2_UNORM_SRGB},
+        {DXGI_FORMAT_BC3_TYPELESS, DXGI_FORMAT_BC3_UNORM_SRGB},
+        {DXGI_FORMAT_BC4_TYPELESS, DXGI_FORMAT_BC4_SNORM},
+        {DXGI_FORMAT_BC5_TYPELESS, DXGI_FORMAT_BC5_SNORM},
+        {DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB},
+        {DXGI_FORMAT_B8G8R8X8_TYPELESS, DXGI_FORMAT_B8G8R8X8_UNORM_SRGB},
+        {DXGI_FORMAT_BC6H_TYPELESS, DXGI_FORMAT_BC6H_SF16},
+        {DXGI_FORMAT_BC7_TYPELESS, DXGI_FORMAT_BC7_UNORM_SRGB},
+    };
+    // The plain BGRA formats sit apart from their typeless ones.
+    if (format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+        return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    }
+    if (format == DXGI_FORMAT_B8G8R8X8_UNORM) {
+        return DXGI_FORMAT_B8G8R8X8_TYPELESS;
+    }
+    const auto value = static_cast<u32>(format);
+    for (const Family& family : FAMILIES) {
+        if (value >= family.first && value <= family.last) {
+            return static_cast<DXGI_FORMAT>(family.first);
+        }
+    }
+    return format;
+}
 
 /// Typed UAV stores every feature level 11.0 device supports ("Format support for Direct3D
 /// feature level 11.0 hardware").
@@ -459,7 +508,7 @@ void TextureCacheRuntime::FreeDeferredStagingBuffer(StagingBufferRef& ref) { sta
 void TextureCacheRuntime::TickFrame() { staging.TickFrame(); }
 u64 TextureCacheRuntime::GetDeviceLocalMemory() const { return device.QueryVideoMemory().Budget; }
 u64 TextureCacheRuntime::GetDeviceMemoryUsage() const {
-    return device.QueryVideoMemory().CurrentUsage;
+    return device.CacheMemoryUsage();
 }
 
 bool TextureCacheRuntime::SupportsView(DXGI_FORMAT format, D3D12_FORMAT_SUPPORT1 support1,
@@ -597,6 +646,9 @@ Image::~Image() {
     if (runtime && slice_array) {
         runtime->scheduler.DeferRelease(std::move(slice_array));
     }
+    if (runtime && reinterpreted) {
+        runtime->scheduler.DeferRelease(std::move(reinterpreted));
+    }
 }
 
 Image& Image::operator=(Image&& other) noexcept {
@@ -606,6 +658,9 @@ Image& Image::operator=(Image&& other) noexcept {
         }
         if (runtime && slice_array) {
             runtime->scheduler.DeferRelease(std::move(slice_array));
+        }
+        if (runtime && reinterpreted) {
+            runtime->scheduler.DeferRelease(std::move(reinterpreted));
         }
         static_cast<VideoCommon::ImageBase&>(*this) = std::move(other);
         allocation_tick = other.allocation_tick;
@@ -619,6 +674,10 @@ Image& Image::operator=(Image&& other) noexcept {
         slice_array = std::move(other.slice_array);
         slice_array_state = other.slice_array_state;
         slice_array_version = other.slice_array_version;
+        reinterpreted = std::move(other.reinterpreted);
+        reinterpreted_state = other.reinterpreted_state;
+        reinterpreted_version = other.reinterpreted_version;
+        reinterpreted_ahead = other.reinterpreted_ahead;
     }
     return *this;
 }
@@ -631,6 +690,9 @@ u32 Image::Subresource(s32 level, s32 layer, u32 plane) const noexcept {
 
 void Image::Transition(D3D12_RESOURCE_STATES next) {
     if (!resource) return;
+    if (reinterpreted_ahead) {
+        WriteBackReinterpreted();
+    }
     if (state == next) {
         // Writes in one state are unordered without a barrier (see Buffer::Transition).
         if (next == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
@@ -682,11 +744,132 @@ ID3D12Resource* Image::SliceArray() {
     ThrowIfFailed(runtime->device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
                   D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&slice_array)),
                   "Create 3D image slice array");
+    CheckRemovedAfter(runtime->device.Get(), [&] {
+        return fmt::format("creating the slice array of 3D image {} (format {} {}x{}x{} levels {})",
+                           info.format, static_cast<u32>(desc.Format), desc.Width, desc.Height,
+                           desc.DepthOrArraySize, desc.MipLevels);
+    });
     slice_array_state = D3D12_RESOURCE_STATE_COMMON;
     slice_array_version = 0;
     LOG_INFO(Render, "D3D12: 3D image {} {}x{}x{} @{:x} read as a 2D array through a slice copy",
              info.format, desc.Width, desc.Height, desc.DepthOrArraySize, gpu_addr);
     return slice_array.Get();
+}
+
+ID3D12Resource* Image::Reinterpreted(DXGI_FORMAT family) {
+    if (reinterpreted) {
+        return reinterpreted->GetDesc().Format == family ? reinterpreted.Get() : nullptr;
+    }
+    if (!resource) {
+        return nullptr;
+    }
+    D3D12_RESOURCE_DESC desc = resource->GetDesc();
+    if (desc.SampleDesc.Count > 1) {
+        return nullptr; // multisampled texels cannot go through a buffer
+    }
+    desc.Format = family;
+    desc.Flags &= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
+    ThrowIfFailed(runtime->device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                  D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&reinterpreted)),
+                  "Create reinterpreted image");
+    CheckRemovedAfter(runtime->device.Get(), [&] {
+        return fmt::format("creating the DXGI {} copy of image {}", static_cast<u32>(family),
+                           info.format);
+    });
+    reinterpreted_state = D3D12_RESOURCE_STATE_COMMON;
+    reinterpreted_version = 0;
+    reinterpreted_ahead = false;
+    LOG_INFO(Render, "D3D12: image {} {}x{} @{:x} viewed as DXGI {} through a copy", info.format,
+             desc.Width, desc.Height, gpu_addr, static_cast<u32>(family));
+    return reinterpreted.Get();
+}
+
+void Image::RefreshReinterpreted() {
+    if (!reinterpreted || reinterpreted_ahead || reinterpreted_version == write_version ||
+        !CanTransfer()) {
+        return;
+    }
+    Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    TransitionReinterpreted(D3D12_RESOURCE_STATE_COPY_DEST);
+    CopyThroughBuffer(resource.Get(), reinterpreted.Get());
+    reinterpreted_version = write_version;
+}
+
+void Image::WriteBackReinterpreted() {
+    // Cleared first: the Transition below comes back here otherwise.
+    reinterpreted_ahead = false;
+    TransitionReinterpreted(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+    CopyThroughBuffer(reinterpreted.Get(), resource.Get());
+    reinterpreted_version = write_version;
+}
+
+void Image::ReadReinterpreted() {
+    if (!reinterpreted) {
+        return;
+    }
+    RefreshReinterpreted();
+    TransitionReinterpreted(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+}
+
+void Image::RenderToReinterpreted() {
+    if (!reinterpreted) {
+        return;
+    }
+    RefreshReinterpreted();
+    TransitionReinterpreted(D3D12_RESOURCE_STATE_RENDER_TARGET);
+    reinterpreted_ahead = true;
+}
+
+void Image::TransitionReinterpreted(D3D12_RESOURCE_STATES next) {
+    if (reinterpreted_state != next) {
+        TransitionBuffer(runtime->scheduler.CommandList(), reinterpreted.Get(),
+                         reinterpreted_state, next);
+        reinterpreted_state = next;
+    }
+}
+
+void Image::CopyThroughBuffer(ID3D12Resource* src, ID3D12Resource* dst) {
+    // Same texel size, so both resources share the buffer layout: each subresource goes to its
+    // footprint in the source's format and comes back in the destination's. The caller has put
+    // src in COPY_SOURCE and dst in COPY_DEST.
+    const D3D12_RESOURCE_DESC src_desc = src->GetDesc();
+    const DXGI_FORMAT dst_format = dst->GetDesc().Format;
+    const u32 count =
+        src_desc.MipLevels * (src_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                  ? 1U
+                                  : src_desc.DepthOrArraySize);
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(count);
+    u64 total_bytes = 0;
+    runtime->device.Get()->GetCopyableFootprints(&src_desc, 0, count, 0, footprints.data(),
+                                                 nullptr, nullptr, &total_bytes);
+    ComPtr<ID3D12Resource> transfer = CreateTransferBuffer(runtime->device.Get(), total_bytes);
+    auto* const commands = runtime->scheduler.CommandList();
+    for (u32 subresource = 0; subresource < count; ++subresource) {
+        const D3D12_TEXTURE_COPY_LOCATION from{
+            .pResource = src, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            .SubresourceIndex = subresource};
+        const D3D12_TEXTURE_COPY_LOCATION to{.pResource = transfer.Get(),
+                                             .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                                             .PlacedFootprint = footprints[subresource]};
+        commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    }
+    TransitionBuffer(commands, transfer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                     D3D12_RESOURCE_STATE_COPY_SOURCE);
+    for (u32 subresource = 0; subresource < count; ++subresource) {
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = footprints[subresource];
+        footprint.Footprint.Format = dst_format;
+        const D3D12_TEXTURE_COPY_LOCATION from{.pResource = transfer.Get(),
+                                               .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                                               .PlacedFootprint = footprint};
+        const D3D12_TEXTURE_COPY_LOCATION to{
+            .pResource = dst, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            .SubresourceIndex = subresource};
+        commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    }
+    runtime->scheduler.DeferRelease(std::move(transfer));
 }
 
 void Image::RefreshSliceArray() {
@@ -1494,7 +1677,8 @@ void TextureCacheRuntime::BlitImage(Framebuffer*, ImageView& dst, ImageView& src
             return;
         }
         src_image->Transition(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        dst_image->Transition(D3D12_RESOURCE_STATE_RENDER_TARGET);
+        src.PrepareRead(Shader::TextureType::Color2D);
+        dst.PrepareRender();
         const bool linear = filter == Tegra::Engines::Fermi2D::Filter::Bilinear;
         blit_helper->BlitColor({dst.RenderTarget(), Format(dst.format).view, 1},
                                src.Handle(Shader::TextureType::Color2D),
@@ -1562,6 +1746,9 @@ void TextureCacheRuntime::AccelerateImageUpload(
                                .PlaneSlice = 0},
         };
         device.Get()->CreateUnorderedAccessView(image.Handle(), nullptr, &desc, uav);
+        CheckRemovedAfter(device.Get(), [&] {
+            return fmt::format("ASTC decode UAV (level {} layers {})", swizzle.level, layers);
+        });
         blit_helper->DecodeAstc({
             .source = base + swizzle.buffer_offset,
             .destination = uav,
@@ -1639,6 +1826,44 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
         }
     }
     const bool is_msaa = source.info.num_samples > 1;
+    // The guest views an image in any format of the same size, and Vulkan allows it (mutable
+    // format). D3D12 needs the view in the resource's typeless family: a view outside it is an
+    // invalid call, which the PC's driver tolerates and the Series answers by removing the
+    // device (an R16G16_FLOAT SRV in Mario Wonder, 0.2.56-0.2.57). Such views read the image in
+    // its own format instead: maybe wrong colors on one texture, but the device lives.
+    const DXGI_FORMAT resource_family = TypelessFamily(resource_desc.Format);
+    const FormatInfo& own_format = source.TransferFormat();
+    srv_resource = image;
+    if (const DXGI_FORMAT view_family = TypelessFamily(format_info.srv);
+        view_family != resource_family) {
+        // Same texel size and plain texels: read a copy in the view's family, refreshed before
+        // each read (PrepareRead). Otherwise read the image in its own format.
+        using namespace VideoCore::Surface;
+        const bool plain = DefaultBlockWidth(info.format) == 1 &&
+                           DefaultBlockHeight(info.format) == 1 &&
+                           DefaultBlockWidth(source.info.format) == 1 &&
+                           DefaultBlockHeight(source.info.format) == 1 &&
+                           GetFormatType(source.info.format) != SurfaceType::DepthStencil;
+        ID3D12Resource* const copy =
+            plain && BytesPerBlock(info.format) == BytesPerBlock(source.info.format)
+                ? source.Reinterpreted(view_family)
+                : nullptr;
+        if (copy) {
+            srv_resource = copy;
+        } else {
+            WarnOnce(logged_view_family, "view of {} (DXGI {}) on an image of {} (DXGI {}) is "
+                     "not castable in D3D12; sampling it as DXGI {}",
+                     info.format, static_cast<u32>(format_info.srv), source.info.format,
+                     static_cast<u32>(resource_desc.Format), static_cast<u32>(own_format.srv));
+            format_info.srv = own_format.srv;
+        }
+    }
+    // Render targets follow the SRVs: on the copy when there is one in the view's family.
+    const bool view_on_copy = srv_resource != image &&
+                              TypelessFamily(format_info.view) == TypelessFamily(format_info.srv);
+    if (!view_on_copy && TypelessFamily(format_info.view) != resource_family) {
+        format_info.view = own_format.view;
+    }
 
     srv_params = {
         .format = format_info.srv,
@@ -1688,7 +1913,9 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
                 rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
                 rtv_desc.Texture2DArray = {base_level, base_layer, layers, 0};
             }
-            runtime->device.Get()->CreateRenderTargetView(image, &rtv_desc, rtv);
+            rtv_on_copy = view_on_copy;
+            runtime->device.Get()->CreateRenderTargetView(view_on_copy ? srv_resource : image,
+                                                          &rtv_desc, rtv);
             CheckRemovedAfter(runtime->device.Get(), [&] {
                 return fmt::format("RTV of {} (format {} dim {} level {} layers {}+{})",
                                    info.format, static_cast<u32>(rtv_desc.Format),
@@ -1729,11 +1956,13 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
                                layers);
         });
     }
+    // The UAV stays on the image (the copy has no UAV flag), so it needs the image's family.
+    const DXGI_FORMAT uav_format = view_on_copy ? own_format.view : format_info.view;
     if ((resource_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) &&
-        runtime->SupportsView(format_info.view, D3D12_FORMAT_SUPPORT1_NONE,
+        runtime->SupportsView(uav_format, D3D12_FORMAT_SUPPORT1_NONE,
                               D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
         uav = runtime->view_descriptors.Allocate();
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc{.Format = format_info.view};
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc{.Format = uav_format};
         if (is_3d) {
             uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
             uav_desc.Texture3D = {base_level, 0, static_cast<u32>(-1)};
@@ -1829,6 +2058,13 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
             desc.Texture2DArray = {p.base_level, p.levels, 0, depth, 0, 0.0f};
             const D3D12_CPU_DESCRIPTOR_HANDLE handle = runtime->view_descriptors.Allocate();
             runtime->device.Get()->CreateShaderResourceView(slices, &desc, handle);
+            CheckRemovedAfter(runtime->device.Get(), [&] {
+                return fmt::format("slice array SRV of {} (format {} levels {}+{} of {}, "
+                                   "slices {}, resource format {})",
+                                   format, static_cast<u32>(desc.Format), p.base_level, p.levels,
+                                   slices->GetDesc().MipLevels, depth,
+                                   static_cast<u32>(slices->GetDesc().Format));
+            });
             return handle;
         }
     }
@@ -1904,8 +2140,16 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
         }
         break;
     }
+    // The tripwire only names the first checked call after a removal: this one tells whether the
+    // device was already gone before the SRV (the Series named the same R16G16_FLOAT SRV three
+    // times, 0.2.56-0.2.57).
+    CheckRemovedAfter(runtime->device.Get(), [&] {
+        return fmt::format("something unchecked before an SRV of {} as type {}", format,
+                           static_cast<u32>(texture_type));
+    });
     const D3D12_CPU_DESCRIPTOR_HANDLE handle = runtime->view_descriptors.Allocate();
-    runtime->device.Get()->CreateShaderResourceView(image, &desc, handle);
+    runtime->device.Get()->CreateShaderResourceView(srv_resource ? srv_resource : image, &desc,
+                                                    handle);
     CheckRemovedAfter(runtime->device.Get(), [&] {
         return fmt::format("SRV of {} as type {} (format {} dim {} levels {}+{} layers {}+{} of "
                            "{}, resource dim {} msaa {})",
@@ -1923,11 +2167,33 @@ Image* ImageView::SourceImage() const noexcept {
 
 void ImageView::TransitionImage(D3D12_RESOURCE_STATES state) const {
     if (slot_images && image) {
+        // Reads through the reinterpreted copy leave the image alone: touching it would copy the
+        // texels back and take the copy out of its readable state.
+        if (srv_resource && srv_resource != image &&
+            (state & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) == 0) {
+            (*slot_images)[image_id].ReadReinterpreted();
+            return;
+        }
         (*slot_images)[image_id].Transition(state);
     }
 }
 
+void ImageView::PrepareRender() const {
+    if (Image* const source = SourceImage()) {
+        if (rtv_on_copy) {
+            source->RenderToReinterpreted();
+        } else {
+            source->Transition(D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
+    }
+}
+
 void ImageView::PrepareRead(Shader::TextureType texture_type) const {
+    if (srv_resource && srv_resource != image) {
+        if (Image* const source = SourceImage()) {
+            source->ReadReinterpreted();
+        }
+    }
     if (texture_type == Shader::TextureType::ColorArray2D &&
         srv_params.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
         if (Image* const source = SourceImage()) {
@@ -1949,13 +2215,13 @@ void ImageView::Release() {
     runtime = nullptr;
 }
 ImageView::ImageView(ImageView&& other) noexcept : VideoCommon::ImageViewBase{std::move(other)}, runtime{std::exchange(other.runtime, nullptr)},
-    slot_images{other.slot_images}, image{other.image}, srv_params{other.srv_params}, natural_type{other.natural_type},
-    srvs{std::exchange(other.srvs, {})}, uav{other.uav}, rtv{other.rtv}, dsv{other.dsv}, dsv_read_only{other.dsv_read_only}, buffer_size{other.buffer_size} {}
+    slot_images{other.slot_images}, image{other.image}, srv_resource{other.srv_resource}, srv_params{other.srv_params}, natural_type{other.natural_type},
+    srvs{std::exchange(other.srvs, {})}, uav{other.uav}, rtv{other.rtv}, rtv_on_copy{other.rtv_on_copy}, dsv{other.dsv}, dsv_read_only{other.dsv_read_only}, buffer_size{other.buffer_size} {}
 ImageView& ImageView::operator=(ImageView&& other) noexcept {
     if (this != &other) { Release(); static_cast<VideoCommon::ImageViewBase&>(*this) = std::move(other);
-        runtime = std::exchange(other.runtime, nullptr); slot_images = other.slot_images; image = other.image;
+        runtime = std::exchange(other.runtime, nullptr); slot_images = other.slot_images; image = other.image; srv_resource = other.srv_resource;
         srv_params = other.srv_params; natural_type = other.natural_type; srvs = std::exchange(other.srvs, {});
-        uav = other.uav; rtv = other.rtv; dsv = other.dsv; dsv_read_only = other.dsv_read_only; buffer_size = other.buffer_size; }
+        uav = other.uav; rtv = other.rtv; rtv_on_copy = other.rtv_on_copy; dsv = other.dsv; dsv_read_only = other.dsv_read_only; buffer_size = other.buffer_size; }
     return *this;
 }
 bool ImageView::IsRescaled() const noexcept { return slot_images && (*slot_images)[image_id].IsRescaled(); }
@@ -2038,6 +2304,9 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
         }
         colors[index] = view->RenderTarget();
         color_images[index] = view->image_id;
+        if (view->RenderTargetOnCopy()) {
+            copy_colors |= 1U << index;
+        }
         color_formats[index] = runtime.Format(view->format).view;
         images = view->slot_images ? view->slot_images : images;
         num_colors = static_cast<u32>(index) + 1;
@@ -2080,8 +2349,14 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
 void Framebuffer::PrepareAttachments(bool depth_sampled) const {
     if (!images) return;
     for (size_t index = 0; index < num_colors; ++index) {
-        if (color_images[index] != ImageId{}) {
-            (*images)[color_images[index]].Transition(D3D12_RESOURCE_STATE_RENDER_TARGET);
+        if (color_images[index] == ImageId{}) {
+            continue;
+        }
+        Image& image = (*images)[color_images[index]];
+        if ((copy_colors >> index) & 1) {
+            image.RenderToReinterpreted();
+        } else {
+            image.Transition(D3D12_RESOURCE_STATE_RENDER_TARGET);
         }
     }
     if (depth_image != ImageId{}) {

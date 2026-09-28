@@ -47,6 +47,13 @@ void CheckRemovedAfter(ID3D12Device* device, Describe&& describe) {
 /// from now on. PC only.
 void SetGpuBasedValidation(bool enabled);
 
+/// The app's memory in use and its limit, false when unknown. On the Xbox the GPU allocates from
+/// the same 5 GiB budget as the rest of the process, which DXGI does not show.
+using AppMemoryQuery = bool (*)(u64& used, u64& limit);
+/// Set by the frontend before the renderer is created; makes the caches' memory usage count the
+/// whole app (see Device::CacheMemoryUsage).
+void SetAppMemoryQuery(AppMemoryQuery query);
+
 class Device {
 public:
     Device();
@@ -70,6 +77,13 @@ public:
 
     /// Local (device) memory budget and usage; zeroes if the adapter cannot report them.
     [[nodiscard]] DXGI_QUERY_VIDEO_MEMORY_INFO QueryVideoMemory() const;
+
+    /// Memory usage for the texture and buffer caches' garbage collection, against the budget
+    /// they read at startup. With an app memory query it is that budget minus what the app has
+    /// left, so the caches start evicting as the process nears its limit whoever allocates (the
+    /// Series ran out at 4.8 of 5 GiB with DXGI still reporting room, 0.2.56). Otherwise the GPU
+    /// usage DXGI reports.
+    [[nodiscard]] u64 CacheMemoryUsage() const;
 
     /// Signals the queue and returns the value that marks this point.
     u64 Signal();
@@ -101,6 +115,7 @@ private:
     HANDLE fence_event{};
     u64 next_fence_value{1};
     std::string adapter_name;
+    u64 initial_budget{}; ///< local video memory budget when the device was created
 };
 
 } // namespace D3D12

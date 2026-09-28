@@ -138,7 +138,8 @@ if ($BootNro -or $gameName -or $BootCfg.Count -gt 0) {
     if ($gameName) {
         $cfg += "game=$gameName`n"
     }
-    foreach ($line in $BootCfg) {
+    # powershell -File hands "-BootCfg a=1,b=2" over as one string: split it here.
+    foreach ($line in ($BootCfg | ForEach-Object { $_ -split ',' } | Where-Object { $_ })) {
         $cfg += "$line`n"
         Write-Host "boot.cfg : $line"
     }

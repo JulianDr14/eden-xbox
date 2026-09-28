@@ -201,6 +201,18 @@ public:
     /// draw or dispatch that reads SliceArray().
     void RefreshSliceArray();
 
+    /// This image's texels in another typeless family of the same texel size, for views D3D12
+    /// cannot cast to (the guest reads and renders an R32 image as R16G16, Mario Wonder's world
+    /// map). A copy through a buffer, created on first use; null when it cannot be made
+    /// (multisampled, or the image already has one in another family).
+    [[nodiscard]] ID3D12Resource* Reinterpreted(DXGI_FORMAT family);
+    /// Brings the copy up to date and makes it readable; call before a draw or dispatch that
+    /// samples Reinterpreted().
+    void ReadReinterpreted();
+    /// Brings the copy up to date and makes it a render target. The copy then holds the newest
+    /// texels until the image itself is used again (any Transition copies them back).
+    void RenderToReinterpreted();
+
     u64 allocation_tick{};
 
 private:
@@ -211,6 +223,11 @@ private:
     [[nodiscard]] u64 TransferBytes(std::span<const VideoCommon::BufferImageCopy> copies) const;
     /// False (logged once) when this image's data cannot be transferred yet.
     [[nodiscard]] bool CanTransfer() const;
+    /// Copies the texels between the image and its reinterpreted copy through a buffer.
+    void RefreshReinterpreted();
+    void WriteBackReinterpreted();
+    void CopyThroughBuffer(ID3D12Resource* src, ID3D12Resource* dst);
+    void TransitionReinterpreted(D3D12_RESOURCE_STATES next);
     /// Hash and transparency of a CPU-decoded upload (first ones only), to compare machines.
     void LogConvertedUpload(const u8* data, const CopyLayout& layout,
                             const VideoCommon::BufferImageCopy& copy) const;
@@ -243,6 +260,11 @@ private:
     ComPtr<ID3D12Resource> slice_array;
     D3D12_RESOURCE_STATES slice_array_state{D3D12_RESOURCE_STATE_COMMON};
     u64 slice_array_version{};
+    ComPtr<ID3D12Resource> reinterpreted;
+    D3D12_RESOURCE_STATES reinterpreted_state{D3D12_RESOURCE_STATE_COMMON};
+    u64 reinterpreted_version{};
+    /// The copy was rendered to and the image does not have those texels yet.
+    bool reinterpreted_ahead{};
 };
 
 class ImageView : public VideoCommon::ImageViewBase {
@@ -271,6 +293,10 @@ public:
         return uav;
     }
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE RenderTarget() const noexcept { return rtv; }
+    /// The RTV is on the image's reinterpreted copy (Image::RenderToReinterpreted before drawing).
+    [[nodiscard]] bool RenderTargetOnCopy() const noexcept { return rtv_on_copy; }
+    /// Readies the image for RenderTarget(): the copy or the image itself as a render target.
+    void PrepareRender() const;
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthStencil() const noexcept { return dsv; }
     /// DSV with depth (and stencil) read-only, for draws that also sample the image.
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilReadOnly() const noexcept {
@@ -310,11 +336,14 @@ private:
     TextureCacheRuntime* runtime{};
     SlotVector<Image>* slot_images{};
     ID3D12Resource* image{};
+    /// The resource the SRVs read: image, or the image's reinterpreted copy.
+    ID3D12Resource* srv_resource{};
     SrvParams srv_params{};
     Shader::TextureType natural_type{Shader::TextureType::Color2D};
     mutable std::array<D3D12_CPU_DESCRIPTOR_HANDLE, Shader::NUM_TEXTURE_TYPES> srvs{};
     D3D12_CPU_DESCRIPTOR_HANDLE uav{};
     D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+    bool rtv_on_copy{};
     D3D12_CPU_DESCRIPTOR_HANDLE dsv{};
     D3D12_CPU_DESCRIPTOR_HANDLE dsv_read_only{};
     u32 buffer_size{};
@@ -416,6 +445,7 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE depth_read_only{};
     u32 num_colors{};
     u32 missing_colors{};
+    u32 copy_colors{}; ///< render targets whose RTV is on the image's reinterpreted copy
     VideoCommon::Extent2D extent{};
     bool has_stencil{};
     bool is_rescaled{};

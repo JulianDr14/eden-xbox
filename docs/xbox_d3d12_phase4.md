@@ -1483,6 +1483,254 @@ El juego llega al gameplay a ~17 ms por frame, y la imagen es la misma.
     1.3–3.9 s.
   - En zonas ya vistas va fijo a 33.3 ms.
 
+**0.2.53.0: fastmem y shaders asíncronos**
+- **Fastmem en UWP** (`common/host_memory.cpp`). Con `cpuopt_fastmem`, `HostMemory` crea:
+  - la DRAM como sección `SEC_RESERVE` de 4 GiB, mapeada entera como backing lineal;
+  - el placeholder de 512 GiB, que `Map()` llena con vistas de esa sección.
+
+  Si algo falla, vuelve al backing privado de antes y fastmem queda apagado.
+  - **Commit bajo demanda:** el handler vectorizado cubre el backing y la arena. Hace
+    `VirtualQuery`, y solo si la página es `MEM_MAPPED` y está reservada hace commit hasta el
+    final del bloque de 64 KiB. Una página ya comprometida en RW se reintenta (otro hilo ganó la
+    carrera); el resto pasa a dynarmic.
+  - **`Protect()`:** una vista de la sección no deja cambiar la protección de páginas aún
+    reservadas. Si falla, hace commit del rango y reintenta.
+  - **`ClearBackingRegion`:** una vista no se puede decomprometer. Solo pone a cero las regiones
+    ya comprometidas, porque las reservadas leen cero al comprometerse. A diferencia del backing
+    privado, la memoria comprometida ya no se devuelve.
+  - `Settings::IsFastmemEnabled()` en UWP sigue a `cpuopt_fastmem`. `boot.cfg` `fastmem=0` lo
+    apaga.
+- **Trampa W^X en dynarmic:** `SetFastmemCallback` escribe el handler en el `UNWIND_INFO`, que
+  está en el espacio de código. Tras `PreludeComplete()` esa página es RX y la escritura habría
+  fallado. Ahora se registra antes, en A32 y en A64.
+- **Shaders asíncronos:** activos por defecto (`boot.cfg` `async_shaders=0` los apaga).
+  - Los draws con pipeline aún compilándose se saltan, salvo los pequeños (≤ 6 vértices o
+    índices), que esperan.
+  - Compute siempre espera: un dispatch saltado deja datos viejos.
+- Se quitó la prueba de fastmem del arranque.
+- **PC (150 s automáticos):** fastmem activo y sin errores de memoria; los fallos de fastmem
+  (lecturas a páginas `NOACCESS`) los resuelve dynarmic. Frame medio ~20 ms frente a ~31 ms en la
+  0.2.51.
+
+**Resultado de la 0.2.53.0 en la Series:**
+- Fastmem arrancó (arena creada) y el juego iba a **18.7 ms por frame** (antes 33.3), sin esperas
+  de pipeline.
+- A los 60 s, antes de entrar al nivel y con 3 GiB de memoria, `abort()`: `UNREACHABLE` en
+  `FastmemCallback`. Hubo un fallo dentro del código JIT en una dirección que no es un punto de
+  parcheo de fastmem.
+- El logger de first-chance ya había gastado sus 32 líneas en los fallos normales de fastmem, así
+  que el fallo que mató el proceso no quedó registrado.
+
+**0.2.54.0 (diagnóstico):**
+- Cada hilo guarda su última excepción y el `abort` la vuelca (`last exception on this thread`).
+- El `UNREACHABLE` de dynarmic dice la RIP, su desplazamiento dentro del bloque de código, dónde
+  empiezan los bloques (antes están los thunks del prólogo) y cuántos puntos de parcheo había.
+
+**Resultado de la 0.2.54.0 en la Series:** otra vez `abort()`, a los 63 s con 2.8 GiB de uso.
+- La última excepción del hilo fue una **escritura a una página `reserved mapped`** de la sección
+  (backing), desde un bloque JIT por la ruta de tabla de páginas.
+- El handler de commit bajo demanda devolvió `CONTINUE_SEARCH`, es decir, `VirtualAllocFromApp`
+  no pudo hacer commit. dynarmic recibió un fallo en un punto que no es de parcheo (194184 puntos
+  de parcheo registrados) y llamó a `UNREACHABLE`.
+- **Hipótesis:** la Series limita el commit de secciones por debajo del presupuesto de la app. La
+  prueba de la 0.2.51 ya vio fallar 4 GiB con `SEC_COMMIT` (error 1455) con 6 MiB en uso.
+
+**0.2.55.0:**
+- `Protect()` sobre la sección ya no hace commit de rangos enteros. `ProtectRegion` pasa regiones
+  completas del heap. Ahora solo se protegen las regiones ya comprometidas; las reservadas se
+  saltan si piden RW y solo se comprometen si piden algo más estricto (rasterizador).
+- El `MemoryReport` del diag incluye el commit total y su límite
+  (`AppMemoryReport.TotalCommitUsage/TotalCommitLimit`).
+- En el PC (100 s automáticos) el commit es igual al uso (~4 GiB) y la corrida termina bien.
+
+**Resultado de la 0.2.55.0 en la Series:** mismo `abort()` a los 69 s, con commit total de
+2.8 GiB de 5 GiB. No es el límite general. En las dos caídas la escritura cae justo al inicio de un
+bloque de 64 KiB.
+
+**0.2.56.0 (diagnóstico):**
+- `host_memory` cuenta el commit de sección y guarda el error, la dirección y el tamaño del último
+  commit fallido (`Common::HostMemoryCommitStats`, en heartbeats y en el `abort`). Si falla el
+  bloque de 64 KiB, reintenta solo la página.
+- Sonda al arrancar (`uwp_commit_probe.cpp`, solo con fastmem): hace commit sin tocar, en pasos de
+  64 MiB, en una sección de 4 GiB, después en una segunda de 1 GiB y después en memoria privada.
+
+**Resultado de la sonda en la Series:**
+
+| Memoria | Commit conseguido | Error |
+|---|---|---|
+| Sección `SEC_RESERVE` de 4 GiB | **1152 MiB** | 1455 |
+| Segunda sección de 1 GiB (con la primera llena) | **0 MiB** | 1455 |
+| Privada (reserva de 6 GiB) | 5056 MiB | 1455 |
+
+- La consola limita **toda** la memoria de sección de la app a ~1.1 GiB; la memoria privada llega
+  al presupuesto de 5 GiB.
+- Fastmem con toda la DRAM en una sección no cabe: Wonder necesita más de 1.1 GiB de DRAM, y las
+  páginas de una vista de sección no se pueden descomprometer.
+- En esa corrida el juego no cargó (`status 2`): `powershell -File` pasó
+  `-BootCfg game=wonder.nsp,play=1` como un solo texto. `package-appx.ps1` ahora separa por comas.
+
+**Por qué ~1.1 GiB:** una sección respaldada por el pagefile (`INVALID_HANDLE_VALUE`) se carga al
+commit *del sistema*, no al de la app, y la Xbox no tiene pagefile. Una sección sobre un **archivo
+real** no gasta commit: sus páginas las respalda el propio archivo, y `SEC_COMMIT`/`SEC_RESERVE` no
+aplican.
+
+**0.2.56.0 (misma versión, reempaquetada):** la DRAM de fastmem es una sección sobre un archivo.
+- `OpenBackingFile`:
+  - crea `eden_dram.bin` en la carpeta temporal de la app (`GetTempPathW`, `AC\Temp`) con
+    `CreateFile2`;
+  - el archivo es `FILE_ATTRIBUTE_TEMPORARY` (el sistema intenta no escribirlo a disco) y
+    `FILE_FLAG_DELETE_ON_CLOSE` (se borra al cerrar, también si el proceso muere);
+  - es sparse (`FSCTL_SET_SPARSE`), para que escribir lejos no obligue a llenar de ceros todo lo
+    anterior en disco.
+- `CreateFileMappingFromApp(archivo, PAGE_READWRITE, 4 GiB)`; el resto (vistas, arena, `Protect`)
+  no cambia. Si algo falla, se vuelve a la memoria privada sin fastmem.
+- `ClearBackingRegion`: sobre el archivo todas las páginas figuran como comprometidas, así que solo
+  se escriben las páginas que no están ya a cero; las demás solo se leen (un hueco del archivo se
+  lee como cero y así no se ensucia).
+- El diag dice `DRAM in a sparse file-backed section`.
+- Resultado en el PC (70 s): commit de ~1.8 GiB (antes ~4 GiB), **16.7 ms por frame**; el archivo
+  desaparece al cerrar.
+- Por medir en la Series:
+  - si la Xbox cuenta esas páginas en los 5 GiB de la app;
+  - si hay tirones por escrituras al SSD.
+
+**Resultado de la 0.2.56.1 en la Series:**
+- El archivo y la sección de 4 GiB se crearon, pero la **vista única de 4 GiB falló con error 8**
+  (`ERROR_NOT_ENOUGH_MEMORY`), y el juego corrió sin fastmem (23–58 ms por frame, tirones de
+  segundos).
+- A los 174 s, con 4.6 GiB de memoria, D3D12 se cayó (device removed `0x887A0001`), seguido de un
+  AV en un DLL. Es un problema aparte.
+
+**Documentación:**
+- Microsoft no documenta límites de tamaño de archivo ni de vista para UWP en Xbox.
+- El "límite de 2 GB por archivo en Dev Mode" que citan artículos no se sostiene: `wonder.nsp`
+  (3.51 GiB) se lee bien.
+- El error 8 no es falta de direcciones: la reserva de 4 GiB, y antes la de 512 GiB, funcionaron.
+
+**0.2.56.2:**
+- La sonda prueba, sobre el archivo, una vista de 4 GiB y después vistas de 1 GiB y 256 MiB hasta
+  que falle alguna.
+- `MapBackingViews`: si la vista única falla, parte el placeholder y mapea la DRAM en vistas de
+  1 GiB, o si no de 256 MiB.
+- Las vistas que `Map()` pone en la arena siguen siendo del tamaño de cada región del guest.
+
+**Resultado de la 0.2.56.2 en la Series:**
+
+| Prueba sobre el archivo de 4 GiB | Resultado |
+|---|---|
+| Sección | OK, sparse |
+| Una vista de 4 GiB | error 8 |
+| Vistas de 1 GiB | 1 (1024 MiB), la segunda error 8 |
+| Vistas de 256 MiB | 4 (1024 MiB), la quinta error 8 |
+| Memoria de la app tras escribir un byte por MiB | 8 MiB (las páginas del archivo no cuentan) |
+
+- **La consola limita a ~1 GiB el total de vistas de secciones mapeadas**, da igual el tamaño de
+  cada una o si la sección es del pagefile (1152 MiB de commit) o de un archivo (1024 MiB de
+  vistas).
+- Fastmem por aliasing necesita la vista lineal de la DRAM (4 GiB) más las vistas de la arena, así
+  que en la Series **no cabe completo**. Lo máximo sería ~0.5 GiB de DRAM con fastmem: cada página
+  cuenta dos veces, una en la vista lineal y otra en la arena.
+- El emulador arrancó sin fastmem, por la memoria privada.
+
+**Caída a los 169 s (la misma que la de la 0.2.56.1, a los 174 s):**
+- Ocurre al entrar en la misma zona. Antes hay cientos de `3D image 12 64x64x1 read as a 2D array
+  through a slice copy` (un recurso nuevo por cada uno), frames de 300–800 ms con 640 recursos
+  nuevos, y la memoria de la app en **4.8 GiB de 5 GiB**.
+- Después D3D12 da device removed (`0x887A0001`). La trampa lo detecta tras un SRV Texture2D
+  `R16G16_FLOAT` que es válido: probablemente solo fue la primera comprobación después de la
+  remoción, no la causa.
+- Hipótesis: el presupuesto de memoria (CPU + GPU comparten los 5 GiB). Sin fastmem, la DRAM
+  privada ya ocupa unos 2+ GiB.
+
+**0.2.57.0 (memoria):**
+- Las cachés de texturas y buffers liberaban según el presupuesto de video que da DXGI. En la
+  consola ese presupuesto es 4147 MiB, fijado al arrancar (5120 menos lo que la app ya usaba). Así
+  el GC solo empezaba a liberar con ~2.3 GiB de GPU y en modo agresivo con ~3.5 GiB, aunque la
+  DRAM emulada y el JIT gastan los mismos 5 GiB.
+  - `D3D12::SetAppMemoryQuery`: `uwp_boot` pasa `MemoryManager::AppMemoryUsage/Limit`.
+  - `Device::CacheMemoryUsage` = presupuesto inicial − lo que le queda libre a la app (como
+    mínimo, el uso de GPU). Las cachés usan eso como "memoria usada": el modo de alta prioridad
+    entra con la app en ~3.3 GiB y el agresivo en ~4.5 GiB.
+- Fastmem apagado por defecto (`fastmem=1` en `boot.cfg` lo activa). Se quitó la sonda de commit.
+- Diag:
+  - `emulated DRAM X MiB` (commit de la DRAM privada) en cada línea de memoria;
+  - `memory map:` (commit por tipo, privado por tamaño de reserva y las 12 reservas más grandes)
+    al cargar y cada minuto;
+  - `D3D12 memory: GPU / DXGI budget / caches see` en cada ventana de rendimiento.
+- PC a los 60 s: app 3007 MiB = DRAM 1168 + GPU ~264 + staging 128 + ~1.4 GiB más. Al cargar ya
+  hay 43 reservas de 8–24 MiB (577 MiB), `malloc` grandes que probablemente son las tablas de
+  páginas del emulador. Hay que confirmarlo en la consola.
+
+**Resultado de la 0.2.57.0 en la Series:** device removed a los 80 s, con la app en 3.1 GiB y la
+GPU en 207–389 MiB. **No es memoria.**
+- Mapa al cargar: 838 MiB privados, 43 reservas de 8–24 MiB (561 MiB), igual que en el PC.
+- Las tres caídas (0.2.56.1, 0.2.56.2 y 0.2.57.0) nombran el mismo "SRV of 46 (R16G16_FLOAT) as
+  type 2", justo después de los primeros pipelines de solo profundidad (DSV 55 = D16) de esa zona.
+- La trampa nombra la primera llamada *comprobada* tras la remoción. Sin comprobar estaban, entre
+  otras, el recurso y el SRV de las copias en 2D de texturas 3D (cientos en esa zona), las copias
+  de descriptores y la UAV del decodificador ASTC.
+
+**0.2.57.1 (diagnóstico):** comprobaciones tras esas llamadas, y una antes del SRV normal
+("something unchecked before an SRV of …").
+
+**Resultado de la 0.2.57.1 en la Series:** caída a los 78 s, otra vez "right after SRV of 46".
+La comprobación de antes no saltó: **es la creación de ese SRV la que tumba el dispositivo.**
+- Cada imagen se crea con el formato typeless de su propia familia, pero la vista usa el formato
+  que pide el guest, que puede ser otro del mismo tamaño. Vulkan lo admite (mutable format); en
+  D3D12 la vista tiene que ser de la familia del recurso.
+- El driver del PC tolera la vista inválida; la Series quita el dispositivo
+  (`DXGI_ERROR_INVALID_CALL`).
+
+**0.2.57.2:**
+- `TypelessFamily(DXGI_FORMAT)`: la familia typeless de cada formato. DXGI pone los formatos con
+  tipo justo después del typeless; los BGRA planos son la excepción.
+- En `ImageView`, si el formato del SRV o de la vista RTV/UAV no es de la familia del recurso, se
+  usa el formato propio de la imagen, con un aviso único: `view of … is not castable in D3D12`.
+  Esa textura puede leerse con otra interpretación, pero el dispositivo sigue vivo.
+- La versión correcta sería una copia con reinterpretación (como las conversiones de Vulkan), si
+  el aviso sale en algo visible.
+
+**Resultado de la 0.2.57.2 en la Series:** más de 4 minutos sin caídas, pero el mapa del mundo se
+ve con fallos de textura (los niveles se ven bien).
+
+**0.2.57.3 (solo PC):** lectura a través de una copia.
+- Caso del mapa: imagen 39 (R32_FLOAT, 1920×1080) que el guest lee como R16G16_FLOAT.
+- `Image::Reinterpreted(family)` crea una copia del recurso con el formato typeless de la vista.
+  Solo si los dos formatos son de texel simple (bloque 1×1), del mismo tamaño y no depth-stencil.
+- La copia se rellena textura → buffer → textura: el mismo footprint, con el `Format` cambiado a la
+  familia destino. D3D12 no copia directamente entre familias distintas.
+- El SRV de la vista se crea sobre la copia.
+- Resultado: el fallo seguía. La capa de debug dio 234 errores [613] "render target format does
+  not match the pipeline state (R16G16_FLOAT)". **El juego también dibuja en esa imagen como
+  R16G16**, y el RTV había caído al formato propio (R32).
+
+**0.2.57.4:** render a la copia, además de lectura.
+- La copia conserva `ALLOW_RENDER_TARGET`, y el RTV de la vista se crea sobre ella.
+- **Sincronización:**
+  - `Image::RenderToReinterpreted()`: refresca la copia si la imagen es más nueva, la pasa a
+    RENDER_TARGET y marca `reinterpreted_ahead`.
+  - `Image::Transition()`: si la copia va por delante, primero devuelve los texels a la imagen
+    (`WriteBackReinterpreted`). Así cualquier uso de la imagen (otra vista, copia, descarga a
+    memoria del guest) ve lo dibujado.
+  - `ImageView::TransitionImage()` en estado de lectura, para vistas leídas por la copia, solo
+    llama a `ReadReinterpreted()`. Tocar la imagen devolvería los texels y sacaría a la copia del
+    estado de lectura en mitad del draw.
+  - `Framebuffer::PrepareAttachments` y el blit de color usan la copia cuando el RTV está en ella.
+- **El UAV sigue en la imagen, con el formato propio.** La copia no tiene `ALLOW_UNORDERED_ACCESS`.
+  Una primera versión dejó el UAV en R16G16 sobre el recurso R32 y el dispositivo cayó al entrar al
+  mapa, también en el PC ("device removed right after UAV of 46").
+- En el PC: el mapa se ve bien, sin errores de la capa de debug y con 0 avisos [613].
+- Límites: MSAA y depth-stencil siguen con el formato propio y el aviso "not castable". Un UAV del
+  guest en la otra familia escribiría con la interpretación equivocada; aún no ha salido.
+
+**Capa de debug:** el aviso [679] (`CREATEGRAPHICSPIPELINESTATE_RENDERTARGETVIEW_NOT_SET`, el PS
+escribe más salidas de las que el draw enlaza) se filtra en la cola. Antes llenaba el tope de 500
+mensajes y ocultaba los errores reales, como los [613].
+
+**Teclado en el PC (`play=1`):** C/V = L/R, B/N = A/B, X/Y = X/Y, M o + del teclado numérico = Plus,
+K o − del teclado numérico = Minus, WASD = stick izquierdo, Q = cerrar. En el mando, Menú = Plus y
+Vista = Minus.
+
 **Trampa de la build:** ninja no recompiló los `.cpp` que incluyen `d3d12_scheduler.h` cuando cambió
 el header. Quedaron objetos con el layout viejo y el resultado fue un access violation en
 `HostCounter::HostCounter` al arrancar. Al cambiar un header del backend, hay que tocar los `.cpp`

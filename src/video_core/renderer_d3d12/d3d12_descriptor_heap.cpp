@@ -134,6 +134,10 @@ D3D12_GPU_DESCRIPTOR_HANDLE DescriptorRing::Upload(
         device->CopyDescriptorsSimple(1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         dst.ptr += stride;
     }
+    CheckRemovedAfter(device, [&] {
+        return fmt::format("copying {} view descriptors to the shader-visible heap",
+                           descriptors.size());
+    });
     if (!logged_upload) {
         LOG_INFO(Render, "D3D12: descriptor ring upload active ({} descriptors, tick {})",
                  descriptors.size(), scheduler.CurrentTick());
@@ -304,6 +308,9 @@ void GuestDescriptorQueue::AddCopy(D3D12_CPU_DESCRIPTOR_HANDLE descriptor) {
         return;
     }
     device->CopyDescriptorsSimple(1, Next(), descriptor, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    CheckRemovedAfter(device, [&] {
+        return fmt::format("copying a texture descriptor (0x{:x}) for a draw", descriptor.ptr);
+    });
 }
 
 // --- SamplerHeap ------------------------------------------------------------------------------
@@ -352,6 +359,9 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
         device->CopyDescriptorsSimple(1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
         dst.ptr += stride;
     }
+    CheckRemovedAfter(device, [&] {
+        return fmt::format("copying {} sampler descriptors", samplers.size());
+    });
     used += count;
     tables.emplace(std::move(key), first);
     if (!logged_cache) {
