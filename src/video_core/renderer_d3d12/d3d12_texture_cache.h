@@ -165,6 +165,13 @@ public:
     [[nodiscard]] bool IsBcDecoded() const noexcept {
         return format.converted && !VideoCore::Surface::IsPixelFormatASTC(info.format);
     }
+    /// A depth format with a stencil plane (D24S8, D32S8): D3D12 keeps depth and stencil in two
+    /// planes, which the guest packs into one texel.
+    [[nodiscard]] bool IsDepthStencilPlanar() const noexcept {
+        return format.stencil_srv != DXGI_FORMAT_UNKNOWN;
+    }
+    /// Copies both planes from src, which has the same resource format.
+    void CopyDepthStencilFrom(Image& src, std::span<const VideoCommon::ImageCopy> copies);
     [[nodiscard]] u32 Subresource(s32 level, s32 layer, u32 plane = 0) const noexcept;
     void Transition(D3D12_RESOURCE_STATES next);
     [[nodiscard]] D3D12_RESOURCE_STATES State() const noexcept { return state; }
@@ -191,6 +198,23 @@ private:
     /// Hash and transparency of a CPU-decoded upload (first ones only), to compare machines.
     void LogConvertedUpload(const u8* data, const CopyLayout& layout,
                             const VideoCommon::BufferImageCopy& copy) const;
+
+    /// Copy footprints of both planes of one depth-stencil subresource, in one buffer.
+    struct PlaneFootprints {
+        std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT, 2> planes;
+        u64 size;
+    };
+    [[nodiscard]] PlaneFootprints Footprints(s32 level) const;
+    /// Copies both planes of a whole subresource into the footprints of buffer (to_buffer) or
+    /// back; the caller puts the buffer in COPY_DEST or COPY_SOURCE.
+    void CopyPlanes(s32 level, s32 layer, ID3D12Resource* buffer,
+                    const PlaneFootprints& footprints, bool to_buffer);
+    /// The guest's packed depth-stencil texels into both planes (the split shader).
+    void UploadDepthStencil(ID3D12Resource* buffer, size_t offset,
+                            std::span<const VideoCommon::BufferImageCopy> copies);
+    /// Both planes into packed guest texels (the merge shader).
+    void DownloadDepthStencil(std::span<ID3D12Resource*> buffers, std::span<size_t> offsets,
+                              std::span<const VideoCommon::BufferImageCopy> copies);
 
     TextureCacheRuntime* runtime{};
     ComPtr<ID3D12Resource> resource;

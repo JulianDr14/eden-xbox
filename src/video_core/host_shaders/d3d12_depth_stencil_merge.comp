@@ -1,0 +1,72 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// The two planes of a D3D12 depth-stencil resource -> guest depth-stencil texels (D3D12 renderer
+// downloads): the inverse of d3d12_depth_stencil_split.comp. Planes holds the depth footprint
+// (32-bit words) and the stencil footprint (bytes) of a whole subresource; the region is packed
+// into rows of row_texels texels, and the texels past the region's width are written as zero.
+
+#version 460 core
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Planes {
+    uint plane_words[];
+};
+
+layout(std430, set = 0, binding = 1) writeonly buffer Packed {
+    uint packed_words[];
+};
+
+// Shared with d3d12_depth_stencil_split.comp. Offsets and pitches are in words.
+layout(push_constant) uniform Params {
+    uint packed_offset;
+    uint packed_row;     // words per guest row
+    uint depth_pitch;    // words per depth footprint row
+    uint stencil_offset; // start of the stencil footprint in Planes
+    uint stencil_pitch;  // words per stencil footprint row
+    uint region_x;       // region in the footprints, in texels
+    uint region_y;
+    uint width;
+    uint height;
+    uint row_texels;     // guest texels per row (at least width)
+    uint layout_mode;    // 0 Z24S8, 1 S8Z24, 2 X8Z24, 3 ZF32_X24S8 (d3d12_blit_image.h)
+    uint unused;
+};
+
+void main() {
+    const uint x = gl_GlobalInvocationID.x;
+    const uint y = gl_GlobalInvocationID.y;
+    if (x >= row_texels || y >= height) {
+        return;
+    }
+    uint depth = 0u;
+    uint stencil = 0u;
+    if (x < width) {
+        const uint fx = region_x + x;
+        const uint fy = region_y + y;
+        depth = plane_words[fy * depth_pitch + fx];
+        const uint stencil_word = plane_words[stencil_offset + fy * stencil_pitch + fx / 4];
+        stencil = (stencil_word >> ((fx % 4) * 8)) & 0xFFu;
+    }
+    const uint row = packed_offset + y * packed_row;
+    switch (layout_mode) {
+    case 0u:
+        // Z24S8: depth in bits 31:8, stencil in 7:0.
+        packed_words[row + x] = ((depth & 0xFFFFFFu) << 8) | stencil;
+        break;
+    case 1u:
+        // S8Z24: stencil in bits 31:24, depth in 23:0.
+        packed_words[row + x] = (stencil << 24) | (depth & 0xFFFFFFu);
+        break;
+    case 2u:
+        // X8Z24: depth in bits 23:0.
+        packed_words[row + x] = depth & 0xFFFFFFu;
+        break;
+    default:
+        // ZF32_X24S8: the float depth, then a word with the stencil in its low byte.
+        packed_words[row + x * 2] = depth;
+        packed_words[row + x * 2 + 1] = stencil;
+        break;
+    }
+}

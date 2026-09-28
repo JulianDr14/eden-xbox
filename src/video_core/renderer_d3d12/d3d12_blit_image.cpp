@@ -4,12 +4,17 @@
 #include <algorithm>
 #include <cstdlib>
 #include <exception>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
+#include "common/div_ceil.h"
 #include "common/logging.h"
 #include "video_core/host_shaders/blit_color_float_frag_spv.h"
 #include "video_core/host_shaders/blit_depth_frag_spv.h"
+#include "video_core/host_shaders/d3d12_depth_stencil_merge_comp_spv.h"
+#include "video_core/host_shaders/d3d12_depth_stencil_split_comp_spv.h"
 #include "video_core/host_shaders/full_screen_triangle_vert_spv.h"
 #include "video_core/host_shaders/vulkan_color_clear_frag_spv.h"
 #include "video_core/host_shaders/vulkan_color_clear_vert_spv.h"
@@ -35,6 +40,33 @@ constexpr u32 RUNTIME_DATA_WORDS = 12;
 /// presenter's linear sampler is 0, so these never meet them.
 constexpr u64 NEAREST_SAMPLER_KEY = ~0ULL;
 constexpr u64 LINEAR_SAMPLER_KEY = ~0ULL - 1;
+
+/// Root parameters of the depth-stencil pack shaders: their push constants, the buffer they read
+/// (a readonly SSBO at binding 0 becomes t0) and the one they write (binding 1, u1). Root
+/// descriptors need no descriptor heap; they have no bounds either, so the shaders stay inside
+/// the region they are given.
+constexpr u32 PACK_CONSTANTS_PARAM = 0;
+constexpr u32 PACK_SOURCE_PARAM = 1;
+constexpr u32 PACK_DESTINATION_PARAM = 2;
+constexpr u32 PACK_CONSTANT_WORDS = 12;
+constexpr u32 PACK_GROUP_SIZE = 8;
+
+void Serialize(const Device& device, const D3D12_ROOT_SIGNATURE_DESC& desc,
+               ComPtr<ID3D12RootSignature>& out, const char* what) {
+    ComPtr<ID3DBlob> serialized;
+    ComPtr<ID3DBlob> error;
+    if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized,
+                                           &error))) {
+        throw std::runtime_error(
+            error ? std::string(static_cast<const char*>(error->GetBufferPointer()),
+                                error->GetBufferSize())
+                  : std::string("D3D12SerializeRootSignature failed"));
+    }
+    ThrowIfFailed(device.Get()->CreateRootSignature(0, serialized->GetBufferPointer(),
+                                                    serialized->GetBufferSize(),
+                                                    IID_PPV_ARGS(&out)),
+                  what);
+}
 
 D3D12_DEPTH_STENCILOP_DESC ReplaceStencil() {
     return {
@@ -82,6 +114,14 @@ BlitImageHelper::BlitImageHelper(const Device& device_, Scheduler& scheduler_,
     } catch (const std::exception& exception) {
         LOG_ERROR(Render, "D3D12: blit helpers unavailable: {}", exception.what());
     }
+    try {
+        CreatePackPipelines(compiler);
+        pack_available = true;
+        LOG_INFO(Render, "D3D12: depth-stencil pack shaders ready");
+    } catch (const std::exception& exception) {
+        LOG_ERROR(Render, "D3D12: depth-stencil pack shaders unavailable, depth-stencil "
+                  "contents will not be transferred: {}", exception.what());
+    }
 }
 
 BlitImageHelper::~BlitImageHelper() = default;
@@ -125,19 +165,89 @@ void BlitImageHelper::CreateRootSignature() {
         .pStaticSamplers = nullptr,
         .Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE,
     };
-    ComPtr<ID3DBlob> serialized;
-    ComPtr<ID3DBlob> error;
-    if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized,
-                                           &error))) {
-        throw std::runtime_error(
-            error ? std::string(static_cast<const char*>(error->GetBufferPointer()),
-                                error->GetBufferSize())
-                  : std::string("D3D12SerializeRootSignature failed"));
+    Serialize(device, desc, root_signature, "CreateRootSignature (blit helpers)");
+}
+
+void BlitImageHelper::CreatePackPipelines(const ShaderCompiler& compiler) {
+    std::array<D3D12_ROOT_PARAMETER, 4> params{};
+    params[PACK_CONSTANTS_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[PACK_CONSTANTS_PARAM].Constants = {.ShaderRegister = 0,
+                                              .RegisterSpace = PUSH_CONSTANT_SPACE,
+                                              .Num32BitValues = PACK_CONSTANT_WORDS};
+    params[PACK_SOURCE_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    params[PACK_SOURCE_PARAM].Descriptor = {.ShaderRegister = 0, .RegisterSpace = 0};
+    params[PACK_DESTINATION_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    params[PACK_DESTINATION_PARAM].Descriptor = {.ShaderRegister = 1, .RegisterSpace = 0};
+    // spirv_to_dxil's compute runtime data (group counts); these shaders do not read it, the
+    // parameter only keeps the signature a superset of whatever the translator declares.
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[3].Constants = {
+        .ShaderRegister = 0, .RegisterSpace = RUNTIME_DATA_SPACE,
+        .Num32BitValues = static_cast<UINT>(sizeof(dxil_spirv_compute_runtime_data) / sizeof(u32))};
+    for (auto& param : params) {
+        param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
-    ThrowIfFailed(device.Get()->CreateRootSignature(0, serialized->GetBufferPointer(),
-                                                    serialized->GetBufferSize(),
-                                                    IID_PPV_ARGS(&root_signature)),
-                  "CreateRootSignature (blit helpers)");
+    const D3D12_ROOT_SIGNATURE_DESC desc{
+        .NumParameters = static_cast<UINT>(params.size()),
+        .pParameters = params.data(),
+        .NumStaticSamplers = 0,
+        .pStaticSamplers = nullptr,
+        .Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE,
+    };
+    Serialize(device, desc, pack_root_signature, "CreateRootSignature (depth-stencil pack)");
+    const auto create = [&](std::span<const u32> spirv, ComPtr<ID3D12PipelineState>& out) {
+        const std::vector<u8> dxil = compiler.Compile(spirv, DXIL_SPIRV_SHADER_COMPUTE);
+        const D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_desc{
+            .pRootSignature = pack_root_signature.Get(),
+            .CS = {dxil.data(), dxil.size()},
+        };
+        ThrowIfFailed(device.Get()->CreateComputePipelineState(&pipeline_desc,
+                                                               IID_PPV_ARGS(&out)),
+                      "CreateComputePipelineState (depth-stencil pack)");
+    };
+    create(D3D12_DEPTH_STENCIL_SPLIT_COMP_SPV, split_pipeline);
+    create(D3D12_DEPTH_STENCIL_MERGE_COMP_SPV, merge_pipeline);
+}
+
+void BlitImageHelper::DispatchPack(ID3D12PipelineState* pipeline, const DepthStencilPack& pack,
+                                   u32 groups_x, u32 groups_y) {
+    if (groups_x == 0 || groups_y == 0) {
+        return;
+    }
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    cmd->SetComputeRootSignature(pack_root_signature.Get());
+    cmd->SetPipelineState(pipeline);
+    const std::array<u32, PACK_CONSTANT_WORDS> constants{
+        pack.packed_offset, pack.packed_row,  pack.depth_pitch, pack.stencil_offset,
+        pack.stencil_pitch, pack.x,           pack.y,           pack.width,
+        pack.height,        pack.row_texels, static_cast<u32>(pack.layout), 0,
+    };
+    cmd->SetComputeRoot32BitConstants(PACK_CONSTANTS_PARAM, PACK_CONSTANT_WORDS, constants.data(),
+                                      0);
+    cmd->SetComputeRootShaderResourceView(PACK_SOURCE_PARAM, pack.source);
+    cmd->SetComputeRootUnorderedAccessView(PACK_DESTINATION_PARAM, pack.destination);
+    cmd->Dispatch(groups_x, groups_y, 1);
+}
+
+void BlitImageHelper::SplitDepthStencil(const DepthStencilPack& pack) {
+    if (!pack_available || pack.width == 0 || pack.height == 0) {
+        return;
+    }
+    // One invocation per stencil word: the four texels of a row it covers.
+    const u32 first_word = pack.x / 4;
+    const u32 last_word = (pack.x + pack.width - 1) / 4;
+    DispatchPack(split_pipeline.Get(), pack,
+                 Common::DivCeil(last_word - first_word + 1, PACK_GROUP_SIZE),
+                 Common::DivCeil(pack.height, PACK_GROUP_SIZE));
+}
+
+void BlitImageHelper::MergeDepthStencil(const DepthStencilPack& pack) {
+    if (!pack_available || pack.width == 0 || pack.height == 0) {
+        return;
+    }
+    DispatchPack(merge_pipeline.Get(), pack,
+                 Common::DivCeil(std::max(pack.row_texels, pack.width), PACK_GROUP_SIZE),
+                 Common::DivCeil(pack.height, PACK_GROUP_SIZE));
 }
 
 void BlitImageHelper::CreateSamplers(CpuDescriptorAllocator& sampler_descriptors) {

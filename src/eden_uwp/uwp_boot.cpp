@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -453,6 +454,41 @@ void OnAbort(int) {
                   "(see eden\\log\\eden_log.txt) or an exception escaped a thread\n",
                   ElapsedMs(), GetCurrentThreadId());
     WriteDiagRaw(line);
+    // The aborting thread's stack, as RVAs into eden-uwp.exe (resolve them with the build's PDB):
+    // an exception escaping a worker thread leaves nothing else behind.
+    void* frames[48];
+    const USHORT count = RtlCaptureStackBackTrace(0, static_cast<DWORD>(std::size(frames)),
+                                                  frames, nullptr);
+    const auto base = reinterpret_cast<std::uintptr_t>(&__ImageBase);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + __ImageBase.e_lfanew);
+    std::string stack = "[eden-uwp] abort stack:";
+    for (USHORT i = 0; i < count; ++i) {
+        const auto addr = reinterpret_cast<std::uintptr_t>(frames[i]);
+        char frame[160];
+        HMODULE module = nullptr;
+        char module_path[MAX_PATH] = "";
+        if (addr >= base && addr < base + nt->OptionalHeader.SizeOfImage) {
+            std::snprintf(frame, sizeof(frame), " +0x%llx",
+                          static_cast<unsigned long long>(addr - base));
+        } else if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                      static_cast<LPCSTR>(frames[i]), &module) &&
+                   GetModuleFileNameA(module, module_path, MAX_PATH) != 0) {
+            // Another module (spirv_to_dxil.dll, the runtime, ...): its name and offset.
+            const char* name = std::strrchr(module_path, '\\');
+            std::snprintf(frame, sizeof(frame), " %s+0x%llx", name ? name + 1 : module_path,
+                          static_cast<unsigned long long>(
+                              addr - reinterpret_cast<std::uintptr_t>(module)));
+        } else {
+            std::snprintf(frame, sizeof(frame), " 0x%llx", static_cast<unsigned long long>(addr));
+        }
+        stack += frame;
+    }
+    stack += '\n';
+    WriteDiagRaw(stack.c_str());
+    // Without this the async logger loses whatever it had queued (the last lines before a
+    // std::terminate on a worker thread, which never passes through AssertFatalImpl).
+    Common::Log::Stop();
 }
 
 // Terminate handlers are per-thread in the MSVC runtime; installed on the boot worker, this names the
@@ -539,8 +575,7 @@ constexpr int MAX_CXX_THROW_LINES = 16;
 
 void LogCxxThrow(const EXCEPTION_RECORD* rec) {
     // MSVC x64 throw: [1] = thrown object, [2] = ThrowInfo, [3] = image base of the RVAs.
-    if (rec->NumberParameters < 4 ||
-        g_cxx_throw_lines.fetch_add(1, std::memory_order_relaxed) >= MAX_CXX_THROW_LINES) {
+    if (rec->NumberParameters < 4) {
         return;
     }
     const auto object = static_cast<std::uintptr_t>(rec->ExceptionInformation[1]);
@@ -564,6 +599,12 @@ void LogCxxThrow(const EXCEPTION_RECORD* rec) {
         if (std::string_view{name} == ".?AVexception@std@@" && object != 0) {
             what = reinterpret_cast<const std::exception*>(object + type[2])->what();
         }
+    }
+    // The platform throws dozens of _com_error at startup and handles them itself; they used up
+    // the budget before anything interesting was thrown.
+    if (std::string_view{first_name} == ".?AV_com_error@@" ||
+        g_cxx_throw_lines.fetch_add(1, std::memory_order_relaxed) >= MAX_CXX_THROW_LINES) {
+        return;
     }
     char line[512];
     std::snprintf(line, sizeof(line), "[eden-uwp] [+%llums] C++ throw %s: %s | thread %lu\n",
