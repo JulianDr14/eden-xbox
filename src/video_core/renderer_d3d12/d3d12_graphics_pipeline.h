@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <type_traits>
 #include <vector>
@@ -107,11 +108,13 @@ struct PipelineBindings {
 class GraphicsPipeline {
 public:
     static constexpr size_t NUM_STAGES = Maxwell::MaxShaderStage;
+    using DxilStages = std::array<std::vector<u8>, NUM_STAGES>;
 
+    /// compile_dxil (SPIR-V to DXIL, the costly part of a new pipeline) runs with the PSO build,
+    /// on the worker when one is given; it throws std::exception when the pipeline cannot be made.
     GraphicsPipeline(const Device& device, const TextureCacheRuntime& texture_runtime,
                      VideoCore::ShaderNotify* shader_notify, Common::ThreadWorker* worker_thread,
-                     const GraphicsPipelineCacheKey& key,
-                     std::array<std::vector<u8>, NUM_STAGES> dxil,
+                     const GraphicsPipelineCacheKey& key, std::function<DxilStages()> compile_dxil,
                      const std::array<const Shader::Info*, NUM_STAGES>& infos,
                      const PipelineLayout& layout);
     ~GraphicsPipeline();
@@ -154,7 +157,7 @@ public:
     }
 
     [[nodiscard]] bool HasStage(size_t stage) const noexcept {
-        return !dxil[stage].empty();
+        return has_stage[stage];
     }
 
     [[nodiscard]] const GraphicsPipelineCacheKey& Key() const noexcept {
@@ -173,7 +176,8 @@ private:
     const Device& device;
     const GraphicsPipelineCacheKey key;
     const PipelineLayout& layout;
-    std::array<std::vector<u8>, NUM_STAGES> dxil;
+    DxilStages dxil; ///< Written by the build, before is_built.
+    std::array<bool, NUM_STAGES> has_stage{};
     std::array<Shader::Info, NUM_STAGES> stage_infos;
     std::array<u32, NUM_STAGES> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};

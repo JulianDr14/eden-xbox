@@ -6,10 +6,13 @@
 
 #pragma once
 
+#include <chrono>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
+#include "audio_core/common/common.h"
 #include "audio_core/sink/sink.h"
 #include "audio_core/sink/sink_stream.h"
 
@@ -23,10 +26,36 @@ public:
     explicit NullSinkStreamImpl(Core::System& system_, StreamType type_)
         : SinkStream{system_, type_} {}
     ~NullSinkStreamImpl() override {}
-    void AppendBuffer(SinkBuffer&, std::span<s16>) override {}
+
+    /// The audio renderer only waits for a sink with a full queue (WaitFreeSpace), and this one
+    /// never queues anything: without a clock it rendered nonstop, a whole host core, and woke the
+    /// guest's audio thread far more often than 200 times a second. Play each rendered buffer in
+    /// real time instead, as a device would, allowing a little lead for timer jitter.
+    void AppendBuffer(SinkBuffer& buffer, std::span<s16>) override {
+        if (type != StreamType::Render) {
+            return;
+        }
+        using namespace std::chrono;
+        constexpr auto max_lead = milliseconds{10};
+        constexpr auto max_lag = milliseconds{50};
+        const auto now = steady_clock::now();
+        if (next_deadline + max_lag < now) {
+            // Behind by more than a few buffers (loading, a paused guest): restart the clock
+            // instead of rendering the backlog at full speed.
+            next_deadline = now;
+        }
+        next_deadline += duration_cast<steady_clock::duration>(
+            nanoseconds{buffer.frames * 1'000'000'000ULL / TargetSampleRate});
+        if (next_deadline - now > max_lead) {
+            std::this_thread::sleep_until(next_deadline - max_lead);
+        }
+    }
     std::vector<s16> ReleaseBuffer(u64) override {
         return {};
     }
+
+private:
+    std::chrono::steady_clock::time_point next_deadline{};
 };
 
 /**
