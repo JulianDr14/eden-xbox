@@ -579,7 +579,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     std::array<std::vector<u32>, Maxwell::MaxShaderStage> spirv;
-    boost::container::static_vector<ShaderCompiler::PipelineStage, Maxwell::MaxShaderStage> stages;
     boost::container::static_vector<size_t, Maxwell::MaxShaderStage> stage_indices;
 
     const Shader::IR::Program* previous_stage{};
@@ -602,29 +601,40 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         const auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage)};
         ConvertLegacyToGeneric(program, runtime_info);
         spirv[stage_index] = EmitSPIRV(profile, runtime_info, program, binding);
-        // Stage indices 0-4 (VS, TCS, TES, GS, FS) match dxil_spirv_shader_stage's values.
-        stages.push_back({.spirv = spirv[stage_index],
-                          .stage = static_cast<dxil_spirv_shader_stage>(stage_index)});
         stage_indices.push_back(stage_index);
         previous_stage = &program;
     }
-
-    // The guest viewport transform decides the flips per draw, through the runtime data
-    // (RasterizerD3D12::UpdateViewports).
-    const ShaderCompiler::PipelineOptions options{
-        .yz_flip = DXIL_SPIRV_YZ_FLIP_CONDITIONAL,
-        .first_vertex_and_base_instance = DXIL_SPIRV_SYSVAL_TYPE_RUNTIME_DATA,
-    };
-    auto compiled = compiler.CompilePipeline(std::span(stages.data(), stages.size()), options);
-    std::array<std::vector<u8>, Maxwell::MaxShaderStage> dxil;
-    for (size_t i = 0; i < compiled.size(); ++i) {
-        dxil[stage_indices[i]] = std::move(compiled[i].dxil);
-    }
     const PipelineLayout& layout = root_signatures.Get(infos, false);
+
+    // SPIR-V to DXIL goes with the PSO build, on a worker: done here it stalled the GPU thread for
+    // 150-490 ms per 300 frames when entering new areas (0.2.59 profile). Translating the guest
+    // shaders stays here, since it reads guest memory through the environments.
+    auto compile_dxil = [this, spirv = std::move(spirv), stage_indices]() {
+        boost::container::static_vector<ShaderCompiler::PipelineStage, Maxwell::MaxShaderStage>
+            stages;
+        for (const size_t stage_index : stage_indices) {
+            // Stage indices 0-4 (VS, TCS, TES, GS, FS) match dxil_spirv_shader_stage's values.
+            stages.push_back({.spirv = spirv[stage_index],
+                              .stage = static_cast<dxil_spirv_shader_stage>(stage_index)});
+        }
+        // The guest viewport transform decides the flips per draw, through the runtime data
+        // (RasterizerD3D12::UpdateViewports).
+        const ShaderCompiler::PipelineOptions options{
+            .yz_flip = DXIL_SPIRV_YZ_FLIP_CONDITIONAL,
+            .first_vertex_and_base_instance = DXIL_SPIRV_SYSVAL_TYPE_RUNTIME_DATA,
+        };
+        auto compiled = compiler.CompilePipeline(std::span(stages.data(), stages.size()), options);
+        GraphicsPipeline::DxilStages dxil;
+        for (size_t i = 0; i < compiled.size(); ++i) {
+            dxil[stage_indices[i]] = std::move(compiled[i].dxil);
+        }
+        return dxil;
+    };
 
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     return std::make_unique<GraphicsPipeline>(device, texture_runtime, &shader_notify,
-                                              thread_worker, key, std::move(dxil), infos, layout);
+                                              thread_worker, key, std::move(compile_dxil), infos,
+                                              layout);
 
 } catch (const Shader::Exception& exception) {
     LOG_ERROR(Render, "D3D12: recompiling VS {:016x} PS {:016x} failed: {}", key.unique_hashes[1],

@@ -330,10 +330,10 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
                                    VideoCore::ShaderNotify* shader_notify,
                                    Common::ThreadWorker* worker_thread,
                                    const GraphicsPipelineCacheKey& key_,
-                                   std::array<std::vector<u8>, NUM_STAGES> dxil_,
+                                   std::function<DxilStages()> compile_dxil,
                                    const std::array<const Shader::Info*, NUM_STAGES>& infos,
                                    const PipelineLayout& layout_)
-    : device{device_}, key{key_}, layout{layout_}, dxil{std::move(dxil_)} {
+    : device{device_}, key{key_}, layout{layout_} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -342,13 +342,25 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
         if (!info) {
             continue;
         }
+        has_stage[stage] = true;
         stage_infos[stage] = *info;
         enabled_uniform_buffer_masks[stage] = info->constant_buffer_mask;
         std::ranges::copy(info->constant_buffer_used_sizes, uniform_buffer_sizes[stage].begin());
         has_images |= !info->image_descriptors.empty();
     }
-    auto func{[this, &texture_runtime, shader_notify] {
-        Build(texture_runtime);
+    auto func{[this, &texture_runtime, shader_notify, compile_dxil = std::move(compile_dxil)] {
+        bool compiled = false;
+        try {
+            dxil = compile_dxil();
+            compiled = true;
+        } catch (const std::exception& exception) {
+            // Handle() stays null: draws with this pipeline are skipped.
+            LOG_ERROR(Render, "D3D12: building the pipeline for VS {:016x} PS {:016x} failed: {}",
+                      key.unique_hashes[1], key.unique_hashes[5], exception.what());
+        }
+        if (compiled) {
+            Build(texture_runtime);
+        }
         {
             std::scoped_lock lock{build_mutex};
             is_built = true;

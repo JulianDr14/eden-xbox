@@ -2013,3 +2013,38 @@ el hilo de la GPU (picos de 150-490 ms al entrar en zonas nuevas).
 
 **Regla:** nada que entre al kernel por draw o por descriptor. Los chivatos caros van detras de una
 opcion de `boot.cfg`.
+
+### Audio sin ritmo y SPIR-V -> DXIL fuera del hilo de la GPU (0.2.60.0)
+
+Perfil de los hilos del juego en el mismo nivel (xperf, 31 s): el emulador usaba ~2,9 nucleos y
+~21 s de CPU eran del renderer de audio (`DelayCommand`, reverb I3DL2, mezclas, resample).
+- **Causa:** el hilo del renderer de audio solo espera en `SinkStream::WaitFreeSpace`, es decir, a
+  que la cola de la salida tenga sitio. El sink Null (el de la Series y los arranques UWP) no
+  encolaba nada, asi que el renderer corria sin pausa y despertaba al hilo de audio del juego mucho
+  mas de 200 veces por segundo. Eso explica tambien buena parte de las SVC de sincronizacion
+  (`SignalToAddress` / `WaitForAddress`) y de las IPC del juego.
+- **Arreglo:** `NullSinkStreamImpl::AppendBuffer` reproduce cada buffer del renderer en tiempo real
+  (240 muestras = 5 ms a 48 kHz), con hasta 10 ms de adelanto. Si va mas de 50 ms atrasado (una
+  carga, el juego en pausa), reinicia el reloj en vez de renderizar el atraso de golpe.
+- Sin cambios: el JIT compilando bloques (~0,8 s de cada 31 s en el nivel) y el cambio de
+  proteccion W^X (~0,25 s) pesan poco.
+
+Pipelines nuevos: `CompilePipeline` (Mesa, SPIR-V -> DXIL) era ~90% de
+`CreateGraphicsPipeline` y corria en el hilo de la GPU. Ahora `GraphicsPipeline` recibe una funcion
+que produce el DXIL y la ejecuta en el worker, antes del build del PSO. En el hilo de la GPU se
+quedan `TranslateProgram` y `EmitSPIRV` (leen la memoria del juego) y la root signature. Si la
+compilacion falla, se registra y `Handle()` queda nulo, como un PSO rechazado.
+
+Resultado en PC, mismo nivel:
+
+| | 0.2.59 | 0.2.60 |
+|---|---|---|
+| CPU del emulador | 2,9 nucleos | 1,5 nucleos |
+| audio | 0,68 nucleos | 0,05 nucleos |
+| frame medio en el nivel | 20-36 ms | 19,5-27 ms |
+| esperas por pipelines nuevos, por ventana | 150-490 ms | 0-238 ms |
+| us por draw | 10-13 | 8,4-10 |
+
+Queda: el hilo de la GPU sigue esperando al juego mas de la mitad del tiempo, asi que el limite es
+la CPU emulada. El assert `slots[s].buffer_state == BufferState::Free` de
+`buffer_queue_producer.cpp` sale al cambiar de escena; es de Eden y no para nada.
