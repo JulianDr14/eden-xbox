@@ -49,11 +49,11 @@ struct DepthStencilPack {
     DepthStencilLayout layout;
 };
 
-/// One mip level of a guest ASTC image decoded on the GPU (astc_decoder.comp, Vulkan's shader):
-/// the guest's block-linear blocks straight from staging into an RGBA8 texture array.
+/// One band of a guest ASTC mip decoded on the GPU. Both descriptors are bounded so malformed
+/// guest offsets cannot turn into an unbounded root-descriptor access.
 struct AstcDecode {
-    /// Read through a root SRV: the level's swizzled ASTC blocks. 4-byte aligned.
-    D3D12_GPU_VIRTUAL_ADDRESS source;
+    /// Raw R32_TYPELESS SRV containing the level's swizzled ASTC blocks.
+    D3D12_CPU_DESCRIPTOR_HANDLE source;
     /// Offline UAV (R8G8B8A8_UNORM, Texture2DArray) of the level; copied into the ring.
     D3D12_CPU_DESCRIPTOR_HANDLE destination;
     u32 block_width;  ///< ASTC block size in texels
@@ -67,6 +67,18 @@ struct AstcDecode {
     u32 blocks_x; ///< ASTC blocks per row and column of the level
     u32 blocks_y;
     u32 layers;
+    u32 input_words;
+    u32 first_block_row;
+};
+
+/// One horizontal RGBA8 band encoded as BC3 into a raw buffer footprint.
+struct Bc3Encode {
+    D3D12_CPU_DESCRIPTOR_HANDLE source;      ///< R8G8B8A8_UNORM Texture2D SRV
+    D3D12_GPU_VIRTUAL_ADDRESS destination;   ///< raw buffer UAV
+    u32 width;
+    u32 height;
+    u32 band_height;
+    u32 output_row_words;
 };
 
 /// Draws Eden's host blit and clear shaders into guest images: the D3D12 counterpart of Vulkan's
@@ -145,8 +157,12 @@ public:
     [[nodiscard]] bool CanDecodeAstc() const noexcept {
         return astc_available;
     }
+    [[nodiscard]] bool CanEncodeBc3() const noexcept {
+        return bc3_available;
+    }
     /// Records the decode of one level; the caller puts the image in UNORDERED_ACCESS.
     void DecodeAstc(const AstcDecode& decode);
+    void EncodeBc3(const Bc3Encode& encode);
 
 private:
     enum class Kind : u8 {
@@ -178,6 +194,7 @@ private:
                       u32 groups_y);
     /// Builds the ASTC decoder's root signature and pipeline; throws on failure.
     void CreateAstcPipeline(const ShaderCompiler& compiler);
+    void CreateBc3Pipeline(const ShaderCompiler& compiler);
 
     const Device& device;
     Scheduler& scheduler;
@@ -199,6 +216,10 @@ private:
     ComPtr<ID3D12RootSignature> astc_root_signature;
     ComPtr<ID3D12PipelineState> astc_pipeline;
     bool astc_available{};
+
+    ComPtr<ID3D12RootSignature> bc3_root_signature;
+    ComPtr<ID3D12PipelineState> bc3_pipeline;
+    bool bc3_available{};
 };
 
 } // namespace D3D12

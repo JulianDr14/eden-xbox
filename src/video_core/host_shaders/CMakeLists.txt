@@ -40,6 +40,7 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/convert_s8d24_to_abgr8.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/d3d12_depth_stencil_merge.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/d3d12_depth_stencil_split.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/d3d12_bc3_encoder.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/full_screen_triangle.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/fxaa.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/fxaa.vert
@@ -207,6 +208,19 @@ foreach(VARIANT IN ITEMS ${SHADER_TYPE_VARIANTS})
     )
     set(SHADER_HEADERS ${SHADER_HEADERS} ${VARIANT_HEADER_FILE})
 endforeach()
+
+# D3D12 adds bounded-input and band-offset constants to the shared ASTC decoder without changing
+# Vulkan's push-constant ABI.
+set(D3D12_ASTC_HEADER ${SHADER_DIR}/d3d12_astc_decoder_comp_spv.h)
+add_custom_command(
+    OUTPUT ${D3D12_ASTC_HEADER}
+    COMMAND ${GLSLANGVALIDATOR} -V ${QUIET_FLAG} -I"${FIDELITYFX_INCLUDE_DIR}" ${GLSL_FLAGS}
+        -DD3D12_ASTC=1 --variable-name D3D12_ASTC_DECODER_COMP_SPV
+        -o ${D3D12_ASTC_HEADER} ${CMAKE_CURRENT_SOURCE_DIR}/astc_decoder.comp
+        --target-env ${SPIR_V_VERSION}
+    MAIN_DEPENDENCY ${CMAKE_CURRENT_SOURCE_DIR}/astc_decoder.comp
+)
+set(SHADER_HEADERS ${SHADER_HEADERS} ${D3D12_ASTC_HEADER})
 
 foreach(FILEPATH IN ITEMS ${FIDELITYFX_FILES})
     get_filename_component(FILENAME ${FILEPATH} NAME)

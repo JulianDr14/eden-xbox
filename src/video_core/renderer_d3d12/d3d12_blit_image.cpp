@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <span>
 #include <stdexcept>
@@ -11,11 +13,12 @@
 
 #include "common/div_ceil.h"
 #include "common/logging.h"
-#include "video_core/host_shaders/astc_decoder_comp_spv.h"
+#include "video_core/host_shaders/d3d12_astc_decoder_comp_spv.h"
 #include "video_core/host_shaders/blit_color_float_frag_spv.h"
 #include "video_core/host_shaders/blit_depth_frag_spv.h"
 #include "video_core/host_shaders/d3d12_depth_stencil_merge_comp_spv.h"
 #include "video_core/host_shaders/d3d12_depth_stencil_split_comp_spv.h"
+#include "video_core/host_shaders/d3d12_bc3_encoder_comp_spv.h"
 #include "video_core/host_shaders/full_screen_triangle_vert_spv.h"
 #include "video_core/host_shaders/vulkan_color_clear_frag_spv.h"
 #include "video_core/host_shaders/vulkan_color_clear_vert_spv.h"
@@ -40,6 +43,19 @@ constexpr u32 RUNTIME_DATA_WORDS = 12;
 /// Keys of the helper's samplers in SamplerHeap: guest samplers count up from 1 and the
 /// presenter's linear sampler is 0, so these never meet them.
 constexpr u64 NEAREST_SAMPLER_KEY = ~0ULL;
+
+/// spirv_to_dxil's compute runtime data (group counts, base group zero). Root constants a
+/// dispatch does not set are undefined: they keep whatever the previous signature left there.
+void SetComputeRuntimeData(ID3D12GraphicsCommandList* cmd, UINT param,
+                           const std::array<u32, 3>& groups) {
+    dxil_spirv_compute_runtime_data data{};
+    data.group_count_x = groups[0];
+    data.group_count_y = groups[1];
+    data.group_count_z = groups[2];
+    std::array<u32, sizeof(data) / sizeof(u32)> words{};
+    std::memcpy(words.data(), &data, sizeof(data));
+    cmd->SetComputeRoot32BitConstants(param, static_cast<UINT>(words.size()), words.data(), 0);
+}
 constexpr u64 LINEAR_SAMPLER_KEY = ~0ULL - 1;
 
 /// Root parameters of the depth-stencil pack shaders: their push constants, the buffer they read
@@ -58,8 +74,14 @@ constexpr u32 PACK_GROUP_SIZE = 8;
 constexpr u32 ASTC_CONSTANTS_PARAM = 0;
 constexpr u32 ASTC_SOURCE_PARAM = 1;
 constexpr u32 ASTC_DESTINATION_PARAM = 2;
-constexpr u32 ASTC_CONSTANT_WORDS = 7;
+constexpr u32 ASTC_CONSTANT_WORDS = 9;
 constexpr u32 ASTC_GROUP_SIZE = 8;
+
+constexpr u32 BC3_CONSTANTS_PARAM = 0;
+constexpr u32 BC3_SOURCE_PARAM = 1;
+constexpr u32 BC3_DESTINATION_PARAM = 2;
+constexpr u32 BC3_CONSTANT_WORDS = 4;
+constexpr u32 BC3_GROUP_SIZE = 8;
 
 void Serialize(const Device& device, const D3D12_ROOT_SIGNATURE_DESC& desc,
                ComPtr<ID3D12RootSignature>& out, const char* what) {
@@ -138,6 +160,14 @@ BlitImageHelper::BlitImageHelper(const Device& device_, Scheduler& scheduler_,
         LOG_INFO(Render, "D3D12: ASTC decoder shader ready");
     } catch (const std::exception& exception) {
         LOG_ERROR(Render, "D3D12: ASTC decoder shader unavailable, ASTC is decoded on the CPU: {}",
+                  exception.what());
+    }
+    try {
+        CreateBc3Pipeline(compiler);
+        bc3_available = true;
+        LOG_INFO(Render, "D3D12: BC3 GPU encoder shader ready");
+    } catch (const std::exception& exception) {
+        LOG_ERROR(Render, "D3D12: BC3 GPU encoder unavailable, recompressed ASTC uses the CPU: {}",
                   exception.what());
     }
 }
@@ -228,6 +258,13 @@ void BlitImageHelper::CreatePackPipelines(const ShaderCompiler& compiler) {
 }
 
 void BlitImageHelper::CreateAstcPipeline(const ShaderCompiler& compiler) {
+    const D3D12_DESCRIPTOR_RANGE srv_range{
+        .RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+        .NumDescriptors = 1,
+        .BaseShaderRegister = 0,
+        .RegisterSpace = 0,
+        .OffsetInDescriptorsFromTableStart = 0,
+    };
     const D3D12_DESCRIPTOR_RANGE uav_range{
         .RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
         .NumDescriptors = 1,
@@ -240,8 +277,9 @@ void BlitImageHelper::CreateAstcPipeline(const ShaderCompiler& compiler) {
     params[ASTC_CONSTANTS_PARAM].Constants = {.ShaderRegister = 0,
                                               .RegisterSpace = PUSH_CONSTANT_SPACE,
                                               .Num32BitValues = ASTC_CONSTANT_WORDS};
-    params[ASTC_SOURCE_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[ASTC_SOURCE_PARAM].Descriptor = {.ShaderRegister = 0, .RegisterSpace = 0};
+    params[ASTC_SOURCE_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[ASTC_SOURCE_PARAM].DescriptorTable = {.NumDescriptorRanges = 1,
+                                                 .pDescriptorRanges = &srv_range};
     params[ASTC_DESTINATION_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[ASTC_DESTINATION_PARAM].DescriptorTable = {.NumDescriptorRanges = 1,
                                                       .pDescriptorRanges = &uav_range};
@@ -261,7 +299,11 @@ void BlitImageHelper::CreateAstcPipeline(const ShaderCompiler& compiler) {
         .Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE,
     };
     Serialize(device, desc, astc_root_signature, "CreateRootSignature (ASTC decoder)");
-    const std::vector<u8> dxil = compiler.Compile(ASTC_DECODER_COMP_SPV, DXIL_SPIRV_SHADER_COMPUTE);
+    const std::array<ShaderCompiler::PipelineStage, 1> stages{{
+        {D3D12_ASTC_DECODER_COMP_SPV, DXIL_SPIRV_SHADER_COMPUTE},
+    }};
+    auto compiled = compiler.CompilePipeline(stages, {});
+    const std::vector<u8>& dxil = compiled[0].dxil;
     const D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_desc{
         .pRootSignature = astc_root_signature.Get(),
         .CS = {dxil.data(), dxil.size()},
@@ -276,7 +318,11 @@ void BlitImageHelper::DecodeAstc(const AstcDecode& decode) {
         return;
     }
     // Descriptors first: a full ring flushes the command list.
-    const D3D12_GPU_DESCRIPTOR_HANDLE uav_table = descriptor_ring.Upload({&decode.destination, 1});
+    const std::array descriptors{decode.source, decode.destination};
+    const D3D12_GPU_DESCRIPTOR_HANDLE table = descriptor_ring.Upload(descriptors);
+    const D3D12_GPU_DESCRIPTOR_HANDLE destination{
+        table.ptr + descriptor_ring.Stride(),
+    };
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
     ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
     cmd->SetDescriptorHeaps(2, heaps);
@@ -285,14 +331,87 @@ void BlitImageHelper::DecodeAstc(const AstcDecode& decode) {
     const std::array<u32, ASTC_CONSTANT_WORDS> constants{
         decode.block_width, decode.block_height,     decode.layer_stride,         decode.block_size,
         decode.x_shift,     decode.gob_block_height, decode.gob_block_height_mask,
+        decode.input_words, decode.first_block_row,
     };
     cmd->SetComputeRoot32BitConstants(ASTC_CONSTANTS_PARAM, ASTC_CONSTANT_WORDS, constants.data(),
                                       0);
-    cmd->SetComputeRootShaderResourceView(ASTC_SOURCE_PARAM, decode.source);
-    cmd->SetComputeRootDescriptorTable(ASTC_DESTINATION_PARAM, uav_table);
+    cmd->SetComputeRootDescriptorTable(ASTC_SOURCE_PARAM, table);
+    cmd->SetComputeRootDescriptorTable(ASTC_DESTINATION_PARAM, destination);
     // One invocation per ASTC block.
-    cmd->Dispatch(Common::DivCeil(decode.blocks_x, ASTC_GROUP_SIZE),
-                  Common::DivCeil(decode.blocks_y, ASTC_GROUP_SIZE), decode.layers);
+    const std::array<u32, 3> groups{Common::DivCeil(decode.blocks_x, ASTC_GROUP_SIZE),
+                                    Common::DivCeil(decode.blocks_y, ASTC_GROUP_SIZE),
+                                    decode.layers};
+    SetComputeRuntimeData(cmd, 3, groups);
+    cmd->Dispatch(groups[0], groups[1], groups[2]);
+}
+
+void BlitImageHelper::CreateBc3Pipeline(const ShaderCompiler& compiler) {
+    const D3D12_DESCRIPTOR_RANGE srv_range{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
+    std::array<D3D12_ROOT_PARAMETER, 4> params{};
+    params[BC3_CONSTANTS_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[BC3_CONSTANTS_PARAM].Constants = {.ShaderRegister = 0,
+                                             .RegisterSpace = PUSH_CONSTANT_SPACE,
+                                             .Num32BitValues = BC3_CONSTANT_WORDS};
+    params[BC3_SOURCE_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[BC3_SOURCE_PARAM].DescriptorTable = {1, &srv_range};
+    params[BC3_DESTINATION_PARAM].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    params[BC3_DESTINATION_PARAM].Descriptor = {.ShaderRegister = 1, .RegisterSpace = 0};
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[3].Constants = {
+        .ShaderRegister = 0, .RegisterSpace = RUNTIME_DATA_SPACE,
+        .Num32BitValues = static_cast<UINT>(sizeof(dxil_spirv_compute_runtime_data) / sizeof(u32))};
+    for (auto& param : params) {
+        param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    }
+    const D3D12_STATIC_SAMPLER_DESC sampler{
+        .Filter = D3D12_FILTER_MIN_MAG_MIP_POINT,
+        .AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        .AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        .AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        .MipLODBias = 0.0f,
+        .MaxAnisotropy = 1,
+        .ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER,
+        .BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK,
+        .MinLOD = 0.0f,
+        .MaxLOD = D3D12_FLOAT32_MAX,
+        .ShaderRegister = 0,
+        .RegisterSpace = 0,
+        .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL,
+    };
+    const D3D12_ROOT_SIGNATURE_DESC desc{static_cast<UINT>(params.size()), params.data(), 1,
+                                         &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    Serialize(device, desc, bc3_root_signature, "CreateRootSignature (BC3 encoder)");
+    const std::array<ShaderCompiler::PipelineStage, 1> stages{{
+        {D3D12_BC3_ENCODER_COMP_SPV, DXIL_SPIRV_SHADER_COMPUTE},
+    }};
+    auto compiled = compiler.CompilePipeline(stages, {});
+    const auto& dxil = compiled[0].dxil;
+    const D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_desc{
+        .pRootSignature = bc3_root_signature.Get(), .CS = {dxil.data(), dxil.size()}};
+    ThrowIfFailed(device.Get()->CreateComputePipelineState(&pipeline_desc,
+                                                           IID_PPV_ARGS(&bc3_pipeline)),
+                  "CreateComputePipelineState (BC3 encoder)");
+}
+
+void BlitImageHelper::EncodeBc3(const Bc3Encode& encode) {
+    if (!bc3_available || encode.width == 0 || encode.band_height == 0) {
+        return;
+    }
+    const D3D12_GPU_DESCRIPTOR_HANDLE table = descriptor_ring.Upload({&encode.source, 1});
+    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
+    cmd->SetDescriptorHeaps(2, heaps);
+    cmd->SetComputeRootSignature(bc3_root_signature.Get());
+    cmd->SetPipelineState(bc3_pipeline.Get());
+    const std::array<u32, BC3_CONSTANT_WORDS> constants{
+        encode.width, encode.height, encode.band_height, encode.output_row_words};
+    cmd->SetComputeRoot32BitConstants(BC3_CONSTANTS_PARAM, BC3_CONSTANT_WORDS, constants.data(), 0);
+    cmd->SetComputeRootDescriptorTable(BC3_SOURCE_PARAM, table);
+    cmd->SetComputeRootUnorderedAccessView(BC3_DESTINATION_PARAM, encode.destination);
+    const std::array<u32, 3> groups{Common::DivCeil(encode.width, 4U * BC3_GROUP_SIZE),
+                                    Common::DivCeil(encode.band_height, 4U * BC3_GROUP_SIZE), 1U};
+    SetComputeRuntimeData(cmd, 3, groups);
+    cmd->Dispatch(groups[0], groups[1], groups[2]);
 }
 
 void BlitImageHelper::DispatchPack(ID3D12PipelineState* pipeline, const DepthStencilPack& pack,
