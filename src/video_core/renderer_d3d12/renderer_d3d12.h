@@ -28,6 +28,14 @@ namespace D3D12 {
 /// ends in frame_1.bmp. Set before boot (boot.cfg "trace_frame=").
 void SetTracedFrame(u32 frame);
 
+/// Whether presents write frame*.bmp and trace a frame's draws (the default). Off for a session
+/// played by hand (boot.cfg "play=1"). Set before boot.
+void SetFrameDiagnostics(bool enabled);
+
+/// Shows the progress of the disk shader cache build on screen, if renderer is the D3D12 one
+/// (see RendererD3D12::ShowLoadProgress). A LoadDiskResources callback for the frontend.
+void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
+
 /// Direct3D 12 renderer: a device and swapchain on the UWP CoreWindow, presenting the guest's
 /// display framebuffer. The framebuffer is deswizzled on the CPU and drawn to the window with
 /// Eden's own blit shaders, translated SPIR-V -> DXIL at runtime (phase 2). If that shader path is
@@ -56,7 +64,15 @@ public:
         return device.AdapterName();
     }
 
+    /// Presents a progress bar and "done/total" on a black screen while the disk shader cache
+    /// builds its pipelines. For the boot thread, before the guest runs (nothing else presents
+    /// then); updates at most every 33 ms.
+    void ShowLoadProgress(size_t done, size_t total);
+
 private:
+    /// While pipelines build (VideoCore::ShaderNotify), a small panel in the bottom-right corner
+    /// of back buffer rtv (in RENDER_TARGET state): three dots that cycle and the shader count.
+    void DrawShaderIndicator(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
     /// Builds the blit root signature and PSO from translated SPIR-V; false (logged) on failure.
     bool CreateBlitPipeline();
     /// (Re)creates the guest texture and its SRV for a new size.
@@ -133,6 +149,8 @@ private:
     bool logged_accelerated{};
     u32 accelerated_frames{};
     bool logged_fallback{};
+    u32 indicator_frames{}; ///< frames the shader indicator has been drawn, for its animation
+    std::chrono::steady_clock::time_point last_load_present{};
 
     /// Frame pacing statistics, logged every PACING_WINDOW frames: the interval between
     /// Composite calls and the time the GPU thread spends blocked on frame pacing and Present.

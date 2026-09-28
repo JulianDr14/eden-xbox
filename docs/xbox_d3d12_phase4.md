@@ -1240,6 +1240,34 @@ Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
   volcado de targets, samplers y tipos, y layout del host. La sonda está reproducida más abajo
   porque nunca llegó a un commit.
 
+- **0.2.46.0: sesión para jugar a mano.** Con `play=1` en boot.cfg (`package-appx.ps1 -BootCfg
+  @('game=wonder.nsp','play=1')`):
+  - el juego corre hasta que se cierra la app desde la consola, sin el límite de 120 s;
+  - no hay `frame*.bmp` ni trace de draws (`D3D12::SetFrameDiagnostics(false)`);
+  - el diag deja un latido por minuto con la memoria;
+  - `input=` sigue siendo opcional, y el mando es el jugador 1 con los botones por posición
+    (A de Xbox = B de Switch).
+
+- **0.2.47.0.**
+  - **Botones por etiqueta:** A de Xbox = A de Switch, y lo mismo con B, X e Y
+    (`GAMEPAD_MAPPINGS` en `uwp_input.cpp`). Antes iban por posición.
+  - **Caché de shaders en disco.** El pipeline cache de D3D12 ya sabía guardar y cargar
+    (`LoadDiskResources`, `SerializePipeline` a `d3d12.bin`), pero el arranque UWP nunca lo
+    llamaba. Ahora `RunHeadlessBoot` llama a `LoadDiskResources` tras `OnGpuReady()` y antes de
+    `system.Run()`, como `yuzu_cmd`:
+    - precompila los pipelines de sesiones anteriores (`LocalState/eden/shader/<title>/d3d12.bin`);
+    - ese mismo paso activa el guardado de cada pipeline nuevo.
+
+    Se recompila SPIR-V → DXIL → PSO en cada arranque; los blobs del PSO no se cachean.
+  - **Progreso en pantalla.** Mientras precompila, `RendererD3D12::ShowLoadProgress` presenta una
+    barra y `hechos/total` sobre negro, como mucho cada 33 ms. Se llama desde el hilo de arranque,
+    cuando nada más presenta.
+  - **Indicador de compilación.** Mientras hay shaders compilándose (`ShaderNotify::
+    ShadersBuilding()`, que mantiene la cuenta 2 s tras la ráfaga), aparece un panel pequeño en la
+    esquina inferior derecha: tres puntos que se animan y el número de shaders. Lo dibuja
+    `DrawShaderIndicator` con `ClearRenderTargetView` por rectángulos (fuente de 3×5 celdas), sin
+    shaders propios. Un tirón con el panel visible es por compilación de shaders.
+
 ### Cómo se diagnosticó (método reutilizable)
 
 Síntoma: huecos con forma de tile en el borde del suelo de Mario Wonder, solo en la Series; en el

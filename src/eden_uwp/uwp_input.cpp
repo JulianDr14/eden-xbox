@@ -55,16 +55,16 @@ constexpr std::array BUTTON_NAMES{
     ButtonName{"HOME", VirtualButton::ButtonHome},  ButtonName{"CAPTURE", VirtualButton::ButtonCapture},
 };
 
-/// Xbox buttons by position on a Switch pad: the bottom face button is B, the right one A.
+/// Xbox buttons by label: Xbox A is Switch A (on the bottom, where the Switch has B), and so on.
 struct GamepadMapping {
     GamepadButtons xbox;
     VirtualButton button;
 };
 constexpr std::array GAMEPAD_MAPPINGS{
-    GamepadMapping{GamepadButtons::A, VirtualButton::ButtonB},
-    GamepadMapping{GamepadButtons::B, VirtualButton::ButtonA},
-    GamepadMapping{GamepadButtons::X, VirtualButton::ButtonY},
-    GamepadMapping{GamepadButtons::Y, VirtualButton::ButtonX},
+    GamepadMapping{GamepadButtons::A, VirtualButton::ButtonA},
+    GamepadMapping{GamepadButtons::B, VirtualButton::ButtonB},
+    GamepadMapping{GamepadButtons::X, VirtualButton::ButtonX},
+    GamepadMapping{GamepadButtons::Y, VirtualButton::ButtonY},
     GamepadMapping{GamepadButtons::LeftShoulder, VirtualButton::TriggerL},
     GamepadMapping{GamepadButtons::RightShoulder, VirtualButton::TriggerR},
     GamepadMapping{GamepadButtons::LeftThumbstick, VirtualButton::StickL},
