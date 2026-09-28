@@ -4,6 +4,7 @@
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <atomic>
 #include <cstring>
@@ -255,6 +256,7 @@ bool logged_stencil_blit = false;
 bool logged_no_blit_helper = false;
 bool logged_missing_rtv = false;
 bool logged_min_max_filter = false;
+bool logged_srv_fallback = false;
 
 /// Typed UAV stores every feature level 11.0 device supports ("Format support for Direct3D
 /// feature level 11.0 hardware").
@@ -308,7 +310,12 @@ FormatInfo SurfaceFormat(PixelFormat format) {
 namespace {
 /// Sampler keys for SamplerHeap; 0 is the presenter's linear sampler.
 std::atomic<u64> next_sampler_key{1};
+std::atomic<bool> pad_array_layers{};
 } // Anonymous namespace
+
+void SetArrayPadding(bool enabled) {
+    pad_array_layers.store(enabled, std::memory_order_relaxed);
+}
 
 /// How one BufferImageCopy is laid out in staging memory (tightly packed by the generic cache) and
 /// in the placed footprint D3D12 copies through (rows padded to 256 bytes).
@@ -441,10 +448,20 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         width = Common::AlignUp(width, block_w);
         height = Common::AlignUp(height, block_h);
     }
+    u32 array_size = info_.type == ImageType::e3D ? info_.size.depth
+                                                  : static_cast<u32>(info_.resources.layers);
+    if (pad_array_layers.load(std::memory_order_relaxed) && is_color && !is_msaa &&
+        info_.type == ImageType::e2D && array_size > 1 && !std::has_single_bit(array_size)) {
+        // Only the layer count changes: subresource indices of color images do not depend on it.
+        const u32 padded = std::min(std::bit_ceil(array_size), 2048U);
+        LOG_INFO(Render, "D3D12: array {} {}x{} L{} @{:x} padded from {} to {} layers",
+                 info_.format, width, height, info_.resources.levels, gpu_addr_, array_size,
+                 padded);
+        array_size = padded;
+    }
     const D3D12_RESOURCE_DESC desc{
         .Dimension = Dimension(info_.type), .Alignment = 0, .Width = width, .Height = height,
-        .DepthOrArraySize = static_cast<u16>(info_.type == ImageType::e3D ? info_.size.depth
-                                                                          : info_.resources.layers),
+        .DepthOrArraySize = static_cast<u16>(array_size),
         .MipLevels = static_cast<u16>(info_.resources.levels), .Format = format.resource,
         .SampleDesc = {.Count = info_.num_samples, .Quality = 0},
         .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN, .Flags = resource_flags,
@@ -472,12 +489,18 @@ Image::~Image() {
     if (runtime && resource) {
         runtime->scheduler.DeferRelease(std::move(resource));
     }
+    if (runtime && slice_array) {
+        runtime->scheduler.DeferRelease(std::move(slice_array));
+    }
 }
 
 Image& Image::operator=(Image&& other) noexcept {
     if (this != &other) {
         if (runtime && resource) {
             runtime->scheduler.DeferRelease(std::move(resource));
+        }
+        if (runtime && slice_array) {
+            runtime->scheduler.DeferRelease(std::move(slice_array));
         }
         static_cast<VideoCommon::ImageBase&>(*this) = std::move(other);
         allocation_tick = other.allocation_tick;
@@ -486,6 +509,10 @@ Image& Image::operator=(Image&& other) noexcept {
         format = other.format;
         footprint_format = other.footprint_format;
         state = other.state;
+        write_version = other.write_version;
+        slice_array = std::move(other.slice_array);
+        slice_array_state = other.slice_array_state;
+        slice_array_version = other.slice_array_version;
     }
     return *this;
 }
@@ -497,13 +524,121 @@ u32 Image::Subresource(s32 level, s32 layer, u32 plane) const noexcept {
 }
 
 void Image::Transition(D3D12_RESOURCE_STATES next) {
-    if (!resource || state == next) return;
+    if (!resource) return;
+    if (state == next) {
+        // Writes in one state are unordered without a barrier (see Buffer::Transition).
+        if (next == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            ++write_version;
+            const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV,
+                                                 .UAV = {.pResource = resource.Get()}};
+            runtime->scheduler.CommandList()->ResourceBarrier(1, &barrier);
+        } else if (next == D3D12_RESOURCE_STATE_COPY_DEST) {
+            ++write_version;
+            const D3D12_RESOURCE_BARRIER barriers[2]{
+                {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                 .Transition = {.pResource = resource.Get(),
+                                .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
+                                .StateAfter = D3D12_RESOURCE_STATE_COMMON}},
+                {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                 .Transition = {.pResource = resource.Get(),
+                                .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                .StateBefore = D3D12_RESOURCE_STATE_COMMON,
+                                .StateAfter = D3D12_RESOURCE_STATE_COPY_DEST}},
+            };
+            runtime->scheduler.CommandList()->ResourceBarrier(2, barriers);
+        }
+        return;
+    }
+    constexpr D3D12_RESOURCE_STATES WRITE_STATES =
+        D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS |
+        D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_COPY_DEST |
+        D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    if ((next & WRITE_STATES) != 0) {
+        ++write_version;
+    }
     const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
         .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
         .Transition = {.pResource = resource.Get(), .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
                        .StateBefore = state, .StateAfter = next}};
     runtime->scheduler.CommandList()->ResourceBarrier(1, &barrier);
     state = next;
+}
+
+ID3D12Resource* Image::SliceArray() {
+    if (slice_array || !resource || info.type != ImageType::e3D) {
+        return slice_array.Get();
+    }
+    D3D12_RESOURCE_DESC desc = resource->GetDesc();
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
+    ThrowIfFailed(runtime->device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                  D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&slice_array)),
+                  "Create 3D image slice array");
+    slice_array_state = D3D12_RESOURCE_STATE_COMMON;
+    slice_array_version = 0;
+    LOG_INFO(Render, "D3D12: 3D image {} {}x{}x{} @{:x} read as a 2D array through a slice copy",
+             info.format, desc.Width, desc.Height, desc.DepthOrArraySize, gpu_addr);
+    return slice_array.Get();
+}
+
+void Image::RefreshSliceArray() {
+    if (!SliceArray() || slice_array_version == write_version || !CanTransfer()) {
+        return;
+    }
+    // D3D12 copies between a 3D and a 2D texture only through a buffer: every slice of every
+    // level goes to the footprint of its array subresource, then from there into the array.
+    const D3D12_RESOURCE_DESC desc = slice_array->GetDesc();
+    const u32 levels = desc.MipLevels;
+    const u32 layers = desc.DepthOrArraySize;
+    const u32 count = levels * layers;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(count);
+    u64 total_bytes = 0;
+    runtime->device.Get()->GetCopyableFootprints(&desc, 0, count, 0, footprints.data(), nullptr,
+                                                 nullptr, &total_bytes);
+    ComPtr<ID3D12Resource> transfer = CreateTransferBuffer(runtime->device.Get(), total_bytes);
+    auto* const commands = runtime->scheduler.CommandList();
+    Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    const auto slices = [&](u32 level) { return std::min(layers, std::max(1U, layers >> level)); };
+    for (u32 level = 0; level < levels; ++level) {
+        for (u32 z = 0; z < slices(level); ++z) {
+            const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint = footprints[level + z * levels];
+            const D3D12_TEXTURE_COPY_LOCATION src{
+                .pResource = resource.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .SubresourceIndex = level};
+            const D3D12_TEXTURE_COPY_LOCATION dst{.pResource = transfer.Get(),
+                                                  .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                                                  .PlacedFootprint = footprint};
+            const D3D12_BOX box{0, 0, z, footprint.Footprint.Width, footprint.Footprint.Height,
+                                z + 1};
+            commands->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+        }
+    }
+    TransitionBuffer(commands, transfer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                     D3D12_RESOURCE_STATE_COPY_SOURCE);
+    if (slice_array_state != D3D12_RESOURCE_STATE_COPY_DEST) {
+        TransitionBuffer(commands, slice_array.Get(), slice_array_state,
+                         D3D12_RESOURCE_STATE_COPY_DEST);
+    }
+    for (u32 level = 0; level < levels; ++level) {
+        for (u32 z = 0; z < slices(level); ++z) {
+            const u32 subresource = level + z * levels;
+            const D3D12_TEXTURE_COPY_LOCATION src{.pResource = transfer.Get(),
+                                                  .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                                                  .PlacedFootprint = footprints[subresource]};
+            const D3D12_TEXTURE_COPY_LOCATION dst{
+                .pResource = slice_array.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .SubresourceIndex = subresource};
+            commands->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+    }
+    slice_array_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    TransitionBuffer(commands, slice_array.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                     slice_array_state);
+    runtime->scheduler.DeferRelease(std::move(transfer));
+    slice_array_version = write_version;
 }
 
 Image::CopyLayout Image::Layout(const BufferImageCopy& copy) const {
@@ -891,13 +1026,43 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
         return;
     }
     const FormatInfo format_info = runtime->Format(info.format);
-    const auto swizzle = info.Swizzle();
-    const u32 base_level = static_cast<u32>(info.range.base.level);
-    const u32 base_layer = static_cast<u32>(info.range.base.layer);
-    const u32 levels = info.range.extent.levels;
-    const u32 layers = info.range.extent.layers;
-    const bool is_msaa = source.info.num_samples > 1;
+    auto swizzle = info.Swizzle();
+    if (const SurfaceType surface_type = VideoCore::Surface::GetFormatType(info.format);
+        surface_type == SurfaceType::Depth || surface_type == SurfaceType::DepthStencil) {
+        // As the Vulkan backend (ConvertGreenRed): guest depth views read depth from G, the
+        // host SRV has it in R and G reads 0 (linear-depth passes then output 0 and lighting
+        // divides by it: NaN/Inf, the black silhouettes of Mario Wonder).
+        std::ranges::transform(swizzle, swizzle.begin(), [](Tegra::Texture::SwizzleSource s) {
+            return s == Tegra::Texture::SwizzleSource::G ? Tegra::Texture::SwizzleSource::R : s;
+        });
+    }
     const D3D12_RESOURCE_DESC resource_desc = image->GetDesc();
+    const u32 resource_levels = resource_desc.MipLevels;
+    const u32 resource_array = resource_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                   ? 1U
+                                   : resource_desc.DepthOrArraySize;
+    // A view past the end of its resource is undefined in D3D12: the PC's driver tolerates it,
+    // AMD's may build a descriptor that addresses the wrong memory. Clamp it (and say so).
+    const u32 base_level = std::min(static_cast<u32>(info.range.base.level), resource_levels - 1);
+    const u32 base_layer = std::min(static_cast<u32>(info.range.base.layer), resource_array - 1);
+    const u32 levels = std::clamp(static_cast<u32>(info.range.extent.levels), 1U,
+                                  resource_levels - base_level);
+    const u32 layers = std::clamp(static_cast<u32>(info.range.extent.layers), 1U,
+                                  resource_array - base_layer);
+    if (base_level != static_cast<u32>(info.range.base.level) ||
+        base_layer != static_cast<u32>(info.range.base.layer) ||
+        levels != static_cast<u32>(info.range.extent.levels) ||
+        layers != static_cast<u32>(info.range.extent.layers)) {
+        static std::atomic<u32> logged_clamps{};
+        if (logged_clamps.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(Render, "D3D12: view of {} @{:x} (levels {}+{} layers {}+{}) exceeds its "
+                        "image ({} levels, {} layers); clamped",
+                        info.format, source.gpu_addr, info.range.base.level,
+                        info.range.extent.levels, info.range.base.layer,
+                        info.range.extent.layers, resource_levels, resource_array);
+        }
+    }
+    const bool is_msaa = source.info.num_samples > 1;
 
     srv_params = {
         .format = format_info.srv,
@@ -974,6 +1139,13 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
             dsv_desc.Texture2DArray = {base_level, base_layer, layers};
         }
         runtime->device.Get()->CreateDepthStencilView(image, &dsv_desc, dsv);
+        // For draws that also sample this image: D3D12 cannot read a resource in DEPTH_WRITE.
+        dsv_read_only = runtime->dsv_descriptors.Allocate();
+        dsv_desc.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+        if (format_info.stencil_srv != DXGI_FORMAT_UNKNOWN) {
+            dsv_desc.Flags |= D3D12_DSV_FLAG_READ_ONLY_STENCIL;
+        }
+        runtime->device.Get()->CreateDepthStencilView(image, &dsv_desc, dsv_read_only);
         CheckRemovedAfter(runtime->device.Get(), [&] {
             return fmt::format("DSV of {} (format {} dim {} level {} layers {}+{})", info.format,
                                static_cast<u32>(dsv_desc.Format),
@@ -1004,7 +1176,15 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
 }
 ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewInfo& info,
                      ImageId id, Image& image_, SlotVector<Image>& images)
-    : ImageView{runtime, info, id, image_} { slot_images = &images; }
+    : ImageView{runtime, info, id, image_} {
+    slot_images = &images;
+    if (natural_type == Shader::TextureType::ColorArray2D &&
+        srv_params.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+        // A 2D array view of a 3D image: the delegated constructor could not reach the image for
+        // its slice array and fell back to the 3D SRV, which stays owned by srvs[Color3D].
+        srvs[static_cast<size_t>(natural_type)] = CreateSrv(natural_type);
+    }
+}
 ImageView::ImageView(TextureCacheRuntime&, const VideoCommon::ImageInfo& info,
                      const VideoCommon::ImageViewInfo& view, GPUVAddr addr)
     : VideoCommon::ImageViewBase{info, view, addr}, buffer_size{VideoCommon::CalculateGuestSizeInBytes(info)} {}
@@ -1060,7 +1240,28 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
             return !image || (!is_1d && !is_3d);
         }
     };
+    if (texture_type == TextureType::ColorArray2D && is_3d && image) {
+        // Mario Wonder samples a 3D texture as a 2D array (Vulkan's 2D_ARRAY_COMPATIBLE); D3D12
+        // has no such view, and the 3D SRV this fell back to made the Series write NaN (the black
+        // silhouettes; the PC's driver happened to read it right). View a 2D array copy instead.
+        Image* const source = SourceImage();
+        if (ID3D12Resource* const slices = source ? source->SliceArray() : nullptr) {
+            const u32 depth = slices->GetDesc().DepthOrArraySize;
+            D3D12_SHADER_RESOURCE_VIEW_DESC desc{.Format = p.format,
+                                                 .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+                                                 .Shader4ComponentMapping = p.mapping};
+            desc.Texture2DArray = {p.base_level, p.levels, 0, depth, 0, 0.0f};
+            const D3D12_CPU_DESCRIPTOR_HANDLE handle = runtime->view_descriptors.Allocate();
+            runtime->device.Get()->CreateShaderResourceView(slices, &desc, handle);
+            return handle;
+        }
+    }
     if (!is_compatible(texture_type)) {
+        const bool slices_pending = texture_type == TextureType::ColorArray2D && is_3d && image &&
+                                    !slot_images; // replaced once the view knows its image
+        if (!slices_pending) WarnOnce(logged_srv_fallback, "SRV of {} as texture type {} is not possible on a resource of "
+                 "dimension {}; reading it with its own dimension", format,
+                 static_cast<u32>(texture_type), static_cast<u32>(p.dimension));
         const TextureType resource_type = is_3d   ? TextureType::Color3D
                                           : is_1d ? TextureType::ColorArray1D
                                                   : TextureType::ColorArray2D;
@@ -1150,6 +1351,15 @@ void ImageView::TransitionImage(D3D12_RESOURCE_STATES state) const {
     }
 }
 
+void ImageView::PrepareRead(Shader::TextureType texture_type) const {
+    if (texture_type == Shader::TextureType::ColorArray2D &&
+        srv_params.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+        if (Image* const source = SourceImage()) {
+            source->RefreshSliceArray();
+        }
+    }
+}
+
 void ImageView::Release() {
     if (!runtime) return;
     for (D3D12_CPU_DESCRIPTOR_HANDLE& handle : srvs) {
@@ -1159,16 +1369,17 @@ void ImageView::Release() {
     if (uav.ptr) runtime->view_descriptors.Free(uav);
     if (rtv.ptr) runtime->rtv_descriptors.Free(rtv);
     if (dsv.ptr) runtime->dsv_descriptors.Free(dsv);
+    if (dsv_read_only.ptr) runtime->dsv_descriptors.Free(dsv_read_only);
     runtime = nullptr;
 }
 ImageView::ImageView(ImageView&& other) noexcept : VideoCommon::ImageViewBase{std::move(other)}, runtime{std::exchange(other.runtime, nullptr)},
     slot_images{other.slot_images}, image{other.image}, srv_params{other.srv_params}, natural_type{other.natural_type},
-    srvs{std::exchange(other.srvs, {})}, uav{other.uav}, rtv{other.rtv}, dsv{other.dsv}, buffer_size{other.buffer_size} {}
+    srvs{std::exchange(other.srvs, {})}, uav{other.uav}, rtv{other.rtv}, dsv{other.dsv}, dsv_read_only{other.dsv_read_only}, buffer_size{other.buffer_size} {}
 ImageView& ImageView::operator=(ImageView&& other) noexcept {
     if (this != &other) { Release(); static_cast<VideoCommon::ImageViewBase&>(*this) = std::move(other);
         runtime = std::exchange(other.runtime, nullptr); slot_images = other.slot_images; image = other.image;
         srv_params = other.srv_params; natural_type = other.natural_type; srvs = std::exchange(other.srvs, {});
-        uav = other.uav; rtv = other.rtv; dsv = other.dsv; buffer_size = other.buffer_size; }
+        uav = other.uav; rtv = other.rtv; dsv = other.dsv; dsv_read_only = other.dsv_read_only; buffer_size = other.buffer_size; }
     return *this;
 }
 bool ImageView::IsRescaled() const noexcept { return slot_images && (*slot_images)[image_id].IsRescaled(); }
@@ -1195,7 +1406,7 @@ Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& 
         reduction = D3D12_FILTER_REDUCTION_TYPE_STANDARD;
     }
     const f32 anisotropy = std::clamp(config.MaxAnisotropy(), 1.0f, 16.0f);
-    D3D12_FILTER filter = anisotropy > 1.0f ? D3D12_ENCODE_ANISOTROPIC_FILTER(reduction) :
+    filter = anisotropy > 1.0f ? D3D12_ENCODE_ANISOTROPIC_FILTER(reduction) :
         D3D12_ENCODE_BASIC_FILTER(linear_min ? D3D12_FILTER_TYPE_LINEAR : D3D12_FILTER_TYPE_POINT,
         linear_mag ? D3D12_FILTER_TYPE_LINEAR : D3D12_FILTER_TYPE_POINT,
         linear_mip ? D3D12_FILTER_TYPE_LINEAR : D3D12_FILTER_TYPE_POINT,
@@ -1205,7 +1416,7 @@ Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& 
     const bool no_mips = config.mipmap_filter == Tegra::Texture::TextureMipmapFilter::None;
     const f32 min_lod = no_mips ? 0.0f : config.MinLod();
     const f32 max_lod = no_mips ? 0.25f : std::max(config.MaxLod(), min_lod);
-    D3D12_SAMPLER_DESC desc{.Filter = filter, .AddressU = AddressMode(config.wrap_u),
+    desc = D3D12_SAMPLER_DESC{.Filter = filter, .AddressU = AddressMode(config.wrap_u),
         .AddressV = AddressMode(config.wrap_v), .AddressW = AddressMode(config.wrap_p),
         .MipLODBias = std::clamp(config.LodBias(), D3D12_MIP_LOD_BIAS_MIN, D3D12_MIP_LOD_BIAS_MAX),
         .MaxAnisotropy = static_cast<u32>(anisotropy),
@@ -1221,11 +1432,17 @@ Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& 
                            desc.MaxLOD, desc.MipLODBias);
     });
 }
+std::string Sampler::Describe() const {
+    return fmt::format("filter 0x{:x} address {}/{}/{} aniso {} lod {}..{} bias {}",
+                       static_cast<u32>(desc.Filter), static_cast<u32>(desc.AddressU),
+                       static_cast<u32>(desc.AddressV), static_cast<u32>(desc.AddressW),
+                       desc.MaxAnisotropy, desc.MinLOD, desc.MaxLOD, desc.MipLODBias);
+}
 Sampler::~Sampler() { if (runtime && handle.ptr) runtime->sampler_descriptors.Free(handle); }
-Sampler::Sampler(Sampler&& other) noexcept : runtime{std::exchange(other.runtime, nullptr)}, handle{other.handle}, key{other.key} {}
+Sampler::Sampler(Sampler&& other) noexcept : runtime{std::exchange(other.runtime, nullptr)}, handle{other.handle}, key{other.key}, filter{other.filter}, desc{other.desc} {}
 Sampler& Sampler::operator=(Sampler&& other) noexcept {
     if (this != &other) { if (runtime && handle.ptr) runtime->sampler_descriptors.Free(handle);
-        runtime = std::exchange(other.runtime, nullptr); handle = other.handle; key = other.key; } return *this;
+        runtime = std::exchange(other.runtime, nullptr); handle = other.handle; key = other.key; filter = other.filter; desc = other.desc; } return *this;
 }
 
 Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM_RT> color_buffers,
@@ -1254,6 +1471,7 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
     }
     if (depth_buffer && depth_buffer->DepthStencil().ptr) {
         depth = depth_buffer->DepthStencil();
+        depth_read_only = depth_buffer->DepthStencilReadOnly();
         depth_image = depth_buffer->image_id;
         depth_format = runtime.Format(depth_buffer->format).dsv;
         images = depth_buffer->slot_images ? depth_buffer->slot_images : images;
@@ -1265,7 +1483,7 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
     }
 }
 
-void Framebuffer::PrepareAttachments() const {
+void Framebuffer::PrepareAttachments(bool depth_sampled) const {
     if (!images) return;
     for (size_t index = 0; index < num_colors; ++index) {
         if (color_images[index] != ImageId{}) {
@@ -1273,7 +1491,8 @@ void Framebuffer::PrepareAttachments() const {
         }
     }
     if (depth_image != ImageId{}) {
-        (*images)[depth_image].Transition(D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        (*images)[depth_image].Transition(depth_sampled ? DEPTH_SAMPLED_STATE
+                                                        : D3D12_RESOURCE_STATE_DEPTH_WRITE);
     }
 }
 

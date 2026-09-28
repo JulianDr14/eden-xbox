@@ -12,6 +12,7 @@
 
 #include "dxil_spirv_nir.h"
 #include "eden_spirv_to_dxil.h"
+#include "nir_builder.h"
 #include "nir_to_dxil.h"
 #include "spirv/nir_spirv.h"
 #include "util/blob.h"
@@ -27,6 +28,21 @@ free_objects(struct dxil_spirv_object *out, unsigned count)
       free(out[i].binary.buffer);
       memset(&out[i], 0, sizeof(out[i]));
    }
+}
+
+/* Guest (Maxwell) shaders rely on IEEE results: rsq(0) = inf, min/max picking the non-NaN operand,
+ * x * 0 staying NaN for x = inf... nir_to_dxil tags every non-exact float op with fast math
+ * (DXIL_UNSAFE_ALGEBRA, "no NaN/Inf"), and the Xbox Series' shader compiler takes it: lit pixels
+ * of Mario Wonder came out NaN there (the black silhouettes) while the PC's driver kept IEEE. */
+static bool
+mark_alu_exact(nir_builder *b, nir_instr *instr, void *data)
+{
+   (void)b;
+   (void)data;
+   if (instr->type != nir_instr_type_alu)
+      return false;
+   nir_instr_as_alu(instr)->fp_math_ctrl |= nir_fp_exact;
+   return true;
 }
 
 bool
@@ -97,9 +113,11 @@ eden_spirv_to_dxil_pipeline(const struct eden_spirv_to_dxil_stage *stages, unsig
        * shader ops, and NIR still makes 16-bit ops out of mediump (RelaxedPrecision) code even
        * with the recompiler's fp16/int16 off; the console driver then rejects the pixel shader
        * (E_INVALIDARG). Dozen lowers only when the app enables 16-bit types, which misses those. */
+      nir_shader_instructions_pass(nir[i], mark_alu_exact, nir_metadata_all, NULL);
       const struct nir_to_dxil_options opts = {
          .environment = DXIL_ENVIRONMENT_VULKAN,
          .lower_int16 = true,
+         .disable_math_refactoring = true,
          .shader_model_max = stages[i].conf->shader_model_max,
          .validator_version_max = validator_version_max,
       };

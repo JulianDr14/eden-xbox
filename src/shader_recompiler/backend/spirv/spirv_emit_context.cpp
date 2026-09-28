@@ -211,6 +211,8 @@ Id GetAttributeType(EmitContext& ctx, AttributeType type) {
                                                      : ctx.TypeVector(ctx.TypeInt(32, true), 4);
     case AttributeType::UnsignedScaled:
         return ctx.profile.support_scaled_attributes ? ctx.F32[4] : ctx.U32[4];
+    case AttributeType::SignedNormA2B10G10R10:
+        return ctx.U32[4];
     case AttributeType::Disabled:
         break;
     }
@@ -235,6 +237,9 @@ InputGenericInfo GetAttributeInfo(EmitContext& ctx, AttributeType type, Id id) {
         return ctx.profile.support_scaled_attributes
                    ? InputGenericInfo{id, ctx.input_f32, ctx.F32[1], InputGenericLoadOp::None}
                    : InputGenericInfo{id, ctx.input_u32, ctx.U32[1], InputGenericLoadOp::UToF};
+    case AttributeType::SignedNormA2B10G10R10:
+        return InputGenericInfo{id, ctx.input_u32, ctx.U32[1],
+                                InputGenericLoadOp::SNormA2B10G10R10};
     case AttributeType::Disabled:
         return InputGenericInfo{};
     }
@@ -493,6 +498,17 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
 }
 
 EmitContext::~EmitContext() = default;
+
+Id EmitContext::UnpackSNormA2B10G10R10(Id value, Id component) {
+    // value is the whole packed word (fetched as R32_UINT): R in bits 0-9, G 10-19, B 20-29, A 30-31
+    const Id is_w{OpIEqual(U1, component, Const(3u))};
+    const Id bits{OpSelect(U32[1], is_w, Const(2u), Const(10u))};
+    const Id offset{OpIMul(U32[1], component, Const(10u))};
+    const Id field{OpBitFieldSExtract(S32[1], OpBitcast(S32[1], value), offset, bits)};
+    const Id max_value{OpSelect(F32[1], is_w, Const(1.0f), Const(511.0f))};
+    const Id normalized{OpFDiv(F32[1], OpConvertSToF(F32[1], field), max_value)};
+    return OpFMax(F32[1], normalized, Const(-1.0f));
+}
 
 Id EmitContext::Def(const IR::Value& value) {
     if (!value.IsImmediate()) {
@@ -773,12 +789,18 @@ void EmitContext::DefineAttributeMemAccess(const Info& info) {
                 ++label_index;
                 continue;
             }
+            // Packed SNORM 10:10:10:2 keeps all four fields in the first component.
+            const Id load_index{generic.load_op == InputGenericLoadOp::SNormA2B10G10R10
+                                    ? u32_zero_value
+                                    : masked_index};
             const Id pointer{
-                is_array ? OpAccessChain(generic.pointer_type, generic_id, vertex, masked_index)
-                         : OpAccessChain(generic.pointer_type, generic_id, masked_index)};
+                is_array ? OpAccessChain(generic.pointer_type, generic_id, vertex, load_index)
+                         : OpAccessChain(generic.pointer_type, generic_id, load_index)};
             const Id value{OpLoad(generic.component_type, pointer)};
-            const Id result{[this, generic, value]() {
+            const Id result{[this, generic, value, masked_index]() {
                 switch (generic.load_op) {
+                case InputGenericLoadOp::SNormA2B10G10R10:
+                    return UnpackSNormA2B10G10R10(value, masked_index);
                 case InputGenericLoadOp::Bitcast:
                     return OpBitcast(F32[1], value);
                 case InputGenericLoadOp::SToF:

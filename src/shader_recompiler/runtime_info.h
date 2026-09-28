@@ -23,6 +23,9 @@ enum class AttributeType : u8 {
     SignedScaled,
     UnsignedScaled,
     Disabled,
+    /// Packed SNORM 10:10:10:2 fetched as four uints and normalized in the shader, for hosts
+    /// without the vertex format (D3D12).
+    SignedNormA2B10G10R10,
 };
 
 enum class InputTopology {

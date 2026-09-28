@@ -5,7 +5,11 @@
 
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
@@ -114,10 +118,10 @@ public:
 
     /// Logs every draw, clear and skipped draw until turned off: one frame of it, taken on two
     /// machines, shows where their output starts to differ.
-    void SetDrawTrace(bool enabled) noexcept {
-        trace_draws = enabled;
-        trace_index = 0;
-    }
+    /// With dump_targets, each framebuffer is also written next to the log (trace\*.bmp) when
+    /// the draws move to another one, and rt0's NaN/Inf count is logged after every draw (slow:
+    /// every draw waits for the GPU).
+    void SetDrawTrace(bool enabled, bool dump_targets = false);
 
 private:
     struct DrawParams {
@@ -160,10 +164,33 @@ private:
     void TraceDraw(std::string_view what, const GraphicsPipeline* pipeline,
                    const Framebuffer* framebuffer, std::span<const VideoCommon::ImageViewId> views,
                    u32 vertices, u32 instances);
+    /// Writes the color targets and the depth plane of a traced framebuffer as trace\*.bmp.
+    void DumpTargets(std::span<const VideoCommon::ImageId> targets);
+    /// Copies level 0 / layer 0 of an image back and waits for it. Returns its NaN/Inf texel
+    /// count (nullopt when the format is not decoded); with a name, also logs per-channel stats
+    /// and writes trace\<name>.bmp.
+    std::optional<u64> DumpTarget(const Image& image, const std::string* bmp_name,
+                                  u32 subresource = 0);
+    /// Logs the NaN/Inf texels of every level and layer of a sampled image (once per trace).
+    void DumpTextureNonFinite(const Image& image);
+    /// For every traced draw: reads each bound cbuf, vertex and index buffer back from the GPU and
+    /// compares it with guest memory. Logs the ones that differ, or all of them (with the index
+    /// range against the vertex buffer sizes) when verbose. With ground_tiles (the ground of
+    /// Mario Wonder), also logs what its vertex shader reads for each tile.
+    void CheckTracedBuffers(std::span<const TracedBuffer> buffers, const DrawParams& params,
+                            bool verbose, bool ground_tiles = false);
+    /// Decodes a sampled image again from guest memory (as the texture cache uploads it) and
+    /// compares every level and layer with what the GPU holds. Logs the levels that differ.
+    void CheckTracedTexture(const Image& image);
+    /// Which texels of the depth target the last traced draw changed: written as
+    /// trace\<index>_dz.bmp at a quarter of the size (white cells hold a changed texel), with the
+    /// count and bounding box returned for the trace line.
+    std::string TraceDepthChanges(const Image& depth);
 
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
     Scheduler& scheduler;
+    StagingBufferPool& staging;
     BufferCacheRuntime& buffer_runtime;
     DescriptorRing& descriptor_ring;
     SamplerHeap& sampler_heap;
@@ -188,7 +215,22 @@ private:
     bool logged_cpu_indirect_draw{};
     bool logged_byte_count_draw{};
     bool trace_draws{};
+    bool trace_dumps{};
     u32 trace_index{};
+    /// Color targets then depth of the framebuffer the traced draws go to (ids, not the
+    /// Framebuffer: the cache may delete it before the draws move on).
+    std::array<VideoCommon::ImageId, VideoCommon::NUM_RT + 1> traced_targets{};
+    SlotVector<Image>* traced_images{};
+    std::unordered_set<GPUVAddr> traced_textures;
+    /// Last rt0 NaN/Inf count per target, and whether the last traced draw raised it.
+    std::unordered_map<GPUVAddr, u64> traced_non_finite;
+    bool trace_non_finite_grew{};
+    u32 traced_buffers_checked{};
+    u32 traced_buffers_differing{};
+    /// Last contents of each traced depth target (plane 0, rows packed), for TraceDepthChanges.
+    std::unordered_map<GPUVAddr, std::vector<u8>> traced_depth;
+    u32 traced_textures_checked{};
+    u32 traced_textures_differing{};
 };
 
 } // namespace D3D12

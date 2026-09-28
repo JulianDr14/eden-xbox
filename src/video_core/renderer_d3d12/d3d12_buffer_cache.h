@@ -55,6 +55,19 @@ private:
     u64 state_tick{}; ///< scheduler tick of the list that set state
 };
 
+/// A buffer bound for a traced draw (RasterizerD3D12::SetDrawTrace), checked against guest memory.
+struct TracedBuffer {
+    enum class Kind { Uniform, NullUniform, StreamedUniform, Vertex, Index, RewrittenIndex };
+    Kind kind{};
+    u32 slot{};
+    Buffer* buffer{}; ///< null for staging memory and null bindings
+    u32 offset{};
+    u32 size{};
+    u32 stride{}; ///< vertex stride or index size
+    DAddr device_addr{};
+    const u8* mapped{}; ///< what the GPU reads of a streamed cbuf
+};
+
 class BufferCacheRuntime {
     friend Buffer;
     using PrimitiveTopology = Tegra::Engines::Maxwell3D::Regs::PrimitiveTopology;
@@ -67,6 +80,11 @@ public:
 
     /// Where guest uniform, storage and texel buffer views go (set by the rasterizer).
     void SetDescriptorQueue(GuestDescriptorQueue* queue) noexcept { descriptor_queue = queue; }
+    /// Collects the buffers of the next bindings (null stops); diagnostics only.
+    void SetTraceBuffers(std::vector<TracedBuffer>* out) noexcept {
+        trace_buffers = out;
+        traced_uniforms = 0;
+    }
 
     void TickFrame(Common::SlotVector<Buffer>& buffers) noexcept;
 
@@ -147,6 +165,8 @@ private:
     StagingBufferPool& staging;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
     GuestDescriptorQueue* descriptor_queue{};
+    std::vector<TracedBuffer>* trace_buffers{};
+    u32 traced_uniforms{};
 
     std::optional<D3D12_INDEX_BUFFER_VIEW> pending_index;
     std::array<D3D12_VERTEX_BUFFER_VIEW, VideoCommon::NUM_VERTEX_BUFFERS> pending_vertex{};

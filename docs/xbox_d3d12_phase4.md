@@ -862,6 +862,334 @@ Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
 - Con esto la consola y el PC dan el mismo resultado; lo siguiente (las siluetas) se depura en el
   PC.
 
+**Las siluetas blancas y negras (0.2.26.0): normales empaquetadas leídas como floats.**
+- **Herramienta:** `boot.cfg` acepta `trace_frame=<n>`. Ese frame se traza draw a draw, igual que
+  la traza por defecto (la de `frame_1.bmp`), pero además:
+  - al cambiar de framebuffer escribe sus targets en `log\trace\NNN_rtX_...bmp`, con los NaN/Inf
+    en magenta y estadísticas por canal en el log;
+  - cuenta los NaN/Inf de rt0 tras cada draw y revisa cada textura muestreada, en todos sus mips y
+    capas.
+  - Es lento, porque cada draw espera a la GPU; solo va con un `trace_frame` explícito. Con la
+    escena de la intro: `trace_frame=3120`.
+- **Qué se vio:**
+  - El target HDR de la escena (`B10G11R11_FLOAT`, 1920x1080) acababa con ~1,07 M texels NaN/Inf,
+    solo en ciertos materiales (follaje, árboles, rocas de primer plano).
+  - El tonemap los convierte en negro (NaN) y blanco (Inf).
+  - Las texturas de entrada no tenían NaN: los creaban los shaders.
+- **Causa:**
+  - Esas mallas guardan normales y tangentes como atributo `A2B10G10R10` **SNORM**. DXGI no tiene
+    un 10:10:10:2 con signo.
+  - El fallback lo leía como `R32G32B32A32_FLOAT`: los 32 bits empaquetados reinterpretados como
+    float (a veces NaN), más 12 bytes de los atributos siguientes.
+- **Corrección:**
+  - Nuevo `Shader::AttributeType::SignedNormA2B10G10R10`. D3D12 lo pide como `R10G10B10A2_UINT`
+    y el backend SPIR-V extiende el signo de cada campo y normaliza
+    (`EmitContext::UnpackSNormA2B10G10R10`): `max(sext(x) / 511, -1)`, y `/ 1` para w.
+  - Vulkan no usa este tipo.
+- **Descartado por el camino**, cada hipótesis con su prueba en el PC:
+  - fp16 de mediump (`mediump_16bit_alu = false`: mismos NaN);
+  - `SignedZeroInfNanPreserve` (float controls: mismos NaN);
+  - culling (`CULL_MODE_NONE`: igual);
+  - la textura 3D vista como 2D array (SRV nula: igual).
+- **Otros dos fallos encontrados con la misma herramienta** (también en 0.2.26.0):
+  - **Swizzle de profundidad:** las vistas de profundidad del guest leen la profundidad en G, como
+    hace Vulkan con `ConvertGreenRed`. La SRV `R24_UNORM_X8` la tiene en R, así que la profundidad
+    linealizada salía 0. Ahora `ImageView` convierte G→R en los formatos depth y depth-stencil.
+  - **Depth buffer leído mientras está enlazado:** `Configure` lo pasaba a SRV y
+    `PrepareAttachments` lo devolvía a `DEPTH_WRITE`, y leer en `DEPTH_WRITE` es indefinido.
+    - Ahora ese draw usa `DEPTH_SAMPLED_STATE` (`DEPTH_READ` + SRV) y un DSV de solo lectura.
+    - Si además escribe profundidad, se avisa y la escritura se pierde.
+- **Pendiente de este tema:**
+  - Una textura 3D vista como 2D array (Vulkan `2D_ARRAY_COMPATIBLE`) no tiene vista en D3D12. Se
+    lee con su propia dimensión y se avisa una vez; hará falta una copia a un 2D array.
+  - Los atributos `A2B10G10R10` SSCALED siguen sin soporte.
+- **Búsqueda externa:** no aparece ningún caso documentado de este fallo; el juego va bien en
+  Vulkan (Eden/yuzu en PC y Android).
+- **En la Series 0.2.26.0 siguen las siluetas; en el PC no.**
+  - En el PC la intro se ve bien también sin traza (ejecución de 150 s), así que no es un problema
+    de sincronización que la traza tapara.
+  - El DXIL es el mismo en las dos máquinas: `spirv_to_dxil` no depende de las capacidades del
+    dispositivo. La diferencia está en el driver o el hardware de la consola.
+  - Las siluetas aparecen al empezar la intro (~72 s), junto con el aviso
+    `min/max sampler reduction is not supported`, que solo sale en la Series (tiled resources
+    tier 1).
+    - Forzar ese fallback en el PC no reproduce el fallo, así que queda descartado.
+  - Diferencias que siguen abiertas:
+    - La Series ejecuta siempre waves de 64 lanes (el PC, de 32 a 64).
+    - El probe marca que la Series no tiene lecturas de UAV tipados.
+    - Sin ops nativas de 16 bits: los `TEXS .F16` del guest pasan por min precision.
+  - Siguiente paso: 0.2.27.0 con `trace_frame=3120` (≈111 s en la Series) para ver en la consola
+    qué draw deja NaN en rt0.
+- **Traza de la Series 0.2.27.0: el NaN nace en la pasada de iluminación, no en las entradas.**
+  - El primer draw con NaN es el #221 (PS `c1a938718d97043c`, 95 píxeles). Le siguen los draws
+    #225, 231, 235 (+38.700 píxeles), 305, 353 y 433, cada uno con un PS distinto.
+  - Los #417 y #440 solo lo propagan, porque leen el color ya contaminado (bloom). Por eso las
+    manchas crecen.
+  - Todas las texturas de entrada son finitas (el escaneo da `non-finite 0`), y el mismo frame
+    trazado en el PC da 0 en todos los draws.
+  - Esos PS no piden ninguna feature (`features PS 0`): ni wave ops ni min precision ni 16 bits.
+    Quedan descartados wave64 y el camino de `TEXS .F16`.
+  - Las decodificaciones de ASTC en CPU dan los mismos hashes en las dos máquinas.
+  - **Causa probable:** `nir_to_dxil` marca cada operación float no exacta con
+    `DXIL_UNSAFE_ALGEBRA` (fast math, "no hay NaN ni Inf") y no pone el flag global
+    `DisableMathRefactoring`. Los shaders de Maxwell dependen de IEEE (`rsq(0) = inf`, `min`/`max`
+    con NaN…). El driver del PC mantiene IEEE, pero el compilador de la consola puede aprovechar
+    el permiso y producir NaN en píxeles sueltos.
+  - **Cambio en 0.2.28.0:** `tools/xbox/mesa/eden_pipeline.c` marca todas las ALU como exactas
+    (`nir_fp_exact`) antes de `nir_to_dxil` y activa `disable_math_refactoring`.
+    - Hay que recompilar la DLL con `build-spirv-to-dxil.ps1`.
+    - En el PC sigue viéndose igual (257 PSOs, sin errores).
+- **Series 0.2.28.0: el fast math no era la causa.**
+  - La traza tiene NaN en los mismos PS (`c1a93…`, `a55a…`, `601b…`, `12e77…`, `9355…`, `3153…`).
+    El paquete llevaba la DLL parcheada (mismo hash que la compilada).
+  - Esta vez el primero es el #189, en una pasada a 384×216 (RGBA16F). Los NaN cubren objetos
+    enteros (siluetas completas), no píxeles sueltos.
+  - Descartados también:
+    - `undef`: `nir_to_dxil` ya lo convierte en 0.
+    - CBV nulas por salirse del `Buffer`: los buffers del cache van alineados a 64 KB.
+    - Los `Unmapped Device ReadBlock`: salen igual en el PC.
+  - El PC es una AMD Radeon Pro 5300M (RDNA1), así que la diferencia está en el compilador de
+    shaders del driver de la consola, no en la marca de GPU.
+  - **Siguiente hipótesis: denormales.**
+    - El profile de D3D12 tenía `support_float_controls = false`. Ningún DXIL llevaba
+      `fp32-denorm-mode`, así que quedaba en "any" y cada driver decide.
+    - Maxwell trabaja en FTZ, y Eden emula FMZ (`a * b` con 0 si algún operando es 0) comparando
+      con cero. Si el driver aplana denormales en unas instrucciones y no en otras, un `rsq` puede
+      dar inf mientras la comparación con 0 falla, y sale NaN.
+    - **Cambio en 0.2.29.0:** `Profile::force_fp32_denorm_flush` (nuevo) hace que el backend
+      SPIR-V emita `DenormFlushToZero 32` en todos los shaders. Mesa lo traduce a
+      `fp32-denorm-mode=ftz`. Solo lo activa D3D12.
+- **Normales empaquetadas SNORM 10:10:10:2 (0.2.30.0).**
+  - En la traza de la Series, cada draw que mete NaN es la primera pasada de una malla concreta
+    (por ejemplo la de 846 vértices en #189 y #224). Los draws siguientes con el mismo PS y otras
+    mallas no añaden ninguno.
+  - `DumpTracedShaders` (`d3d12_pipeline_cache.cpp`) vuelca a `log/shaders/` el SPIR-V y el DXIL
+    de los PS de la traza, más los atributos de vértice de su pipeline. Todas esas pipelines leen
+    la normal y la tangente como `SNorm` + `Size_A2_B10_G10_R10`, que antes se leían como
+    `R10G10B10A2_UINT` y se normalizaban en el shader.
+  - El PS `66c87…` (luces por clusters) normaliza esos vectores interpolados con `rsqrt`. Si llegan
+    a cero, sale inf × 0 = NaN en todo el objeto, y en el G-buffer no se nota porque la normal va a
+    un RT UNORM.
+  - El probe de la consola tampoco es fiable para formatos: marca "no" hasta en las lecturas UAV
+    tipadas de RGBA32F, que son obligatorias.
+  - **Cambio:** el atributo se lee como `R32_UINT` (la palabra entera) y
+    `EmitContext::UnpackSNormA2B10G10R10` extrae los campos en los bits 0, 10, 20 y 30 con signo.
+    En el PC se ve igual que antes.
+  - **Resultado en la Series: no lo arregla.** La traza confirma dxgi 42 (`R32_UINT`) y sigue
+    habiendo NaN, ahora en tres mallas distintas con el PS `66c87…` (#190-#192, 384×216). El
+    bloom los extiende después a manchas negras y blancas en el frame final.
+  - El DXIL del VS y del PS que usa la Series es idéntico byte a byte al del PC, que también es
+    AMD (Radeon Pro 5300M). La diferencia está en los datos que recibe el shader o en cómo los
+    lee la consola.
+  - El VS decodifica la normal de la entrada `R32_UINT` y la multiplica por la matriz del modelo
+    (cbuf 4), la misma que usa la posición. Como la posición sale bien, lo sospechoso son los
+    vertex buffers 1 y 2 (normal y tangente) o los cbufs de luces del PS (cbuf 8, indexado
+    dinámicamente).
+  - Entre los avisos del log, el único que sale solo en la Series es "min/max sampler reduction".
+    Ninguno de los samplers de estos draws es de reducción (filtros 0x14/0x15/0x95).
+- **Comprobación de buffers en la traza (0.2.31.0).**
+  - `RasterizerD3D12::CheckTracedBuffers`: en cada draw trazado que sube la cuenta de NaN/Inf de
+    rt0, lee de la GPU cada cbuf, vertex buffer e index buffer enlazado y lo compara palabra a
+    palabra con la memoria del guest. Registra las palabras distintas, las que son cero y las
+    NaN/Inf, y el rango de vértices que lee el draw frente a los que caben en cada VB. Las
+    líneas empiezan por `D3D12 trace buffers #`.
+  - Los cbufs que se enlazan como nulos (`cbuf NULL`) y los que van por staging
+    (`cbuf streamed`) también quedan en el log.
+  - **Cambio:** los buffers de la caché se crean redondeados a bloques de 256 bytes, y
+    `BindUniformBuffer` compara con ese tamaño. Antes, un cbuf del guest que terminaba justo al
+    final de su buffer, con un tamaño que no era múltiplo de 256, se enlazaba como CBV nulo (todo
+    ceros), y eso basta para dar NaN en los `rsqrt` de la luz.
+  - **Resultado en la Series:** ningún cbuf sale nulo, y los cbufs coinciden con el guest. Los
+    **vertex buffers no coinciden**: en #183 el de normales difiere en 90 de 90 palabras y el de
+    tangentes igual, todas a cero en la GPU. En #180, 252 de 330. El index buffer coincide y el
+    rango de vértices cabe en los VB. La GPU lee ceros donde el guest tiene datos.
+- **Copias sin orden en un mismo destino (0.2.32.0).**
+  - `BufferCache::CreateBuffer` llena el buffer nuevo de ceros (`ClearBuffer`, una copia desde
+    staging) y después `JoinOverlap` copia encima los buffers viejos que absorbe. En D3D12 son dos
+    `CopyBufferRegion` al mismo recurso, y `Buffer::Transition(COPY_DEST)` no emitía nada si el
+    buffer ya estaba en COPY_DEST.
+  - Sin una barrera entre ellas, D3D12 no garantiza el orden de las copias. El driver del PC las
+    serializa, pero la Series las ejecuta en paralelo, así que el relleno de ceros cae encima de
+    los datos. Las regiones que el guest ya no vuelve a escribir no se resuben, y la GPU se queda
+    con ceros. Vulkan lo evita con el parámetro `barrier` de `CopyBuffer`, que aquí se ignoraba.
+  - **Cambio:** `Buffer::Transition` y `Image::Transition`, cuando ya están en COPY_DEST, emiten
+    COPY_DEST→COMMON→COPY_DEST, que espera a la copia anterior. En UAV→UAV, `Image::Transition`
+    ahora también emite una barrera UAV, como ya hacían los buffers.
+  - **Resultado en la Series:** ya no sale ni un NaN y la escena se ve casi como en el PC. Queda
+    roto el borde del suelo, con huecos rectangulares. Ya faltan en la profundidad del G-buffer
+    (`182_ds_110_…`), así que es geometría y no textura. No hay draws saltados.
+- **Comprobación de buffers en todos los draws (0.2.33.0).** `CheckTracedBuffers` corre en cada
+  draw trazado. Solo registra los buffers que no coinciden con el guest, y al final del frame un
+  resumen: `D3D12 trace buffers: N of M bound buffers differ from guest memory`. Los buffers que
+  escribe la GPU (compute, transform feedback) pueden salir distintos sin estar mal, porque el
+  guest aún no tiene sus datos.
+- **Resultado 0.2.33.0.** Solo 10 de 3167 buffers difieren, todos en draws tardíos (#430+) y con
+  floats casi iguales: son datos que el juego ya actualizó para el frame siguiente. Los buffers del
+  suelo coinciden. Los huecos del borde del suelo (visibles en la profundidad del G-buffer, #181)
+  tienen bordes con forma de sprite, así que apuntan a un discard por alpha y no a triángulos que
+  faltan. Esas piezas las dibuja el PS `946d5d69e5522128` con texturas ASTC 6x5 sRGB (formato 93),
+  que la CPU decodifica al subirlas. El hash de las primeras subidas ASTC es idéntico en el PC y
+  en la Series, así que el decodificador no es la causa.
+- **Comprobación de texturas (0.2.34.0).** `CheckTracedTexture` corre una vez por cada imagen que
+  muestrea el frame trazado (sin `GpuModified` ni `CpuModified`). Vuelve a hacer lo mismo que la
+  subida de la caché de texturas (`UnswizzleImage` y, si hay conversión, `ConvertImage`), lee cada
+  nivel y capa de la GPU y compara bloque a bloque. Registra
+  `D3D12 trace texture check ...: matches guest memory` o los subrecursos que difieren, con el
+  primer bloque distinto y los texels de alpha 0 en cada lado. El resumen final es
+  `D3D12 trace textures: N of M sampled images differ from guest memory`.
+- **Resultado 0.2.34.0.** 0 de 130 texturas muestreadas difieren, incluidas las ASTC 6x5 de las
+  piezas del suelo (`@648474e00`, `@648237600`). Los buffers y las texturas llegan bien a la GPU,
+  así que la diferencia está en la ejecución del shader o en el estado fijo del PSO.
+- **0.2.35.0.** El volcado de shaders incluye el PS `946d5d69e5522128`, y los archivos llevan
+  también el hash del VS (`<ps>_<vs>_fs.dxil`), porque ese PS va con tres VS distintos. La línea
+  de traza añade `a2c`, `alpha test` (función y referencia), `early z` y `msaa`. El DXIL se
+  desensambla con `dxc -dumpbin` (Windows SDK).
+- **Resultado 0.2.35.0.** Ningún draw del suelo usa alpha-to-coverage ni MSAA, y el alpha test es
+  "siempre". El PS `946d5d69…` solo muestrea la textura en `TEXCOORD1.xy` y descarta si
+  `alpha < c5[384].x`, con la textura y el cbuf ya verificados. Los VS animan el viento con sin/cos
+  de un tiempo del cbuf e indexan un cbuf con un entero sacado de un float, que está acotado y
+  con NaN→0. En el código no hay nada indefinido que explique los huecos.
+- **0.2.36.0.** Cada draw trazado con depth lee la profundidad y la compara con la del draw
+  anterior. Añade a la línea `depth changed N texels in x0,y0..x1,y1` y escribe
+  `trace\<n>_dz.bmp` a 1/4 de tamaño, en blanco donde el draw cambió la profundidad. Sirve para
+  ver qué draw deja los huecos y de qué pipeline es.
+  - **Resultado en la Series.** Los huecos también están en la profundidad (`182_ds`), así que
+    el suelo no llega a escribir esos píxeles.
+  - Los culpables son el draw #33 (VS `e3273884…`, PS `144325c2…`) y el #35. Cada uno tiene
+    276 vértices y muestrea un array 128×128×105 de formato 26 (`@64fa7dc00` y `@6504eb400`).
+  - La máscara del #33 sale con huecos rectangulares del tamaño de un tile; la del #35 es el
+    borde del césped, continuo.
+  - La comprobación de texturas decía que coincidían, pero solo miraba las 16 primeras capas.
+- **0.2.37.0.**
+  - `CheckTracedTexture` ahora compara todas las capas.
+  - La línea de cada textura añade el tipo de vista y su rango de capas
+    (`type T layers base+count`).
+  - Se vuelcan los shaders `144325c2…` (el suelo con huecos) y `a1da7454…` (el borde que sale
+    bien), para ver cómo eligen la capa.
+  - **Resultado.**
+    - Las 105 capas coinciden con la memoria del guest, y la vista es 2D array con las 105
+      capas.
+    - Los dos PS son iguales:
+      `capa = round(TEXCOORD2.w)`, `Sample`, y `discard` si `alpha < c5[384].x`.
+    - En el VS, los dos atributos son RGB32F, y
+      `TEXCOORD2.w = c3[80 + 32 * trunc(attr1.z)].x`.
+    - Los buffers del draw también coinciden. Queda la sospecha de que el VS lea `c3` más allá
+      del tamaño del CBV: en AMD, una lectura fuera de rango da 0, así que la capa sería 0.
+- **0.2.38.0.**
+  - Los draws de esos dos PS registran todos sus buffers, con el tamaño de cada cbuf.
+  - En los vertex buffers añaden el rango (mín..máx) de cada columna de floats sobre los vértices
+    que lee el draw, para comparar `attr1.z` con el tamaño de `c3`.
+  - **Resultado:** la hipótesis del cbuf fuera de rango queda descartada.
+    - `c3` mide 57600 bytes y `attr1.z` va de 359 a 404, así que la tabla llega como mucho a
+      ~13 KB.
+    - Los 184 vértices del draw forman 46 quads, uno por valor de `attr1.z`.
+    - La textura del suelo es `BC4_UNORM` (formato 26), no L8: el "L8" del log son sus 8 mips.
+    - El VS también lee la posición y la escala de cada tile en `c2[1152 + 16k]` y
+      `c2[1664 + 16k]`, con `k = trunc(c3[84 + 32i])`.
+    - `c2` es un cbuf streamed de 2304 bytes, y el chequeo no lo comparaba con la memoria del
+      juego.
+    - En la máscara de profundidad faltan rectángulos grandes que se repiten a lo largo del
+      borde, no píxeles sueltos.
+- **0.2.39.0.** Para los draws del suelo:
+  - Se compara la copia streamed de `c2`, lo que realmente lee la GPU, con la memoria del juego.
+  - Por cada tile se registra `c3[64 + 32i]`, `c3[80 + 32i]`, `k`, `c2[1152 + 16k]` y
+    `c2[1664 + 16k]`, marcando OOB lo que queda fuera del tamaño atado.
+  - **Resultado:** no sirvió. `c2`/`c3` en el DXIL son los *bindings* de D3D12, no los cbufs del
+    guest.
+    - El VS enlaza los cbufs del guest 3, 4, 6 y 7 (slots D3D12 0-3). La tabla está en el `c7`
+      del guest y los transforms en el `c6`, que es el streamed de 2304 bytes.
+    - Se leyeron los cbufs 2 y 3 del guest, de 512 y 2560 bytes: todo salió OOB.
+- **0.2.40.0.** El mismo registro, leyendo los cbufs 6 y 7 del guest.
+  - **Resultado:** los datos están bien.
+    - La copia streamed de `c6` coincide con el guest, y ninguna lectura cae fuera de rango.
+    - Cada tile tiene su posición en la rejilla (`c7[64 + 32i]`), su capa (`c7[80 + 32i]`, entre
+      1 y 100) y `k = 2`. Con eso, `c6[1184]` vale (1,1,1,1) y `c6[1696]` vale 0.
+    - El draw #34 (borde de pasto) dibuja los mismos tiles con las mismas capas y otra textura, y
+      sale sólido.
+    - La máscara de cambios de profundidad no sirve para localizar los huecos: el draw anterior
+      (#28) es el primero sobre ese depth y no deja base con qué comparar.
+    - La profundidad final del pase (`175_ds`) sí muestra los huecos: rectángulos lejanos en la
+      franja del borde de la plataforma.
+- **0.2.41.0.**
+  - La traza registra cada sampler completo (filtro, direccionamiento, anisotropía, rango de LOD y
+    bias) en lugar de solo el filtro.
+  - Vuelca las capas 1, 7, 36, 44, 81, 97 y 98 de la textura BC4 de 105 capas, mips 0 a 3,
+    decodificadas desde la copia de la GPU (`trace\tex_<addr>_L<mip>_<capa>.bmp`).
+- **Resultado de la 0.2.41.**
+  - Esta vez el pasto (PS `a1da…`) es el #29 y el suelo (PS `144325…`) es el #31. El orden entre
+    corridas cambia, así que hay que identificarlos por hash.
+  - El pasto usa un sampler con LOD 0..0 (solo mip 0) y la textura `@65432b400`.
+  - El suelo usa filtro `0x14` (MIN_MAG_LINEAR_MIP_POINT), clamp y LOD 0..13 sobre la textura
+    `@6538bdc00`.
+  - Las máscaras BC4 del suelo están bien en los mips 0 a 3: casi todo blanco con una franja negra
+    arriba.
+  - **El prepass.** Toda la escena es un prepass de profundidad (depth LESS con escritura),
+    seguido de pases de color con depth EQUAL sin escritura (#216–#255). El pasto y el suelo
+    dibujan los mismos tiles con dos VS distintos.
+    - Mesa baja `ffma` de 32 bits a `fmul` + `fadd`, y los VS no llevan flags `fast`, así que el
+      driver no puede fusionar operaciones. La invariancia de la posición no explica los huecos.
+  - **Los huecos.** Superponiendo las máscaras dz de #29 y #31 sobre la profundidad final:
+    - Los huecos son zonas donde no escribió ninguno de los dos draws. Por tanto, el PS del suelo
+      descartó ahí (`sample.w < c5[384].x`).
+    - Por posición de tile (≈69,5 px por tile, fila y=1,5):
+      - Las capas 81 y 97 pierden una franja de tile completo.
+      - Las capas 83, 84, 99 y 100 pierden la mitad izquierda.
+      - Las capas 82 y 98 salen bien.
+    - Pero el contenido volcado de las capas 81 y 98 es prácticamente idéntico. La GPU está
+      devolviendo al muestrear algo distinto de lo que tiene el recurso.
+  - Buscando en internet no apareció ningún caso documentado de este fallo, ni en RDNA2 ni en la
+    Xbox.
+- **0.2.42.0.**
+  - Nueva opción de boot.cfg `sampler_lod0=1` (`D3D12::SetSamplerLodZero`): todos los samplers
+    leen solo el mip 0. Se empaqueta activada.
+    - Si los huecos desaparecen, el fallo está en la selección o en el contenido de los mips > 0.
+    - Si no, está en la capa o en el descriptor que recibe la GPU.
+  - El volcado BC4 pasa a las capas 81–84 y 97–100, todos los mips.
+- **Resultado de la 0.2.42.**
+  - Con todos los samplers en `lod 0..0` (confirmado en la traza) los huecos siguen iguales, así que
+    los mips quedan descartados. Esta vez el suelo es el draw #30 y el pasto el #35.
+  - La capa (`TEXCOORD2.w`) sale de `c7[idx*32+80]` y vale 81–84 y 97–100 en las piezas del borde,
+    como en memoria. Las UV salen de una matriz 2×3 de c4 que es igual para todos los tiles.
+  - Hay tres arrays BC4 de 128×128×105 con 8 mips:
+    - `…cbdc00`: la máscara del suelo, con una franja negra arriba igual en todas las capas del borde;
+    - `…b4e400`: el festón, que usa el pase de color #218;
+    - `…72b400`: el festón inverso, que usa el pasto.
+  - Mapa ASCII de los `dz` de #30/#35: en uno de cada cuatro tiles la banda que descarta el suelo
+    está **20 px más abajo** (856–863 en vez de 836–847). Es la misma máscara con V corrida ~0.29
+    con wrap.
+  - En esos tiles **todo** el contenido de color sale corrido en franjas, no solo la máscara. El
+    factor común es el índice de capa, y cada pase muestrea su propio array de 105 capas.
+  - Conclusión: para ciertas capas de estos arrays el sampler lee direcciones distintas de las que
+    usa `CopyTextureRegion`, porque el volcado por copia coincide con la memoria del guest. La
+    alternativa es que la vista describa algo que el recurso no tiene, que es comportamiento
+    indefinido en D3D12.
+  - Descartado: doble liberación de descriptores offline (solo se liberan en `ImageView::Release`
+    y `Sampler`) y el reciclaje del anillo shader-visible.
+  - De paso apareció un aliasing latente: el fallback de `ImageView::CreateSrv` devuelve el handle
+    de otro slot, que `Handle()` guarda dos veces y `Release()` libera dos veces. En esta partida no
+    se dispara porque no sale su aviso, pero hay que arreglarlo.
+- **0.2.43.0.**
+  - Se retira `sampler_lod0`.
+  - Las vistas se recortan al rango real del recurso (mips y capas) y se avisa hasta 16 veces
+    (`view … exceeds its image`).
+  - `CheckTracedTexture` añade el layout del host: formato, tamaño, flags, `GetResourceAllocationInfo`
+    y los bytes de la cadena de mips de una capa.
+  - Nueva opción de boot.cfg `array_pad=1` (`D3D12::SetArrayPadding`), que se empaqueta activada:
+    los arrays 2D de color con un número de capas que no es potencia de 2 se crean con la siguiente
+    (105 → 128), y las capas extra no se usan. Si los huecos desaparecen, se confirma un desacuerdo
+    de direccionamiento por capa en la consola y eso mismo sirve de workaround.
+- **Texturas 3D leídas como array 2D.** El juego crea 256 vistas 2D array sobre imágenes 3D
+  (64×64×1, formato 12). Es lo que en Vulkan permite `2D_ARRAY_COMPATIBLE`, y D3D12 no tiene esa
+  vista.
+  - Antes caían a un SRV 3D, y esa diferencia de dimensión con lo que declara el shader es
+    comportamiento indefinido.
+  - Ahora `Image::SliceArray()` crea una copia 2D array y `RefreshSliceArray()` la rellena a
+    través de un buffer, porque D3D12 no copia directamente entre texturas 3D y 2D.
+  - La copia se rehace cuando la imagen pasa por un estado de escritura (`write_version`).
+    `ImageView::PrepareRead()` la refresca antes de cada draw o dispatch que la lea.
+  - La traza ahora incluye `types:`, el `Shader::TextureType` declarado de cada textura. En el PS
+    `c1a93…` son cube array, cube ×2, 2D ×6 y un 3D real, así que las siluetas no venían de aquí.
+
 **Pendiente de la 4.4:**
 - `DrawTexture` y `DrawIndirect` con `ExecuteIndirect`: no han salido en este juego.
 - Pasan a la fase 5:

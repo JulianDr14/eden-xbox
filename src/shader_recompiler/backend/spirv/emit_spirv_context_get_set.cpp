@@ -312,11 +312,16 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, Id vertex) {
             // Attribute is disabled or varying component is not written
             return ctx.Const(element == 3 ? 1.0f : 0.0f);
         }
+        // Packed SNORM 10:10:10:2 keeps all four fields in the first component.
+        const u32 load_element{
+            generic.load_op == InputGenericLoadOp::SNormA2B10G10R10 ? 0U : element};
         const Id pointer{
-            AttrPointer(ctx, generic.pointer_type, vertex, generic.id, ctx.Const(element))};
+            AttrPointer(ctx, generic.pointer_type, vertex, generic.id, ctx.Const(load_element))};
         const Id value{ctx.OpLoad(generic.component_type, pointer)};
-        return [&ctx, generic, value]() {
+        return [&ctx, generic, value, element]() {
             switch (generic.load_op) {
+            case InputGenericLoadOp::SNormA2B10G10R10:
+                return ctx.UnpackSNormA2B10G10R10(value, ctx.Const(element));
             case InputGenericLoadOp::Bitcast:
                 return ctx.OpBitcast(ctx.F32[1], value);
             case InputGenericLoadOp::SToF:

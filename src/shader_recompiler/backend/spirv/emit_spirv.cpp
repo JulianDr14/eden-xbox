@@ -337,7 +337,10 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
 void SetupDenormControl(const Profile& profile, const IR::Program& program, EmitContext& ctx,
                         Id main_func) {
     const Info& info{program.info};
-    if (info.uses_fp32_denorms_flush && info.uses_fp32_denorms_preserve) {
+    if (profile.force_fp32_denorm_flush && profile.support_fp32_denorm_flush) {
+        ctx.AddCapability(spv::Capability::DenormFlushToZero);
+        ctx.AddExecutionMode(main_func, spv::ExecutionMode::DenormFlushToZero, 32U);
+    } else if (info.uses_fp32_denorms_flush && info.uses_fp32_denorms_preserve) {
         LOG_DEBUG(Shader_SPIRV, "Fp32 denorm flush and preserve on the same shader");
     } else if (info.uses_fp32_denorms_flush) {
         if (profile.support_fp32_denorm_flush && !profile.has_broken_fp32_denorm_flush) {

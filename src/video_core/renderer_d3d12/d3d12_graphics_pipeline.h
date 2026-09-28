@@ -94,6 +94,12 @@ struct PipelineBindings {
     std::array<u32, PUSH_CONSTANT_WORDS> push_constants{};
     /// When set (draw trace), Configure appends the views of the sampled textures here.
     std::vector<VideoCommon::ImageViewId>* trace_views{};
+    /// With trace_views: each texture's sampler (Sampler::Describe), in the same order.
+    std::vector<std::string>* trace_filters{};
+    /// With trace_views: the Shader::TextureType each texture is declared as.
+    std::vector<u32>* trace_types{};
+    /// A texture of the draw is the bound depth buffer: bind it read-only (DEPTH_SAMPLED_STATE).
+    bool depth_sampled{};
 };
 
 /// A guest graphics pipeline: signed DXIL of each stage, its root signature and the PSO, built on

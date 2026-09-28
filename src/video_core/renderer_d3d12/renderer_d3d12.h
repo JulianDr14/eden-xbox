@@ -24,6 +24,10 @@
 
 namespace D3D12 {
 
+/// Presented frame whose draws go to the log (the draw trace). 0 keeps the default: the frame that
+/// ends in frame_1.bmp. Set before boot (boot.cfg "trace_frame=").
+void SetTracedFrame(u32 frame);
+
 /// Direct3D 12 renderer: a device and swapchain on the UWP CoreWindow, presenting the guest's
 /// display framebuffer. The framebuffer is deswizzled on the CPU and drawn to the window with
 /// Eden's own blit shaders, translated SPIR-V -> DXIL at runtime (phase 2). If that shader path is

@@ -91,7 +91,10 @@ Buffer::Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams params
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr, u64 size_bytes, bool)
     : VideoCommon::BufferBase(cpu_addr, size_bytes), scheduler{&runtime.scheduler},
-      buffer{runtime.CreateDefaultBuffer(size_bytes)}, tracker{size_bytes} {}
+      // Whole 256-byte blocks: a guest cbuf ending with the buffer still fits a CBV.
+      buffer{runtime.CreateDefaultBuffer(
+          Common::AlignUp(size_bytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT))},
+      tracker{size_bytes} {}
 
 Buffer::~Buffer() {
     if (scheduler && buffer) {
@@ -127,6 +130,23 @@ void Buffer::Transition(D3D12_RESOURCE_STATES next) {
             const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV,
                                                  .UAV = {.pResource = buffer.Get()}};
             cmd->ResourceBarrier(1, &barrier);
+        } else if (next == D3D12_RESOURCE_STATE_COPY_DEST) {
+            // Copies into one resource are unordered without a barrier between them, and the
+            // Series runs them in parallel: CreateBuffer's zero fill landed over the data
+            // JoinOverlap copies in. A round trip through COMMON waits for the earlier copy.
+            const D3D12_RESOURCE_BARRIER barriers[2]{
+                {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                 .Transition = {.pResource = buffer.Get(),
+                                .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
+                                .StateAfter = D3D12_RESOURCE_STATE_COMMON}},
+                {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                 .Transition = {.pResource = buffer.Get(),
+                                .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                                .StateBefore = D3D12_RESOURCE_STATE_COMMON,
+                                .StateAfter = D3D12_RESOURCE_STATE_COPY_DEST}},
+            };
+            cmd->ResourceBarrier(2, barriers);
         }
     } else {
         const D3D12_RESOURCE_BARRIER barrier{
@@ -260,6 +280,14 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
                                          u32 first, u32 num_indices, Buffer& buffer, u32 offset,
                                          u32 size) {
     rewritten_count.reset();
+    if (trace_buffers) {
+        const bool rewritten = IsEmulatedTopology(topology) || format == IndexFormat::UnsignedByte;
+        trace_buffers->push_back({.kind = rewritten ? TracedBuffer::Kind::RewrittenIndex
+                                                    : TracedBuffer::Kind::Index,
+                                  .buffer = &buffer, .offset = offset, .size = size,
+                                  .stride = IndexSize(format),
+                                  .device_addr = buffer.CpuAddr() + offset});
+    }
     if (!IsEmulatedTopology(topology) && format != IndexFormat::UnsignedByte) {
         buffer.Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
         pending_index = D3D12_INDEX_BUFFER_VIEW{
@@ -335,6 +363,11 @@ void BufferCacheRuntime::BindRewrittenIndices(std::span<const u32> indices, bool
 
 void BufferCacheRuntime::BindVertexBuffer(u32 index, Buffer& buffer, u32 offset, u32 size,
                                           u32 stride) {
+    if (trace_buffers) {
+        trace_buffers->push_back({.kind = TracedBuffer::Kind::Vertex, .slot = index,
+                                  .buffer = &buffer, .offset = offset, .size = size,
+                                  .stride = stride, .device_addr = buffer.CpuAddr() + offset});
+    }
     buffer.Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
     BindVertexBuffer(index, buffer.Handle(), offset, size, stride);
 }
@@ -378,6 +411,11 @@ std::span<u8> BufferCacheRuntime::BindMappedUniformBuffer(size_t, u32, u32 size)
     const StagingBufferRef ref =
         staging.Request(Common::AlignUp(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT),
                         MemoryUsage::Upload);
+    if (trace_buffers) {
+        trace_buffers->push_back({.kind = TracedBuffer::Kind::StreamedUniform,
+                                  .slot = traced_uniforms++, .size = size,
+                                  .mapped = ref.mapped_span.data()});
+    }
     if (descriptor_queue) {
         descriptor_queue->AddConstantBuffer(ref.buffer->GetGPUVirtualAddress() + ref.offset,
                                             size);
@@ -392,7 +430,18 @@ void BufferCacheRuntime::BindUniformBuffer(Buffer& buffer, u32 offset, u32 size)
     // A CBV spans whole 256-byte blocks and must stay inside its resource; the null buffer (an
     // unbound guest cbuf) does not hold one.
     const u64 aligned = Common::AlignUp(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
-    if (!buffer.Handle() || offset + aligned > buffer.SizeBytes()) {
+    const bool fits = buffer.Handle() && buffer.SizeBytes() != 0 &&
+                      offset + aligned <= Common::AlignUp(buffer.SizeBytes(),
+                                                          D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+    if (trace_buffers) {
+        trace_buffers->push_back({.kind = fits ? TracedBuffer::Kind::Uniform
+                                               : TracedBuffer::Kind::NullUniform,
+                                  .slot = traced_uniforms++, .buffer = fits ? &buffer : nullptr,
+                                  .offset = offset, .size = size,
+                                  .stride = static_cast<u32>(buffer.SizeBytes()),
+                                  .device_addr = buffer.CpuAddr() + offset});
+    }
+    if (!fits) {
         descriptor_queue->AddConstantBuffer(0, 0);
         return;
     }
