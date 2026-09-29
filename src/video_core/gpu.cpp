@@ -35,6 +35,8 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/frame_trace.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -253,15 +255,28 @@ struct GPU::Impl {
                 free_swap_counters.pop_front();
             }
         }
+        // Frame chain counters: how long after the request the renderer composes (the GPU thread
+        // reaching the request, then the game's fences on that frame).
+        const auto record_latency = [requested = std::chrono::steady_clock::now()] {
+            const u64 latency_us = VideoCore::Perf::ElapsedUs(requested);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::Composites, 1);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::CompositeLatencyUs, latency_us);
+            if (latency_us > 1'000'000 / 60) {
+                VideoCore::Perf::Add(VideoCore::Perf::Counter::CompositesLate, 1);
+            }
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::Composite, latency_us);
+        };
         pending_composite_fence = RequestSyncOperation(
             [this, current_request_counter, num_fences, composite_layers = std::move(layers),
-             composite_fences = std::move(fences)] {
+             composite_fences = std::move(fences), record_latency] {
                 if (num_fences == 0) {
+                    record_latency();
                     renderer->Composite(composite_layers);
                     return;
                 }
                 auto& syncpoint_manager = system.Host1x().GetSyncpointManager();
-                const auto executer = [this, current_request_counter, composite_layers]() {
+                const auto executer = [this, current_request_counter, composite_layers,
+                                       record_latency]() {
                     {
                         std::unique_lock<std::mutex> lk(request_swap_mutex);
                         if (--request_swap_counters[current_request_counter] != 0) {
@@ -269,6 +284,7 @@ struct GPU::Impl {
                         }
                         free_swap_counters.push_back(current_request_counter);
                     }
+                    record_latency();
                     renderer->Composite(composite_layers);
                 };
                 for (size_t i = 0; i < num_fences; i++) {

@@ -21,6 +21,7 @@
 #include "core/hle/service/nvdrv/devices/nvhost_ctrl.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/frame_trace.h"
 #include "video_core/perf_counters.h"
 
 namespace Service::Nvidia::Devices {
@@ -199,13 +200,17 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
     }
     params.value.raw |= slot;
 
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GpuFenceWait, fence_id,
+                                target_value);
     event.wait_handle =
         host1x_syncpoint_manager.RegisterHostAction(fence_id, target_value,
                                                     [this, slot,
                                                      start = std::chrono::steady_clock::now()]() {
+            const u64 waited_us = VideoCore::Perf::ElapsedUs(start);
             VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestGpuWaits, 1);
-            VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestGpuWaitUs,
-                                 VideoCore::Perf::ElapsedUs(start));
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestGpuWaitUs, waited_us);
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GpuFenceSignal,
+                                        events[slot].assigned_syncpt, waited_us);
             auto& event_ = events[slot];
             if (event_.status.exchange(EventState::Signalling, std::memory_order_acq_rel) ==
                 EventState::Waiting) {

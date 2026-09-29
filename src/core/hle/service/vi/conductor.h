@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include "common/container/unordered_map.h"
 
@@ -57,6 +58,8 @@ private:
 private:
     s32 m_swap_interval = 1;
     f32 m_compose_speed_scale = 1.0f;
+    /// Start of the previous ProcessVsync, to count the vsyncs a late one skipped.
+    std::chrono::steady_clock::time_point m_last_vsync{};
 };
 
 } // namespace Service::VI

@@ -16,6 +16,8 @@
 #include "core/hle/service/nvdrv/devices/nvdisp_disp0.h"
 #include "core/perf_stats.h"
 #include "video_core/gpu.h"
+#include "video_core/frame_trace.h"
+#include "video_core/perf_counters.h"
 
 namespace Service::Nvidia::Devices {
 
@@ -87,6 +89,8 @@ void nvdisp_disp0::Composite(std::span<const Nvnflinger::HwcLayer> sorted_layers
         }
     }
 
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::VsyncFrames, 1);
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::VsyncComposed, 1);
     system.GPU().RequestComposite(std::move(output_layers), std::move(output_fences));
     Common::ADPF::ReportFrameInterval();
     system.SpeedLimiter().DoSpeedLimiting(system.CoreTiming().GetGlobalTimeUs());
@@ -95,7 +99,11 @@ void nvdisp_disp0::Composite(std::span<const Nvnflinger::HwcLayer> sorted_layers
 }
 
 void nvdisp_disp0::WaitForComposite() {
+    const auto start = std::chrono::steady_clock::now();
     system.GPU().WaitForComposite();
+    const u64 waited_us = VideoCore::Perf::ElapsedUs(start);
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::VsyncComposeWaitUs, waited_us);
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::ComposeWaitEnd, waited_us);
 }
 
 Kernel::KEvent* nvdisp_disp0::QueryEvent(u32 event_id) {

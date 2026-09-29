@@ -41,6 +41,7 @@
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "hid_core/hid_core.h"
+#include "video_core/frame_trace.h"
 #include "video_core/gpu.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
@@ -963,7 +964,8 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         SystemNavigationManager::GetForCurrentView().BackRequested(
             [](auto&&, BackRequestedEventArgs const& args) { args.Handled(true); });
         // Keyboard play on the PC (uwp_input.h): C/V = L/R, B/N = A/B, M or numpad + = Plus,
-        // K or numpad - = Minus, X/Y = X/Y, WASD = left stick, Q quits.
+        // K or numpad - = Minus, X/Y = X/Y, WASD = left stick, Q quits, T traces two seconds of
+        // the frame chain.
         const auto on_key = [](Windows::System::VirtualKey key, bool pressed) {
             using Windows::System::VirtualKey;
             using EdenXbox::Key;
@@ -985,6 +987,12 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
             case VirtualKey::Q:
                 if (pressed) {
                     EdenXbox::RequestQuit();
+                }
+                break;
+            case VirtualKey::T:
+                // Frame chain timeline of the next two seconds, to the log (frame_trace.h).
+                if (pressed) {
+                    VideoCore::FrameTrace::Start(120);
                 }
                 break;
             default: break;
