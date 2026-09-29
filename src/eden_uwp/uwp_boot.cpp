@@ -61,6 +61,7 @@ void SetAstcGpuVerify(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuSync(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuFresh(bool enabled); // d3d12_texture_cache.h
 void SetGpuBasedValidation(bool enabled); // d3d12_device.h
+void SetDredEnabled(bool enabled);         // d3d12_device.h
 void SetDescriptorRemovalChecks(bool enabled); // d3d12_device.h
 using AppMemoryQuery = bool (*)(u64& used, u64& limit); // d3d12_device.h
 void SetAppMemoryQuery(AppMemoryQuery query);            // d3d12_device.h
@@ -116,6 +117,8 @@ struct BootConfig {
     bool debug_layer{};
     /// With the debug layer, GPU-based validation too ("debug_layer=gbv").
     bool gpu_validation{};
+    /// DRED breadcrumbs and page-fault tracking ("dred=1"); diagnostic and deliberately opt-in.
+    bool dred{};
     /// Look for a removed device after every descriptor a draw writes ("descriptor_checks=1"), to
     /// name the view that removed it; costs a kernel call per descriptor.
     bool descriptor_checks{};
@@ -214,6 +217,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     D3D12::SetAstcGpuSync(config.astc_sync);
     D3D12::SetAstcGpuFresh(config.astc_fresh);
     D3D12::SetDescriptorRemovalChecks(config.descriptor_checks);
+    D3D12::SetDredEnabled(config.dred);
     VideoCore::Perf::SetDetailedGpuProfile(config.gpu_profile);
     VideoCore::Perf::SetForceSwapIntervalOne(config.force_swap_interval_one);
     if (config.debug_layer) {
@@ -1064,6 +1068,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "descriptor_checks=1") {
                         config.descriptor_checks = true;
                         WriteDiag("boot.cfg: device removal checks after every draw descriptor");
+                    } else if (line == "dred=1") {
+                        config.dred = true;
+                        WriteDiag("boot.cfg: DRED breadcrumbs and page-fault tracking enabled");
                     } else if (line == "gpu_profile=1") {
                         config.gpu_profile = true;
                         WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");

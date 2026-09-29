@@ -40,11 +40,34 @@ enum class Counter : size_t {
     StagingStreamWaits,    ///< large uploads that waited for the GPU to free the stream ring
     TextureDecodeUs,       ///< CPU decoding/re-encoding of converted textures (ASTC, BCn arrays)
     TextureGpuDecodes,     ///< textures decoded by a compute shader (ASTC)
+    TextureUploadMapNs,    ///< querying a CPU pointer for non-staging upload sources
+    TextureUploadRepackNs, ///< CPU row repacking into a D3D12-aligned footprint
+    TextureUploadRecordNs, ///< CopyTextureRegion recording
+    TextureUploadMaps,
+    TextureUploadRepacks,
+    TextureUploadCopies,
+    TextureCacheFindNs,
+    TextureCacheFinds,
+    TextureCacheInsertNs,
+    TextureCacheInserts,
+    TextureCacheOverlapNs,
+    TextureCacheImageCreateNs,
+    TextureCacheRefreshNs,
+    TextureCacheStagingNs,
+    TextureCacheUnswizzleNs,
+    TextureCacheBackendUploadNs,
+    TextureCacheRegisterNs,
+    TextureCacheViewCreateNs,
+    TextureCacheViewsCreated,
     DrawNs,                ///< whole draws (direct and indirect), nested counters included
     DrawTexturesNs,        ///< of which: reading texture handles and finding the image views
     DrawBuffersNs,         ///< uniform, storage, texel, vertex and index buffers
     DrawDescriptorsNs,     ///< writing the descriptor table (and each stage's host buffers)
     DrawTargetsNs,         ///< render targets, feedback loops and image transitions
+    DrawUpdateTargetsNs,
+    DrawFeedbackNs,
+    DrawFramebufferNs,
+    DrawImageTransitionsNs,
     DrawSamplersNs,        ///< the sampler table
     DrawRecordNs,          ///< preparing attachments and recording state and the draw
     PipelineFastHits,      ///< transition-cache hits in CurrentGraphicsPipeline

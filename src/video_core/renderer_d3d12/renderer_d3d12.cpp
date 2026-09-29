@@ -587,17 +587,24 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
                                              clear_ms - dispatch_ms);
     return fmt::format(
         "draws {:.1f} ms ({:.1f} us each: textures {:.1f}, buffers {:.1f}, descriptors {:.1f}, "
-        "targets {:.1f}, samplers {:.1f}, record {:.1f}), clears {:.1f} ms, dispatches {:.1f} ms, "
+        "targets {:.1f} [update {:.1f}, feedback {:.1f}, framebuffer {:.1f}, transitions {:.1f}], "
+        "samplers {:.1f}, record {:.1f}), clears {:.1f} ms, dispatches {:.1f} ms, "
         "outside them {:.1f} ms | pipeline fast path {} hits / {} misses | CBV {} ({:.1f} ms: "
         "{} streamed, {} persistent, {} null), view copies {} ({:.1f} ms) | guest waited for "
         "the GPU {} times ({:.1f} ms in all) | commands: {} submit lists {:.1f} ms ({:.1f} ms "
-        "outside draw/clear/dispatch), {} ticks {:.1f} ms, {} invalidations {:.1f} ms | DMA: "
+        "outside draw/clear/dispatch), {} ticks {:.1f} ms, {} invalidations {:.1f} ms | uploads: "
+        "{} maps {:.1f} ms, {} repacks {:.1f} ms, {} copies {:.1f} ms | texture cache: "
+        "{} finds {:.1f} ms, {} inserts {:.1f} ms (overlap {:.1f}, image {:.1f}, refresh "
+        "{:.1f}, register {:.1f}), {} views {:.1f} ms, staging {:.1f}, unswizzle {:.1f}, "
+        "backend {:.1f} ms | DMA: "
         "puller {} / {:.1f} ms, macros {} / {:.1f} ms, Maxwell {} / {:.1f} ms, compute {} / "
         "{:.1f} ms, copies {} / {:.1f} ms, other {} / {:.1f} ms | Maxwell dirty: {} changed, "
         "{} identical skipped",
         draw_ms, per_draw(Counter::DrawNs), per_draw(Counter::DrawTexturesNs),
         per_draw(Counter::DrawBuffersNs), per_draw(Counter::DrawDescriptorsNs),
-        per_draw(Counter::DrawTargetsNs), per_draw(Counter::DrawSamplersNs),
+        per_draw(Counter::DrawTargetsNs), per_draw(Counter::DrawUpdateTargetsNs),
+        per_draw(Counter::DrawFeedbackNs), per_draw(Counter::DrawFramebufferNs),
+        per_draw(Counter::DrawImageTransitionsNs), per_draw(Counter::DrawSamplersNs),
         per_draw(Counter::DrawRecordNs), clear_ms, dispatch_ms, outside,
         get(Counter::PipelineFastHits), get(Counter::PipelineFastMisses),
         get(Counter::CbvCreates), ns_ms(Counter::CbvCreateNs), get(Counter::CbvStreamed),
@@ -606,6 +613,16 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
         get(Counter::GuestGpuWaits), Ms(d, Counter::GuestGpuWaitUs), get(Counter::SubmitLists),
         submit_ms, submit_overhead, get(Counter::GpuTicks), ns_ms(Counter::GpuTickNs),
         get(Counter::CacheInvalidations), ns_ms(Counter::CacheInvalidationNs),
+        get(Counter::TextureUploadMaps), ns_ms(Counter::TextureUploadMapNs),
+        get(Counter::TextureUploadRepacks), ns_ms(Counter::TextureUploadRepackNs),
+        get(Counter::TextureUploadCopies), ns_ms(Counter::TextureUploadRecordNs),
+        get(Counter::TextureCacheFinds), ns_ms(Counter::TextureCacheFindNs),
+        get(Counter::TextureCacheInserts), ns_ms(Counter::TextureCacheInsertNs),
+        ns_ms(Counter::TextureCacheOverlapNs), ns_ms(Counter::TextureCacheImageCreateNs),
+        ns_ms(Counter::TextureCacheRefreshNs), ns_ms(Counter::TextureCacheRegisterNs),
+        get(Counter::TextureCacheViewsCreated), ns_ms(Counter::TextureCacheViewCreateNs),
+        ns_ms(Counter::TextureCacheStagingNs), ns_ms(Counter::TextureCacheUnswizzleNs),
+        ns_ms(Counter::TextureCacheBackendUploadNs),
         get(Counter::DmaPullerCalls), ns_ms(Counter::DmaPullerNs), get(Counter::DmaMacroCalls),
         ns_ms(Counter::DmaMacroNs), get(Counter::DmaMaxwellCalls), ns_ms(Counter::DmaMaxwellNs),
         get(Counter::DmaComputeCalls), ns_ms(Counter::DmaComputeNs), get(Counter::DmaCopyCalls),
@@ -724,6 +741,7 @@ void RendererD3D12::ReportPerf(double interval_ms) {
     last_hitch_report = time;
     LOG_INFO(Render, "D3D12 hitch: {:.0f} ms frame, likely {} | {}", interval_ms,
              LikelyCause(delta, interval_ms), DescribePerf(delta, interval_ms));
+    LOG_INFO(Render, "D3D12 hitch detail: {}", DescribeDrawCosts(delta, interval_ms));
 }
 
 void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {

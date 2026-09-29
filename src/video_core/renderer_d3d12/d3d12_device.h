@@ -62,6 +62,11 @@ void CheckRemovedAfterDescriptor(ID3D12Device* device, Describe&& describe) {
 /// from now on. PC only.
 void SetGpuBasedValidation(bool enabled);
 
+/// Enables DRED auto-breadcrumbs and page-fault tracking for subsequently created devices.
+/// Disabled by default because both facilities add measurable runtime overhead; use boot.cfg
+/// "dred=1" only while diagnosing a device removal.
+void SetDredEnabled(bool enabled);
+
 /// The app's memory in use and its limit, false when unknown. On the Xbox the GPU allocates from
 /// the same 5 GiB budget as the rest of the process, which DXGI does not show.
 using AppMemoryQuery = bool (*)(u64& used, u64& limit);

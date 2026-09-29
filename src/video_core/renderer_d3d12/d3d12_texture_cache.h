@@ -230,6 +230,10 @@ public:
     u64 allocation_tick{};
 
 private:
+    /// Shared upload implementation. mapped_at_base points at base_offset in a persistently
+    /// mapped staging allocation; null asks the implementation to inspect and map the resource.
+    void UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* mapped_at_base,
+                          std::span<const VideoCommon::BufferImageCopy> copies);
     /// Staging layout of one BufferImageCopy (see d3d12_texture_cache.cpp).
     struct CopyLayout;
     [[nodiscard]] CopyLayout Layout(const VideoCommon::BufferImageCopy& copy) const;
