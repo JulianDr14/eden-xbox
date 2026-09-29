@@ -461,6 +461,19 @@ u64 Device::CacheMemoryUsage() const {
     return (std::max)(usage, local.CurrentUsage);
 }
 
+u64 Device::CacheMemoryBudget() const {
+    constexpr u64 AppHeadroom = 1536ULL * 1024 * 1024;
+    const u64 dxgi_budget = QueryVideoMemory().Budget;
+    const AppMemoryQuery query = app_memory_query.load(std::memory_order_acquire);
+    u64 used{};
+    u64 limit{};
+    if (query == nullptr || !query(used, limit) || limit <= AppHeadroom) {
+        return dxgi_budget;
+    }
+    const u64 app_cache_budget = limit - AppHeadroom;
+    return dxgi_budget != 0 ? (std::min)(dxgi_budget, app_cache_budget) : app_cache_budget;
+}
+
 DXGI_QUERY_VIDEO_MEMORY_INFO Device::QueryVideoMemory() const {
     DXGI_QUERY_VIDEO_MEMORY_INFO info{};
     if (!adapter3 ||

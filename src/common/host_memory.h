@@ -14,6 +14,17 @@
 
 namespace Common {
 
+struct HostMemoryFastmemRegion {
+    size_t offset{};
+    size_t size{};
+    bool force_full{};
+};
+
+/// Configured by the UWP frontend before Core::System creates DeviceMemory.
+void ConfigureHostMemoryFastmem(size_t hot_mib, bool force_full);
+[[nodiscard]] size_t HostMemoryFastmemHotSize();
+[[nodiscard]] bool HostMemoryFastmemForceFull();
+
 enum class MemoryPermission : u32 {
     Read = 1 << 0,
     Write = 1 << 1,
@@ -28,7 +39,8 @@ DECLARE_ENUM_FLAG_OPERATORS(MemoryPermission)
  */
 class HostMemory {
 public:
-    explicit HostMemory(size_t backing_size_, size_t virtual_size_);
+    explicit HostMemory(size_t backing_size_, size_t virtual_size_,
+                        HostMemoryFastmemRegion fastmem_region_ = {});
     ~HostMemory();
 
     /**

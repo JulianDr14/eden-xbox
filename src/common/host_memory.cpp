@@ -55,6 +55,7 @@
 #endif // ^^^ POSIX ^^^
 
 #include <atomic>
+#include <array>
 #include <mutex>
 #include <random>
 
@@ -79,6 +80,25 @@ namespace Common {
 
 [[maybe_unused]] constexpr size_t PageAlignment = 0x1000;
 [[maybe_unused]] constexpr size_t HugePageSize = 0x200000;
+
+namespace {
+std::atomic<size_t> g_fastmem_hot_size{size_t{384} << 20};
+std::atomic<bool> g_fastmem_force_full{false};
+}
+
+void ConfigureHostMemoryFastmem(size_t hot_mib, bool force_full) {
+    g_fastmem_hot_size.store(std::clamp(hot_mib, size_t{128}, size_t{448}) << 20,
+                             std::memory_order_release);
+    g_fastmem_force_full.store(force_full, std::memory_order_release);
+}
+
+size_t HostMemoryFastmemHotSize() {
+    return g_fastmem_hot_size.load(std::memory_order_acquire);
+}
+
+bool HostMemoryFastmemForceFull() {
+    return g_fastmem_force_full.load(std::memory_order_acquire);
+}
 
 #ifdef _WIN32
 
@@ -208,6 +228,20 @@ std::atomic<u64> g_page_retry_saves{0};
 std::atomic<u32> g_last_commit_error{0};
 std::atomic<uintptr_t> g_last_failed_address{0};
 std::atomic<u64> g_last_failed_length{0};
+std::atomic<u64> g_fastmem_canonical_bytes{0};
+std::atomic<u64> g_fastmem_alias_bytes{0};
+std::atomic<u64> g_fastmem_alias_budget{0};
+std::atomic<u64> g_fastmem_guest_bytes{0};
+std::atomic<u64> g_fastmem_skipped_bytes{0};
+std::atomic<u64> g_fastmem_map_failures{0};
+std::atomic<u64> g_fastmem_hot_offset{0};
+std::atomic<u64> g_fastmem_hot_size_actual{0};
+std::atomic<u64> g_fastmem_request_bytes{0};
+std::atomic<u64> g_fastmem_request_min{~u64{0}};
+std::atomic<u64> g_fastmem_request_max{0};
+constexpr size_t FastmemHistogramShift = 26;
+constexpr size_t FastmemHistogramBuckets = 64;
+std::array<std::atomic<u64>, FastmemHistogramBuckets> g_fastmem_request_histogram{};
 
 bool CommitSectionRange(uintptr_t begin, uintptr_t end) {
     if (g_pfn_virtual_alloc_from_app(reinterpret_cast<void*>(begin), end - begin, MEM_COMMIT,
@@ -269,7 +303,17 @@ LONG NTAPI BackingDemandCommitHandler(EXCEPTION_POINTERS* ep) {
         const size_t arena_size = g_arena_size.load(std::memory_order_acquire);
         const bool in_backing = fault_addr >= base && fault_addr < base + size;
         const bool in_arena = arena != nullptr && fault_addr >= arena && fault_addr < arena + arena_size;
-        return in_backing || in_arena ? SectionDemandCommit(fault_addr) : EXCEPTION_CONTINUE_SEARCH;
+        if (in_backing || in_arena) {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(fault_addr, &info, sizeof(info)) != 0 && info.Type == MEM_MAPPED) {
+                return SectionDemandCommit(fault_addr);
+            }
+        }
+        // Hybrid backing: its prefix and suffix are private reservations. Arena holes must keep
+        // faulting so Dynarmic patches those accesses to the page-table path.
+        if (!in_backing) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
     }
     if (fault_addr < base || fault_addr >= base + size) {
         return EXCEPTION_CONTINUE_SEARCH; // not our backing — let other handlers run
@@ -287,9 +331,10 @@ LONG NTAPI BackingDemandCommitHandler(EXCEPTION_POINTERS* ep) {
 
 class HostMemory::Impl {
 public:
-    explicit Impl(size_t backing_size_, size_t virtual_size_)
+    explicit Impl(size_t backing_size_, size_t virtual_size_, HostMemoryFastmemRegion fastmem_region_)
         : backing_size{backing_size_}
         , virtual_size{virtual_size_}
+        , fastmem_region{fastmem_region_}
         , process{GetCurrentProcess()}
         , kernelbase_dll("Kernelbase")
     {}
@@ -329,10 +374,17 @@ public:
         GetFuncAddress(kernelbase_dll, "AddVectoredExceptionHandler", g_pfn_add_veh);
         GetFuncAddress(kernelbase_dll, "RemoveVectoredExceptionHandler", g_pfn_remove_veh);
         if (Settings::values.cpuopt_fastmem.GetValue()) {
-            if (InitSection()) {
+            if (fastmem_region.force_full && InitSection()) {
                 return true;
             }
-            LOG_WARNING(HW_Memory, "Fastmem arena unavailable, using the private backing");
+            if (fastmem_region.force_full) {
+                LOG_WARNING(HW_Memory, "Full fastmem unavailable, trying the hybrid arena");
+                Release();
+            }
+            if (InitHybridSection()) {
+                return true;
+            }
+            LOG_WARNING(HW_Memory, "Hybrid fastmem unavailable, using the private backing");
             Release();
         }
         backing_base = static_cast<u8*>(
@@ -396,6 +448,161 @@ public:
     }
 
 #ifdef HOST_MEMORY_USE_FROM_APP
+    /// Xbox fastmem: only a bounded hot slice of the application pool is section-backed. The private
+    /// reservations and the mapped section remain adjacent, so every existing BackingBasePointer
+    /// user still sees one linear DRAM allocation. Only the section-backed range can be aliased.
+    bool InitHybridSection() {
+        if (!pfn_CreateFileMappingFromApp || !pfn_VirtualAlloc2 || !pfn_MapViewOfFile3 ||
+            !pfn_UnmapViewOfFile2 || !g_pfn_virtual_alloc_from_app || !g_pfn_add_veh) {
+            return false;
+        }
+        hybrid_hot_offset = AlignDown(fastmem_region.offset, size_t{64} << 10);
+        hybrid_hot_size = AlignDown(fastmem_region.size, size_t{64} << 10);
+        if (hybrid_hot_size == 0 || hybrid_hot_offset >= backing_size ||
+            hybrid_hot_size > backing_size - hybrid_hot_offset) {
+            LOG_WARNING(HW_Memory, "Invalid hybrid fastmem range at {:#x}, size {:#x}",
+                        hybrid_hot_offset, hybrid_hot_size);
+            return false;
+        }
+        hybrid_alias_budget =
+            (std::min)(MaxHybridAliasBudget, HybridTotalViewBudget - hybrid_hot_size);
+
+        backing_file = OpenBackingFile();
+        if (backing_file == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+        backing_handle = pfn_CreateFileMappingFromApp(backing_file, nullptr, PAGE_READWRITE,
+                                                      hybrid_hot_size, nullptr);
+        if (!backing_handle) {
+            LOG_WARNING(HW_Memory, "Failed to create the hybrid fastmem section, error {}",
+                        GetLastError());
+            return false;
+        }
+        backing_base = static_cast<u8*>(pfn_VirtualAlloc2(
+            process, nullptr, backing_size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
+            nullptr, 0));
+        if (!backing_base) {
+            LOG_WARNING(HW_Memory, "Failed to reserve the hybrid backing, error {}", GetLastError());
+            return false;
+        }
+        hybrid = true;
+
+        // Split [private prefix | mapped hot section | private suffix].
+        if (hybrid_hot_offset != 0 &&
+            !VirtualFree(backing_base, hybrid_hot_offset,
+                         MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) {
+            LOG_WARNING(HW_Memory, "Failed to split the hybrid backing prefix, error {}",
+                        GetLastError());
+            return false;
+        }
+        hybrid_split_prefix = hybrid_hot_offset != 0;
+        if (hybrid_hot_offset + hybrid_hot_size != backing_size &&
+            !VirtualFree(backing_base + hybrid_hot_offset, hybrid_hot_size,
+                         MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) {
+            LOG_WARNING(HW_Memory, "Failed to split the hybrid backing suffix, error {}",
+                        GetLastError());
+            return false;
+        }
+        hybrid_split_suffix = hybrid_hot_offset + hybrid_hot_size != backing_size;
+        if (hybrid_hot_offset != 0 &&
+            pfn_VirtualAlloc2(process, backing_base, hybrid_hot_offset,
+                              MEM_RESERVE | MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr,
+                              0) != backing_base) {
+            LOG_WARNING(HW_Memory, "Failed to reserve the hybrid private prefix, error {}",
+                        GetLastError());
+            return false;
+        }
+        hybrid_prefix_private = hybrid_hot_offset != 0;
+        const size_t suffix_offset = hybrid_hot_offset + hybrid_hot_size;
+        if (suffix_offset != backing_size &&
+            pfn_VirtualAlloc2(process, backing_base + suffix_offset, backing_size - suffix_offset,
+                              MEM_RESERVE | MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr,
+                              0) != backing_base + suffix_offset) {
+            LOG_WARNING(HW_Memory, "Failed to reserve the hybrid private suffix, error {}",
+                        GetLastError());
+            return false;
+        }
+        hybrid_suffix_private = suffix_offset != backing_size;
+        if (pfn_MapViewOfFile3(backing_handle, process, backing_base + hybrid_hot_offset, 0,
+                               hybrid_hot_size, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr,
+                               0) != backing_base + hybrid_hot_offset) {
+            LOG_WARNING(HW_Memory, "Failed to map the hybrid canonical view, error {}",
+                        GetLastError());
+            return false;
+        }
+        hybrid_canonical_mapped = true;
+
+        virtual_base = static_cast<u8*>(pfn_VirtualAlloc2(
+            process, nullptr, virtual_size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
+            nullptr, 0));
+        if (!virtual_base) {
+            LOG_WARNING(HW_Memory, "Failed to reserve the hybrid fastmem arena, error {}",
+                        GetLastError());
+            return false;
+        }
+
+        // Exercise coherence before exposing the arena to Dynarmic. This catches a section/view
+        // incompatibility here and preserves the all-private fallback instead of failing in-game.
+        constexpr size_t VerifySize = size_t{64} << 10;
+        bool verify_ok = VirtualFree(virtual_base, VerifySize,
+                                     MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) != FALSE;
+        if (verify_ok) {
+            verify_ok = pfn_MapViewOfFile3(backing_handle, process, virtual_base, 0, VerifySize,
+                                           MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr,
+                                           0) == virtual_base;
+        }
+        if (verify_ok) {
+            volatile u8* const canonical = backing_base + hybrid_hot_offset;
+            volatile u8* const alias = virtual_base;
+            const u8 original = canonical[0];
+            canonical[0] = 0xA5;
+            verify_ok = alias[0] == 0xA5;
+            alias[0] = 0x5A;
+            verify_ok = verify_ok && canonical[0] == 0x5A;
+            canonical[0] = original;
+            pfn_UnmapViewOfFile2(process, virtual_base, MEM_PRESERVE_PLACEHOLDER);
+        }
+        const bool coalesced =
+            VirtualFree(virtual_base, virtual_size,
+                        MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS) != FALSE;
+        verify_ok = verify_ok && coalesced;
+        if (!verify_ok) {
+            LOG_WARNING(HW_Memory, "Hybrid fastmem coherence check failed, error {}",
+                        GetLastError());
+            return false;
+        }
+
+        g_backing_base.store(backing_base, std::memory_order_release);
+        g_backing_size.store(backing_size, std::memory_order_release);
+        g_arena_base.store(virtual_base, std::memory_order_release);
+        g_arena_size.store(virtual_size, std::memory_order_release);
+        g_backing_is_section.store(true, std::memory_order_release);
+        g_fastmem_canonical_bytes.store(hybrid_hot_size, std::memory_order_release);
+        g_fastmem_alias_bytes.store(0, std::memory_order_release);
+        g_fastmem_alias_budget.store(hybrid_alias_budget, std::memory_order_release);
+        g_fastmem_guest_bytes.store(0, std::memory_order_release);
+        g_fastmem_skipped_bytes.store(0, std::memory_order_release);
+        g_fastmem_map_failures.store(0, std::memory_order_release);
+        g_fastmem_request_bytes.store(0, std::memory_order_release);
+        g_fastmem_request_min.store(~u64{0}, std::memory_order_release);
+        g_fastmem_request_max.store(0, std::memory_order_release);
+        for (auto& bucket : g_fastmem_request_histogram) {
+            bucket.store(0, std::memory_order_release);
+        }
+        g_fastmem_hot_offset.store(hybrid_hot_offset, std::memory_order_release);
+        g_fastmem_hot_size_actual.store(hybrid_hot_size, std::memory_order_release);
+        g_backing_veh = g_pfn_add_veh(/*first=*/1, BackingDemandCommitHandler);
+        if (!g_backing_veh) {
+            LOG_WARNING(HW_Memory, "Failed to install the hybrid demand-commit handler");
+            return false;
+        }
+        LOG_INFO(HW_Memory,
+                 "Hybrid fastmem: {} MiB at DRAM offset {:#x}, {} GiB arena, alias budget {} MiB",
+                 hybrid_hot_size >> 20, hybrid_hot_offset, virtual_size >> 30,
+                 hybrid_alias_budget >> 20);
+        return true;
+    }
+
     /// Fastmem layout for the AppContainer: the DRAM is a SEC_RESERVE section mapped once as the
     /// linear backing, plus the address-space placeholder that Map() fills with views of it. Pages
     /// are committed on first touch by the demand-commit handler.
@@ -638,13 +845,45 @@ public:
 
     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
         std::unique_lock lock{placeholder_mutex};
+        if (hybrid) {
+            g_fastmem_request_bytes.fetch_add(length, std::memory_order_relaxed);
+            g_fastmem_request_min.store(
+                (std::min)(g_fastmem_request_min.load(std::memory_order_relaxed), u64{host_offset}),
+                std::memory_order_relaxed);
+            g_fastmem_request_max.store(
+                (std::max)(g_fastmem_request_max.load(std::memory_order_relaxed),
+                           u64{host_offset + length}),
+                std::memory_order_relaxed);
+            for (size_t offset = host_offset; offset < host_offset + length;) {
+                const size_t bucket = offset >> FastmemHistogramShift;
+                const size_t bucket_end = (std::min)(host_offset + length,
+                                                     (bucket + 1) << FastmemHistogramShift);
+                if (bucket < g_fastmem_request_histogram.size()) {
+                    g_fastmem_request_histogram[bucket].fetch_add(bucket_end - offset,
+                                                                  std::memory_order_relaxed);
+                }
+                offset = bucket_end;
+            }
+            const size_t host_end = host_offset + length;
+            const size_t hot_end = hybrid_hot_offset + hybrid_hot_size;
+            const size_t mapped_begin = (std::max)(host_offset, hybrid_hot_offset);
+            const size_t mapped_end = (std::min)(host_end, hot_end);
+            if (mapped_begin >= mapped_end) {
+                return;
+            }
+            virtual_offset += mapped_begin - host_offset;
+            host_offset = mapped_begin;
+            length = mapped_end - mapped_begin;
+        }
         if (!IsNiechePlaceholder(virtual_offset, length)) {
             Split(virtual_offset, length);
         }
         ASSERT(placeholders.find({virtual_offset, virtual_offset + length}) == placeholders.end());
-        TrackPlaceholder(virtual_offset, host_offset, length);
-
-        MapView(virtual_offset, host_offset, length);
+        if (MapView(virtual_offset, host_offset, length)) {
+            TrackPlaceholder(virtual_offset, host_offset, length);
+        } else {
+            CoalesceAroundHole(virtual_offset, length);
+        }
     }
 
     void Unmap(size_t virtual_offset, size_t length) {
@@ -698,6 +937,7 @@ public:
 
     const size_t backing_size; ///< Size of the backing memory in bytes
     const size_t virtual_size; ///< Size of the virtual address placeholder in bytes
+    const HostMemoryFastmemRegion fastmem_region;
 
     u8* backing_base{};
     u8* virtual_base{};
@@ -743,7 +983,31 @@ private:
             VirtualFree(virtual_base, 0, MEM_RELEASE);
             virtual_base = nullptr;
         }
-        UnmapBackingViews();
+        if (hybrid) {
+            if (hybrid_canonical_mapped) {
+                pfn_UnmapViewOfFile2(process, backing_base + hybrid_hot_offset,
+                                     MEM_PRESERVE_PLACEHOLDER);
+                hybrid_canonical_mapped = false;
+            }
+            const size_t suffix_offset = hybrid_hot_offset + hybrid_hot_size;
+            if (hybrid_prefix_private) {
+                VirtualFree(backing_base, 0, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+            }
+            if (hybrid_suffix_private) {
+                VirtualFree(backing_base + suffix_offset, 0,
+                            MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+            }
+            if (hybrid_split_prefix || hybrid_split_suffix) {
+                VirtualFree(backing_base, backing_size,
+                            MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS);
+            }
+            VirtualFree(backing_base, 0, MEM_RELEASE);
+            backing_base = nullptr;
+            hybrid = false;
+            hybrid_alias_bytes = 0;
+        } else {
+            UnmapBackingViews();
+        }
         if (backing_handle) {
             CloseHandle(backing_handle);
         }
@@ -753,6 +1017,11 @@ private:
             backing_file = INVALID_HANDLE_VALUE;
         }
         g_backing_is_file.store(false, std::memory_order_release);
+        g_fastmem_canonical_bytes.store(0, std::memory_order_release);
+        g_fastmem_alias_bytes.store(0, std::memory_order_release);
+        g_fastmem_alias_budget.store(0, std::memory_order_release);
+        g_fastmem_hot_offset.store(0, std::memory_order_release);
+        g_fastmem_hot_size_actual.store(0, std::memory_order_release);
 #else
         if (!placeholders.empty()) {
             for (const auto& placeholder : placeholders) {
@@ -809,6 +1078,10 @@ private:
                                   MEM_PRESERVE_PLACEHOLDER)) {
             LOG_CRITICAL(HW_Memory, "Failed to unmap placeholder");
         }
+        if (hybrid) {
+            hybrid_alias_bytes -= placeholder_end - placeholder_begin;
+            g_fastmem_alias_bytes.store(hybrid_alias_bytes, std::memory_order_relaxed);
+        }
         // If we have to remap memory regions due to partial unmaps, we are in a data race as
         // Windows doesn't support remapping memory without unmapping first. Avoid adding any extra
         // logic within the panic region described below.
@@ -817,13 +1090,11 @@ private:
         if (split_left || split_right) {
             Split(unmap_begin, unmap_end - unmap_begin);
         }
-        if (split_left) {
-            MapView(placeholder_begin, host_offset, unmap_begin - placeholder_begin);
-        }
-        if (split_right) {
-            MapView(unmap_end, host_offset + unmap_end - placeholder_begin,
-                    placeholder_end - unmap_end);
-        }
+        const bool mapped_left =
+            split_left && MapView(placeholder_begin, host_offset, unmap_begin - placeholder_begin);
+        const bool mapped_right =
+            split_right && MapView(unmap_end, host_offset + unmap_end - placeholder_begin,
+                                   placeholder_end - unmap_end);
         // End panic region
 
         size_t coalesce_begin = unmap_begin;
@@ -845,20 +1116,50 @@ private:
         }
         // Remove and reinsert placeholder trackers
         UntrackPlaceholder(it);
-        if (split_left) {
+        if (mapped_left) {
             TrackPlaceholder(placeholder_begin, host_offset, unmap_begin - placeholder_begin);
         }
-        if (split_right) {
+        if (mapped_right) {
             TrackPlaceholder(unmap_end, host_offset + unmap_end - placeholder_begin,
                              placeholder_end - unmap_end);
         }
         return true;
     }
 
-    void MapView(size_t virtual_offset, size_t host_offset, size_t length) {
-        if (!pfn_MapViewOfFile3(backing_handle, process, virtual_base + virtual_offset, host_offset,
-                                length, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0)) {
-            LOG_CRITICAL(HW_Memory, "Failed to map placeholder");
+    bool MapView(size_t virtual_offset, size_t host_offset, size_t length) {
+        if (hybrid && length > hybrid_alias_budget - hybrid_alias_bytes) {
+            g_fastmem_skipped_bytes.fetch_add(length, std::memory_order_relaxed);
+            LOG_WARNING(HW_Memory, "Hybrid fastmem alias budget exhausted; {} KiB stays on page table",
+                        length >> 10);
+            return false;
+        }
+        const size_t section_offset = hybrid ? host_offset - hybrid_hot_offset : host_offset;
+        if (!pfn_MapViewOfFile3(backing_handle, process, virtual_base + virtual_offset,
+                                section_offset, length, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE,
+                                nullptr, 0)) {
+            g_fastmem_map_failures.fetch_add(1, std::memory_order_relaxed);
+            g_fastmem_skipped_bytes.fetch_add(length, std::memory_order_relaxed);
+            LOG_WARNING(HW_Memory,
+                        "Failed to map fastmem alias at guest {:#x}, {} KiB, error {}; using page table",
+                        virtual_offset, length >> 10, GetLastError());
+            return false;
+        }
+        if (hybrid) {
+            hybrid_alias_bytes += length;
+            g_fastmem_alias_bytes.store(hybrid_alias_bytes, std::memory_order_relaxed);
+            g_fastmem_guest_bytes.fetch_add(length, std::memory_order_relaxed);
+        }
+        return true;
+    }
+
+    void CoalesceAroundHole(size_t virtual_offset, size_t length) {
+        // The failed mapping left exactly this range as a placeholder. Neighboring mapped views
+        // delimit the largest placeholder range that can safely be coalesced.
+        const auto right = placeholders.upper_bound({virtual_offset, virtual_offset + length});
+        const size_t begin = right == placeholders.begin() ? 0 : std::prev(right)->upper();
+        const size_t end = right == placeholders.end() ? virtual_size : right->lower();
+        if (begin < virtual_offset || virtual_offset + length < end) {
+            Coalesce(begin, end - begin);
         }
     }
 
@@ -899,6 +1200,18 @@ private:
 
     HANDLE process{};        ///< Current process handle
     HANDLE backing_handle{}; ///< File based backing memory
+    static constexpr size_t MaxHybridAliasBudget = size_t{512} << 20;
+    static constexpr size_t HybridTotalViewBudget = size_t{896} << 20;
+    bool hybrid{};
+    bool hybrid_canonical_mapped{};
+    bool hybrid_split_prefix{};
+    bool hybrid_split_suffix{};
+    bool hybrid_prefix_private{};
+    bool hybrid_suffix_private{};
+    size_t hybrid_hot_offset{};
+    size_t hybrid_hot_size{};
+    size_t hybrid_alias_bytes{};
+    size_t hybrid_alias_budget{};
     bool backing_mapped{};   ///< UWP fastmem: the section view replaced the backing placeholder
     HANDLE backing_file{INVALID_HANDLE_VALUE}; ///< UWP fastmem: the file behind the section
     size_t backing_piece{};  ///< UWP fastmem: size of each backing view, 0 for a single view
@@ -1220,7 +1533,8 @@ private:
 
 #endif // ^^^ POSIX ^^^
 
-HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_)
+HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_,
+                       HostMemoryFastmemRegion fastmem_region_)
     : backing_size(backing_size_)
     , virtual_size(virtual_size_)
 {
@@ -1230,7 +1544,15 @@ HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_)
     virtual_base = nullptr;
 #else
     // Try to allocate a fastmem arena.
-    impl = std::make_unique<HostMemory::Impl>(AlignUp(backing_size, PageAlignment), AlignUp(virtual_size, PageAlignment) + HugePageSize);
+#ifdef _WIN32
+    impl = std::make_unique<HostMemory::Impl>(AlignUp(backing_size, PageAlignment),
+                                              AlignUp(virtual_size, PageAlignment) + HugePageSize,
+                                              fastmem_region_);
+#else
+    (void)fastmem_region_;
+    impl = std::make_unique<HostMemory::Impl>(AlignUp(backing_size, PageAlignment),
+                                              AlignUp(virtual_size, PageAlignment) + HugePageSize);
+#endif
     if (impl->Init()) {
         backing_base = impl->backing_base;
         virtual_base = impl->virtual_base;
@@ -1414,6 +1736,37 @@ std::string HostMemoryCommitStats() {
         return "emulated DRAM " + std::to_string(committed >> 20) + " MiB";
     }
     if (g_backing_is_file.load(std::memory_order_acquire)) {
+        if (const u64 hot_size = g_fastmem_hot_size_actual.load(std::memory_order_acquire);
+            hot_size != 0) {
+            const u64 aliases = g_fastmem_alias_bytes.load(std::memory_order_relaxed);
+            const u64 alias_budget = g_fastmem_alias_budget.load(std::memory_order_relaxed);
+            const u64 skipped = g_fastmem_skipped_bytes.load(std::memory_order_relaxed);
+            const u64 failures = g_fastmem_map_failures.load(std::memory_order_relaxed);
+            const u64 request_min = g_fastmem_request_min.load(std::memory_order_relaxed);
+            const u64 request_max = g_fastmem_request_max.load(std::memory_order_relaxed);
+            char hot_offset[32];
+            std::snprintf(hot_offset, sizeof(hot_offset), "%llx",
+                          static_cast<unsigned long long>(
+                              g_fastmem_hot_offset.load(std::memory_order_relaxed)));
+            std::string histogram;
+            for (size_t i = 0; i < g_fastmem_request_histogram.size(); ++i) {
+                const u64 bytes = g_fastmem_request_histogram[i].load(std::memory_order_relaxed);
+                if (bytes != 0) {
+                    histogram += (histogram.empty() ? "" : ",") + std::to_string(i * 64) + ":" +
+                                 std::to_string(bytes >> 20);
+                }
+            }
+            return "hybrid fastmem hot [0x" + std::string{hot_offset} +
+                   ", " + std::to_string(hot_size >> 20) + " MiB], aliases " +
+                   std::to_string(aliases >> 20) + "/" + std::to_string(alias_budget >> 20) +
+                   " MiB, guest mapped " +
+                   std::to_string(g_fastmem_guest_bytes.load(std::memory_order_relaxed) >> 20) +
+                   " MiB, skipped " + std::to_string(skipped >> 20) + " MiB, failures " +
+                   std::to_string(failures) + ", requested " +
+                   std::to_string(g_fastmem_request_bytes.load(std::memory_order_relaxed) >> 20) +
+                   " MiB in [" + (request_min == ~u64{0} ? "none" : std::to_string(request_min >> 20)) +
+                   ", " + std::to_string(request_max >> 20) + ") MiB; 64-MiB buckets " + histogram;
+        }
         return g_backing_file_sparse.load(std::memory_order_acquire)
                    ? "DRAM in a sparse file-backed section"
                    : "DRAM in a file-backed section (not sparse)";
