@@ -459,3 +459,22 @@ vez:
 - Quedan 125,1 ms de `other work` en ese frame, principalmente preparar/grabar 647 uploads pequenos.
   Es el siguiente bloque a instrumentar y agrupar; ya no conviene mover la creacion a workers antes
   de medir esa ruta.
+
+### Vistas de textura y DRED (despues de 0.2.65.0)
+
+- El perfil fino del siguiente hitch localizo el coste en `FindOrEmplaceImageView`: unas 700 vistas
+  consumian 81--108 ms. El repack y la grabacion real de los uploads solo consumian 9--13 ms.
+- D3D12 creaba RTV/DSV para toda vista cuya imagen permitiera render, aunque la vista fuese solo de
+  shader. Ahora sigue la marca `ImageViewInfo::IsRenderTarget()` que tambien usa Vulkan: una vista
+  de shader crea SRV/UAV y una vista attachment crea RTV/DSV. El SRV natural de un attachment queda
+  lazy hasta que un shader lo solicite.
+- DRED ya no se fuerza en cada arranque. `dred=1` activa breadcrumbs y page-fault tracking al
+  diagnosticar un device removal; apagado se mantienen `GetDeviceRemovedReason` tras submits y el
+  informe normal. Microsoft cifra los breadcrumbs automaticos en 2--5% tipico y documenta coste
+  adicional de creacion/destruccion por el page-fault tracking:
+  https://microsoft.github.io/DirectX-Specs/d3d/DeviceRemovedExtendedData.html.
+- Los RTV/DSV viven en heaps CPU-only. D3D12 copia su contenido al command list durante
+  `OMSetRenderTargets`, por lo que no requieren residencia ni sincronizacion con la GPU:
+  https://learn.microsoft.com/en-us/windows/win32/direct3d12/non-shader-visible-descriptor-heaps.
+- Build UWP incremental limpio y self-test de texture cache limpio. Falta repetir el recorrido
+  manual de Wonder para medir la reduccion del hitch de vistas.

@@ -1401,6 +1401,11 @@ void Image::CopyDepthStencilFrom(Image& src, std::span<const ImageCopy> copies) 
 
 void Image::UploadMemory(ID3D12Resource* buffer, size_t base_offset,
                          std::span<const BufferImageCopy> copies) {
+    UploadMemoryImpl(buffer, base_offset, nullptr, copies);
+}
+
+void Image::UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* mapped_at_base,
+                             std::span<const BufferImageCopy> copies) {
     if (!CanTransfer() || copies.empty()) {
         return;
     }
@@ -1410,23 +1415,25 @@ void Image::UploadMemory(ID3D12Resource* buffer, size_t base_offset,
         UploadDepthStencil(buffer, base_offset, copies);
         return;
     }
-    Transition(D3D12_RESOURCE_STATE_COPY_DEST);
     auto* const commands = runtime->scheduler.CommandList();
-    const bool cpu_visible = HeapType(buffer) == D3D12_HEAP_TYPE_UPLOAD;
-    u8* source_base = nullptr;
-    if (cpu_visible) {
-        // Staging buffers are persistently mapped; Map again just to learn the base address.
+    bool unmap_source = false;
+    if (!mapped_at_base && HeapType(buffer) == D3D12_HEAP_TYPE_UPLOAD) {
+        VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::TextureUploadMapNs};
         void* mapped{};
         const D3D12_RANGE no_read{0, 0};
         ThrowIfFailed(buffer->Map(0, &no_read, &mapped), "Map (texture upload source)");
-        source_base = static_cast<u8*>(mapped);
+        mapped_at_base = static_cast<u8*>(mapped) + base_offset;
+        unmap_source = true;
+        VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::TextureUploadMaps, 1);
     }
+    const bool cpu_visible = mapped_at_base != nullptr;
+    Transition(D3D12_RESOURCE_STATE_COPY_DEST);
     bool promoted_source = false;
     for (const auto& copy : copies) {
         const CopyLayout layout = Layout(copy);
         const u32 layers = static_cast<u32>(std::max(1, copy.image_subresource.num_layers));
-        if (format.converted && source_base) {
-            LogConvertedUpload(source_base + base_offset + copy.buffer_offset, layout, copy);
+        if (format.converted && mapped_at_base) {
+            LogConvertedUpload(mapped_at_base + copy.buffer_offset, layout, copy);
         }
         for (u32 layer = 0; layer < layers; ++layer) {
             const u64 source_offset = base_offset + copy.buffer_offset +
@@ -1440,19 +1447,27 @@ void Image::UploadMemory(ID3D12Resource* buffer, size_t base_offset,
                 src.pResource = buffer;
                 src.PlacedFootprint.Offset = source_offset;
                 promoted_source = !cpu_visible;
-            } else if (cpu_visible) {
+            } else if (mapped_at_base) {
                 // Repack on the CPU into a pitch-aligned staging allocation.
                 const StagingBufferRef packed = runtime->UploadStagingBuffer(
                     static_cast<size_t>(layout.padded_slice * layout.depth));
-                for (u32 z = 0; z < layout.depth; ++z) {
-                    for (u32 row = 0; row < layout.rows; ++row) {
-                        std::memcpy(packed.mapped_span.data() + z * layout.padded_slice +
-                                        static_cast<u64>(row) * layout.row_pitch,
-                                    source_base + source_offset + z * layout.tight_slice +
-                                        static_cast<u64>(row) * layout.row_bytes,
-                                    layout.row_bytes);
+                {
+                    VideoCore::Perf::ScopedNsTimer timer{
+                        VideoCore::Perf::Counter::TextureUploadRepackNs};
+                    for (u32 z = 0; z < layout.depth; ++z) {
+                        for (u32 row = 0; row < layout.rows; ++row) {
+                            std::memcpy(packed.mapped_span.data() + z * layout.padded_slice +
+                                            static_cast<u64>(row) * layout.row_pitch,
+                                        mapped_at_base + copy.buffer_offset +
+                                            static_cast<u64>(layer) * layout.depth *
+                                                layout.tight_slice +
+                                            z * layout.tight_slice +
+                                            static_cast<u64>(row) * layout.row_bytes,
+                                        layout.row_bytes);
+                        }
                     }
                 }
+                VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::TextureUploadRepacks, 1);
                 src.pResource = packed.buffer;
                 src.PlacedFootprint.Offset = packed.offset;
             } else {
@@ -1480,14 +1495,19 @@ void Image::UploadMemory(ID3D12Resource* buffer, size_t base_offset,
                 .SubresourceIndex = Subresource(copy.image_subresource.base_level,
                                                 copy.image_subresource.base_layer +
                                                     static_cast<s32>(layer))};
-            commands->CopyTextureRegion(&dst, copy.image_offset.x, copy.image_offset.y,
-                                        copy.image_offset.z, &src, nullptr);
+            {
+                VideoCore::Perf::ScopedNsTimer timer{
+                    VideoCore::Perf::Counter::TextureUploadRecordNs};
+                commands->CopyTextureRegion(&dst, copy.image_offset.x, copy.image_offset.y,
+                                            copy.image_offset.z, &src, nullptr);
+            }
+            VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::TextureUploadCopies, 1);
             if (transfer) {
                 runtime->scheduler.DeferRelease(std::move(transfer));
             }
         }
     }
-    if (cpu_visible) {
+    if (unmap_source) {
         const D3D12_RANGE no_write{0, 0};
         buffer->Unmap(0, &no_write);
     } else if (promoted_source) {
@@ -1496,7 +1516,10 @@ void Image::UploadMemory(ID3D12Resource* buffer, size_t base_offset,
 }
 
 void Image::UploadMemory(const StagingBufferRef& map, std::span<const BufferImageCopy> copies) {
-    UploadMemory(map.buffer, map.offset, copies);
+    ASSERT(map.usage == MemoryUsage::Upload);
+    // The staging pool keeps this resource mapped for its complete lifetime. Passing the pointer
+    // avoids a Map/GetHeapProperties/Unmap round trip for every small texture upload.
+    UploadMemoryImpl(map.buffer, map.offset, map.mapped_span.data(), copies);
 }
 
 void Image::DownloadMemory(ID3D12Resource* buffer, size_t offset,
@@ -2345,12 +2368,20 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
     case ImageViewType::CubeArray: natural_type = Shader::TextureType::ColorArrayCube; break;
     default: natural_type = Shader::TextureType::Color2D; break;
     }
-    // The view's own type up front; the rest when a shader asks for them.
-    srvs[static_cast<size_t>(natural_type)] = CreateSrv(natural_type);
+    // A render-target view often exists only to be written. Creating its SRV eagerly made loading
+    // frames issue hundreds of unnecessary device calls. Handle() creates this same natural SRV
+    // on first shader read, as it already does for every alternate texture type.
+    if (!info.IsRenderTarget()) {
+        srvs[static_cast<size_t>(natural_type)] = CreateSrv(natural_type);
+    }
 
     const SurfaceType surface = VideoCore::Surface::GetFormatType(info.format);
     const bool is_3d = resource_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-    if (surface == SurfaceType::ColorTexture &&
+    // The underlying image may allow rendering, but most views of it are shader-only. Creating an
+    // RTV/DSV for every such view made texture-heavy loading frames issue hundreds of needless
+    // device calls. The generic cache marks attachment views with the render-target swizzle (the
+    // same distinction used by Vulkan), so only those need CPU render descriptors.
+    if (info.IsRenderTarget() && surface == SurfaceType::ColorTexture &&
         (resource_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
         if (runtime->SupportsView(format_info.view, D3D12_FORMAT_SUPPORT1_RENDER_TARGET)) {
             rtv = runtime->rtv_descriptors.Allocate();
@@ -2368,7 +2399,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
             rtv_on_copy = view_on_copy;
             runtime->device.Get()->CreateRenderTargetView(view_on_copy ? srv_resource : image,
                                                           &rtv_desc, rtv);
-            CheckRemovedAfter(runtime->device.Get(), [&] {
+            CheckRemovedAfterDescriptor(runtime->device.Get(), [&] {
                 return fmt::format("RTV of {} (format {} dim {} level {} layers {}+{})",
                                    info.format, static_cast<u32>(rtv_desc.Format),
                                    static_cast<u32>(rtv_desc.ViewDimension), base_level,
@@ -2378,7 +2409,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
             WarnOnce(logged_view_format, "view format {} cannot be a render target", info.format);
         }
     }
-    if (surface != SurfaceType::ColorTexture &&
+    if (info.IsRenderTarget() && surface != SurfaceType::ColorTexture &&
         (resource_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
         format_info.dsv != DXGI_FORMAT_UNKNOWN) {
         dsv = runtime->dsv_descriptors.Allocate();
@@ -2401,7 +2432,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
             dsv_desc.Flags |= D3D12_DSV_FLAG_READ_ONLY_STENCIL;
         }
         runtime->device.Get()->CreateDepthStencilView(image, &dsv_desc, dsv_read_only);
-        CheckRemovedAfter(runtime->device.Get(), [&] {
+        CheckRemovedAfterDescriptor(runtime->device.Get(), [&] {
             return fmt::format("DSV of {} (format {} dim {} level {} layers {}+{})", info.format,
                                static_cast<u32>(dsv_desc.Format),
                                static_cast<u32>(dsv_desc.ViewDimension), base_level, base_layer,
@@ -2423,7 +2454,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
             uav_desc.Texture2DArray = {base_level, base_layer, layers, 0};
         }
         runtime->device.Get()->CreateUnorderedAccessView(image, nullptr, &uav_desc, uav);
-        CheckRemovedAfter(runtime->device.Get(), [&] {
+        CheckRemovedAfterDescriptor(runtime->device.Get(), [&] {
             return fmt::format("UAV of {} (format {} dim {} level {} layers {}+{})", info.format,
                                static_cast<u32>(uav_desc.Format),
                                static_cast<u32>(uav_desc.ViewDimension), base_level, base_layer,
@@ -2510,7 +2541,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
             desc.Texture2DArray = {p.base_level, p.levels, 0, depth, 0, 0.0f};
             const D3D12_CPU_DESCRIPTOR_HANDLE handle = runtime->view_descriptors.Allocate();
             runtime->device.Get()->CreateShaderResourceView(slices, &desc, handle);
-            CheckRemovedAfter(runtime->device.Get(), [&] {
+            CheckRemovedAfterDescriptor(runtime->device.Get(), [&] {
                 return fmt::format("slice array SRV of {} (format {} levels {}+{} of {}, "
                                    "slices {}, resource format {})",
                                    format, static_cast<u32>(desc.Format), p.base_level, p.levels,
@@ -2595,14 +2626,14 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
     // The tripwire only names the first checked call after a removal: this one tells whether the
     // device was already gone before the SRV (the Series named the same R16G16_FLOAT SRV three
     // times, 0.2.56-0.2.57).
-    CheckRemovedAfter(runtime->device.Get(), [&] {
+    CheckRemovedAfterDescriptor(runtime->device.Get(), [&] {
         return fmt::format("something unchecked before an SRV of {} as type {}", format,
                            static_cast<u32>(texture_type));
     });
     const D3D12_CPU_DESCRIPTOR_HANDLE handle = runtime->view_descriptors.Allocate();
     runtime->device.Get()->CreateShaderResourceView(srv_resource ? srv_resource : image, &desc,
                                                     handle);
-    CheckRemovedAfter(runtime->device.Get(), [&] {
+    CheckRemovedAfterDescriptor(runtime->device.Get(), [&] {
         return fmt::format("SRV of {} as type {} (format {} dim {} levels {}+{} layers {}+{} of "
                            "{}, resource dim {} msaa {})",
                            format, static_cast<u32>(texture_type), static_cast<u32>(desc.Format),

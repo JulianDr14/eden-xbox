@@ -1114,6 +1114,7 @@ void TextureCache<P>::DownloadImageIntoBuffer(typename TextureCache<P>::Image* i
 
 template <class P>
 void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
+    VideoCore::Perf::ScopedNsTimer refresh_timer{VideoCore::Perf::Counter::TextureCacheRefreshNs};
     if (False(image.flags & ImageFlagBits::CpuModified)) {
         // Only upload modified images
         return;
@@ -1146,7 +1147,9 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         QueueAsyncUnswizzle(image, image_id);
         return;
     }
+    VideoCore::Perf::LapTimer timer;
     auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+    timer.Lap(VideoCore::Perf::Counter::TextureCacheStagingNs);
     UploadImageContents(image, staging);
     runtime.InsertUploadMemoryBarrier();
 }
@@ -1158,27 +1161,35 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
     const GPUVAddr gpu_addr = image.gpu_addr;
 
     if (True(image.flags & ImageFlagBits::AcceleratedUpload)) {
+        VideoCore::Perf::LapTimer timer;
         gpu_memory->ReadBlock(gpu_addr, mapped_span.data(), mapped_span.size_bytes(),
                               VideoCommon::CacheType::NoTextureCache);
+        timer.Lap(VideoCore::Perf::Counter::TextureCacheUnswizzleNs);
         const auto uploads = FullUploadSwizzles(image.info);
         runtime.AccelerateImageUpload(image, staging, FixSmallVectorADL(uploads), 0, 0);
+        timer.Lap(VideoCore::Perf::Counter::TextureCacheBackendUploadNs);
         return;
     }
 
+    VideoCore::Perf::LapTimer timer;
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
     if (True(image.flags & ImageFlagBits::Converted)) {
         unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
         auto copies = FixSmallVectorADL(UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, unswizzle_data_buffer));
         {
-            VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::TextureDecodeUs};
+            VideoCore::Perf::ScopedTimer decode_timer{
+                VideoCore::Perf::Counter::TextureDecodeUs};
             ConvertImage(unswizzle_data_buffer, image.info, mapped_span, copies);
         }
+        timer.Lap(VideoCore::Perf::Counter::TextureCacheUnswizzleNs);
         image.UploadMemory(staging, copies);
     } else {
         const auto copies = FixSmallVectorADL(UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, mapped_span));
+        timer.Lap(VideoCore::Perf::Counter::TextureCacheUnswizzleNs);
         image.UploadMemory(staging, copies);
     }
+    timer.Lap(VideoCore::Perf::Counter::TextureCacheBackendUploadNs);
 }
 
 template <class P>
@@ -1217,6 +1228,8 @@ ImageId TextureCache<P>::FindOrInsertImage(const ImageInfo& info, GPUVAddr gpu_a
 template <class P>
 ImageId TextureCache<P>::FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
                                    RelaxedOptions options) {
+    VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::TextureCacheFindNs};
+    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::TextureCacheFinds, 1);
     std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
     if (!cpu_addr) {
         cpu_addr = gpu_memory->GpuToCpuAddress(gpu_addr, CalculateGuestSizeInBytes(info));
@@ -1519,6 +1532,8 @@ bool TextureCache<P>::ScaleDown(Image& image) {
 template <class P>
 ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
                                      RelaxedOptions options) {
+    VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::TextureCacheInsertNs};
+    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::TextureCacheInserts, 1);
     std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
     if (!cpu_addr) {
         const auto size = CalculateGuestSizeInBytes(info);
@@ -1543,6 +1558,7 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
 
 template <class P>
 ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DAddr cpu_addr) {
+    VideoCore::Perf::LapTimer phase_timer;
     ImageInfo new_info = info;
     const size_t size_bytes = CalculateGuestSizeInBytes(new_info);
     const bool broken_views = runtime.HasBrokenTextureViewFormats();
@@ -1612,6 +1628,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     };
     ForEachSparseImageInRegion(channel_state->gpu_memory.GetID(), gpu_addr, size_bytes,
                                region_check_gpu);
+    phase_timer.Lap(VideoCore::Perf::Counter::TextureCacheOverlapNs);
 
     bool can_rescale = info.rescaleable;
     bool any_rescaled = false;
@@ -1639,6 +1656,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     }
 
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
+    phase_timer.Lap(VideoCore::Perf::Counter::TextureCacheImageCreateNs);
     Image& new_image = slot_images[new_image_id];
 
     new_image.allocation_tick = frame_tick;
@@ -1747,7 +1765,11 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         DeleteImage(copy_object.id);
     }
 
-    RegisterImage(new_image_id);
+    {
+        VideoCore::Perf::ScopedNsTimer timer{
+            VideoCore::Perf::Counter::TextureCacheRegisterNs};
+        RegisterImage(new_image_id);
+    }
     return new_image_id;
 }
 
@@ -2140,6 +2162,8 @@ ImageViewId TextureCache<P>::FindOrEmplaceImageView(ImageId image_id, const Imag
     if (const ImageViewId image_view_id = image.FindView(info); image_view_id) {
         return image_view_id;
     }
+    VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::TextureCacheViewCreateNs};
+    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::TextureCacheViewsCreated, 1);
     const ImageViewId image_view_id = slot_image_views.insert(runtime, info, image_id, image, slot_images);
     image.InsertView(info, image_view_id);
     return image_view_id;

@@ -773,9 +773,10 @@ Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
     `ExecuteCommandLists`.
   - La primera llamada tras la que el dispositivo está perdido queda en el log como
     `device removed (reason …) right after …`, con sus parámetros.
-  - DRED (breadcrumbs y page faults) queda activo siempre, no solo con `renderer_debug`.
-    `ReportDeviceRemoved` ahora dice cuántas listas quedaron sin terminar: si ninguna quedó
-    abierta, la causa no fue la GPU.
+  - En esa version DRED (breadcrumbs y page faults) quedo activo siempre, no solo con
+    `renderer_debug`; despues del diagnostico paso a ser opt-in con `dred=1` por su coste.
+    `ReportDeviceRemoved` dice cuántas listas quedaron sin terminar: si ninguna quedó abierta, la
+    causa no fue la GPU.
 
 **Series (0.2.21.0): la causa era un sampler con reducción MAX.**
 - **Lo que marcó el tripwire:** a los 72,17 s, justo tras crear el sampler, el log dice
@@ -2229,3 +2230,23 @@ grabacion de los 647 uploads, no a allocation. Fuentes del modelo:
 [Microsoft Residency](https://learn.microsoft.com/en-us/windows/win32/direct3d12/residency),
 [Resource Heaps](https://microsoft.github.io/DirectX-Specs/d3d/ResourceHeaps.html) y
 [D3D12MA](https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator).
+
+### Creacion selectiva de vistas y DRED bajo demanda
+
+El desglose posterior corrigio la atribucion inicial de los 125,1 ms: el trabajo de repack/copia
+del backend fue solo 9--13 ms; `FindOrEmplaceImageView` creo unas 700 vistas y gasto 81--108 ms.
+El backend D3D12 estaba construyendo RTV/DSV para cualquier vista de una imagen con flags de render,
+incluso si la vista era solo un recurso de shader. Ahora, como el backend Vulkan, consulta
+`ImageViewInfo::IsRenderTarget()`: RTV/DSV solo existen para attachments y el SRV de un attachment
+se crea solo si despues se muestrea. Esto elimina llamadas al device y consumo de heaps CPU-only sin
+cambiar los recursos ni su sincronizacion.
+
+DRED tambien pasa a ser diagnostico con `boot.cfg` `dred=1`. Seguimos comprobando device removal al
+enviar trabajo, pero una ejecucion normal evita el 2--5% tipico documentado para auto-breadcrumbs y
+el coste de object tracking de page faults. Fuentes: [DRED](https://microsoft.github.io/DirectX-Specs/d3d/DeviceRemovedExtendedData.html),
+[non-shader-visible heaps](https://learn.microsoft.com/en-us/windows/win32/direct3d12/non-shader-visible-descriptor-heaps)
+y [CPU efficiency/free-threaded device calls](https://microsoft.github.io/DirectX-Specs/d3d/CPUEfficiency.html).
+
+Gate pendiente: repetir el recorrido manual de Wonder y comparar el hitch de vistas, los frames de
+mas de 100 ms y la cantidad de RTV/DSV/SRV creados. El build incremental y el self-test de texture
+cache ya terminan limpios.

@@ -61,11 +61,16 @@ void SetDescriptorRemovalChecks(bool enabled) {
 
 namespace {
 bool gpu_based_validation = false;
+bool dred_enabled = false;
 std::atomic<AppMemoryQuery> app_memory_query{nullptr};
 } // Anonymous namespace
 
 void SetGpuBasedValidation(bool enabled) {
     gpu_based_validation = enabled;
+}
+
+void SetDredEnabled(bool enabled) {
+    dred_enabled = enabled;
 }
 
 void SetAppMemoryQuery(AppMemoryQuery query) {
@@ -92,15 +97,18 @@ Device::Device() {
             LOG_WARNING(Render, "D3D12: debug layer requested but not installed");
         }
     }
-    // DRED (part of the runtime, not the SDK layers, so also on the console): on a device removal,
-    // the last GPU operations of each command list and the faulting address (ReportDeviceRemoved).
-    // Its cost is small next to what a removal on the console costs to diagnose without it.
+    // DRED (part of the runtime, not the SDK layers, so also on the console) is invaluable after a
+    // device removal, but it is not free: Microsoft documents 2-5% typical overhead for automatic
+    // breadcrumbs, plus object create/destroy overhead for page-fault tracking. Keep it diagnostic.
     {
         ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
-            dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-            dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-            LOG_INFO(Render, "D3D12: DRED breadcrumbs and page faults on");
+            const auto setting = dred_enabled ? D3D12_DRED_ENABLEMENT_FORCED_ON
+                                              : D3D12_DRED_ENABLEMENT_FORCED_OFF;
+            dred->SetAutoBreadcrumbsEnablement(setting);
+            dred->SetPageFaultEnablement(setting);
+            LOG_INFO(Render, "D3D12: DRED breadcrumbs and page faults {}",
+                     dred_enabled ? "on" : "off (boot.cfg dred=1 enables diagnostics)");
         } else {
             LOG_INFO(Render, "D3D12: DRED not available");
         }

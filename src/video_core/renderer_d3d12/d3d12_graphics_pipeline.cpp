@@ -571,12 +571,16 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
         buffer_cache.any_buffer_uploaded = false;
     }
     lap.Lap(VideoCore::Perf::Counter::DrawDescriptorsNs);
+    VideoCore::Perf::LapTimer target_lap;
     texture_cache.UpdateRenderTargets(false);
+    target_lap.Lap(VideoCore::Perf::Counter::DrawUpdateTargetsNs);
     texture_cache.CheckFeedbackLoop(std::span<const ImageViewInOut>{views.data(), views.size()});
+    target_lap.Lap(VideoCore::Perf::Counter::DrawFeedbackNs);
 
     // Depth-based effects sample the bound depth buffer: both uses then share a read-only state
     // (DEPTH_SAMPLED_STATE) and the draw binds the read-only DSV.
     const VideoCommon::ImageId depth_image = texture_cache.GetFramebuffer()->DepthImageId();
+    target_lap.Lap(VideoCore::Perf::Counter::DrawFramebufferNs);
     for (const auto& [view_id, is_storage] : image_transitions) {
         ImageView& image_view = texture_cache.GetImageView(view_id);
         if (!is_storage && depth_image != VideoCommon::ImageId{} &&
@@ -589,6 +593,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
                                               : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
+    target_lap.Lap(VideoCore::Perf::Counter::DrawImageTransitionsNs);
     if (out.depth_sampled && key.state.dynamic_state.depth_write_enable != 0) {
         WarnOnce(warned_depth_feedback, "writing depth while sampling the depth buffer");
     }
