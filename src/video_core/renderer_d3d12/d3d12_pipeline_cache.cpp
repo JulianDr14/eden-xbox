@@ -372,22 +372,20 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         current_pipeline = nullptr;
         return nullptr;
     }
-    // FixedPipelineState::Refresh only rereads these blocks when Vulkan's state tracker flagged
-    // them; D3D12 has no tracker yet (phase 4.3), so they are always reread.
-    auto& dirty = maxwell3d->dirty.flags;
-    dirty[Vulkan::Dirty::VertexInput] = true;
-    dirty[Vulkan::Dirty::Blending] = true;
-    dirty[Vulkan::Dirty::ViewportSwizzles] = true;
+    // The D3D12 rasterizer installs Vulkan's fixed-state dirty tables for the channel. Refresh
+    // only rereads blocks whose Maxwell registers changed.
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
     graphics_key.RefreshStatic(maxwell3d->regs);
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
+            VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::PipelineFastHits, 1);
             current_pipeline = next;
             return BuiltPipeline(current_pipeline);
         }
     }
+    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::PipelineFastMisses, 1);
     return CurrentGraphicsPipelineSlowPath();
 }
 

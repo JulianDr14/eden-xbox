@@ -22,6 +22,7 @@
 #include "video_core/renderer_d3d12/d3d12_pipeline_cache.h"
 #include "video_core/renderer_d3d12/d3d12_query_cache.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
+#include "video_core/renderer_vulkan/vk_state_tracker.h"
 
 namespace Tegra {
 struct FramebufferConfig;
@@ -143,8 +144,7 @@ private:
 
     using IndirectParams = Tegra::Engines::Maxwell3D::DrawManager::IndirectParams;
 
-    /// Records the complete state of a draw, then the draw. Nothing is carried over from earlier
-    /// draws: the state tracker of the Vulkan backend is left for later, when it pays off.
+    /// Records changed state and then the draw. Command-list state is invalidated on every reset.
     void RecordDraw(const GraphicsPipeline& pipeline, const PipelineBindings& bindings,
                     const Framebuffer& framebuffer, const DrawParams& params,
                     Maxwell::PrimitiveTopology topology);
@@ -152,8 +152,9 @@ private:
     void BindDrawState(const GraphicsPipeline& pipeline, const PipelineBindings& bindings,
                        const Framebuffer& framebuffer, const DrawParams& params,
                        Maxwell::PrimitiveTopology topology);
-    /// Every draw binds its vertex buffers again (see Draw).
-    void MarkVertexBuffersDirty();
+    void InvalidateCommandListState();
+    void InvalidateGraphicsState();
+    void ApplyPendingStateInvalidation();
     /// Indirect draws of topologies rewritten on the CPU: reads the arguments and draws directly.
     void DrawIndirectOnCpu(const IndirectParams& params);
     [[nodiscard]] ViewportState ComputeViewports(
@@ -202,6 +203,24 @@ private:
     BufferCache buffer_cache;
     TextureCache texture_cache;
     PipelineCache pipeline_cache;
+    Vulkan::StateTracker state_tracker;
+    struct CommandListState {
+        bool valid{};
+        bool heaps_bound{};
+        ID3D12RootSignature* graphics_root{};
+        ID3D12PipelineState* graphics_pipeline{};
+        std::array<SIZE_T, VideoCommon::NUM_RT> color_targets{};
+        u32 num_color_targets{};
+        SIZE_T depth_target{};
+        std::array<float, 4> blend_factor{};
+        u32 stencil_ref{};
+        D3D12_PRIMITIVE_TOPOLOGY topology{D3D_PRIMITIVE_TOPOLOGY_UNDEFINED};
+        ViewportState viewport{};
+    } command_state;
+    bool channel_bound{};
+    bool state_invalidation_pending{};
+    // QueryCache owns the scheduler callback lifetime and clears every submission callback in its
+    // destructor. Keep it after the state captured by our reset callback, so it is destroyed first.
     QueryCache query_cache;
     AccelerateDMA accelerate_dma;
     FenceManager fence_manager;

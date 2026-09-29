@@ -43,6 +43,7 @@
 #include "hid_core/hid_core.h"
 #include "video_core/frame_trace.h"
 #include "video_core/gpu.h"
+#include "video_core/perf_counters.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
 
@@ -118,6 +119,8 @@ struct BootConfig {
     /// Look for a removed device after every descriptor a draw writes ("descriptor_checks=1"), to
     /// name the view that removed it; costs a kernel call per descriptor.
     bool descriptor_checks{};
+    /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
+    bool gpu_profile{};
     /// File name of a game in LocalState\games to boot instead of boot.nro (package-appx.ps1 -Game).
     std::string game;
     /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
@@ -196,6 +199,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     D3D12::SetAstcGpuSync(config.astc_sync);
     D3D12::SetAstcGpuFresh(config.astc_fresh);
     D3D12::SetDescriptorRemovalChecks(config.descriptor_checks);
+    VideoCore::Perf::SetDetailedGpuProfile(config.gpu_profile);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
         D3D12::SetGpuBasedValidation(config.gpu_validation);
@@ -1044,6 +1048,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "descriptor_checks=1") {
                         config.descriptor_checks = true;
                         WriteDiag("boot.cfg: device removal checks after every draw descriptor");
+                    } else if (line == "gpu_profile=1") {
+                        config.gpu_profile = true;
+                        WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
                     } else if (line == "debug_layer=1" || line == "debug_layer=gbv") {
                         config.debug_layer = true;
                         config.gpu_validation = line == "debug_layer=gbv";

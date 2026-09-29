@@ -344,3 +344,27 @@ vez:
   activo solo con `descriptor_checks=1`. El resto de los chivatos (creacion y submit) sigue igual.
 - Contadores por ventana (`D3D12 GPU thread:` en el log): coste por draw por fases, clears,
   dispatches, trabajo fuera de draws y esperas del juego a la GPU (`nvhost_ctrl`).
+
+### State tracking y `gpu_profile` (despues de 0.2.60)
+
+- El backend conserva el estado D3D12 dentro de una command list y evita repetir heaps, root
+  signature, PSO, attachments, viewports, scissors, blend, stencil y topologia. Cada `Reset`, cambio
+  de canal o helper grafico invalida lo necesario.
+- El callback de `Reset` no toca directamente las dirty flags: al cerrar puede ejecutarse cuando el
+  payload Maxwell ya no existe, incluso antes de `ReleaseChannel`. Solo deja una invalidacion
+  pendiente; el siguiente draw/clear/dispatch la aplica con un canal vivo.
+- Los vertex/index buffers y el estado fijo usan las tablas dirty de Maxwell; nunca se marcan todos
+  los vertex buffers en cada draw.
+- Los dos heaps shader-visible son siempre los mismos. Se fijan una vez tras cada reset; Microsoft
+  advierte que cambiar heaps puede provocar un flush del pipeline.
+- `gpu_profile=1` en `boot.cfg` activa los cronometros finos por draw. Apagado, `LapTimer` y
+  `ScopedNsTimer` no consultan `steady_clock` ni actualizan sus contadores.
+- Con el perfil activo, `D3D12 GPU thread:` incluye fast-path de pipelines, creacion de CBV, reparto
+  streamed/persistente/nulo y copias de vistas. Usar una corrida con cache caliente y sin capa de
+  debug para comparar rendimiento.
+- Un root CBV no puede ser nulo y no lleva limite de tamaño: GPUVA cero o acceso fuera del recurso
+  es comportamiento indefinido. Solo se considerara una ruta hibrida si la medicion de CBV queda
+  por encima del 10% y el layout cabe en los 64 DWORD de la root signature.
+- Medicion Wonder PC (116 s, sin debug layer): 7,6--11,8 us/draw, mas de 99,7% de hits en la
+  transicion de pipeline y 1,1--1,3 us/draw grabando estado. `CreateConstantBufferView` consume
+  aproximadamente 2% del tiempo activo, no alcanza el gate para root CBV.

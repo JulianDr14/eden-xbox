@@ -8,6 +8,7 @@
 
 #include "common/cityhash.h"
 #include "common/logging.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 
@@ -212,6 +213,8 @@ void GuestDescriptorQueue::AddConstantBuffer(D3D12_GPU_VIRTUAL_ADDRESS address, 
     if (count == 0) {
         return;
     }
+    VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::CbvCreateNs};
+    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::CbvCreates, 1);
     const D3D12_CONSTANT_BUFFER_VIEW_DESC desc{
         .BufferLocation = address,
         .SizeInBytes = address != 0 ? (size + 255u) & ~255u : 0u,
@@ -307,6 +310,8 @@ void GuestDescriptorQueue::AddCopy(D3D12_CPU_DESCRIPTOR_HANDLE descriptor) {
     if (count == 0) {
         return;
     }
+    VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::ViewCopyNs};
+    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::ViewCopies, 1);
     device->CopyDescriptorsSimple(1, Next(), descriptor, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     CheckRemovedAfterDescriptor(device, [&] {
         return fmt::format("copying a texture descriptor (0x{:x}) for a draw", descriptor.ptr);

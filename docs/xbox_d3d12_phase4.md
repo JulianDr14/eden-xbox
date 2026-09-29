@@ -2048,3 +2048,62 @@ Resultado en PC, mismo nivel:
 Queda: el hilo de la GPU sigue esperando al juego mas de la mitad del tiempo, asi que el limite es
 la CPU emulada. El assert `slots[s].buffer_state == BufferState::Free` de
 `buffer_queue_producer.cpp` sale al cambiar de escena; es de Eden y no para nada.
+
+### State tracking D3D12 y perfilado bajo demanda (despues de 0.2.60; PC)
+
+Una auditoria con xperf en Mario Wonder mostro que el hilo de GPU rozaba el presupuesto de 16,7 ms:
+~67% de su tiempo ocupado estaba en draws. Habia dos invalidaciones artificiales por draw:
+
+- `MarkVertexBuffersDirty` marcaba los 32 vertex buffers aunque Maxwell no hubiera cambiado sus
+  registros.
+- `CurrentGraphicsPipeline` forzaba siempre `VertexInput`, `Blending` y `ViewportSwizzles`, por lo
+  que `FixedPipelineState::Refresh` releia esos bloques y rehacia la clave completa.
+
+Se instalan ahora en cada canal las tablas dirty del `Vulkan::StateTracker`, que incluyen las del
+cache generico y las del estado fijo. Los buffers y la clave del pipeline solo se refrescan cuando
+una escritura de registros los ensucia.
+
+`RasterizerD3D12` conserva por command list los heaps, root signature, PSO, RTV/DSV, viewports,
+scissors, blend factor, stencil ref y topologia. Las root constants y las tablas que realmente
+cambian se siguen fijando. El estado se invalida:
+
+- despues de cada `ID3D12GraphicsCommandList::Reset`;
+- al cambiar de canal;
+- despues de un helper grafico de blit o clear.
+
+El callback de reset captura el rasterizador. `QueryCache` elimina los callbacks durante el
+desmontaje y por eso debe destruirse antes que el state tracker. El callback tampoco toca
+directamente `dirty.flags`: durante el cierre puede haber un reset cuando el payload Maxwell ya no
+existe, incluso antes de `ReleaseChannel`. Solo deja una invalidacion pendiente, que el siguiente
+draw/clear/dispatch aplica cuando hay necesariamente un canal vivo. ex10 encontro la primera vida
+util y Mario la segunda, ambas como un AV en `Vulkan::StateTracker::InvalidateState` al cerrar.
+
+Los cronometros de nanosegundos por draw quedan apagados por defecto. `boot.cfg` `gpu_profile=1`
+los activa y añade al log:
+
+- hits/misses del fast path de pipelines;
+- numero y tiempo de `CreateConstantBufferView`;
+- CBV streamed, persistentes y nulos;
+- numero y tiempo de copias de SRV/UAV al heap visible.
+
+Esto decide el siguiente cambio: root CBV solo se estudiara si los CBV siguen costando al menos el
+10% tras este gate. No se convierten de forma general porque una GPUVA cero o una lectura fuera del
+recurso es indefinida y el presupuesto de la root signature es 64 DWORD.
+
+**Gate PC:** build incremental y enlace correctos. Con la capa de debug: boot, ex04, ex10 y ex11
+terminan con `RunHeadlessBoot returned 0`, sin errores D3D12; ex04 conserva el cubo texturizado y
+ex11 la onda del dispatch indirecto. En ex04, las dos ventanas medidas dieron 300 hits y 0 misses
+del fast path. Pendientes: medir el mismo recorrido de Wonder sin capa de debug y validar en Series.
+
+**Wonder, PC, sin debug layer, `gpu_profile=1` (116 s):** en las ventanas estables de gameplay el
+coste fue 7,6--11,8 us/draw. El fast path resolvio mas del 99,7% de las transiciones y la grabacion
+de estado API quedo en 1,1--1,3 us/draw. Crear 0,9--1,27 millones de CBV costo 41--66 ms por
+ventana; copiar 0,54--0,83 millones de vistas costo 28--51 ms. La creacion de CBV representa
+aproximadamente el 2% de los 2,9--3,2 s activos del hilo, muy por debajo del gate de 10%: no se
+justifica root CBV. Persisten hitches de carga de recursos/pipelines y ventanas de 21--29 ms donde
+el hilo espera trabajo o fences del guest; ya no domina la regrabacion del estado D3D12.
+
+El primer cierre manual revelo el AV de vida util de `dirty.flags` descrito arriba. Tras diferir la
+invalidacion hasta el siguiente comando con canal vivo, una prueba automatica de Wonder de 20 s
+termina con `RunHeadlessBoot returned 0`; solo queda la excepcion UWP `0x80010012` posterior al
+cierre, ya conocida y benigna.

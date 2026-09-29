@@ -182,6 +182,7 @@ RasterizerD3D12::RasterizerD3D12(Tegra::GPU& gpu_,
       accelerate_dma{buffer_cache, texture_cache},
       fence_manager{*this, gpu_, texture_cache, buffer_cache, query_cache, scheduler_} {
     buffer_runtime.SetDescriptorQueue(&descriptor_queue);
+    scheduler.RegisterOnReset([this] { InvalidateCommandListState(); });
     LOG_INFO(Render, "D3D12: rasterizer active (draws, clears, caches, DMA and pipelines)");
 }
 
@@ -197,6 +198,7 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         gpu.TickWork();
     };
     gpu_memory->FlushCaching();
+    ApplyPendingStateInvalidation();
 
     GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
     if (!pipeline) {
@@ -206,8 +208,6 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         return;
     }
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-
-    MarkVertexBuffersDirty();
 
     PipelineBindings bindings;
     std::vector<VideoCommon::ImageViewId> traced_views;
@@ -290,17 +290,6 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     }
 }
 
-void RasterizerD3D12::MarkVertexBuffersDirty() {
-    // Every draw records its whole state (see RecordDraw), vertex buffers included: mark them
-    // dirty so the buffer cache binds them again, as Vulkan's state tracker does for each new
-    // command buffer.
-    auto& flags = maxwell3d->dirty.flags;
-    flags[VideoCommon::Dirty::VertexBuffers] = true;
-    for (u32 index = 0; index < Maxwell::NumVertexArrays; ++index) {
-        flags[VideoCommon::Dirty::VertexBuffer0 + index] = true;
-    }
-}
-
 void RasterizerD3D12::DrawIndirect() {
     ++draw_counter;
     const IndirectParams& params = maxwell3d->draw_manager.indirect_state;
@@ -326,14 +315,13 @@ void RasterizerD3D12::DrawIndirect() {
         gpu.TickWork();
     };
     gpu_memory->FlushCaching();
+    ApplyPendingStateInvalidation();
 
     GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
     if (!pipeline) {
         return;
     }
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-    MarkVertexBuffersDirty();
-
     // With the indirect state set, Configure also synchronizes the argument and count buffers.
     PipelineBindings bindings;
     buffer_cache.SetDrawIndirect(&params);
@@ -484,24 +472,59 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
     const PipelineLayout& layout = pipeline.Layout();
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
 
-    ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
-    cmd->SetDescriptorHeaps(2, heaps);
-    cmd->SetGraphicsRootSignature(layout.Handle());
-    cmd->SetPipelineState(pipeline.Handle());
+    if (!command_state.heaps_bound) {
+        ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
+        cmd->SetDescriptorHeaps(2, heaps);
+        command_state.heaps_bound = true;
+    }
+    if (!command_state.valid || command_state.graphics_root != layout.Handle()) {
+        cmd->SetGraphicsRootSignature(layout.Handle());
+        command_state.graphics_root = layout.Handle();
+    }
+    if (!command_state.valid || command_state.graphics_pipeline != pipeline.Handle()) {
+        cmd->SetPipelineState(pipeline.Handle());
+        command_state.graphics_pipeline = pipeline.Handle();
+    }
 
     const auto color_targets = framebuffer.ColorTargets();
     const D3D12_CPU_DESCRIPTOR_HANDLE depth = framebuffer.DepthTarget(bindings.depth_sampled);
-    cmd->OMSetRenderTargets(static_cast<UINT>(color_targets.size()),
-                            color_targets.empty() ? nullptr : color_targets.data(), FALSE,
-                            depth.ptr ? &depth : nullptr);
+    bool targets_changed = !command_state.valid ||
+                           command_state.num_color_targets != color_targets.size() ||
+                           command_state.depth_target != depth.ptr;
+    for (size_t index = 0; index < color_targets.size(); ++index) {
+        targets_changed |= command_state.color_targets[index] != color_targets[index].ptr;
+    }
+    if (targets_changed) {
+        cmd->OMSetRenderTargets(static_cast<UINT>(color_targets.size()),
+                                color_targets.empty() ? nullptr : color_targets.data(), FALSE,
+                                depth.ptr ? &depth : nullptr);
+        command_state.num_color_targets = static_cast<u32>(color_targets.size());
+        command_state.color_targets.fill(0);
+        for (size_t index = 0; index < color_targets.size(); ++index) {
+            command_state.color_targets[index] = color_targets[index].ptr;
+        }
+        command_state.depth_target = depth.ptr;
+    }
 
-    ViewportState viewports = UpdateViewports(cmd);
-    UpdateScissors(cmd);
-    const float blend_factor[4] = {regs.blend_color.r, regs.blend_color.g, regs.blend_color.b,
-                                   regs.blend_color.a};
-    cmd->OMSetBlendFactor(blend_factor);
+    if (!command_state.valid || state_tracker.TouchViewports()) {
+        command_state.viewport = UpdateViewports(cmd);
+    }
+    if (!command_state.valid || state_tracker.TouchScissors()) {
+        UpdateScissors(cmd);
+    }
+    const std::array blend_factor{regs.blend_color.r, regs.blend_color.g, regs.blend_color.b,
+                                  regs.blend_color.a};
+    if (!command_state.valid || state_tracker.TouchBlendConstants() ||
+        command_state.blend_factor != blend_factor) {
+        cmd->OMSetBlendFactor(blend_factor.data());
+        command_state.blend_factor = blend_factor;
+    }
     // D3D12 has a single reference for both faces.
-    cmd->OMSetStencilRef(regs.stencil_front_ref);
+    if (!command_state.valid || state_tracker.TouchStencilReference() ||
+        command_state.stencil_ref != regs.stencil_front_ref) {
+        cmd->OMSetStencilRef(regs.stencil_front_ref);
+        command_state.stencil_ref = regs.stencil_front_ref;
+    }
     if (regs.stencil_two_side_enable != 0 && regs.stencil_back_ref != regs.stencil_front_ref &&
         !logged_stencil_ref) {
         LOG_WARNING(Render, "D3D12: different front and back stencil references; using the front");
@@ -514,9 +537,9 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
     runtime_data.first_vertex = params.runtime_first_vertex;
     runtime_data.base_instance = params.base_instance;
     runtime_data.is_indexed_draw = params.is_indexed;
-    runtime_data.yz_flip_mask = viewports.yz_flip_mask;
-    runtime_data.viewport_width = viewports.width;
-    runtime_data.viewport_height = viewports.height;
+    runtime_data.yz_flip_mask = command_state.viewport.yz_flip_mask;
+    runtime_data.viewport_width = command_state.viewport.width;
+    runtime_data.viewport_height = command_state.viewport.height;
     std::array<u32, sizeof(runtime_data) / sizeof(u32)> runtime_words{};
     std::memcpy(runtime_words.data(), &runtime_data, sizeof(runtime_data));
     cmd->SetGraphicsRoot32BitConstants(PipelineLayout::RUNTIME_DATA_INDEX,
@@ -530,8 +553,32 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
         cmd->SetGraphicsRootDescriptorTable(layout.SamplerTableIndex(), bindings.sampler_table);
     }
 
-    cmd->IASetPrimitiveTopology(MaxwellToD3D12::PrimitiveTopology(topology, regs.patch_vertices));
+    const D3D12_PRIMITIVE_TOPOLOGY d3d_topology =
+        MaxwellToD3D12::PrimitiveTopology(topology, regs.patch_vertices);
+    if (!command_state.valid || command_state.topology != d3d_topology) {
+        cmd->IASetPrimitiveTopology(d3d_topology);
+        command_state.topology = d3d_topology;
+    }
     buffer_runtime.ApplyGeometry(cmd);
+    command_state.valid = true;
+}
+
+void RasterizerD3D12::InvalidateGraphicsState() {
+    command_state.valid = false;
+    command_state.graphics_root = nullptr;
+    command_state.graphics_pipeline = nullptr;
+}
+
+void RasterizerD3D12::InvalidateCommandListState() {
+    command_state = {};
+    state_invalidation_pending = channel_bound;
+}
+
+void RasterizerD3D12::ApplyPendingStateInvalidation() {
+    if (state_invalidation_pending && channel_bound) {
+        state_tracker.InvalidateState();
+        state_invalidation_pending = false;
+    }
 }
 
 RasterizerD3D12::ViewportState RasterizerD3D12::UpdateViewports(ID3D12GraphicsCommandList* cmd) {
@@ -672,11 +719,13 @@ void RasterizerD3D12::DrawTexture() {
         {framebuffer->ColorTargets()[0], framebuffer->ColorFormat(0), framebuffer->Samples()},
         texture.Handle(Shader::TextureType::Color2D), {sampler.Handle(), sampler.Key()},
         dst_region, src_region, {texture.size.width, texture.size.height});
+    InvalidateGraphicsState();
 }
 
 void RasterizerD3D12::Clear(u32 layer_count) {
     ++draw_counter;
     VideoCore::Perf::ScopedNsTimer clear_timer{VideoCore::Perf::Counter::ClearNs};
+    ApplyPendingStateInvalidation();
     gpu_memory->FlushCaching();
     const auto& regs = maxwell3d->regs;
     const bool use_color = regs.clear_surface.R || regs.clear_surface.G || regs.clear_surface.B ||
@@ -745,6 +794,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
                                         framebuffer->ColorFormat(color_attachment),
                                         framebuffer->Samples()},
                                        mask, regs.clear_color, rect);
+                InvalidateGraphicsState();
             }
         } else {
             std::array<f32, 4> color{};
@@ -785,6 +835,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
                 {depth, framebuffer->DepthFormat(), framebuffer->Samples()}, use_depth,
                 regs.clear_depth, static_cast<u8>(regs.stencil_front_mask),
                 static_cast<u8>(regs.clear_stencil), rect);
+            InvalidateGraphicsState();
             clear_flags = {};
         } else if (use_stencil && framebuffer->HasStencil()) {
             clear_flags |= D3D12_CLEAR_FLAG_STENCIL;
@@ -803,6 +854,7 @@ void RasterizerD3D12::DispatchCompute() {
         FlushIfUploadHeavy();
     };
     gpu_memory->FlushCaching();
+    ApplyPendingStateInvalidation();
 
     ComputePipeline* const pipeline = pipeline_cache.CurrentComputePipeline();
     if (!pipeline) {
@@ -854,8 +906,11 @@ void RasterizerD3D12::DispatchCompute() {
     }
 
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
-    ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
-    cmd->SetDescriptorHeaps(2, heaps);
+    if (!command_state.heaps_bound) {
+        ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
+        cmd->SetDescriptorHeaps(2, heaps);
+        command_state.heaps_bound = true;
+    }
     cmd->SetComputeRootSignature(layout.Handle());
     cmd->SetPipelineState(pipeline->Handle());
     cmd->SetComputeRoot32BitConstants(PipelineLayout::PUSH_CONSTANTS_INDEX, PUSH_CONSTANT_WORDS,
@@ -1080,8 +1135,8 @@ void RasterizerD3D12::FlushCommands() {
 }
 void RasterizerD3D12::FlushIfUploadHeavy() {
     // A loading frame may upload more textures than the 128 MiB staging stream holds within one
-    // command list (151 MiB in Mario Wonder), and the stream only reuses submitted regions. Every
-    // draw records its whole state, so submitting between draws is safe.
+    // command list (151 MiB in Mario Wonder), and the stream only reuses submitted regions. The
+    // reset callback invalidates cached state, so submitting between draws is safe.
     constexpr u64 UPLOAD_SUBMIT_BYTES = 32ULL << 20;
     if (staging.PendingUploadBytes() < UPLOAD_SUBMIT_BYTES) {
         return;
@@ -1100,6 +1155,9 @@ bool RasterizerD3D12::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surfa
                                             const Tegra::Engines::Fermi2D::Config& config) {
     std::scoped_lock lock{texture_cache.mutex};
     const bool blitted = texture_cache.BlitImage(dst, src, config);
+    if (blitted) {
+        InvalidateGraphicsState();
+    }
     if (trace_draws) {
         TraceDraw(fmt::format("2D blit {:x} ({}x{}) -> {:x} ({}x{}) {}", src.Address(), src.width,
                               src.height, dst.Address(), dst.width, dst.height,
@@ -1859,7 +1917,7 @@ void RasterizerD3D12::InitializeChannel(Tegra::Control::ChannelState& channel) {
     // buffers, descriptors) are only raised by register writes listed in these tables; without
     // them a new render target or program is never picked up (Vulkan's StateTracker::SetupTables
     // does the same, plus its own flags).
-    VideoCommon::Dirty::SetupDirtyFlags(channel.payload->maxwell_3d.dirty.tables);
+    state_tracker.SetupTables(channel);
     CreateChannel(channel);
     { std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
       texture_cache.CreateChannel(channel); buffer_cache.CreateChannel(channel); }
@@ -1868,6 +1926,11 @@ void RasterizerD3D12::InitializeChannel(Tegra::Control::ChannelState& channel) {
 }
 void RasterizerD3D12::BindChannel(Tegra::Control::ChannelState& channel) {
     BindToChannel(channel.bind_id);
+    state_tracker.ChangeChannel(channel);
+    channel_bound = true;
+    state_tracker.InvalidateState();
+    state_invalidation_pending = false;
+    InvalidateGraphicsState();
     { std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
       texture_cache.BindToChannel(channel.bind_id); buffer_cache.BindToChannel(channel.bind_id); }
     pipeline_cache.BindToChannel(channel.bind_id);
@@ -1875,6 +1938,12 @@ void RasterizerD3D12::BindChannel(Tegra::Control::ChannelState& channel) {
 }
 void RasterizerD3D12::ReleaseChannel(s32 id) {
     EraseChannel(id);
+    // EraseChannel clears current_channel_id when the active channel goes away. A later scheduler
+    // reset (notably during shutdown) must not dereference StateTracker::flags from that channel.
+    channel_bound = current_channel_id != UNSET_CHANNEL;
+    if (!channel_bound) {
+        state_invalidation_pending = false;
+    }
     { std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
       texture_cache.EraseChannel(id); buffer_cache.EraseChannel(id); }
     pipeline_cache.EraseChannel(id);
