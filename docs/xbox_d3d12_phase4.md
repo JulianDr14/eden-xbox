@@ -2147,3 +2147,85 @@ aunque la suma de nucleos aparezca ociosa. En PC fastmem reserva una seccion dis
 Series sigue pendiente una variante compatible con el limite de vistas del AppContainer o acelerar
 la ruta paginada. `force_swap_interval=1` queda exclusivamente como prueba diagnostica y apagada por
 defecto.
+
+### Fastmem hibrido para Xbox UWP (implementado, gate de Series pendiente)
+
+El limite no era el espacio virtual: la consola reserva el arena de 512 GiB, pero deja mapear solo
+aproximadamente 1 GiB de vistas de seccion. AWE tampoco sirve: requiere `SeLockMemoryPrivilege` y
+Microsoft especifica que sus paginas fisicas no pueden estar mapeadas a dos direcciones a la vez.
+Fuentes: [AllocateUserPhysicalPages](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-allocateuserphysicalpages),
+[VirtualAlloc2](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc2),
+[MapViewOfFile3](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-mapviewoffile3)
+y [VirtualFree](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfree).
+
+La ruta nueva conserva un solo `BackingBasePointer()` contiguo de 4 GiB mediante placeholders
+adyacentes. Los 384 MiB del extremo alto del Application Pool son una seccion sobre archivo
+temporal sparse; el prefijo es memoria privada comprometida bajo demanda. Solo la seccion se aliasa
+en el arena. Fuera de ella queda `PAGE_NOACCESS` y Dynarmic recompila el bloque para usar su page
+table. La vista canonica consume 384 MiB y los aliases tienen un presupuesto duro de 512 MiB: 896
+MiB en total. Si un alias no cabe, se omite y se conserva la ruta paginada.
+
+Al arrancar se mapea temporalmente 64 KiB, se escribe por backing y alias en ambas direcciones y se
+restaura el byte. Cualquier fallo desmonta la seccion y vuelve al backing privado. La propuesta
+inicial situaba la franja al principio del Application Pool (`0x32b00000`), pero la telemetria de
+Wonder demostro que no cubria ningun mapping. El juego mapeo unos 1517 MiB concentrados en la cola
+superior; con `0xe8000000..0xffffffff` quedaron cubiertos los 384 MiB completos. La prueba UWP local
+termino con `RunHeadlessBoot returned 0`, cero bytes omitidos y cero fallos de mapping.
+
+`boot.cfg` acepta `fastmem=0`, `fastmem=1` (automatico), `fastmem=hybrid` (experimento UWP),
+`fastmem=full` (diagnostico con fallback al hibrido) y `fastmem_hot_mib=N`, limitado a 128--448 MiB.
+Los heartbeats muestran rango caliente,
+aliases, omisiones, fallos e histograma fisico de 64 MiB. Falta el gate en Series: 15 minutos de
+Wonder, sin `Critical`/device removal, y comparar 256/384/448 MiB. El primer paquete para ese gate
+fue 0.2.63.0, con `fastmem=1` y `play=1`; sus simbolos quedaron archivados.
+
+**Resultado en Series (0.2.63.0):** el mecanismo fue correcto pero el gate de rendimiento fallo.
+Se mapearon 387 MiB de aliases sin omisiones ni errores, pero solo 388 de 2637 MiB solicitados
+(~15%) intersectaron la franja caliente. Los faults y recompilaciones del resto hicieron el juego
+claramente mas lento. A los 209,7 s termino en `std::bad_alloc`: la app usaba 5021 de 5120 MiB y
+las caches veian 4028 MiB. No hubo `device removed` ni error del renderer. Por tanto 0.2.64.0 hace
+que `fastmem=1` seleccione page-table en Xbox y deja el hibrido solo bajo `fastmem=hybrid`.
+
+El mismo cambio limita el presupuesto que D3D12 anuncia a las caches a `min(DXGI, limite UWP -
+1536 MiB)`. En Series son 3584 MiB, de modo que la recoleccion agresiva comienza con margen para
+DRAM guest, JIT, staging y picos transitorios en vez de esperar hasta rozar los 5 GiB.
+
+### Sustituto del fastmem: page table absoluta limpia (0.2.65.0)
+
+Dynarmic ya tenia `absolute_offset_page_table=true`; por tanto los callbacks no eran la ruta normal.
+El coste evitable estaba en reutilizar la entrada canonica de Eden, que mezcla el offset host con
+atributos. Se creo una tabla dispersa paralela para el JIT con solo el offset absoluto. En x64 esto
+elimina del hot path la mascara de 64 bits, el marked-bit y la extension de signo. Una entrada cero
+conserva exactamente el fallback existente para unmapped/MMIO, debugger, rasterizer-cached y cruces
+de pagina.
+
+La publicacion de mappings es transaccional respecto al JIT: metadata antes que puntero al mapear,
+y puntero cero antes que metadata al desmapear o marcar debug/cache. Cada `KProcess` posee ambas
+tablas. Los permisos guest se validan en `KPageTable`; la ruta page-table no tiene una TLB de
+permisos separada que invalidar. El cambio de proceso selecciona su propio par de tablas. Una micro-TLB
+direct-mapped no se activa: ante una tabla de un nivel agregaria otra carga/tag/branch y presion de
+registros a todos los accesos. El gate de Series debe comparar la misma ruta de Wonder con
+`fastmem=0`, confirmar cero corrupcion y medir intervalos 1/2 y tiempo de CPU guest.
+
+Primer perfil PC (110 s manual, `fastmem=0 gpu_profile=1`): salida 0 y sin device removal. Dos
+ventanas estables procesaron 300 frames en 302 y 318 vsyncs, con 16,78 y 17,67 ms/frame; otras zonas
+con uploads/carga necesitaron 352--413 vsyncs (~44--51 fps). Los draws permanecieron en 7,6--9,2
+us y el hilo GPU paso la mayor parte de cada ventana esperando trabajo, por lo que la diferencia
+frente a la ruta paginada empaquetada procede del lado CPU guest. No es aun una comparacion A/B del
+mismo punto: debe repetirse en Series y con el mismo recorrido antes de atribuir un porcentaje.
+
+### Pool de memoria para texturas
+
+El hitch de 648 texturas demostro que el coste dominante no eran sus 8,02 MiB de datos sino crear
+648 heaps implicitos mediante committed resources. El backend subasigna ahora bloques DEFAULT de
+64 MiB y usa placed resources, con pools separados para RT/DS y texturas normales (compatibles con
+Heap Tier 1), coalescing de huecos y retorno diferido por la fence del scheduler. Cualquier fallo
+vuelve individualmente a committed resource.
+
+En el mismo evento de Wonder PC, `ResourceCreateUs` bajo de 438,7 a 12,4 ms (-97,2%) y el hitch de
+610 a 143 ms (-76,6%). La sesion creo 2955 recursos placed, cero fallbacks; el pool alcanzo 576 MiB,
+530 MiB vivos de pico y cero al cerrar. Los 125,1 ms restantes del frame pertenecen a preparacion y
+grabacion de los 647 uploads, no a allocation. Fuentes del modelo:
+[Microsoft Residency](https://learn.microsoft.com/en-us/windows/win32/direct3d12/residency),
+[Resource Heaps](https://microsoft.github.io/DirectX-Specs/d3d/ResourceHeaps.html) y
+[D3D12MA](https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator).

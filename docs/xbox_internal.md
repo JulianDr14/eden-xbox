@@ -384,3 +384,78 @@ vez:
 - `force_swap_interval=1` existe solo para diagnostico y esta apagado por defecto. No es una
   solucion: desacopla presentacion y simulacion, produce velocidad irregular y eleva las esperas
   de fence. En Series fastmem completo sigue bloqueado por el limite de vistas del AppContainer.
+- **Fastmem hibrido UWP (experimental):** `fastmem=hybrid` conserva 4 GiB lineales con memoria privada salvo una
+  seccion sparse de 384 MiB en la cola del Application Pool (`0xe8000000..0xffffffff`). Solo esa
+  cola se aliasa en el arena; el resto fault/recompila a page table. La vista canonica mas aliases
+  no puede superar 896 MiB (384 + 512); un alias que no quepa se omite sin abortar.
+- El supuesto de usar el inicio del Application Pool era incorrecto: Wonder no mapeo bytes en esa
+  franja. El histograma mostro ~1517 MiB de mappings hacia el extremo alto; la cola de 384 MiB
+  quedo cubierta completa en PC, sin fallos y con salida 0.
+- El gate de Series 0.2.63.0 descarto el hibrido como ruta normal: solo cubrio 388 de 2637 MiB
+  solicitados (~15%), se sintio mucho mas lento y termino a los 210 s con `std::bad_alloc`, usando
+  5021 de 5120 MiB. No hubo fallos de vistas (`skipped=0`, `failures=0`) ni device removal.
+- Desde 0.2.64.0, `fastmem=1` es automatico y elige page-table en Xbox; `fastmem=hybrid` conserva
+  el experimento explicito. `fastmem=full` conserva la prueba completa y vuelve al hibrido si falla.
+  `fastmem_hot_mib=N` permite 128--448 MiB (384 por defecto). Cada arranque hibrido comprueba
+  coherencia backing/alias con 64 KiB antes de entregar el arena a Dynarmic.
+- AWE no sirve: `AllocateUserPhysicalPages` requiere `SeLockMemoryPrivilege`, es desktop-only y
+  sus paginas no se pueden mapear simultaneamente en dos direcciones. El limite de ~1 GiB de
+  vistas sigue siendo una medicion de la consola, no una garantia publicada por Microsoft.
+
+### Page table JIT limpia (0.2.65.0)
+
+- `absolute_offset_page_table` ya estaba activo en AArch64 y AArch32. La penalizacion restante era
+  que Dynarmic leia la entrada canonica empaquetada: por cada load/store aplicaba la mascara de
+  atributos, comprobaba el bit marcado y, segun la direccion del backing, extendia el signo.
+- Cada proceso tiene ahora una segunda tabla dispersa exclusiva del JIT. Sus entradas contienen
+  solo el offset absoluto limpio; cero selecciona el callback. El camino normal queda en cargar
+  una entrada, probar cero y sumar la direccion guest.
+- La tabla canonica conserva tipo, bloque y marcas para Memory, debugger y rasterizer. Al mapear se
+  publica primero la metadata y despues el puntero JIT; al desmapear o marcar debug/cache se borra
+  primero el puntero JIT. Asi un acceso concurrente cae de forma segura al callback y nunca usa un
+  host pointer viejo. Los permisos guest viven en `KPageTable`; `Memory::ProtectRegion` solo cambia
+  proteccion del arena cuando existe fastmem y no modifica la traduccion de la ruta page-table.
+- Debug pages, rasterizer-cached, MMIO/no mapeadas y accesos que cruzan pagina mantienen los
+  callbacks existentes. Al volver a Memory se repone la entrada limpia. Un cambio de proceso usa
+  su propio par de tablas, por lo que no hay estado traducido compartido que invalidar.
+- No se anadio una micro-TLB software: el hit requeriria tag, comparacion y salto antes de la unica
+  carga indexada que ya hace la page table, y ademas reservaria registros en todos los bloques.
+  Tampoco se puede reutilizar a ciegas una traduccion entre stores/callbacks que pueden cambiar
+  permisos. La tabla limpia realiza el objetivo del fast path sin introducir ese segundo lookup.
+- Gate PC: build UWP completo y `boot_nro` con `fastmem=0`, salida 0; 961 MiB comprometidos al final.
+  La tabla es `SparseLargeVector`, por lo que reservar el segundo espacio no compromete todas sus
+  paginas.
+- Wonder PC manual, 110 s, `fastmem=0 gpu_profile=1`: termino limpio con salida 0. En gameplay
+  estable hubo ventanas de 300 frames en 302 y 318 vsyncs (16,78 y 17,67 ms/frame, ~57--60 fps).
+  Zonas con carga oscilaron entre 352 y 413 vsyncs por 300 frames (~44--51 fps). La linea base
+  page-table anterior habia producido solo 67 frames en 120 vsyncs (~33,5 fps) en el recorrido
+  medido; la comparacion no es A/B exacta de posicion, pero justifica el gate en Series.
+- En las ventanas estables el draw D3D12 siguio en 7,6--9,2 us y el renderer clasifico el tiempo
+  como `mostly guest CPU`: la mejora no procede de abaratar draws. No hubo device removal ni fallo
+  de Render. Durante un hitch de creacion de 648 recursos aparecieron ocho asserts recuperables de
+  `BufferQueueProducer` por un slot no libre; son un problema de pacing separado, no de traduccion
+  de memoria.
+- Pendiente medir Wonder en Series contra 0.2.64.0.
+
+### Pool de placed textures (despues de 0.2.65.0)
+
+- El hitch reproducible de Wonder creaba 648 recursos en un frame: 438,7 de sus 610 ms estaban en
+  `CreateCommittedResource`, aunque los 647 uploads sumaban solo 8,02 MiB. Cada committed resource
+  crea tambien un heap implicito y lo hace residente.
+- `TextureResourceAllocator` mantiene bloques DEFAULT de 64 MiB y crea `CreatePlacedResource`
+  dentro de ellos. Separa texturas normales de RT/DS para funcionar en Resource Heap Tier 1. Los
+  rangos libres se fusionan y solo vuelven al pool despues de que la fence retire el recurso.
+- Si `CreateHeap` o `CreatePlacedResource` falla, registra el HRESULT y crea el committed resource
+  anterior; el renderer no aborta por el allocator.
+- Microsoft documenta que crear heaps puede ser lento, recomienda hacerlo fuera del render thread
+  y presenta placed resources como separacion de recurso y memoria:
+  https://learn.microsoft.com/en-us/windows/win32/direct3d12/residency y
+  https://microsoft.github.io/DirectX-Specs/d3d/ResourceHeaps.html. El diseño de pools coincide con
+  D3D12MA: https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.
+- Gate PC de Wonder, mismo evento: 648 creaciones bajaron de 438,7 a 12,4 ms (-97,2%); el frame
+  completo paso de 610 a 143 ms (-76,6%). Se crearon 2955 placed resources, cero fallbacks y cero
+  fallos; 576 MiB de heaps, 530 MiB vivos de pico y cero vivos al cerrar. `RunHeadlessBoot` devolvio
+  0 y no hubo device removal.
+- Quedan 125,1 ms de `other work` en ese frame, principalmente preparar/grabar 647 uploads pequenos.
+  Es el siguiente bloque a instrumentar y agrupar; ya no conviene mover la creacion a workers antes
+  de medir esa ruta.
