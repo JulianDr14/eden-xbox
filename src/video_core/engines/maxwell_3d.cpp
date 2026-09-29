@@ -17,6 +17,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
+#include "video_core/perf_counters.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
 
@@ -299,6 +300,11 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
 }
 
 void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
+    if (regs.reg_array[method] == argument) {
+        VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::MaxwellDirtyUnchanged, 1);
+        return;
+    }
+    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::MaxwellDirtyChanged, 1);
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;

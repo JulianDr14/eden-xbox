@@ -368,3 +368,19 @@ vez:
 - Medicion Wonder PC (116 s, sin debug layer): 7,6--11,8 us/draw, mas de 99,7% de hits en la
   transicion de pipeline y 1,1--1,3 us/draw grabando estado. `CreateConstantBufferView` consume
   aproximadamente 2% del tiempo activo, no alcanza el gate para root CBV.
+- Perfil profundo Wonder: todas las esperas `nvhost_ctrl` son del syncpoint 1, reservado por el
+  canal grafico GPFIFO. El trabajo fuera de draw se concentra en procesar submits Maxwell
+  (~2,0--2,7 ms/frame); `TickWork`/composite cuesta ~0,3--0,6 ms/frame e invalidaciones cero. El
+  cronometro por argumento macro es diagnostico e intrusivo: incluye el draw ejecutado por la macro
+  y millones de lecturas de reloj. Para optimizar, medir una vez por `MacroEngine::Execute` y
+  agrupar por hash/metodo. El JIT x64 estaba activo.
+- La traza activada con `T` incluye queue/acquire/release de BufferQueue, slots, frame numbers,
+  estado al bloquear el dequeue, submits y fences. Wonder solicita `swap_interval=2` durante las
+  caidas; Nvnflinger y `Conductor` lo respetan igual con Vulkan y D3D12.
+- Wonder PC, misma zona: sin fastmem, 39 de 67 frames trazados pidieron intervalo 2 y solo hubo 67
+  composites en 120 vsyncs; con `fastmem=1`, uno de 117 pidio intervalo 2 y hubo 117 composites.
+  La ruta paginada de memoria guest es el cuello que dispara el fallback a 30 Hz. La ociosidad
+  agregada de los cores no descarta que un hilo guest sea el limitante.
+- `force_swap_interval=1` existe solo para diagnostico y esta apagado por defecto. No es una
+  solucion: desacopla presentacion y simulacion, produce velocidad irregular y eleva las esperas
+  de fence. En Series fastmem completo sigue bloqueado por el limite de vistas del AppContainer.

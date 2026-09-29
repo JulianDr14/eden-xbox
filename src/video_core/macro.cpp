@@ -27,6 +27,7 @@
 #include "video_core/dirty_flags.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/macro.h"
+#include "video_core/perf_counters.h"
 
 #include "common/assert.h"
 #include "common/bit_field.h"
@@ -1339,6 +1340,27 @@ static void Dump(u64 hash, std::span<const u32> code, bool decompiled = false) {
 
 void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u32 method,
                           std::span<const u32> parameters) {
+    const bool profile = VideoCore::Perf::DetailedGpuProfileEnabled();
+    const auto profile_start = profile ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
+    const u64 nested_start =
+        profile ? VideoCore::Perf::ReadCounter(VideoCore::Perf::Counter::DrawNs) +
+                      VideoCore::Perf::ReadCounter(VideoCore::Perf::Counter::ClearNs) +
+                      VideoCore::Perf::ReadCounter(VideoCore::Perf::Counter::DispatchNs)
+                : 0;
+    const auto finish_profile = [&](u64 hash) {
+        if (!profile) {
+            return;
+        }
+        const u64 total_ns = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                  std::chrono::steady_clock::now() - profile_start)
+                                                  .count());
+        const u64 nested_ns = VideoCore::Perf::ReadCounter(VideoCore::Perf::Counter::DrawNs) +
+                                  VideoCore::Perf::ReadCounter(VideoCore::Perf::Counter::ClearNs) +
+                                  VideoCore::Perf::ReadCounter(VideoCore::Perf::Counter::DispatchNs) -
+                              nested_start;
+        VideoCore::Perf::RecordMacroProfile(method, hash, total_ns, nested_ns);
+    };
     const auto execute_variant = [&system, &maxwell3d, &parameters,
                                   method](AnyCachedMacro& cached) {
         if (std::holds_alternative<MacroInterpreterImpl>(cached) ||
@@ -1380,6 +1402,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
     };
     if (auto const it = macro_cache.find(method); it != macro_cache.end()) {
         execute_variant(it->second.program);
+        finish_profile(it->second.hash);
         return;
     }
 
@@ -1421,6 +1444,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
     }
 
     execute_variant(ci.program);
+    finish_profile(ci.hash);
     if (Settings::values.dump_macros) {
         Dump(ci.hash, code, !std::holds_alternative<std::monostate>(ci.program));
     }

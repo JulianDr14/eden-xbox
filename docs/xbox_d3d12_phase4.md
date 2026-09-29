@@ -2107,3 +2107,43 @@ El primer cierre manual revelo el AV de vida util de `dirty.flags` descrito arri
 invalidacion hasta el siguiente comando con canal vivo, una prueba automatica de Wonder de 20 s
 termina con `RunHeadlessBoot returned 0`; solo queda la excepcion UWP `0x80010012` posterior al
 cierre, ya conocida y benigna.
+
+**Desglose de esperas y comandos (Wonder PC, perfil profundo):** todas las esperas del guest
+proceden del syncpoint 1, el syncpoint reservado por el canal grafico GPFIFO. En gameplay son
+97--230 esperas por 300 frames, normalmente 3--6 ms y con maximos de 15--48 ms. Los submits gastan
+~2,0--2,7 s por ventana: tras restar draws, clears y dispatches quedan ~0,6--0,8 s, o 2,0--2,7
+ms/frame, procesando el pushbuffer. `TickWork`/composite cuesta 0,3--0,6 ms/frame y no hubo
+invalidaciones de cache.
+
+El perfil por llamada atribuye la mayor parte a la ruta macro y despues a metodos Maxwell normales,
+pero la ruta macro es inclusiva: el ultimo argumento ejecuta la macro JIT y esta puede llamar al
+draw medido dentro. Ademas, cronometrar ~1,2 millones de argumentos por ventana introduce coste
+visible. El JIT x64 esta activo (`disable_macro_jit=false`). El siguiente perfil debe tomar una sola
+marca por `MacroEngine::Execute` y agrupar por hash/metodo, separando su tiempo exclusivo del draw;
+estos datos no justifican desactivar el JIT ni cambiar la semantica de los syncpoints.
+
+**Fast path de registros Maxwell:** `ProcessDirtyRegisters` omite la propagacion por las tablas
+dirty cuando el valor escrito ya era el mismo. En cuatro ventanas estables de Wonder se omitieron
+9,7--11,6 millones de escrituras frente a 3,2--3,8 millones que si cambiaron: aproximadamente el
+75% eran redundantes. ex04 con la capa de debug y Wonder terminaron correctamente. Los contadores
+por registro son diagnosticos y solo se actualizan con `gpu_profile=1`.
+
+**Cadena de 60 a 30 Hz y fastmem (Wonder PC):** la traza de queue/acquire/release demostro que la
+caida no la introduce DXGI. Wonder cambia explicitamente el `swap_interval` de 1 a 2; Nvnflinger
+lo respeta y conserva cada framebuffer durante dos vsyncs. Con fastmem apagado, una traza de 120
+vsyncs tuvo 28 frames con intervalo 1 y 39 con intervalo 2, solo 67 composites, p90 de 43,2 ms
+entre `QueueBuffer` y maximo de 125,3 ms. Los submits acababan antes del vsync y las esperas de
+fence tuvieron maximo de 2,26 ms.
+
+Forzar diagnosticamente el intervalo a 1 no es valido: el juego se acelera y frena, las esperas de
+fence suben hasta ~20 ms y la produccion llega en rafagas. Vulkan tampoco fuerza el intervalo: la
+ruta Nvnflinger/VI es compartida y `Conductor` programa `60 / swap_interval`; Vulkan solo desacopla
+el present del renderer mediante su hilo de presentacion.
+
+Con `fastmem=1`, sin forzar el intervalo, la misma traza tuvo 116 frames con intervalo 1 y uno con
+intervalo 2, 117 composites de 120, p90 de 17,0 ms y maximo de 33,4 ms. Esto identifica la ruta de
+memoria paginada de la CPU guest como causa principal de que el juego active su fallback a 30 Hz,
+aunque la suma de nucleos aparezca ociosa. En PC fastmem reserva una seccion dispersa de 4 GiB; en
+Series sigue pendiente una variante compatible con el limite de vistas del AppContainer o acelerar
+la ruta paginada. `force_swap_interval=1` queda exclusivamente como prueba diagnostica y apagada por
+defecto.

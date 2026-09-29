@@ -16,8 +16,10 @@ enum class Event : u8 {
     VsyncComposed,   ///< a = 1 when a new game frame was composed
     ComposeWaitEnd,  ///< a = microseconds the VSyncThread waited for the GPU thread
     Composite,       ///< the renderer composing; a = microseconds since the request
-    QueueBuffer,     ///< the game queued a frame
-    DequeueWait,     ///< the game started waiting for a free framebuffer
+    QueueBuffer,     ///< the game queued a frame; a = slot, b = swap interval
+    AcquireBuffer,   ///< Nvnflinger acquired it; a = slot, b = frame number
+    ReleaseBuffer,   ///< Nvnflinger released it; a = slot, b = frame number
+    DequeueWait,     ///< game waits; a = queue size, b = acquired/dequeued/max packed in bytes
     DequeueWaitEnd,  ///< a = microseconds it waited
     GpuFenceWait,    ///< the game waits for a syncpoint; a = syncpoint, b = value
     GpuFenceSignal,  ///< that wait was signalled; a = syncpoint, b = microseconds waited

@@ -121,6 +121,8 @@ struct BootConfig {
     bool descriptor_checks{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
+    /// Diagnostic only: ignore requests for 30 Hz presentation ("force_swap_interval=1").
+    bool force_swap_interval_one{};
     /// File name of a game in LocalState\games to boot instead of boot.nro (package-appx.ps1 -Game).
     std::string game;
     /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
@@ -200,6 +202,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     D3D12::SetAstcGpuFresh(config.astc_fresh);
     D3D12::SetDescriptorRemovalChecks(config.descriptor_checks);
     VideoCore::Perf::SetDetailedGpuProfile(config.gpu_profile);
+    VideoCore::Perf::SetForceSwapIntervalOne(config.force_swap_interval_one);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
         D3D12::SetGpuBasedValidation(config.gpu_validation);
@@ -1051,6 +1054,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "gpu_profile=1") {
                         config.gpu_profile = true;
                         WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
+                    } else if (line == "force_swap_interval=1") {
+                        config.force_swap_interval_one = true;
+                        WriteDiag("boot.cfg: forcing guest swap intervals above one to one");
                     } else if (line == "debug_layer=1" || line == "debug_layer=gbv") {
                         config.debug_layer = true;
                         config.gpu_validation = line == "debug_layer=gbv";

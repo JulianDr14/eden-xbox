@@ -221,7 +221,11 @@ Status BufferQueueProducer::WaitForFreeSlotThenRelock(bool async, s32* found, St
 
             // Frame chain counters: the game waiting for the display to release a framebuffer.
             const auto wait_start = std::chrono::steady_clock::now();
-            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::DequeueWait);
+            const u64 buffer_state = static_cast<u64>(acquired_count & 0xff) |
+                                     (static_cast<u64>(dequeued_count & 0xff) << 8) |
+                                     (static_cast<u64>(max_buffer_count & 0xff) << 16);
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::DequeueWait,
+                                        core->queue.size(), buffer_state);
             const bool running = core->WaitForDequeueCondition(lk);
             const u64 waited_us = VideoCore::Perf::ElapsedUs(wait_start);
             VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestDequeueWaits, 1);
@@ -455,6 +459,12 @@ Status BufferQueueProducer::QueueBuffer(s32 slot, const QueueBufferInput& input,
 
     input.Deflate(&timestamp, &is_auto_timestamp, &crop, &scaling_mode, &transform, &sticky_transform_, &async, &swap_interval, &fence);
 
+    const s32 requested_swap_interval = swap_interval;
+    if (swap_interval > 1 && VideoCore::Perf::ForceSwapIntervalOne()) {
+        swap_interval = 1;
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestSwapIntervalOverrides, 1);
+    }
+
     switch (scaling_mode) {
     case NativeWindowScalingMode::Freeze:
     case NativeWindowScalingMode::ScaleToWindow:
@@ -546,7 +556,10 @@ Status BufferQueueProducer::QueueBuffer(s32 slot, const QueueBufferInput& input,
         core->buffer_has_been_queued = true;
         core->SignalDequeueCondition();
         VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestFramesQueued, 1);
-        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::QueueBuffer);
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::QueueBuffer,
+                                    static_cast<u64>(slot),
+                                    static_cast<u64>(static_cast<u32>(requested_swap_interval)) |
+                                        (static_cast<u64>(static_cast<u32>(swap_interval)) << 32));
 
         output->Inflate(core->default_width, core->default_height, core->transform_hint, static_cast<u32>(core->queue.size()));
     }

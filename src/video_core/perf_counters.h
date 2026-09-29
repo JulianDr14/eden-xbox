@@ -7,6 +7,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <mutex>
+#include <unordered_map>
 
 #include "common/common_types.h"
 
@@ -54,6 +56,26 @@ enum class Counter : size_t {
     CbvNull,
     ViewCopyNs,
     ViewCopies,
+    SubmitListNs,
+    SubmitLists,
+    GpuTickNs,
+    GpuTicks,
+    CacheInvalidationNs,
+    CacheInvalidations,
+    DmaPullerNs,
+    DmaPullerCalls,
+    DmaMacroNs,
+    DmaMacroCalls,
+    DmaMaxwellNs,
+    DmaMaxwellCalls,
+    DmaComputeNs,
+    DmaComputeCalls,
+    DmaCopyNs,
+    DmaCopyCalls,
+    DmaOtherNs,
+    DmaOtherCalls,
+    MaxwellDirtyChanged,
+    MaxwellDirtyUnchanged,
     ClearNs,
     DispatchNs,
     GuestGpuWaits,         ///< guest fence waits (nvhost_ctrl events) that the GPU signalled later
@@ -67,6 +89,7 @@ enum class Counter : size_t {
     CompositeLatencyUs,    ///< from each composite request to the renderer running it
     CompositesLate,        ///< composites that ran more than a frame after the request
     GuestFramesQueued,     ///< frames the game queued (QueueBuffer)
+    GuestSwapIntervalOverrides, ///< diagnostic requests above one forced back to one
     GuestDequeueWaits,     ///< times the game waited for a free framebuffer (DequeueBuffer)
     GuestDequeueWaitUs,
     GuestCoreIdleUs,       ///< emulated CPU cores with no guest thread to run, summed over cores
@@ -78,6 +101,31 @@ using Snapshot = std::array<u64, NUM_COUNTERS>;
 
 inline std::array<std::atomic<u64>, NUM_COUNTERS> counters{};
 inline std::atomic<bool> detailed_gpu_profile{};
+inline std::atomic<bool> force_swap_interval_one{};
+
+constexpr size_t NUM_GUEST_SYNCPOINTS = 256;
+struct GuestWaitSiteCounters {
+    std::atomic<u64> count{};
+    std::atomic<u64> total_us{};
+    std::atomic<u64> max_us{};
+};
+struct GuestWaitSiteSnapshot {
+    u64 count{};
+    u64 total_us{};
+    u64 max_us{};
+};
+inline std::array<GuestWaitSiteCounters, NUM_GUEST_SYNCPOINTS> guest_wait_sites{};
+
+struct MacroProfileSnapshot {
+    u32 method{};
+    u64 hash{};
+    u64 count{};
+    u64 total_ns{};
+    u64 nested_ns{};
+    u64 max_ns{};
+};
+inline std::mutex macro_profiles_mutex;
+inline std::unordered_map<u32, MacroProfileSnapshot> macro_profiles;
 
 inline void SetDetailedGpuProfile(bool enabled) {
     detailed_gpu_profile.store(enabled, std::memory_order_relaxed);
@@ -85,6 +133,14 @@ inline void SetDetailedGpuProfile(bool enabled) {
 
 [[nodiscard]] inline bool DetailedGpuProfileEnabled() {
     return detailed_gpu_profile.load(std::memory_order_relaxed);
+}
+
+inline void SetForceSwapIntervalOne(bool enabled) {
+    force_swap_interval_one.store(enabled, std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline bool ForceSwapIntervalOne() {
+    return force_swap_interval_one.load(std::memory_order_relaxed);
 }
 
 inline void Add(Counter counter, u64 value) {
@@ -95,6 +151,63 @@ inline void AddDetailed(Counter counter, u64 value) {
     if (DetailedGpuProfileEnabled()) {
         Add(counter, value);
     }
+}
+
+[[nodiscard]] inline u64 ReadCounter(Counter counter) {
+    return counters[static_cast<size_t>(counter)].load(std::memory_order_relaxed);
+}
+
+inline void RecordMacroProfile(u32 method, u64 hash, u64 total_ns, u64 nested_ns) {
+    if (!DetailedGpuProfileEnabled()) {
+        return;
+    }
+    Add(Counter::DmaMacroCalls, 1);
+    Add(Counter::DmaMacroNs, total_ns);
+    std::scoped_lock lock{macro_profiles_mutex};
+    auto& profile = macro_profiles[method];
+    profile.method = method;
+    profile.hash = hash;
+    ++profile.count;
+    profile.total_ns += total_ns;
+    profile.nested_ns += nested_ns;
+    profile.max_ns = std::max(profile.max_ns, total_ns);
+}
+
+inline std::vector<MacroProfileSnapshot> TakeMacroProfiles() {
+    std::scoped_lock lock{macro_profiles_mutex};
+    std::vector<MacroProfileSnapshot> result;
+    result.reserve(macro_profiles.size());
+    for (const auto& [method, profile] : macro_profiles) {
+        result.push_back(profile);
+    }
+    macro_profiles.clear();
+    return result;
+}
+
+inline void RecordGuestGpuWait(u32 syncpoint_id, u64 waited_us) {
+    Add(Counter::GuestGpuWaits, 1);
+    Add(Counter::GuestGpuWaitUs, waited_us);
+    if (syncpoint_id >= guest_wait_sites.size()) {
+        return;
+    }
+    auto& site = guest_wait_sites[syncpoint_id];
+    site.count.fetch_add(1, std::memory_order_relaxed);
+    site.total_us.fetch_add(waited_us, std::memory_order_relaxed);
+    u64 previous = site.max_us.load(std::memory_order_relaxed);
+    while (previous < waited_us &&
+           !site.max_us.compare_exchange_weak(previous, waited_us, std::memory_order_relaxed)) {
+    }
+}
+
+inline std::array<GuestWaitSiteSnapshot, NUM_GUEST_SYNCPOINTS> TakeGuestWaitSites() {
+    std::array<GuestWaitSiteSnapshot, NUM_GUEST_SYNCPOINTS> result{};
+    for (size_t index = 0; index < result.size(); ++index) {
+        auto& site = guest_wait_sites[index];
+        result[index] = {.count = site.count.exchange(0, std::memory_order_relaxed),
+                         .total_us = site.total_us.exchange(0, std::memory_order_relaxed),
+                         .max_us = site.max_us.exchange(0, std::memory_order_relaxed)};
+    }
+    return result;
 }
 
 inline Snapshot Read() {

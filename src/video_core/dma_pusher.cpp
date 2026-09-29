@@ -11,6 +11,7 @@
 #include "video_core/gpu.h"
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
+#include "video_core/perf_counters.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra {
@@ -174,6 +175,8 @@ void DmaPusher::SetState(const CommandHeader& command_header) {
 
 void DmaPusher::CallMethod(u32 argument) {
     if (dma_state.method < non_puller_methods) {
+        VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::DmaPullerNs};
+        VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::DmaPullerCalls, 1);
         puller.CallPullerMethod(*this, Engines::Puller::MethodCall{
             dma_state.method,
             argument,
@@ -185,6 +188,35 @@ void DmaPusher::CallMethod(u32 argument) {
         if (!subchannel->execution_mask[dma_state.method]) {
             subchannel->method_sink.emplace_back(dma_state.method, argument);
         } else {
+            const auto engine = subchannel_type[dma_state.subchannel];
+            const bool macro = engine == Engines::EngineTypes::Maxwell3D &&
+                               dma_state.method >= MacroRegistersStart;
+            if (macro) {
+                subchannel->ConsumeSink(system);
+                subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
+                subchannel->CallMethod(system, dma_state.method, argument, dma_state.is_last_call);
+                return;
+            }
+            const auto ns_counter = macro ? VideoCore::Perf::Counter::DmaMacroNs
+                                    : engine == Engines::EngineTypes::Maxwell3D
+                                        ? VideoCore::Perf::Counter::DmaMaxwellNs
+                                    : engine == Engines::EngineTypes::KeplerCompute
+                                        ? VideoCore::Perf::Counter::DmaComputeNs
+                                    : engine == Engines::EngineTypes::Fermi2D ||
+                                              engine == Engines::EngineTypes::MaxwellDMA
+                                        ? VideoCore::Perf::Counter::DmaCopyNs
+                                        : VideoCore::Perf::Counter::DmaOtherNs;
+            const auto count_counter = macro ? VideoCore::Perf::Counter::DmaMacroCalls
+                                       : engine == Engines::EngineTypes::Maxwell3D
+                                           ? VideoCore::Perf::Counter::DmaMaxwellCalls
+                                       : engine == Engines::EngineTypes::KeplerCompute
+                                           ? VideoCore::Perf::Counter::DmaComputeCalls
+                                       : engine == Engines::EngineTypes::Fermi2D ||
+                                                 engine == Engines::EngineTypes::MaxwellDMA
+                                           ? VideoCore::Perf::Counter::DmaCopyCalls
+                                           : VideoCore::Perf::Counter::DmaOtherCalls;
+            VideoCore::Perf::ScopedNsTimer timer{ns_counter};
+            VideoCore::Perf::AddDetailed(count_counter, 1);
             subchannel->ConsumeSink(system);
             subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
             subchannel->CallMethod(system, dma_state.method, argument, dma_state.is_last_call);
@@ -194,9 +226,41 @@ void DmaPusher::CallMethod(u32 argument) {
 
 void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
     if (dma_state.method < non_puller_methods) {
+        VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::DmaPullerNs};
+        VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::DmaPullerCalls, 1);
         puller.CallMultiMethod(*this, dma_state.method, dma_state.subchannel, base_start, num_methods, dma_state.method_count);
     } else {
         auto subchannel = subchannels[dma_state.subchannel];
+        const auto engine = subchannel_type[dma_state.subchannel];
+        const bool macro = engine == Engines::EngineTypes::Maxwell3D &&
+                           dma_state.method >= MacroRegistersStart;
+        if (macro) {
+            subchannel->ConsumeSink(system);
+            subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
+            subchannel->CallMultiMethod(system, dma_state.method, base_start, num_methods,
+                                        dma_state.method_count);
+            return;
+        }
+        const auto ns_counter = macro ? VideoCore::Perf::Counter::DmaMacroNs
+                                : engine == Engines::EngineTypes::Maxwell3D
+                                    ? VideoCore::Perf::Counter::DmaMaxwellNs
+                                : engine == Engines::EngineTypes::KeplerCompute
+                                    ? VideoCore::Perf::Counter::DmaComputeNs
+                                : engine == Engines::EngineTypes::Fermi2D ||
+                                          engine == Engines::EngineTypes::MaxwellDMA
+                                    ? VideoCore::Perf::Counter::DmaCopyNs
+                                    : VideoCore::Perf::Counter::DmaOtherNs;
+        const auto count_counter = macro ? VideoCore::Perf::Counter::DmaMacroCalls
+                                   : engine == Engines::EngineTypes::Maxwell3D
+                                       ? VideoCore::Perf::Counter::DmaMaxwellCalls
+                                   : engine == Engines::EngineTypes::KeplerCompute
+                                       ? VideoCore::Perf::Counter::DmaComputeCalls
+                                   : engine == Engines::EngineTypes::Fermi2D ||
+                                             engine == Engines::EngineTypes::MaxwellDMA
+                                       ? VideoCore::Perf::Counter::DmaCopyCalls
+                                       : VideoCore::Perf::Counter::DmaOtherCalls;
+        VideoCore::Perf::ScopedNsTimer timer{ns_counter};
+        VideoCore::Perf::AddDetailed(count_counter, 1);
         subchannel->ConsumeSink(system);
         subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
         subchannel->CallMultiMethod(system, dma_state.method, base_start, num_methods, dma_state.method_count);

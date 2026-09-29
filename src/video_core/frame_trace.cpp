@@ -54,6 +54,10 @@ const char* Name(Event event) {
         return "composite";
     case Event::QueueBuffer:
         return "game-queue-buffer";
+    case Event::AcquireBuffer:
+        return "display-acquire-buffer";
+    case Event::ReleaseBuffer:
+        return "display-release-buffer";
     case Event::DequeueWait:
         return "game-dequeue-wait";
     case Event::DequeueWaitEnd:
