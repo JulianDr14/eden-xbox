@@ -93,6 +93,11 @@ public:
     /// Local (device) memory budget and usage; zeroes if the adapter cannot report them.
     [[nodiscard]] DXGI_QUERY_VIDEO_MEMORY_INFO QueryVideoMemory() const;
 
+    /// Budget exposed to the generic caches. Xbox GPU allocations share the UWP process limit, so
+    /// leave room for guest DRAM, JIT code, staging and transient allocations instead of treating
+    /// DXGI's whole local-memory budget as cache space.
+    [[nodiscard]] u64 CacheMemoryBudget() const;
+
     /// Memory usage for the texture and buffer caches' garbage collection, against the budget
     /// they read at startup. With an app memory query it is that budget minus what the app has
     /// left, so the caches start evicting as the process nears its limit whoever allocates (the

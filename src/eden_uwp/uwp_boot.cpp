@@ -142,10 +142,10 @@ struct BootConfig {
     bool astc_fresh{};
     /// Played by hand ("play=1"): runs until the app is closed, without frame dumps or draw trace.
     bool play{};
-    /// Guest memory through the host-mapped arena instead of the bounds-checked page table
-    /// ("fastmem=1" turns it on). Off: the console maps at most ~1 GiB of section views in all
-    /// (0.2.56 probes), and the arena needs the 4 GiB DRAM mapped at least twice.
-    bool fastmem{};
+    /// Guest memory through the host-mapped arena. Xbox uses a bounded hybrid section; "full" is
+    /// diagnostic and falls back to hybrid if the complete mapping cannot be created.
+    enum class Fastmem { Off, Auto, Hybrid, Full } fastmem{Fastmem::Off};
+    u32 fastmem_hot_mib{384};
     /// Draw without waiting for pipelines still compiling ("async_shaders=0" turns it off).
     bool async_shaders{true};
     /// Buttons to press at given times ("input=25:L+R" lines).
@@ -170,12 +170,25 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
               " ms");
     ApplyHeadlessBootSettings(config.null_renderer ? BootSurface{} : surface);
     // Read by HostMemory when Core::System builds the DRAM, so it has to be set before that.
-    Settings::values.cpuopt_fastmem = config.fastmem;
-    Settings::values.cpuopt_fastmem_exclusives = config.fastmem;
+    // The 384-MiB Series experiment covered only 388 of 2637 MiB requested by Wonder (15%). The
+    // resulting fastmem fault/recompile storm was markedly slower than the page table, so Auto
+    // must take the safe path until a selective JIT/page-table fast path exists. Keep Hybrid and
+    // Full as explicit diagnostics.
+    const bool fastmem_enabled = config.fastmem == BootConfig::Fastmem::Hybrid ||
+                                 config.fastmem == BootConfig::Fastmem::Full;
+    Settings::values.cpuopt_fastmem = fastmem_enabled;
+    Settings::values.cpuopt_fastmem_exclusives = fastmem_enabled;
+    Common::ConfigureHostMemoryFastmem(config.fastmem_hot_mib,
+                                       config.fastmem == BootConfig::Fastmem::Full);
     // Pipelines that compile while playing stalled whole seconds on entering new areas (0.2.52):
     // skip those draws until the pipeline is ready, as Eden does with asynchronous shaders.
     Settings::values.use_asynchronous_shaders.SetValue(config.async_shaders);
-    WriteDiag(std::string("step: fastmem ") + (config.fastmem ? "on" : "off") +
+    WriteDiag(std::string("step: fastmem ") +
+              (config.fastmem == BootConfig::Fastmem::Off      ? "off"
+               : config.fastmem == BootConfig::Fastmem::Auto   ? "auto -> page table"
+               : config.fastmem == BootConfig::Fastmem::Full   ? "full"
+                                                               : "hybrid diagnostic") +
+              (fastmem_enabled ? " (hot " + std::to_string(config.fastmem_hot_mib) + " MiB)" : "") +
               ", asynchronous shaders " + (config.async_shaders ? "on" : "off"));
     D3D12::SetTracedFrame(config.traced_frame);
     D3D12::SetFrameDiagnostics(!config.play);
@@ -1090,10 +1103,20 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "astc_verify=1") {
                         config.astc_verify = true;
                         WriteDiag("boot.cfg: verify first GPU BC3 upload against CPU");
-                    } else if (line == "fastmem=0" || line == "fastmem=1") {
-                        config.fastmem = line == "fastmem=1";
-                        WriteDiag(std::string("boot.cfg: fastmem ") +
-                                  (config.fastmem ? "on" : "off"));
+                    } else if (line == "fastmem=0" || line == "fastmem=1" ||
+                               line == "fastmem=hybrid" || line == "fastmem=full") {
+                        using Fastmem = decltype(config.fastmem);
+                        config.fastmem = line == "fastmem=0"      ? Fastmem::Off
+                                         : line == "fastmem=full" ? Fastmem::Full
+                                         : line == "fastmem=hybrid" ? Fastmem::Hybrid
+                                                                   : Fastmem::Auto;
+                        WriteDiag("boot.cfg: " + line);
+                    } else if (line.starts_with("fastmem_hot_mib=")) {
+                        const auto requested = static_cast<u32>(
+                            std::strtoul(line.c_str() + 16, nullptr, 10));
+                        config.fastmem_hot_mib = std::clamp(requested, 128U, 448U);
+                        WriteDiag("boot.cfg: fastmem hot " +
+                                  std::to_string(config.fastmem_hot_mib) + " MiB");
                     } else if (line == "async_shaders=0") {
                         config.async_shaders = false;
                         WriteDiag("boot.cfg: asynchronous shaders off");
