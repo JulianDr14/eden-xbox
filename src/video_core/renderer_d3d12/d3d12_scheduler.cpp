@@ -285,7 +285,16 @@ u64 Scheduler::KnownGpuTick() const {
 void Scheduler::DeferRelease(ComPtr<IUnknown> object) {
     if (object) {
         std::scoped_lock lock{release_mutex};
-        pending_releases.emplace_back(CurrentTick(), std::move(object));
+        pending_releases.push_back({CurrentTick(), std::move(object), {}});
+    }
+}
+
+void Scheduler::DeferRelease(ComPtr<IUnknown> object, std::function<void()>&& retire) {
+    if (object) {
+        std::scoped_lock lock{release_mutex};
+        pending_releases.push_back({CurrentTick(), std::move(object), std::move(retire)});
+    } else if (retire) {
+        retire();
     }
 }
 
@@ -293,7 +302,11 @@ void Scheduler::CollectGarbage() {
     const u64 gpu_tick = KnownGpuTick();
     ReadTimestamps(gpu_tick);
     std::scoped_lock lock{release_mutex};
-    while (!pending_releases.empty() && pending_releases.front().first <= gpu_tick) {
+    while (!pending_releases.empty() && pending_releases.front().tick <= gpu_tick) {
+        pending_releases.front().object.Reset();
+        if (pending_releases.front().retire) {
+            pending_releases.front().retire();
+        }
         pending_releases.pop_front();
     }
 }

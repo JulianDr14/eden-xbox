@@ -13,6 +13,7 @@
 
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
+#include "video_core/renderer_d3d12/d3d12_resource_allocator.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/texture_cache_base.h"
@@ -65,6 +66,7 @@ public:
     TextureCacheRuntime(const Device& device, Scheduler& scheduler, StagingBufferPool& staging,
                         CpuDescriptorAllocator& views, CpuDescriptorAllocator& samplers,
                         CpuDescriptorAllocator& rtvs, CpuDescriptorAllocator& dsvs);
+    ~TextureCacheRuntime();
 
     void RunSelfTest();
     void Finish();
@@ -128,6 +130,7 @@ private:
     CpuDescriptorAllocator& sampler_descriptors;
     CpuDescriptorAllocator& rtv_descriptors;
     CpuDescriptorAllocator& dsv_descriptors;
+    TextureResourceAllocator texture_allocator;
     D3D12_CPU_DESCRIPTOR_HANDLE null_rtv{};
     BlitImageHelper* blit_helper{};
     /// Reused by single-layer ASTC uploads. Bands cap the live decode/encode workspace at 40 MiB.
@@ -262,6 +265,7 @@ private:
 
     TextureCacheRuntime* runtime{};
     ComPtr<ID3D12Resource> resource;
+    std::shared_ptr<TextureResourceAllocator::Allocation> resource_allocation;
     FormatInfo format{};
     bool gpu_decoded{};
     DXGI_FORMAT footprint_format{}; ///< format GetCopyableFootprints uses for plane 0

@@ -75,6 +75,9 @@ public:
 
     /// Keeps object alive until the GPU is done with everything recorded so far.
     void DeferRelease(ComPtr<IUnknown> object);
+    /// Releases object and then runs retire after the same GPU tick completes. Used by placed
+    /// resources to return their heap range only after the resource itself is no longer in use.
+    void DeferRelease(ComPtr<IUnknown> object, std::function<void()>&& retire);
 
     /// Called right before each submission (e.g. to end open queries or flush barriers).
     void RegisterOnSubmit(std::function<void()>&& func) {
@@ -141,7 +144,12 @@ private:
     std::deque<PooledAllocator> allocator_pool;
 
     std::mutex release_mutex;
-    std::deque<std::pair<u64, ComPtr<IUnknown>>> pending_releases;
+    struct PendingRelease {
+        u64 tick;
+        ComPtr<IUnknown> object;
+        std::function<void()> retire;
+    };
+    std::deque<PendingRelease> pending_releases;
     std::vector<std::function<void()>> on_submit;
     std::vector<std::function<void()>> on_reset;
 
