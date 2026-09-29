@@ -124,6 +124,22 @@ struct PageTable {
         static_assert(sizeof(Data) == sizeof(std::atomic<u64>));
     };
 
+    /// Clean absolute-offset pointer consumed by Dynarmic. A zero entry deliberately selects the
+    /// precise callback path for unmapped, debug and rasterizer-cached pages.
+    class JitPageEntry {
+    public:
+        [[nodiscard]] uintptr_t Load() const noexcept {
+            return pointer.load(std::memory_order_relaxed);
+        }
+
+        void Store(uintptr_t value) noexcept {
+            pointer.store(value, std::memory_order_release);
+        }
+
+    private:
+        std::atomic<uintptr_t> pointer{};
+    };
+
     PageTable();
     ~PageTable() noexcept;
 
@@ -149,6 +165,8 @@ struct PageTable {
     /// corresponding attribute element is of type `Memory`.
     SparseLargeVector<PageEntryData> entries;
     static_assert(sizeof(PageEntryData) == 8);
+    SparseLargeVector<JitPageEntry> jit_entries;
+    static_assert(sizeof(JitPageEntry) == sizeof(uintptr_t));
 
     u8* fastmem_arena{};
     std::size_t current_address_space_width_in_bits{};

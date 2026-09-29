@@ -408,8 +408,12 @@ struct Memory::Impl {
         const u64 num_pages = ((vaddr + size - 1) >> YUZU_PAGEBITS) - (vaddr >> YUZU_PAGEBITS) + 1;
 
         current_page_table->entries.CommitRegion(vaddr >> YUZU_PAGEBITS, (vaddr >> YUZU_PAGEBITS) + num_pages);
+        current_page_table->jit_entries.CommitRegion(vaddr >> YUZU_PAGEBITS,
+                                                      (vaddr >> YUZU_PAGEBITS) + num_pages);
         for (u64 i = 0; i < num_pages; ++i, vaddr += YUZU_PAGESIZE) {
-            auto& entry = current_page_table->entries.GetUnchecked(vaddr >> YUZU_PAGEBITS);
+            const u64 page = vaddr >> YUZU_PAGEBITS;
+            auto& entry = current_page_table->entries.GetUnchecked(page);
+            auto& jit_entry = current_page_table->jit_entries.GetUnchecked(page);
             const auto [pointer, type, block] = entry.PointerTypeBlock(true);
             if (debug) {
                 // Switch page type to debug if now debug
@@ -422,6 +426,7 @@ struct Memory::Impl {
                     // Page is already marked.
                     break;
                 case Common::PageType::Memory:
+                    jit_entry.Store(0);
                     entry.MarkDebug(pointer, block);
                     break;
                 default:
@@ -439,6 +444,7 @@ struct Memory::Impl {
                     break;
                 case Common::PageType::DebugMemory: {
                     entry.Store(false, Common::PageType::Memory, block, pointer);
+                    jit_entry.Store(pointer);
                     break;
                 }
                 default:
@@ -471,8 +477,12 @@ struct Memory::Impl {
 
         const u64 num_pages = ((vaddr + size - 1) >> YUZU_PAGEBITS) - (vaddr >> YUZU_PAGEBITS) + 1;
         current_page_table->entries.CommitRegion(vaddr >> YUZU_PAGEBITS, (vaddr >> YUZU_PAGEBITS) + num_pages);
+        current_page_table->jit_entries.CommitRegion(vaddr >> YUZU_PAGEBITS,
+                                                      (vaddr >> YUZU_PAGEBITS) + num_pages);
         for (u64 i = 0; i < num_pages; ++i, vaddr += YUZU_PAGESIZE) {
-            auto& entry = current_page_table->entries.GetUnchecked(vaddr >> YUZU_PAGEBITS);
+            const u64 page = vaddr >> YUZU_PAGEBITS;
+            auto& entry = current_page_table->entries.GetUnchecked(page);
+            auto& jit_entry = current_page_table->jit_entries.GetUnchecked(page);
             const Common::PageType page_type = entry.Type();
             if (cached) {
                 // Switch page type to cached if now cached
@@ -483,6 +493,7 @@ struct Memory::Impl {
                     break;
                 case Common::PageType::DebugMemory:
                 case Common::PageType::Memory:
+                    jit_entry.Store(0);
                     entry.MarkRasterizerCached();
                     break;
                 case Common::PageType::RasterizerCachedMemory:
@@ -510,8 +521,10 @@ struct Memory::Impl {
                         // pagetable after unmapping a VMA. In that case the underlying VMA will no
                         // longer exist, and we should just leave the pagetable entry blank.
                         entry.Store(false, Common::PageType::Unmapped, block, 0);
+                        jit_entry.Store(0);
                     } else {
                         entry.Store(false, Common::PageType::Memory, block, ptr);
+                        jit_entry.Store(ptr);
                     }
                     break;
                 }
@@ -545,17 +558,23 @@ struct Memory::Impl {
             ASSERT_MSG(type != Common::PageType::Memory,
                        "Mapping memory page without a pointer @ {:016x}", base * YUZU_PAGESIZE);
 
+            // Remove the JIT pointer first so a concurrent access falls back instead of observing
+            // a stale host pointer while the metadata entry is being cleared.
+            page_table.jit_entries.ZeroRegion(base, end);
             page_table.entries.ZeroRegion(base, end);
         } else {
             auto current_block = block_count.fetch_add(1, std::memory_order_relaxed);
             ASSERT(current_block != 65535);
 
             page_table.entries.CommitRegion(base, end);
+            page_table.jit_entries.CommitRegion(base, end);
             while (base != end) {
                 auto host_ptr = reinterpret_cast<u64>(system.DeviceMemory().GetPointer<u8>(target)) - (base << YUZU_PAGEBITS);;
                 auto& entry = page_table.entries.GetUnchecked(base);
 
                 entry.Store(false, type, current_block, host_ptr);
+                page_table.jit_entries.GetUnchecked(base).Store(
+                    type == Common::PageType::Memory ? host_ptr : 0);
                 ASSERT_MSG(page_table.entries[base].Pointer(),
                            "memory mapping base yield a nullptr within the table");
 

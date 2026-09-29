@@ -16,6 +16,7 @@ PageTable::~PageTable() noexcept = default;
 void PageTable::Resize(std::size_t address_space_width_in_bits, std::size_t page_bits) {
     auto const num_page_table_entries = 1ULL << (address_space_width_in_bits - page_bits);
     entries.ResizeAndClear(num_page_table_entries);
+    jit_entries.ResizeAndClear(num_page_table_entries);
     current_address_space_width_in_bits = address_space_width_in_bits;
     current_page_bits = page_bits;
 }
