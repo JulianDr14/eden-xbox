@@ -12,6 +12,7 @@
 #include "core/frontend/graphics_context.h"
 #include "video_core/control/scheduler.h"
 #include "video_core/dma_pusher.h"
+#include "video_core/frame_trace.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/host1x/host1x.h"
@@ -39,8 +40,16 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         while (!stop_token.stop_requested()) {
             {
                 // Time with nothing to do: the guest CPU has not produced the next work yet.
+                const auto idle_start = std::chrono::steady_clock::now();
                 VideoCore::Perf::ScopedTimer idle{VideoCore::Perf::Counter::GpuThreadIdleUs};
                 state.queue.PopWait(next, stop_token);
+                if (VideoCore::FrameTrace::Active()) {
+                    const u64 idle_us = VideoCore::Perf::ElapsedUs(idle_start);
+                    if (idle_us >= 200) {
+                        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GpuIdleEnd,
+                                                    idle_us);
+                    }
+                }
             }
             if (stop_token.stop_requested()) {
                 break;

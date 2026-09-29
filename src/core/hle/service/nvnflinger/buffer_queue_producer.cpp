@@ -21,6 +21,8 @@
 #include "core/hle/service/nvnflinger/parcel.h"
 #include "core/hle/service/nvnflinger/ui/graphic_buffer.h"
 #include "core/hle/service/nvnflinger/window.h"
+#include "video_core/frame_trace.h"
+#include "video_core/perf_counters.h"
 
 namespace Service::android {
 
@@ -217,7 +219,15 @@ Status BufferQueueProducer::WaitForFreeSlotThenRelock(bool async, s32* found, St
                 return Status::WouldBlock;
             }
 
-            if (!core->WaitForDequeueCondition(lk)) {
+            // Frame chain counters: the game waiting for the display to release a framebuffer.
+            const auto wait_start = std::chrono::steady_clock::now();
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::DequeueWait);
+            const bool running = core->WaitForDequeueCondition(lk);
+            const u64 waited_us = VideoCore::Perf::ElapsedUs(wait_start);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestDequeueWaits, 1);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestDequeueWaitUs, waited_us);
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::DequeueWaitEnd, waited_us);
+            if (!running) {
                 // We are no longer running
                 return Status::NoError;
             }
@@ -535,6 +545,8 @@ Status BufferQueueProducer::QueueBuffer(s32 slot, const QueueBufferInput& input,
 
         core->buffer_has_been_queued = true;
         core->SignalDequeueCondition();
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestFramesQueued, 1);
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::QueueBuffer);
 
         output->Inflate(core->default_width, core->default_height, core->transform_hint, static_cast<u32>(core->queue.size()));
     }

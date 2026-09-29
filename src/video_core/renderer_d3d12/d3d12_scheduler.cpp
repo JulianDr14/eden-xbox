@@ -9,6 +9,7 @@
 #include <fmt/format.h>
 
 #include "common/logging.h"
+#include "video_core/frame_trace.h"
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 
@@ -205,6 +206,7 @@ u64 Scheduler::Flush() {
     ID3D12CommandList* const lists[] = {command_list.Get()};
     device.Queue()->ExecuteCommandLists(1, lists);
     VideoCore::Perf::Add(VideoCore::Perf::Counter::Submits, 1);
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GpuSubmit);
     CheckRemovedAfter(device.Get(), [&] {
         return fmt::format("submitting tick {} (removed by the GPU or by a recorded command)",
                            current_tick.load(std::memory_order_relaxed));

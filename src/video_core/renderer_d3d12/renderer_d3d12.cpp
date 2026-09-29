@@ -591,6 +591,26 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
         get(Counter::GuestGpuWaits), Ms(d, Counter::GuestGpuWaitUs));
 }
 
+/// The frame chain over a window: frames the game queued, vsyncs (and those lost to a late one),
+/// the VSyncThread waiting for the GPU thread, how long composites took to run after being
+/// requested, and the game waiting for a free framebuffer.
+std::string DescribeFrameChain(const VideoCore::Perf::Snapshot& d) {
+    const auto get = [&d](Counter counter) { return VideoCore::Perf::Get(d, counter); };
+    const auto average_ms = [&](Counter us, Counter count) {
+        return get(count) != 0 ? Ms(d, us) / static_cast<double>(get(count)) : 0.0;
+    };
+    return fmt::format(
+        "game queued {} frames | vsyncs {} ({} lost), {} with a new frame; waited for the GPU "
+        "thread {:.1f} ms | composites {} ({:.1f} ms after the request on average, {} over a "
+        "frame) | game waited for a free framebuffer {} times ({:.1f} ms) | emulated cores idle "
+        "{:.1f} ms in all",
+        get(Counter::GuestFramesQueued), get(Counter::Vsyncs), get(Counter::VsyncsLost),
+        get(Counter::VsyncFrames), Ms(d, Counter::VsyncComposeWaitUs), get(Counter::Composites),
+        average_ms(Counter::CompositeLatencyUs, Counter::Composites), get(Counter::CompositesLate),
+        get(Counter::GuestDequeueWaits), Ms(d, Counter::GuestDequeueWaitUs),
+        Ms(d, Counter::GuestCoreIdleUs));
+}
+
 /// The largest share of a slow frame, in words.
 const char* LikelyCause(const VideoCore::Perf::Snapshot& d, double interval_ms) {
     const std::array<std::pair<double, const char*>, 7> shares{{
@@ -642,6 +662,7 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
     LOG_INFO(Render, "D3D12 perf over {} frames ({:.0f} ms), mostly {} | {}", frames, total_ms,
              LikelyCause(delta, total_ms), DescribePerf(delta, total_ms));
     LOG_INFO(Render, "D3D12 GPU thread: {}", DescribeDrawCosts(delta, total_ms));
+    LOG_INFO(Render, "D3D12 frame chain: {}", DescribeFrameChain(delta));
     // Who submits and waits (S/W, count, eden-uwp.exe RVAs from the innermost caller out).
     LOG_INFO(Render, "D3D12 sync sites: {}", scheduler.TakeSyncSites(6));
     const DXGI_QUERY_VIDEO_MEMORY_INFO video = device.QueryVideoMemory();

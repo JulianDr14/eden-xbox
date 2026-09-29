@@ -13,6 +13,7 @@
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/kernel/svc.h"
+#include "video_core/perf_counters.h"
 
 namespace Kernel {
 
@@ -222,6 +223,8 @@ void PhysicalCore::LogBacktrace(KernelCore& kernel) {
 }
 
 void PhysicalCore::Idle() {
+    // Frame chain counters: an emulated core with no guest thread to run.
+    VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::GuestCoreIdleUs};
     std::unique_lock lk{m_guard};
     m_on_interrupt.wait(lk, [this] { return m_is_interrupted; });
 }

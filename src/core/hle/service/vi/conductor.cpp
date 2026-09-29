@@ -15,6 +15,8 @@
 #include "core/hle/service/vi/container.h"
 #include "core/hle/service/vi/display_list.h"
 #include "core/hle/service/vi/vsync_manager.h"
+#include "video_core/frame_trace.h"
+#include "video_core/perf_counters.h"
 
 constexpr auto FrameNs = std::chrono::nanoseconds{1000000000 / 60};
 
@@ -74,6 +76,21 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
 }
 
 void Conductor::ProcessVsync() {
+    // Frame chain counters (renderer perf windows): a vsync that starts two or more periods after
+    // the previous one skipped the ones in between, and the game saw a slower display.
+    const auto now = std::chrono::steady_clock::now();
+    u64 lost = 0;
+    if (m_last_vsync.time_since_epoch().count() != 0) {
+        const s64 periods = (now - m_last_vsync + FrameNs / 2) / FrameNs;
+        if (periods >= 2) {
+            lost = static_cast<u64>(periods - 1);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::VsyncsLost, lost);
+        }
+    }
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::Vsync, lost);
+    m_last_vsync = now;
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::Vsyncs, 1);
+
     Common::PollThreadPolicies();
     Common::ADPF::SetTargetWorkDuration(std::chrono::nanoseconds{this->GetFramePeriodNs()});
 

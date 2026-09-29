@@ -91,6 +91,8 @@ add_library(video_core STATIC
     macro.cpp
     macro.h
     fence_manager.h
+    frame_trace.cpp
+    frame_trace.h
     gpu.cpp
     gpu.h
     gpu_thread.cpp

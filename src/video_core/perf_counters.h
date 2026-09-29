@@ -49,6 +49,18 @@ enum class Counter : size_t {
     DispatchNs,
     GuestGpuWaits,         ///< guest fence waits (nvhost_ctrl events) that the GPU signalled later
     GuestGpuWaitUs,        ///< time from each of those waits to its signal; waits can overlap
+    // The frame chain: game -> GPU thread -> composite -> vsync.
+    Vsyncs,                ///< vsyncs processed by the VSyncThread (60 per second when on time)
+    VsyncsLost,            ///< vsyncs skipped because the previous one ran late
+    VsyncComposeWaitUs,    ///< the VSyncThread waiting for the GPU thread's previous composite
+    VsyncFrames,           ///< vsyncs that composed a new game frame
+    Composites,            ///< composites the renderer ran
+    CompositeLatencyUs,    ///< from each composite request to the renderer running it
+    CompositesLate,        ///< composites that ran more than a frame after the request
+    GuestFramesQueued,     ///< frames the game queued (QueueBuffer)
+    GuestDequeueWaits,     ///< times the game waited for a free framebuffer (DequeueBuffer)
+    GuestDequeueWaitUs,
+    GuestCoreIdleUs,       ///< emulated CPU cores with no guest thread to run, summed over cores
     Count,
 };
 
