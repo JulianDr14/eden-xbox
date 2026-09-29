@@ -498,6 +498,8 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_scheduler.h
         renderer_d3d12/d3d12_query_cache.cpp
         renderer_d3d12/d3d12_query_cache.h
+        renderer_d3d12/d3d12_resource_allocator.cpp
+        renderer_d3d12/d3d12_resource_allocator.h
         renderer_d3d12/d3d12_rasterizer.cpp
         renderer_d3d12/d3d12_rasterizer.h
         renderer_d3d12/d3d12_root_signature.cpp

@@ -502,7 +502,8 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
                                          CpuDescriptorAllocator& rtvs,
                                          CpuDescriptorAllocator& dsvs)
     : device{device_}, scheduler{scheduler_}, staging{staging_}, view_descriptors{views},
-      sampler_descriptors{samplers}, rtv_descriptors{rtvs}, dsv_descriptors{dsvs} {
+      sampler_descriptors{samplers}, rtv_descriptors{rtvs}, dsv_descriptors{dsvs},
+      texture_allocator{device_, scheduler_} {
     null_rtv = rtv_descriptors.Allocate();
     const D3D12_RENDER_TARGET_VIEW_DESC null_desc{
         .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -517,6 +518,12 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
         options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_2;
     LOG_INFO(Render, "D3D12: texture cache runtime ready (min/max sampler reduction {})",
              supports_min_max_filter ? "yes" : "no");
+}
+
+TextureCacheRuntime::~TextureCacheRuntime() {
+    scheduler.Finish();
+    scheduler.CollectGarbage();
+    LOG_INFO(Render, "D3D12: {}", texture_allocator.Report());
 }
 
 FormatInfo TextureCacheRuntime::Format(PixelFormat format) const { return NativeFormat(format); }
@@ -588,7 +595,7 @@ StagingBufferRef TextureCacheRuntime::DownloadStagingBuffer(size_t size, bool de
 }
 void TextureCacheRuntime::FreeDeferredStagingBuffer(StagingBufferRef& ref) { staging.FreeDeferred(ref); }
 void TextureCacheRuntime::TickFrame() { staging.TickFrame(); }
-u64 TextureCacheRuntime::GetDeviceLocalMemory() const { return device.QueryVideoMemory().Budget; }
+u64 TextureCacheRuntime::GetDeviceLocalMemory() const { return device.CacheMemoryBudget(); }
 u64 TextureCacheRuntime::GetDeviceMemoryUsage() const {
     return device.CacheMemoryUsage();
 }
@@ -701,14 +708,15 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         .SampleDesc = {.Count = info_.num_samples, .Quality = 0},
         .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN, .Flags = resource_flags,
     };
-    const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
     {
         VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
                                            VideoCore::Perf::Counter::ResourcesCreated};
-        ThrowIfFailed(runtime->device.Get()->CreateCommittedResource(
-                          &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON,
-                          nullptr, IID_PPV_ARGS(&resource)),
-                      "Create texture cache image");
+        auto allocated = runtime->texture_allocator.Create(desc, D3D12_RESOURCE_STATE_COMMON);
+        resource = std::move(allocated.resource);
+        resource_allocation = std::move(allocated.allocation);
+        if (!resource) {
+            throw std::runtime_error("D3D12: texture allocator returned no resource");
+        }
     }
     CheckRemovedAfter(runtime->device.Get(), [&] {
         return fmt::format("creating image {} ({} dim {} {}x{}x{} levels {} samples {} flags 0x{:x})",
@@ -727,7 +735,8 @@ Image::Image(const VideoCommon::NullImageParams& params) : VideoCommon::ImageBas
 
 Image::~Image() {
     if (runtime && resource) {
-        runtime->scheduler.DeferRelease(std::move(resource));
+        runtime->texture_allocator.DeferRelease(
+            {std::move(resource), std::move(resource_allocation), resource_allocation != nullptr});
     }
     if (runtime && slice_array) {
         runtime->scheduler.DeferRelease(std::move(slice_array));
@@ -740,7 +749,9 @@ Image::~Image() {
 Image& Image::operator=(Image&& other) noexcept {
     if (this != &other) {
         if (runtime && resource) {
-            runtime->scheduler.DeferRelease(std::move(resource));
+            runtime->texture_allocator.DeferRelease(
+                {std::move(resource), std::move(resource_allocation),
+                 resource_allocation != nullptr});
         }
         if (runtime && slice_array) {
             runtime->scheduler.DeferRelease(std::move(slice_array));
@@ -752,6 +763,7 @@ Image& Image::operator=(Image&& other) noexcept {
         allocation_tick = other.allocation_tick;
         runtime = other.runtime;
         resource = std::move(other.resource);
+        resource_allocation = std::move(other.resource_allocation);
         format = other.format;
         gpu_decoded = other.gpu_decoded;
         footprint_format = other.footprint_format;
