@@ -55,14 +55,20 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 break;
             }
             if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
+                VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::SubmitListNs};
+                VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::SubmitLists, 1);
                 scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
             } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
+                VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::GpuTickNs};
+                VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::GpuTicks, 1);
                 system.GPU().TickWork();
             } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
                 VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::GpuThreadFlushUs,
                                                    VideoCore::Perf::Counter::GpuThreadFlushes};
                 renderer.ReadRasterizer()->FlushRegion(flush->addr, flush->size);
             } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
+                VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::CacheInvalidationNs};
+                VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::CacheInvalidations, 1);
                 renderer.ReadRasterizer()->OnCacheInvalidation(invalidate->addr, invalidate->size);
             } else {
                 ASSERT(false);

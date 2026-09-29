@@ -579,6 +579,8 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
     const double draw_ms = ns_ms(Counter::DrawNs);
     const double clear_ms = ns_ms(Counter::ClearNs);
     const double dispatch_ms = ns_ms(Counter::DispatchNs);
+    const double submit_ms = ns_ms(Counter::SubmitListNs);
+    const double submit_overhead = std::max(0.0, submit_ms - draw_ms - clear_ms - dispatch_ms);
     const double outside = std::max(0.0, interval_ms - Ms(d, Counter::GpuThreadIdleUs) -
                                              Ms(d, Counter::FenceWaitUs) -
                                              Ms(d, Counter::GpuThreadFlushUs) - draw_ms -
@@ -588,7 +590,11 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
         "targets {:.1f}, samplers {:.1f}, record {:.1f}), clears {:.1f} ms, dispatches {:.1f} ms, "
         "outside them {:.1f} ms | pipeline fast path {} hits / {} misses | CBV {} ({:.1f} ms: "
         "{} streamed, {} persistent, {} null), view copies {} ({:.1f} ms) | guest waited for "
-        "the GPU {} times ({:.1f} ms in all)",
+        "the GPU {} times ({:.1f} ms in all) | commands: {} submit lists {:.1f} ms ({:.1f} ms "
+        "outside draw/clear/dispatch), {} ticks {:.1f} ms, {} invalidations {:.1f} ms | DMA: "
+        "puller {} / {:.1f} ms, macros {} / {:.1f} ms, Maxwell {} / {:.1f} ms, compute {} / "
+        "{:.1f} ms, copies {} / {:.1f} ms, other {} / {:.1f} ms | Maxwell dirty: {} changed, "
+        "{} identical skipped",
         draw_ms, per_draw(Counter::DrawNs), per_draw(Counter::DrawTexturesNs),
         per_draw(Counter::DrawBuffersNs), per_draw(Counter::DrawDescriptorsNs),
         per_draw(Counter::DrawTargetsNs), per_draw(Counter::DrawSamplersNs),
@@ -597,7 +603,62 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
         get(Counter::CbvCreates), ns_ms(Counter::CbvCreateNs), get(Counter::CbvStreamed),
         get(Counter::CbvPersistent), get(Counter::CbvNull), get(Counter::ViewCopies),
         ns_ms(Counter::ViewCopyNs),
-        get(Counter::GuestGpuWaits), Ms(d, Counter::GuestGpuWaitUs));
+        get(Counter::GuestGpuWaits), Ms(d, Counter::GuestGpuWaitUs), get(Counter::SubmitLists),
+        submit_ms, submit_overhead, get(Counter::GpuTicks), ns_ms(Counter::GpuTickNs),
+        get(Counter::CacheInvalidations), ns_ms(Counter::CacheInvalidationNs),
+        get(Counter::DmaPullerCalls), ns_ms(Counter::DmaPullerNs), get(Counter::DmaMacroCalls),
+        ns_ms(Counter::DmaMacroNs), get(Counter::DmaMaxwellCalls), ns_ms(Counter::DmaMaxwellNs),
+        get(Counter::DmaComputeCalls), ns_ms(Counter::DmaComputeNs), get(Counter::DmaCopyCalls),
+        ns_ms(Counter::DmaCopyNs), get(Counter::DmaOtherCalls), ns_ms(Counter::DmaOtherNs),
+        get(Counter::MaxwellDirtyChanged), get(Counter::MaxwellDirtyUnchanged));
+}
+
+std::string DescribeGuestWaitSites() {
+    const auto sites = VideoCore::Perf::TakeGuestWaitSites();
+    std::array<size_t, VideoCore::Perf::NUM_GUEST_SYNCPOINTS> order{};
+    std::iota(order.begin(), order.end(), 0);
+    std::ranges::sort(order, [&sites](size_t left, size_t right) {
+        return sites[left].total_us > sites[right].total_us;
+    });
+    std::string result;
+    size_t emitted{};
+    for (const size_t id : order) {
+        if (sites[id].count == 0 || emitted == 6) {
+            break;
+        }
+        if (!result.empty()) {
+            result += "; ";
+        }
+        result += fmt::format("id {}: {} waits, {:.1f} ms total, {:.1f} ms max", id,
+                              sites[id].count, static_cast<double>(sites[id].total_us) / 1000.0,
+                              static_cast<double>(sites[id].max_us) / 1000.0);
+        ++emitted;
+    }
+    return result.empty() ? "none" : result;
+}
+
+std::string DescribeMacroProfiles() {
+    auto profiles = VideoCore::Perf::TakeMacroProfiles();
+    std::ranges::sort(profiles, [](const auto& left, const auto& right) {
+        return left.total_ns - std::min(left.total_ns, left.nested_ns) >
+               right.total_ns - std::min(right.total_ns, right.nested_ns);
+    });
+    std::string result;
+    for (size_t index = 0; index < std::min<size_t>(profiles.size(), 6); ++index) {
+        const auto& profile = profiles[index];
+        const double exclusive_ms =
+            static_cast<double>(profile.total_ns - std::min(profile.total_ns, profile.nested_ns)) /
+            1e6;
+        if (!result.empty()) {
+            result += "; ";
+        }
+        result += fmt::format("m=0x{:x} h={:016x}: {} calls, {:.1f} ms exclusive, {:.1f} ms "
+                              "nested, {:.2f} ms max",
+                              profile.method, profile.hash, profile.count, exclusive_ms,
+                              static_cast<double>(profile.nested_ns) / 1e6,
+                              static_cast<double>(profile.max_ns) / 1e6);
+    }
+    return result.empty() ? "none" : result;
 }
 
 /// The frame chain over a window: frames the game queued, vsyncs (and those lost to a late one),
@@ -611,12 +672,13 @@ std::string DescribeFrameChain(const VideoCore::Perf::Snapshot& d) {
     return fmt::format(
         "game queued {} frames | vsyncs {} ({} lost), {} with a new frame; waited for the GPU "
         "thread {:.1f} ms | composites {} ({:.1f} ms after the request on average, {} over a "
-        "frame) | game waited for a free framebuffer {} times ({:.1f} ms) | emulated cores idle "
-        "{:.1f} ms in all",
+        "frame) | game waited for a free framebuffer {} times ({:.1f} ms) | forced {} swap "
+        "intervals to one | emulated cores idle {:.1f} ms in all",
         get(Counter::GuestFramesQueued), get(Counter::Vsyncs), get(Counter::VsyncsLost),
         get(Counter::VsyncFrames), Ms(d, Counter::VsyncComposeWaitUs), get(Counter::Composites),
         average_ms(Counter::CompositeLatencyUs, Counter::Composites), get(Counter::CompositesLate),
         get(Counter::GuestDequeueWaits), Ms(d, Counter::GuestDequeueWaitUs),
+        get(Counter::GuestSwapIntervalOverrides),
         Ms(d, Counter::GuestCoreIdleUs));
 }
 
@@ -672,6 +734,8 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
              LikelyCause(delta, total_ms), DescribePerf(delta, total_ms));
     LOG_INFO(Render, "D3D12 GPU thread: {}", DescribeDrawCosts(delta, total_ms));
     LOG_INFO(Render, "D3D12 frame chain: {}", DescribeFrameChain(delta));
+    LOG_INFO(Render, "D3D12 guest GPU wait sites: {}", DescribeGuestWaitSites());
+    LOG_INFO(Render, "D3D12 macro profiles: {}", DescribeMacroProfiles());
     // Who submits and waits (S/W, count, eden-uwp.exe RVAs from the innermost caller out).
     LOG_INFO(Render, "D3D12 sync sites: {}", scheduler.TakeSyncSites(6));
     const DXGI_QUERY_VIDEO_MEMORY_INFO video = device.QueryVideoMemory();

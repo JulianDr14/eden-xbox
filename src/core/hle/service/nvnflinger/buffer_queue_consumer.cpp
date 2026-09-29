@@ -14,6 +14,7 @@
 #include "core/hle/service/nvnflinger/buffer_queue_core.h"
 #include "core/hle/service/nvnflinger/parcel.h"
 #include "core/hle/service/nvnflinger/producer_listener.h"
+#include "video_core/frame_trace.h"
 
 namespace Service::android {
 
@@ -91,6 +92,8 @@ Status BufferQueueConsumer::AcquireBuffer(BufferItem* out_buffer,
 
     const auto slot = front->slot;
     *out_buffer = *front;
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AcquireBuffer,
+                                static_cast<u64>(slot), front->frame_number);
 
     LOG_DEBUG(Service_Nvnflinger, "acquiring slot={}", slot);
 
@@ -149,6 +152,8 @@ Status BufferQueueConsumer::ReleaseBuffer(s32 slot, u64 frame_number, const Fenc
             // by properly waiting for the fence in the BufferItemConsumer.
             // slots[slot].fence = release_fence;
             slots[slot].buffer_state = BufferState::Free;
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::ReleaseBuffer,
+                                        static_cast<u64>(slot), frame_number);
 
             listener = core->connected_producer_listener;
 

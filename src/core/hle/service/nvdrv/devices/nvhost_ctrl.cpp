@@ -204,11 +204,10 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
                                 target_value);
     event.wait_handle =
         host1x_syncpoint_manager.RegisterHostAction(fence_id, target_value,
-                                                    [this, slot,
+                                                    [this, slot, fence_id,
                                                      start = std::chrono::steady_clock::now()]() {
             const u64 waited_us = VideoCore::Perf::ElapsedUs(start);
-            VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestGpuWaits, 1);
-            VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestGpuWaitUs, waited_us);
+            VideoCore::Perf::RecordGuestGpuWait(fence_id, waited_us);
             VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GpuFenceSignal,
                                         events[slot].assigned_syncpt, waited_us);
             auto& event_ = events[slot];
