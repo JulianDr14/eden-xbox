@@ -45,6 +45,15 @@ enum class Counter : size_t {
     DrawTargetsNs,         ///< render targets, feedback loops and image transitions
     DrawSamplersNs,        ///< the sampler table
     DrawRecordNs,          ///< preparing attachments and recording state and the draw
+    PipelineFastHits,      ///< transition-cache hits in CurrentGraphicsPipeline
+    PipelineFastMisses,
+    CbvCreateNs,
+    CbvCreates,
+    CbvStreamed,
+    CbvPersistent,
+    CbvNull,
+    ViewCopyNs,
+    ViewCopies,
     ClearNs,
     DispatchNs,
     GuestGpuWaits,         ///< guest fence waits (nvhost_ctrl events) that the GPU signalled later
@@ -68,9 +77,24 @@ constexpr size_t NUM_COUNTERS = static_cast<size_t>(Counter::Count);
 using Snapshot = std::array<u64, NUM_COUNTERS>;
 
 inline std::array<std::atomic<u64>, NUM_COUNTERS> counters{};
+inline std::atomic<bool> detailed_gpu_profile{};
+
+inline void SetDetailedGpuProfile(bool enabled) {
+    detailed_gpu_profile.store(enabled, std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline bool DetailedGpuProfileEnabled() {
+    return detailed_gpu_profile.load(std::memory_order_relaxed);
+}
 
 inline void Add(Counter counter, u64 value) {
     counters[static_cast<size_t>(counter)].fetch_add(value, std::memory_order_relaxed);
+}
+
+inline void AddDetailed(Counter counter, u64 value) {
+    if (DetailedGpuProfileEnabled()) {
+        Add(counter, value);
+    }
 }
 
 inline Snapshot Read() {
@@ -116,7 +140,16 @@ private:
 /// (the phases of a draw last a few microseconds, too short to truncate to microseconds).
 class LapTimer {
 public:
+    LapTimer() : enabled{DetailedGpuProfileEnabled()} {
+        if (enabled) {
+            last = std::chrono::steady_clock::now();
+        }
+    }
+
     void Lap(Counter ns_counter) {
+        if (!enabled) {
+            return;
+        }
         const auto now = std::chrono::steady_clock::now();
         Add(ns_counter, static_cast<u64>(
                             std::chrono::duration_cast<std::chrono::nanoseconds>(now - last)
@@ -125,15 +158,26 @@ public:
     }
 
 private:
-    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+    bool enabled{};
+    std::chrono::steady_clock::time_point last{};
 };
 
 /// Adds the scope's duration to a nanosecond counter.
 class ScopedNsTimer {
 public:
-    explicit ScopedNsTimer(Counter ns_counter_) : ns_counter{ns_counter_} {}
+    explicit ScopedNsTimer(Counter ns_counter_)
+        : ns_counter{ns_counter_}, enabled{DetailedGpuProfileEnabled()} {
+        if (enabled) {
+            start = std::chrono::steady_clock::now();
+        }
+    }
     ~ScopedNsTimer() {
-        lap.Lap(ns_counter);
+        if (enabled) {
+            Add(ns_counter,
+                static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count()));
+        }
     }
 
     ScopedNsTimer(const ScopedNsTimer&) = delete;
@@ -141,7 +185,8 @@ public:
 
 private:
     Counter ns_counter;
-    LapTimer lap;
+    bool enabled{};
+    std::chrono::steady_clock::time_point start{};
 };
 
 } // namespace VideoCore::Perf

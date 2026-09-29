@@ -567,6 +567,9 @@ std::string DescribePerf(const VideoCore::Perf::Snapshot& d, double interval_ms)
 /// draws, clears and dispatches (Maxwell methods, macros, DMA, presenting), and how long the guest
 /// waited for the GPU to signal its fences.
 std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interval_ms) {
+    if (!VideoCore::Perf::DetailedGpuProfileEnabled()) {
+        return "detailed per-draw profiling off (boot.cfg gpu_profile=1 enables it)";
+    }
     const auto get = [&d](Counter counter) { return VideoCore::Perf::Get(d, counter); };
     const u64 draws = std::max<u64>(1, get(Counter::Draws));
     const auto per_draw = [&](Counter counter) {
@@ -583,11 +586,17 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
     return fmt::format(
         "draws {:.1f} ms ({:.1f} us each: textures {:.1f}, buffers {:.1f}, descriptors {:.1f}, "
         "targets {:.1f}, samplers {:.1f}, record {:.1f}), clears {:.1f} ms, dispatches {:.1f} ms, "
-        "outside them {:.1f} ms | guest waited for the GPU {} times ({:.1f} ms in all)",
+        "outside them {:.1f} ms | pipeline fast path {} hits / {} misses | CBV {} ({:.1f} ms: "
+        "{} streamed, {} persistent, {} null), view copies {} ({:.1f} ms) | guest waited for "
+        "the GPU {} times ({:.1f} ms in all)",
         draw_ms, per_draw(Counter::DrawNs), per_draw(Counter::DrawTexturesNs),
         per_draw(Counter::DrawBuffersNs), per_draw(Counter::DrawDescriptorsNs),
         per_draw(Counter::DrawTargetsNs), per_draw(Counter::DrawSamplersNs),
         per_draw(Counter::DrawRecordNs), clear_ms, dispatch_ms, outside,
+        get(Counter::PipelineFastHits), get(Counter::PipelineFastMisses),
+        get(Counter::CbvCreates), ns_ms(Counter::CbvCreateNs), get(Counter::CbvStreamed),
+        get(Counter::CbvPersistent), get(Counter::CbvNull), get(Counter::ViewCopies),
+        ns_ms(Counter::ViewCopyNs),
         get(Counter::GuestGpuWaits), Ms(d, Counter::GuestGpuWaitUs));
 }
 

@@ -10,6 +10,7 @@
 #include "common/alignment.h"
 #include "common/logging.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
@@ -408,6 +409,7 @@ void BufferCacheRuntime::ApplyGeometry(ID3D12GraphicsCommandList* cmd) {
 }
 
 std::span<u8> BufferCacheRuntime::BindMappedUniformBuffer(size_t, u32, u32 size) {
+    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::CbvStreamed, 1);
     const StagingBufferRef ref =
         staging.Request(Common::AlignUp(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT),
                         MemoryUsage::Upload);
@@ -442,9 +444,11 @@ void BufferCacheRuntime::BindUniformBuffer(Buffer& buffer, u32 offset, u32 size)
                                   .device_addr = buffer.CpuAddr() + offset});
     }
     if (!fits) {
+        VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::CbvNull, 1);
         descriptor_queue->AddConstantBuffer(0, 0);
         return;
     }
+    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::CbvPersistent, 1);
     buffer.Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
     descriptor_queue->AddConstantBuffer(buffer.Address() + offset, size);
 }
