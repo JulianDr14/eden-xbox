@@ -770,6 +770,8 @@ Image& Image::operator=(Image&& other) noexcept {
         footprint_format = other.footprint_format;
         state = other.state;
         write_version = other.write_version;
+        depth_feedback = std::move(other.depth_feedback);
+        depth_feedback_failed = other.depth_feedback_failed;
         slice_array = std::move(other.slice_array);
         slice_array_state = other.slice_array_state;
         slice_array_version = other.slice_array_version;
@@ -779,6 +781,32 @@ Image& Image::operator=(Image&& other) noexcept {
         reinterpreted_ahead = other.reinterpreted_ahead;
     }
     return *this;
+}
+
+Image* Image::PrepareDepthFeedback() {
+    if (depth_feedback_failed || !runtime || !resource) {
+        return nullptr;
+    }
+    if (!depth_feedback) {
+        depth_feedback = std::make_unique<Image>(*runtime, info, 0, 0);
+        if (!depth_feedback->Handle()) {
+            depth_feedback.reset();
+            depth_feedback_failed = true;
+            return nullptr;
+        }
+        LOG_INFO(Render, "D3D12: depth feedback snapshot allocated ({} {}x{}, {} samples)",
+                 info.format, info.size.width, info.size.height, info.num_samples);
+    }
+    // CopyResource preserves every mip, layer and both depth/stencil planes, including MSAA.
+    // The direct queue orders earlier draws, this copy and the next draw; no CPU fence is needed.
+    Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    depth_feedback->Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+    runtime->scheduler.CommandList()->CopyResource(depth_feedback->Handle(), Handle());
+    depth_feedback->Transition(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Transition(D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    ++runtime->depth_feedback_copies;
+    return depth_feedback.get();
 }
 
 u32 Image::Subresource(s32 level, s32 layer, u32 plane) const noexcept {
@@ -2509,7 +2537,24 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::Handle(Shader::TextureType texture_type) 
     return srvs[index];
 }
 
-D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_type) const {
+D3D12_CPU_DESCRIPTOR_HANDLE ImageView::DepthFeedbackHandle(Shader::TextureType texture_type) const {
+    Image* const source = SourceImage();
+    if (!source || !source->DepthFeedback()) {
+        return Handle(texture_type);
+    }
+    if (!depth_feedback_srvs) {
+        depth_feedback_srvs = std::make_unique<
+            std::array<D3D12_CPU_DESCRIPTOR_HANDLE, Shader::NUM_TEXTURE_TYPES>>();
+    }
+    auto& handle = depth_feedback_srvs->at(static_cast<size_t>(texture_type));
+    if (!handle.ptr) {
+        handle = CreateSrv(texture_type, source->DepthFeedback()->Handle());
+    }
+    return handle;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_type,
+                                               ID3D12Resource* override_resource) const {
     using Shader::TextureType;
     const SrvParams& p = srv_params;
     // A type the resource cannot be viewed as (a 2D texture read as 3D, a cube from fewer than six
@@ -2567,7 +2612,8 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
         const TextureType resource_type = is_3d   ? TextureType::Color3D
                                           : is_1d ? TextureType::ColorArray1D
                                                   : TextureType::ColorArray2D;
-        return Handle(is_compatible(natural_type) ? natural_type : resource_type);
+        const TextureType fallback = is_compatible(natural_type) ? natural_type : resource_type;
+        return override_resource ? CreateSrv(fallback, override_resource) : Handle(fallback);
     }
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{.Format = p.format,
                                          .Shader4ComponentMapping = p.mapping};
@@ -2638,7 +2684,8 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
                            static_cast<u32>(texture_type));
     });
     const D3D12_CPU_DESCRIPTOR_HANDLE handle = runtime->view_descriptors.Allocate();
-    runtime->device.Get()->CreateShaderResourceView(srv_resource ? srv_resource : image, &desc,
+    runtime->device.Get()->CreateShaderResourceView(override_resource ? override_resource :
+                                                    srv_resource ? srv_resource : image, &desc,
                                                     handle);
     CheckRemovedAfterDescriptor(runtime->device.Get(), [&] {
         return fmt::format("SRV of {} as type {} (format {} dim {} levels {}+{} layers {}+{} of "
@@ -2694,6 +2741,12 @@ void ImageView::PrepareRead(Shader::TextureType texture_type) const {
 
 void ImageView::Release() {
     if (!runtime) return;
+    if (depth_feedback_srvs) {
+        for (const auto handle : *depth_feedback_srvs) {
+            if (handle.ptr) runtime->view_descriptors.Free(handle);
+        }
+        depth_feedback_srvs.reset();
+    }
     for (D3D12_CPU_DESCRIPTOR_HANDLE& handle : srvs) {
         if (handle.ptr) runtime->view_descriptors.Free(handle);
         handle = {};
@@ -2706,11 +2759,12 @@ void ImageView::Release() {
 }
 ImageView::ImageView(ImageView&& other) noexcept : VideoCommon::ImageViewBase{std::move(other)}, runtime{std::exchange(other.runtime, nullptr)},
     slot_images{other.slot_images}, image{other.image}, srv_resource{other.srv_resource}, srv_params{other.srv_params}, natural_type{other.natural_type},
-    srvs{std::exchange(other.srvs, {})}, uav{other.uav}, rtv{other.rtv}, rtv_on_copy{other.rtv_on_copy}, dsv{other.dsv}, dsv_read_only{other.dsv_read_only}, buffer_size{other.buffer_size} {}
+    srvs{std::exchange(other.srvs, {})}, depth_feedback_srvs{std::move(other.depth_feedback_srvs)}, uav{other.uav}, rtv{other.rtv}, rtv_on_copy{other.rtv_on_copy}, dsv{other.dsv}, dsv_read_only{other.dsv_read_only}, buffer_size{other.buffer_size} {}
 ImageView& ImageView::operator=(ImageView&& other) noexcept {
     if (this != &other) { Release(); static_cast<VideoCommon::ImageViewBase&>(*this) = std::move(other);
         runtime = std::exchange(other.runtime, nullptr); slot_images = other.slot_images; image = other.image; srv_resource = other.srv_resource;
         srv_params = other.srv_params; natural_type = other.natural_type; srvs = std::exchange(other.srvs, {});
+        depth_feedback_srvs = std::move(other.depth_feedback_srvs);
         uav = other.uav; rtv = other.rtv; rtv_on_copy = other.rtv_on_copy; dsv = other.dsv; dsv_read_only = other.dsv_read_only; buffer_size = other.buffer_size; }
     return *this;
 }
@@ -2903,6 +2957,38 @@ void TextureCacheRuntime::RunSelfTest() {
         Image depth_image{*this, depth_info, 0, 0};
         VideoCommon::ImageViewInfo depth_view_info{ImageViewType::e2D, depth_info.format};
         ImageView depth_view{*this, depth_view_info, ImageId{2}, depth_image};
+        // A snapshot must preserve the previous depth even after the original is written again.
+        const auto depth_dsv = dsv_descriptors.Allocate();
+        const D3D12_DEPTH_STENCIL_VIEW_DESC depth_desc{
+            .Format = DXGI_FORMAT_D32_FLOAT, .ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D};
+        device.Get()->CreateDepthStencilView(depth_image.Handle(), &depth_desc, depth_dsv);
+        depth_image.Transition(D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        scheduler.CommandList()->ClearDepthStencilView(depth_dsv, D3D12_CLEAR_FLAG_DEPTH,
+                                                       0.25f, 0, 0, nullptr);
+        Image* const snapshot = depth_image.PrepareDepthFeedback();
+        if (!snapshot) throw std::runtime_error{"depth feedback allocation failed"};
+        scheduler.CommandList()->ClearDepthStencilView(depth_dsv, D3D12_CLEAR_FLAG_DEPTH,
+                                                       0.75f, 0, 0, nullptr);
+        auto old_depth = DownloadStagingBuffer(width * height * sizeof(float), true);
+        auto new_depth = DownloadStagingBuffer(width * height * sizeof(float), true);
+        snapshot->DownloadMemory(old_depth, std::span{&copy, 1});
+        depth_image.DownloadMemory(new_depth, std::span{&copy, 1});
+        FreeDeferredStagingBuffer(old_depth);
+        FreeDeferredStagingBuffer(new_depth);
+        Finish();
+        dsv_descriptors.Free(depth_dsv);
+        // DownloadMemory repacks the aligned GPU footprint into the requested guest rows.
+        const u32 depth_pitch = width * sizeof(float);
+        for (u32 y = 0; y < height; ++y) {
+            for (u32 x = 0; x < width; ++x) {
+                float before{}, after{};
+                std::memcpy(&before, old_depth.mapped_span.data() + y * depth_pitch + x * 4, 4);
+                std::memcpy(&after, new_depth.mapped_span.data() + y * depth_pitch + x * 4, 4);
+                if (before != 0.25f || after != 0.75f)
+                    throw std::runtime_error{"depth feedback contents mismatch"};
+            }
+        }
+        LOG_INFO(Render, "D3D12: depth feedback round-trip passed (snapshot 0.25, original 0.75)");
         ImageView null_view{*this, VideoCommon::NullImageViewParams{}};
         Framebuffer framebuffer{*this, colors, &depth_view, targets};
         LOG_INFO(Render, "D3D12: texture cache round-trip passed ({}x{} RGBA8 unaligned rows, SRV/UAV/RTV/DSV, null views, sampler, framebuffer)", width, height);

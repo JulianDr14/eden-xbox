@@ -513,6 +513,24 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     buffer_cache.BindHostGeometryBuffers(is_indexed);
     lap.Lap(VideoCore::Perf::Counter::DrawBuffersNs);
 
+    // Resolve attachments before writing SRVs: a writable depth attachment must be sampled
+    // through a GPU snapshot, not through its read-only DSV (which would suppress guest writes).
+    VideoCommon::ImageId depth_image;
+    {
+        VideoCore::Perf::LapTimer target_lap;
+        texture_cache.UpdateRenderTargets(false);
+        target_lap.Lap(VideoCore::Perf::Counter::DrawUpdateTargetsNs);
+        depth_image = texture_cache.GetFramebuffer()->DepthImageId();
+        target_lap.Lap(VideoCore::Perf::Counter::DrawFramebufferNs);
+    }
+    lap.Lap(VideoCore::Perf::Counter::DrawTargetsNs);
+    const auto& dynamic = key.state.dynamic_state;
+    const bool writable_depth =
+        (dynamic.depth_test_enable != 0 && dynamic.depth_write_enable != 0) ||
+        (dynamic.stencil_enable != 0 && key.stencil_write_mask != 0);
+    bool depth_feedback_attempted = false;
+    bool depth_feedback_ready = false;
+
     // The table is written in root-signature order while the caches bind, stage by stage:
     // uniform, storage and texel buffers from the buffer cache, then textures and images.
     GuestDescriptorQueue& queue = context.descriptor_queue;
@@ -536,8 +554,18 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
             for (u32 index = 0; index < desc.count; ++index) {
                 const VideoCommon::ImageViewId view_id = (views_it++)->id;
                 const ImageView& image_view = texture_cache.GetImageView(view_id);
-                image_view.PrepareRead(desc.type);
-                queue.AddCopy(image_view.Handle(desc.type));
+                const bool aliases_depth = depth_image != VideoCommon::ImageId{} &&
+                                           image_view.image_id == depth_image;
+                if (aliases_depth && writable_depth && !depth_feedback_attempted) {
+                    depth_feedback_attempted = true;
+                    depth_feedback_ready = image_view.SourceImage()->PrepareDepthFeedback() != nullptr;
+                }
+                if (aliases_depth && depth_feedback_ready) {
+                    queue.AddCopy(image_view.DepthFeedbackHandle(desc.type));
+                } else {
+                    image_view.PrepareRead(desc.type);
+                    queue.AddCopy(image_view.Handle(desc.type));
+                }
                 const Sampler& sampler = texture_cache.GetSampler(*(samplers_it++));
                 sampler_handles.push_back(sampler.Handle());
                 sampler_keys.push_back(sampler.Key());
@@ -572,21 +600,19 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     }
     lap.Lap(VideoCore::Perf::Counter::DrawDescriptorsNs);
     VideoCore::Perf::LapTimer target_lap;
-    texture_cache.UpdateRenderTargets(false);
-    target_lap.Lap(VideoCore::Perf::Counter::DrawUpdateTargetsNs);
     texture_cache.CheckFeedbackLoop(std::span<const ImageViewInOut>{views.data(), views.size()});
     target_lap.Lap(VideoCore::Perf::Counter::DrawFeedbackNs);
 
     // Depth-based effects sample the bound depth buffer: both uses then share a read-only state
     // (DEPTH_SAMPLED_STATE) and the draw binds the read-only DSV.
-    const VideoCommon::ImageId depth_image = texture_cache.GetFramebuffer()->DepthImageId();
-    target_lap.Lap(VideoCore::Perf::Counter::DrawFramebufferNs);
     for (const auto& [view_id, is_storage] : image_transitions) {
         ImageView& image_view = texture_cache.GetImageView(view_id);
         if (!is_storage && depth_image != VideoCommon::ImageId{} &&
             image_view.image_id == depth_image) {
-            out.depth_sampled = true;
-            image_view.TransitionImage(DEPTH_SAMPLED_STATE);
+            if (!depth_feedback_ready) {
+                out.depth_sampled = true;
+                image_view.TransitionImage(DEPTH_SAMPLED_STATE);
+            }
             continue;
         }
         image_view.TransitionImage(is_storage ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
@@ -594,8 +620,8 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
                                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
     target_lap.Lap(VideoCore::Perf::Counter::DrawImageTransitionsNs);
-    if (out.depth_sampled && key.state.dynamic_state.depth_write_enable != 0) {
-        WarnOnce(warned_depth_feedback, "writing depth while sampling the depth buffer");
+    if (out.depth_sampled && writable_depth) {
+        WarnOnce(warned_depth_feedback, "depth feedback snapshot allocation failed; depth writes");
     }
     lap.Lap(VideoCore::Perf::Counter::DrawTargetsNs);
 

@@ -21,6 +21,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "core/arm/cpu_profile.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
 #include "video_core/capture.h"
@@ -777,6 +778,21 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
              LikelyCause(delta, total_ms), DescribePerf(delta, total_ms));
     LOG_INFO(Render, "D3D12 GPU thread: {}", DescribeDrawCosts(delta, total_ms));
     LOG_INFO(Render, "D3D12 frame chain: {}", DescribeFrameChain(delta));
+    LOG_INFO(Render, "D3D12 depth feedback: {} GPU copies in total",
+             texture_cache_runtime.DepthFeedbackCopies());
+    if (Core::CpuProfile::Enabled()) {
+        using Core::CpuProfile::Counter;
+        for (size_t core = 0; core < Core::CpuProfile::cores.size(); ++core) {
+            const auto cpu = Core::CpuProfile::Take(core);
+            LOG_INFO(Render, "D3D12 guest CPU core {}: {} JIT runs, {:.1f} ms elapsed in Run "
+                             "(includes translation/callbacks/preemption), {} code words, "
+                             "{} slow reads ({} vectors), {} slow writes, {} clock reads",
+                     core, Get(cpu, Counter::Runs), Get(cpu, Counter::RunNs) / 1.0e6,
+                     Get(cpu, Counter::CodeWords), Get(cpu, Counter::Reads),
+                     Get(cpu, Counter::Reads128),
+                     Get(cpu, Counter::Writes), Get(cpu, Counter::ClockReads));
+        }
+    }
     LOG_INFO(Render, "D3D12 guest GPU wait sites: {}", DescribeGuestWaitSites());
     LOG_INFO(Render, "D3D12 macro profiles: {}", DescribeMacroProfiles());
     // Who submits and waits (S/W, count, eden-uwp.exe RVAs from the innermost caller out).

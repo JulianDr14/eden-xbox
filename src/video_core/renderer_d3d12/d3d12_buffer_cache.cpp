@@ -244,6 +244,7 @@ void BufferCacheRuntime::Copy(Buffer* dst, ID3D12Resource* dst_raw, Buffer* src,
     }
     // Cache buffers are tracked (Buffer::Transition). Raw resources are staging memory, whose
     // state never changes, or the scratch buffer above, promoted from COMMON.
+    const bool restore_read = dst && dst->State() == D3D12_RESOURCE_STATE_GENERIC_READ;
     if (dst) dst->Transition(D3D12_RESOURCE_STATE_COPY_DEST);
     if (src) src->Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
     for (const auto& copy : copies) {
@@ -251,6 +252,9 @@ void BufferCacheRuntime::Copy(Buffer* dst, ID3D12Resource* dst_raw, Buffer* src,
         if (dst) dst->MarkUsage(copy.dst_offset, copy.size);
         if (src) src->MarkUsage(copy.src_offset, copy.size);
     }
+    // An upload can touch a vertex/index buffer whose IA binding is still cached. Restore its
+    // readable state: the generic cache may skip rebinding an unchanged guest vertex stream.
+    if (restore_read) dst->Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
 }
 void BufferCacheRuntime::CopyBuffer(Buffer& dst, Buffer& src, std::span<const VideoCommon::BufferCopy> copies, bool, bool) { Copy(&dst, dst.Handle(), &src, src.Handle(), copies); }
 void BufferCacheRuntime::CopyBuffer(Buffer& dst, ID3D12Resource* src, std::span<const VideoCommon::BufferCopy> copies, bool, bool) { Copy(&dst, dst.Handle(), nullptr, src, copies); }

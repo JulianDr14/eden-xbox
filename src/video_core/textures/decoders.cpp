@@ -71,7 +71,23 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
                                  ((block_y & block_height_mask) << GOB_SIZE_SHIFT);
 
             u32 swizzled_x = pdep<SWIZZLE_X_BITS>(origin_x * BYTES_PER_PIXEL);
-            for (u32 column = 0; column < width;
+            u32 column = 0;
+            // Tegra's low four X bits are contiguous within each row. Read a whole 16-byte
+            // sector rather than one pixel at a time; leave odd-size pixels and row tails on
+            // the scalar path. Constant-size memcpy lets the compiler select unaligned SIMD.
+            if constexpr (!TO_LINEAR && (BYTES_PER_PIXEL == 1 || BYTES_PER_PIXEL == 2 ||
+                                        BYTES_PER_PIXEL == 4 || BYTES_PER_PIXEL == 8)) {
+                constexpr u32 pixels_per_sector = 16 / BYTES_PER_PIXEL;
+                for (; width - column >= pixels_per_sector;
+                     column += pixels_per_sector, incrpdep<SWIZZLE_X_BITS, 16>(swizzled_x)) {
+                    const u32 x = column * BYTES_PER_PIXEL;
+                    const u32 offset_x = (x >> GOB_SIZE_X_SHIFT) << x_shift;
+                    const u32 source = offset_z + offset_y + offset_x + (swizzled_x | swizzled_y);
+                    const u32 target = slice * pitch * height + line * pitch + x;
+                    std::memcpy(output.data() + target, input.data() + source, 16);
+                }
+            }
+            for (; column < width;
                  ++column, incrpdep<SWIZZLE_X_BITS, BYTES_PER_PIXEL>(swizzled_x)) {
                 const u32 x = (column + origin_x) * BYTES_PER_PIXEL;
                 const u32 offset_x = (x >> GOB_SIZE_X_SHIFT) << x_shift;
