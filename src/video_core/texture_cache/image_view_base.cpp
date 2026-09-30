@@ -9,6 +9,7 @@
 #include "common/assert.h"
 #include "video_core/compatible_formats.h"
 #include "video_core/surface.h"
+#include "video_core/perf_counters.h"
 #include "video_core/texture_cache/formatter.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view_base.h"
@@ -25,7 +26,16 @@ ImageViewBase::ImageViewBase(const ImageViewInfo& info, const ImageInfo& image_i
           .height = (std::max)(image_info.size.height >> range.base.level, 1u),
           .depth = (std::max)(image_info.size.depth >> range.base.level, 1u),
       } {
-    ASSERT_MSG(VideoCore::Surface::IsViewCompatible(image_info.format, info.format, false, true),
+    VideoCore::Perf::ScopedNsTimer base_timer{
+        VideoCore::Perf::Counter::TextureCacheViewBaseNs};
+    bool compatible;
+    {
+        VideoCore::Perf::ScopedNsTimer compatibility_timer{
+            VideoCore::Perf::Counter::TextureCacheViewCompatibilityNs};
+        compatible = VideoCore::Surface::IsViewCompatible(image_info.format, info.format, false,
+                                                           true);
+    }
+    ASSERT_MSG(compatible,
                "Image view format {} is incompatible with image format {}", info.format,
                image_info.format);
     if (image_info.forced_flushed) {

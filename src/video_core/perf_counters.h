@@ -59,6 +59,20 @@ enum class Counter : size_t {
     TextureCacheRegisterNs,
     TextureCacheViewCreateNs,
     TextureCacheViewsCreated,
+    TextureCacheViewSetupNs,       ///< format, swizzle, range and dimension derivation
+    TextureCacheViewReinterpretNs, ///< typeless-family validation/reinterpreted image lookup
+    TextureCacheViewSrvNs,         ///< SRV parameters and eager natural SRV creation
+    TextureCacheViewAttachmentNs,  ///< RTV/DSV/UAV capability checks and descriptor creation
+    TextureCacheViewSlotInsertNs,  ///< SlotVector insertion when it already has a free slot
+    TextureCacheViewSlotGrowNs,    ///< SlotVector allocation and relocation plus inserted view
+    TextureCacheViewSlotGrows,
+    TextureCacheViewSlotClockNs,  ///< back-to-back steady_clock calls in profiled insertion
+    TextureCacheViewSlotFreeNs,   ///< selecting/growing the backing slot
+    TextureCacheViewSlotConstructNs, ///< placement-new, including member initializers
+    TextureCacheViewSlotBitNs,    ///< marking the selected slot occupied
+    TextureCacheViewIndexNs,       ///< linking the new view into its owning Image
+    TextureCacheViewBaseNs,        ///< ImageViewBase constructor body
+    TextureCacheViewCompatibilityNs, ///< IsViewCompatible inside ImageViewBase
     DrawNs,                ///< whole draws (direct and indirect), nested counters included
     DrawTexturesNs,        ///< of which: reading texture handles and finding the image views
     DrawBuffersNs,         ///< uniform, storage, texel, vertex and index buffers

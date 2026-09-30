@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <numeric>
 #include <type_traits>
 #include <utility>
@@ -33,6 +34,13 @@ struct SlotId {
     }
 
     u32 index = INVALID_INDEX;
+};
+
+struct SlotInsertProfile {
+    u64 clock_ns{};
+    u64 free_index_ns{};
+    u64 construct_ns{};
+    u64 storage_bit_ns{};
 };
 
 template <class T>
@@ -128,6 +136,28 @@ public:
         return SlotId{index};
     }
 
+    template <typename... Args>
+    [[nodiscard]] SlotId insert_profiled(SlotInsertProfile& profile, Args&&... args) noexcept {
+        using Clock = std::chrono::steady_clock;
+        const auto clock_begin = Clock::now();
+        const auto begin = Clock::now();
+        const u32 index = FreeValueIndex();
+        const auto after_index = Clock::now();
+        new (&values[index].object) T(std::forward<Args>(args)...);
+        const auto after_construct = Clock::now();
+        SetStorageBit(index);
+        const auto after_bit = Clock::now();
+        const auto ns = [](auto duration) {
+            return static_cast<u64>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+        };
+        profile.clock_ns = ns(begin - clock_begin);
+        profile.free_index_ns = ns(after_index - begin);
+        profile.construct_ns = ns(after_construct - after_index);
+        profile.storage_bit_ns = ns(after_bit - after_construct);
+        return SlotId{index};
+    }
+
     void erase(SlotId id) noexcept {
         values[id.Value()].object.~T();
         free_list.push_back(id.Value());
@@ -150,6 +180,11 @@ public:
 
     [[nodiscard]] size_t size() const noexcept {
         return values_capacity - free_list.size();
+    }
+
+    /// Whether the next insertion must allocate a larger array and move every live object.
+    [[nodiscard]] bool full() const noexcept {
+        return free_list.empty();
     }
 
 private:

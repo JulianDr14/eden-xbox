@@ -2255,6 +2255,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
     if (!image) {
         return;
     }
+    VideoCore::Perf::LapTimer view_timer;
     // Views of a decoded block-compressed array read its plain texels (a view in another format
     // reinterprets the same resource format).
     FormatInfo format_info = runtime->Format(info.format);
@@ -2300,6 +2301,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
                         info.range.extent.layers, resource_levels, resource_array);
         }
     }
+    view_timer.Lap(VideoCore::Perf::Counter::TextureCacheViewSetupNs);
     const bool is_msaa = source.info.num_samples > 1;
     // The guest views an image in any format of the same size, and Vulkan allows it (mutable
     // format). D3D12 needs the view in the resource's typeless family: a view outside it is an
@@ -2339,6 +2341,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
     if (!view_on_copy && TypelessFamily(format_info.view) != resource_family) {
         format_info.view = own_format.view;
     }
+    view_timer.Lap(VideoCore::Perf::Counter::TextureCacheViewReinterpretNs);
 
     srv_params = {
         .format = format_info.srv,
@@ -2374,6 +2377,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
     if (!info.IsRenderTarget()) {
         srvs[static_cast<size_t>(natural_type)] = CreateSrv(natural_type);
     }
+    view_timer.Lap(VideoCore::Perf::Counter::TextureCacheViewSrvNs);
 
     const SurfaceType surface = VideoCore::Surface::GetFormatType(info.format);
     const bool is_3d = resource_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
@@ -2461,6 +2465,7 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
                                layers);
         });
     }
+    view_timer.Lap(VideoCore::Perf::Counter::TextureCacheViewAttachmentNs);
 }
 ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewInfo& info,
                      ImageId id, Image& image_, SlotVector<Image>& images)
@@ -2468,9 +2473,10 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
     slot_images = &images;
     if (natural_type == Shader::TextureType::ColorArray2D &&
         srv_params.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
-        // A 2D array view of a 3D image: the delegated constructor could not reach the image for
-        // its slice array and fell back to the 3D SRV, which stays owned by srvs[Color3D].
-        srvs[static_cast<size_t>(natural_type)] = CreateSrv(natural_type);
+        // Before slot_images was available, CreateSrv fell back to the 3D SRV and put the same
+        // handle in both slots. Keep Color3D as its owner, but leave ColorArray2D empty so Handle()
+        // creates the slice-array SRV only if a shader actually reads this view as a 2D array.
+        srvs[static_cast<size_t>(natural_type)] = {};
     }
 }
 ImageView::ImageView(TextureCacheRuntime&, const VideoCommon::ImageInfo& info,

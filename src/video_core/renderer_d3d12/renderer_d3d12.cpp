@@ -580,6 +580,23 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
     const double clear_ms = ns_ms(Counter::ClearNs);
     const double dispatch_ms = ns_ms(Counter::DispatchNs);
     const double submit_ms = ns_ms(Counter::SubmitListNs);
+    const double view_total_ms = ns_ms(Counter::TextureCacheViewCreateNs);
+    const double view_setup_ms = ns_ms(Counter::TextureCacheViewSetupNs);
+    const double view_reinterpret_ms = ns_ms(Counter::TextureCacheViewReinterpretNs);
+    const double view_srv_ms = ns_ms(Counter::TextureCacheViewSrvNs);
+    const double view_attachment_ms = ns_ms(Counter::TextureCacheViewAttachmentNs);
+    const double view_slot_insert_ms = ns_ms(Counter::TextureCacheViewSlotInsertNs);
+    const double view_slot_grow_ms = ns_ms(Counter::TextureCacheViewSlotGrowNs);
+    const double view_slot_clock_ms = ns_ms(Counter::TextureCacheViewSlotClockNs);
+    const double view_slot_free_ms = ns_ms(Counter::TextureCacheViewSlotFreeNs);
+    const double view_slot_construct_ms = ns_ms(Counter::TextureCacheViewSlotConstructNs);
+    const double view_slot_bit_ms = ns_ms(Counter::TextureCacheViewSlotBitNs);
+    const double view_index_ms = ns_ms(Counter::TextureCacheViewIndexNs);
+    const double view_base_ms = ns_ms(Counter::TextureCacheViewBaseNs);
+    const double view_compatibility_ms = ns_ms(Counter::TextureCacheViewCompatibilityNs);
+    const double view_placement_ms = std::max(
+        0.0, view_slot_insert_ms + view_slot_grow_ms - view_base_ms - view_setup_ms -
+                 view_reinterpret_ms - view_srv_ms - view_attachment_ms);
     const double submit_overhead = std::max(0.0, submit_ms - draw_ms - clear_ms - dispatch_ms);
     const double outside = std::max(0.0, interval_ms - Ms(d, Counter::GpuThreadIdleUs) -
                                              Ms(d, Counter::FenceWaitUs) -
@@ -595,7 +612,11 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
         "outside draw/clear/dispatch), {} ticks {:.1f} ms, {} invalidations {:.1f} ms | uploads: "
         "{} maps {:.1f} ms, {} repacks {:.1f} ms, {} copies {:.1f} ms | texture cache: "
         "{} finds {:.1f} ms, {} inserts {:.1f} ms (overlap {:.1f}, image {:.1f}, refresh "
-        "{:.1f}, register {:.1f}), {} views {:.1f} ms, staging {:.1f}, unswizzle {:.1f}, "
+        "{:.1f}, register {:.1f}), {} views {:.1f} ms [setup {:.1f}, reinterpret {:.1f}, "
+        "base {:.1f} (compat {:.1f}), SRV {:.1f}, attachments {:.1f}, slot {:.1f}, "
+        "grow {} / {:.1f}, placement {:.1f} [clock {:.1f}, free {:.1f}, construct {:.1f}, bit "
+        "{:.1f}], index {:.1f}], "
+        "staging {:.1f}, unswizzle {:.1f}, "
         "backend {:.1f} ms | DMA: "
         "puller {} / {:.1f} ms, macros {} / {:.1f} ms, Maxwell {} / {:.1f} ms, compute {} / "
         "{:.1f} ms, copies {} / {:.1f} ms, other {} / {:.1f} ms | Maxwell dirty: {} changed, "
@@ -620,7 +641,11 @@ std::string DescribeDrawCosts(const VideoCore::Perf::Snapshot& d, double interva
         get(Counter::TextureCacheInserts), ns_ms(Counter::TextureCacheInsertNs),
         ns_ms(Counter::TextureCacheOverlapNs), ns_ms(Counter::TextureCacheImageCreateNs),
         ns_ms(Counter::TextureCacheRefreshNs), ns_ms(Counter::TextureCacheRegisterNs),
-        get(Counter::TextureCacheViewsCreated), ns_ms(Counter::TextureCacheViewCreateNs),
+        get(Counter::TextureCacheViewsCreated), view_total_ms, view_setup_ms, view_reinterpret_ms,
+        view_base_ms, view_compatibility_ms, view_srv_ms, view_attachment_ms, view_slot_insert_ms,
+        get(Counter::TextureCacheViewSlotGrows), view_slot_grow_ms, view_placement_ms,
+        view_slot_clock_ms, view_slot_free_ms, view_slot_construct_ms, view_slot_bit_ms,
+        view_index_ms,
         ns_ms(Counter::TextureCacheStagingNs), ns_ms(Counter::TextureCacheUnswizzleNs),
         ns_ms(Counter::TextureCacheBackendUploadNs),
         get(Counter::DmaPullerCalls), ns_ms(Counter::DmaPullerNs), get(Counter::DmaMacroCalls),

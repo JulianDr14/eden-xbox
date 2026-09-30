@@ -2247,6 +2247,24 @@ el coste de object tracking de page faults. Fuentes: [DRED](https://microsoft.gi
 [non-shader-visible heaps](https://learn.microsoft.com/en-us/windows/win32/direct3d12/non-shader-visible-descriptor-heaps)
 y [CPU efficiency/free-threaded device calls](https://microsoft.github.io/DirectX-Specs/d3d/CPUEfficiency.html).
 
-Gate pendiente: repetir el recorrido manual de Wonder y comparar el hitch de vistas, los frames de
-mas de 100 ms y la cantidad de RTV/DSV/SRV creados. El build incremental y el self-test de texture
-cache ya terminan limpios.
+El primer intento de hacer tambien UAV/RTV/DSV completamente lazy no mejoro el evento (96,4--97,6
+ms frente a 93,4--93,7 ms) y se revirtio. El perfil por subfases encontro que `SlotVector` tampoco
+era el problema: `FreeValueIndex`, el bit de ocupacion y sus crecimientos eran despreciables. El
+coste estaba dentro del `placement-new`, fuera del cuerpo cronometrado del constructor principal:
+el constructor delegado de `ImageView` creaba el SRV de una textura 3D vista como array 2D en todas
+las vistas candidatas. Ahora conserva el SRV 3D provisional, deja vacia la entrada `ColorArray2D` y
+la materializa desde `Handle()` solo ante un uso real; `PrepareRead()` sigue refrescando la copia de
+slices antes de leerla.
+
+Gate PC manual, mismo recorrido de Wonder con `fastmem=0 gpu_profile=1`:
+
+- 724 vistas: 68,3 -> 2,6 ms (-96,2%); `placement-new`: 67,7 -> 2,0 ms (-97,0%).
+- Lote comparable: 688 vistas/61,0 ms -> 691 vistas/3,3 ms (-94,6%).
+- Primer hitch: draws 128,3 -> 63,0 ms (-50,9%) y submit 177,3 -> 114,6 ms (-35,4%).
+- Sin device removal ni errores nuevos del renderer.
+
+El siguiente cuello medido es `RefreshImage` y la preparacion de uploads, no los descriptores. En
+el primer lote quedaron 80,8 ms de inserciones, con 56,2 ms atribuidos a refresh, 21,3 ms a imagen,
+18,6 ms de repack y 25,9 ms de backend (contadores anidados). El proximo gate debe desglosar
+`RefreshImage` en solapes, construccion de regiones de copia, staging/unswizzle, transiciones y
+grabacion, y optimizar solo la subfase dominante.

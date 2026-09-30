@@ -476,5 +476,19 @@ vez:
 - Los RTV/DSV viven en heaps CPU-only. D3D12 copia su contenido al command list durante
   `OMSetRenderTargets`, por lo que no requieren residencia ni sincronizacion con la GPU:
   https://learn.microsoft.com/en-us/windows/win32/direct3d12/non-shader-visible-descriptor-heaps.
-- Build UWP incremental limpio y self-test de texture cache limpio. Falta repetir el recorrido
-  manual de Wonder para medir la reduccion del hitch de vistas.
+- El perfil dentro de `SlotVector::insert` descarto la estructura: buscar un slot, marcar su bit y
+  el propio reloj costaban practicamente cero. El `placement-new` concentraba 60,6--89,9 ms por
+  lote porque el constructor delegado de `ImageView` materializaba inmediatamente el SRV especial
+  que representa una textura 3D como array 2D. Ese SRV de la copia por slices ahora queda vacio y
+  `Handle(ColorArray2D)` lo crea solo si un shader llega a pedirlo; el SRV 3D conserva la propiedad
+  de su descriptor provisional.
+- Gate PC manual de Wonder: 724 vistas bajaron de 68,3 a 2,6 ms (-96,2%) y su construccion de 67,7
+  a 2,0 ms (-97,0%). Otro lote comparable paso de 61,0 ms para 688 vistas a 3,3 ms para 691
+  (-94,6%). En el primer hitch, draws bajaron de 128,3 a 63,0 ms y submit de 177,3 a 114,6 ms. No
+  hubo device removal; permanecen el PSO invalido conocido y los asserts recuperables de
+  `BufferQueueProducer`.
+- El siguiente cuello ya no son las vistas. En ese hitch quedaron 80,8 ms en inserciones de
+  imagen: 56,2 ms en `RefreshImage`, 21,3 ms en preparacion/creacion de imagen, 18,6 ms en repack y
+  25,9 ms en el backend de uploads (algunas fases estan anidadas). El siguiente perfil debe partir
+  `RefreshImage` en busqueda de solapes, conversion de copias, staging/unswizzle, transiciones y
+  grabacion; no volver a cambiar descriptores sin datos.

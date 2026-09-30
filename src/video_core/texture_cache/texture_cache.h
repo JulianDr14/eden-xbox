@@ -2164,8 +2164,36 @@ ImageViewId TextureCache<P>::FindOrEmplaceImageView(ImageId image_id, const Imag
     }
     VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::TextureCacheViewCreateNs};
     VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::TextureCacheViewsCreated, 1);
-    const ImageViewId image_view_id = slot_image_views.insert(runtime, info, image_id, image, slot_images);
-    image.InsertView(info, image_view_id);
+    const bool grows = slot_image_views.full();
+    if (grows) {
+        VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::TextureCacheViewSlotGrows, 1);
+    }
+    ImageViewId image_view_id;
+    {
+        VideoCore::Perf::ScopedNsTimer insert_timer{
+            grows ? VideoCore::Perf::Counter::TextureCacheViewSlotGrowNs
+                  : VideoCore::Perf::Counter::TextureCacheViewSlotInsertNs};
+        if (VideoCore::Perf::DetailedGpuProfileEnabled()) {
+            Common::SlotInsertProfile profile;
+            image_view_id = slot_image_views.insert_profiled(profile, runtime, info, image_id, image,
+                                                             slot_images);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureCacheViewSlotClockNs,
+                                 profile.clock_ns);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureCacheViewSlotFreeNs,
+                                 profile.free_index_ns);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureCacheViewSlotConstructNs,
+                                 profile.construct_ns);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureCacheViewSlotBitNs,
+                                 profile.storage_bit_ns);
+        } else {
+            image_view_id = slot_image_views.insert(runtime, info, image_id, image, slot_images);
+        }
+    }
+    {
+        VideoCore::Perf::ScopedNsTimer index_timer{
+            VideoCore::Perf::Counter::TextureCacheViewIndexNs};
+        image.InsertView(info, image_view_id);
+    }
     return image_view_id;
 }
 
