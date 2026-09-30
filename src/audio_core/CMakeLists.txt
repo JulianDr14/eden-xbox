@@ -205,6 +205,7 @@ add_library(audio_core STATIC
     renderer/voice/voice_info.h
     renderer/voice/voice_state.h
     sink/null_sink.h
+    sink/realtime_pacer.h
     sink/sink.h
     sink/sink_details.cpp
     sink/sink_details.h
@@ -229,6 +230,14 @@ endif()
 target_include_directories(audio_core PRIVATE ${OPUS_INCLUDE_DIRS})
 target_link_libraries(audio_core PUBLIC common core Opus::opus)
 
+if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    target_sources(audio_core PRIVATE
+        sink/xaudio2_sink.cpp
+        sink/xaudio2_sink.h)
+    target_link_libraries(audio_core PRIVATE xaudio2.lib)
+    target_compile_definitions(audio_core PRIVATE HAVE_XAUDIO2=1)
+endif()
+
 if (ENABLE_CUBEB)
     target_sources(audio_core PRIVATE
         sink/cubeb_sink.cpp
@@ -238,8 +247,8 @@ if (ENABLE_CUBEB)
     target_compile_definitions(audio_core PRIVATE HAVE_CUBEB=1)
 endif()
 
-# Xbox/UWP AppContainer: deliberately NO audio device backend. The headless boot uses the null sink
-# (audio_core/sink/null_sink.h, always built). Linking SDL3 here would drag its entire desktop
+# Xbox/UWP AppContainer uses the native XAudio2 2.9 backend above. Linking SDL3 here would drag its
+# entire desktop
 # windowing/input stack (GDI32/SHELL32/USER32/IMM32/SETUPAPI/HID/WINMM) into the app - none of which
 # the AppContainer provides - so the package fails to activate at load.
 if (NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")

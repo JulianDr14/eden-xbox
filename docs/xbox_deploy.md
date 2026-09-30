@@ -4,12 +4,9 @@ This is the step that turns the UWP build from [`docs/uwp_build.md`](uwp_build.m
 that actually runs on a console. It covers **GATE 2**: proving Eden executed guest code through the
 dynarmic JIT inside the Xbox AppContainer.
 
-> **What this does _not_ do yet:** the Direct3D 12 renderer is at phase 1: a real device and
-> swapchain on the CoreWindow that present the guest framebuffer through a CPU copy. There is no
-> shader path, so guest GPU work is not rendered; no input, no audio. Success is a dark-blue screen,
-> then the payload's ~10 s test pattern (green top band, colour ramps, a white bar sweeping right),
-> and `RunHeadlessBoot returned 0` in the diag. The log lists the console's real D3D12 caps
-> (`D3D12: ...` lines).
+> **Current state:** the renderer executes guest D3D12 workloads and UWP uses native XAudio2 2.9
+> output. The `boot_nro` still proves JIT and graphics only; it does not open AudioOut. Real audio
+> is therefore gated with a game after the NRO returns 0. See [`xbox_audio.md`](xbox_audio.md).
 
 ## What you need
 
@@ -81,6 +78,23 @@ base C++ toolset alone links the app fine but does not ship this package.
 3. Set the app to **Game mode**, not App mode. App mode caps a UWP app at roughly a gigabyte of
    memory; Game mode is what makes the emulated DRAM reservation viable — especially on Series S.
 4. Launch it.
+
+## Audio gate
+
+The default is `audio=xaudio2`: PCM16 stereo at 48 kHz through the system default endpoint. No
+extra DLL, microphone capability or redistributable is needed. Optional `boot.cfg` entries are:
+
+```ini
+audio=xaudio2
+audio_profile=1
+```
+
+Use `audio=null` for a timed silent comparison. An unknown `audio=` value writes a warning and
+falls back to XAudio2. With profiling enabled, inspect `eden_log.txt` for the periodic `XAudio2
+profile` line and for any `GlitchesSinceEngineStarted` increase. The console acceptance gate is at
+least 15 minutes of continuous game audio over HDMI (and controller headphones when available),
+with no repeated pops, distortion, `Critical`, deadlock or frame-pacing regression. If the endpoint
+is lost, the game must continue at normal speed using the silent paced fallback.
 
 ## Reading the result
 

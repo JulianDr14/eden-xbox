@@ -208,6 +208,7 @@ present siguió por el scheduler, el boot terminó en 10,890 s con retorno 0 y 8
 - Quads y fans.
 - Wide lines.
 - Logic op.
+- Audio XAudio2 2.9 nativo; diseño y gates en `xbox_audio.md`.
 
 El plan largo, con la investigación, está en `~/.claude/plans/ancient-shimmying-creek.md`.
 
@@ -306,6 +307,31 @@ vez:
   - con escalado por CPU: ~17 s en el PC;
   - con el blit por shader: ~10.2 s en el PC y 10.1 s en la Series, es decir, 60 fps.
 - **Memoria en la Series durante el boot:** ~750 MiB de 5120.
+
+### Audio XAudio2 2.9 (29 sep 2026)
+
+- El UWP usa XAudio2 por defecto, con PCM16 estéreo a 48 kHz y tres slots persistentes de 960
+  frames: 20 ms por slot y 60 ms en vuelo. `audio=null` conserva la ruta silenciosa temporizada.
+- `SinkStream::ProcessAudioOutAndRender` sigue haciendo la mezcla, volumen, downmix y underrun. El
+  backend solo mantiene el ring y entrega PCM; no duplica reglas del mezclador de Eden.
+- El callback de voice únicamente libera un bit en una máscara atómica y despierta al worker. No
+  reserva, registra, mezcla, espera ni consulta el dispositivo. El worker es el único productor y
+  el único que llama a `SubmitSourceBuffer`.
+- `CreateMasteringVoice` usa device id nulo, por lo que XAudio2 2.9 usa el Virtual Audio Client y
+  sigue el endpoint predeterminado. Cualquier HRESULT o `OnCriticalError` retira la voice después
+  de terminar sus callbacks y cambia a pacing silencioso sin detener el juego.
+- La source voice lleva `XAUDIO2_VOICE_NOSRC | XAUDIO2_VOICE_NOPITCH`. Toda la memoria se reserva
+  al construir el stream; steady state no crea objetos ni asigna buffers.
+- `audio_profile=1` consulta `GetPerformanceData` cada cinco segundos fuera del callback. Registra
+  submits, completados, fallos, latencia, glitches, voices y memoria de XAudio2.
+- Build UWP completo correcto. `boot_nro` dio `RunHeadlessBoot returned 0` con XAudio2 por defecto y
+  con `audio=null`. El NRO no crea AudioOut, por lo que el sonido real se valida con Wonder. El
+  AppX 0.2.66.0 está firmado y sus EXE/PDB están archivados en
+  `build-uwp/symbols/0.2.66.0/`.
+- Gate Wonder PC de 92 s: 4244 buffers enviados y 4241 completados; los tres restantes seguían en
+  vuelo al cerrar. Cero fallos de submit, starvations y glitches; latencia de 1887–1940 muestras
+  (39–40 ms), engine estable en 62 KiB y cierre limpio con `RunHeadlessBoot returned 0`. El audio
+  queda funcionalmente validado en PC; faltan la corrida de 15 minutos y Series.
 
 ### Ruido conocido en los logs (no es un fallo)
 - `Failed to find program id for ROM`: un NRO no tiene program id.

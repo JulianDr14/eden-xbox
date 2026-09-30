@@ -3,9 +3,9 @@
 
 // Headless GATE-2 boot frontend for the Xbox/UWP AppContainer target.
 //
-// Brings up Core::System with the Null renderer + null audio sink, loads a homebrew NRO staged in the
+// Brings up Core::System with the D3D12 renderer + native XAudio2 output, loads a payload staged in the
 // app's sandboxed local storage, runs it through the dynarmic JIT, and emits a deterministic
-// JIT-liveness marker. No audio device; input is the Xbox gamepad and/or a boot.cfg script
+// JIT-liveness marker. Input is the Xbox gamepad and/or a boot.cfg script
 // (uwp_input.h).
 //
 // The Core::System bring-up is modeled on the proven desktop boot in src/yuzu_cmd/yuzu.cpp; the
@@ -67,6 +67,10 @@ using AppMemoryQuery = bool (*)(u64& used, u64& limit); // d3d12_device.h
 void SetAppMemoryQuery(AppMemoryQuery query);            // d3d12_device.h
 } // namespace D3D12
 
+namespace AudioCore::Sink {
+void SetXAudio2ProfileEnabled(bool enabled) noexcept; // audio_core/sink/xaudio2_sink.h
+}
+
 namespace VideoCommon {
 void SetAstcArrayRecompression(bool enabled) noexcept; // texture_cache/util.h
 } // namespace VideoCommon
@@ -97,7 +101,7 @@ static void ApplyHeadlessBootSettings(const BootSurface& surface) {
     Settings::values.renderer_backend = surface.core_window != nullptr
                                             ? Settings::RendererBackend::Direct3D12
                                             : Settings::RendererBackend::Null;
-    Settings::values.sink_id = Settings::AudioEngine::Null;              // audio_core/sink/null_sink
+    Settings::values.sink_id = Settings::AudioEngine::XAudio2;
     // The on-console failure mode is a hard crash with no eden_log.txt; the default 4 KiB write
     // buffering loses exactly the lines that say where it died. Flush every line instead.
     Settings::values.log_flush_line = true;
@@ -124,6 +128,10 @@ struct BootConfig {
     bool descriptor_checks{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
+    /// XAudio2 performance samples and queue counters ("audio_profile=1").
+    bool audio_profile{};
+    /// Timed silent output for comparison and audio-device diagnosis ("audio=null").
+    bool null_audio{};
     /// Diagnostic only: ignore requests for 30 Hz presentation ("force_swap_interval=1").
     bool force_swap_interval_one{};
     /// File name of a game in LocalState\games to boot instead of boot.nro (package-appx.ps1 -Game).
@@ -172,6 +180,10 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
               std::to_string(std::chrono::duration<double, std::milli>(timer_resolution).count()) +
               " ms");
     ApplyHeadlessBootSettings(config.null_renderer ? BootSurface{} : surface);
+    if (config.null_audio) {
+        Settings::values.sink_id = Settings::AudioEngine::Null;
+    }
+    AudioCore::Sink::SetXAudio2ProfileEnabled(config.audio_profile);
     // Read by HostMemory when Core::System builds the DRAM, so it has to be set before that.
     // The 384-MiB Series experiment covered only 388 of 2637 MiB requested by Wonder (15%). The
     // resulting fastmem fault/recompile storm was markedly slower than the page table, so Auto
@@ -225,6 +237,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         D3D12::SetGpuBasedValidation(config.gpu_validation);
         WriteDiag("step: D3D12 debug layer requested");
     }
+    WriteDiag(std::string("step: audio ") + (config.null_audio ? "timed Null" : "XAudio2"));
     WriteDiag(surface.core_window != nullptr && !config.null_renderer
                   ? "step: logging up, renderer Direct3D12 on a " + std::to_string(surface.width) +
                         "x" + std::to_string(surface.height) + " CoreWindow"
@@ -1074,6 +1087,19 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "gpu_profile=1") {
                         config.gpu_profile = true;
                         WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
+                    } else if (line == "audio_profile=1") {
+                        config.audio_profile = true;
+                        WriteDiag("boot.cfg: XAudio2 profiling enabled");
+                    } else if (line == "audio=null") {
+                        config.null_audio = true;
+                        WriteDiag("boot.cfg: timed Null audio");
+                    } else if (line == "audio=xaudio2") {
+                        config.null_audio = false;
+                        WriteDiag("boot.cfg: XAudio2 audio");
+                    } else if (line.starts_with("audio=")) {
+                        config.null_audio = false;
+                        WriteDiag("boot.cfg: unknown audio backend '" + line.substr(6) +
+                                  "', using XAudio2");
                     } else if (line == "force_swap_interval=1") {
                         config.force_swap_interval_one = true;
                         WriteDiag("boot.cfg: forcing guest swap intervals above one to one");
