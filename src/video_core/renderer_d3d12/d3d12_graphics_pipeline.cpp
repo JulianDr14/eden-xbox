@@ -651,6 +651,13 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
         }
         const u32 slot = attribute.buffer;
         const u32 divisor = state.binding_divisors[slot];
+        const bool split = MaxwellToD3D12::SplitNormalized8x4(
+            attribute.Type(), attribute.Size(), attribute.offset);
+        if (split) {
+            format = attribute.Type() == Maxwell::VertexAttribute::Type::UNorm
+                         ? DXGI_FORMAT_R8G8_UNORM
+                         : DXGI_FORMAT_R8G8_SNORM;
+        }
         elements.push_back({
             .SemanticName = "TEXCOORD",
             .SemanticIndex = static_cast<UINT>(index),
@@ -661,6 +668,12 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
                                            : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
             .InstanceDataStepRate = divisor,
         });
+        if (split) {
+            auto second = elements.back();
+            second.SemanticIndex += Shader::IR::NUM_GENERICS;
+            second.AlignedByteOffset += 2;
+            elements.push_back(second);
+        }
     }
     desc.InputLayout = {.pInputElementDescs = elements.empty() ? nullptr : elements.data(),
                         .NumElements = static_cast<UINT>(elements.size())};

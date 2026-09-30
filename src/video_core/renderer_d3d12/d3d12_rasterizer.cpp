@@ -481,10 +481,7 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
         cmd->SetGraphicsRootSignature(layout.Handle());
         command_state.graphics_root = layout.Handle();
     }
-    if (!command_state.valid || command_state.graphics_pipeline != pipeline.Handle()) {
-        cmd->SetPipelineState(pipeline.Handle());
-        command_state.graphics_pipeline = pipeline.Handle();
-    }
+    scheduler.SetPipelineState(pipeline.Handle());
 
     const auto color_targets = framebuffer.ColorTargets();
     const D3D12_CPU_DESCRIPTOR_HANDLE depth = framebuffer.DepthTarget(bindings.depth_sampled);
@@ -566,7 +563,6 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
 void RasterizerD3D12::InvalidateGraphicsState() {
     command_state.valid = false;
     command_state.graphics_root = nullptr;
-    command_state.graphics_pipeline = nullptr;
 }
 
 void RasterizerD3D12::InvalidateCommandListState() {
@@ -912,7 +908,7 @@ void RasterizerD3D12::DispatchCompute() {
         command_state.heaps_bound = true;
     }
     cmd->SetComputeRootSignature(layout.Handle());
-    cmd->SetPipelineState(pipeline->Handle());
+    scheduler.SetPipelineState(pipeline->Handle());
     cmd->SetComputeRoot32BitConstants(PipelineLayout::PUSH_CONSTANTS_INDEX, PUSH_CONSTANT_WORDS,
                                       bindings.push_constants.data(), 0);
     dxil_spirv_compute_runtime_data runtime_data{};

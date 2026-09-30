@@ -42,6 +42,15 @@ D3D12_FILL_MODE FillMode(Maxwell::PolygonMode mode);
 /// recompiler reads them as integers and converts in the shader.
 DXGI_FORMAT VertexFormat(Maxwell::VertexAttribute::Type type, Maxwell::VertexAttribute::Size size);
 
+/// Four normalized bytes at a half-word offset cannot use a four-byte IA format. Fetch two
+/// aligned pairs instead; the shader joins them without copying/repacking vertex buffers.
+constexpr bool SplitNormalized8x4(Maxwell::VertexAttribute::Type type,
+                                 Maxwell::VertexAttribute::Size size, u32 offset) noexcept {
+    return (type == Maxwell::VertexAttribute::Type::UNorm ||
+            type == Maxwell::VertexAttribute::Type::SNorm) &&
+           size == Maxwell::VertexAttribute::Size::Size_R8_G8_B8_A8 && (offset & 3U) == 2U;
+}
+
 /// Index buffer format; UnsignedByte has none (the draw widens it to 16 bits).
 DXGI_FORMAT IndexFormat(Maxwell::IndexFormat format);
 

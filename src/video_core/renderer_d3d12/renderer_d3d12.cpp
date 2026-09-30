@@ -963,7 +963,7 @@ void RendererD3D12::RecordBlit(ID3D12Resource* image, u32 image_index,
     cmd->SetDescriptorHeaps(2, heaps);
 
     cmd->SetGraphicsRootSignature(blit_root_signature.Get());
-    cmd->SetPipelineState(blit_pipeline.Get());
+    scheduler.SetPipelineState(blit_pipeline.Get());
     // tex_scale, tex_offset
     cmd->SetGraphicsRoot32BitConstants(0, 4, tex_scale_offset.data(), 0);
     const u32 runtime_data[12]{};

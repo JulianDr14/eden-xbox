@@ -148,6 +148,7 @@ enum class InputGenericLoadOp {
     SToF,
     UToF,
     SNormA2B10G10R10, ///< sign-extend the field, then normalize (see UnpackSNormA2B10G10R10)
+    SplitNormalized8x4,
 };
 
 struct InputGenericInfo {
@@ -155,6 +156,7 @@ struct InputGenericInfo {
     Id pointer_type;
     Id component_type;
     InputGenericLoadOp load_op;
+    Id second_pair{};
 };
 
 struct GenericElementInfo {
