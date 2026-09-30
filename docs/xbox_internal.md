@@ -244,6 +244,14 @@ vez:
 
 ## 4. Lo que sabemos
 
+Revision comparada de los logs PC/Series del 29 sep: ver
+[`xbox_log_review_2026-09-30.md`](xbox_log_review_2026-09-30.md). Recuentos confirmados,
+con tres trampas de interpretacion: `caches see` es presion sintetica global, no bytes
+residentes solo en caches; los ocho avisos de storage fallback Series ocurren en precarga,
+que tambien retraduce los environments; el assert de BufferQueueProducer comprueba slots
+fuera del maximo activo, no demuestra reutilizacion prematura. Los ReadBlock ausentes
+rellenan con cero, pero no prueban corrupcion sin identificar consumidor y mapping.
+
 ### La consola (Xbox Series X, UWP Dev Mode, medido con el probe)
 - **Adaptador y API:** el adaptador es `SraKmd_arden`, con D3D12 a **FL 11.0**, **SM 6.4** y root
   signature 1.2.
@@ -461,7 +469,25 @@ vez:
   de Render. Durante un hitch de creacion de 648 recursos aparecieron ocho asserts recuperables de
   `BufferQueueProducer` por un slot no libre; son un problema de pacing separado, no de traduccion
   de memoria.
-- Pendiente medir Wonder en Series contra 0.2.64.0.
+- Series, logs de Descargas del 29 sep 2026, revisados el 30 sep: paquete 0.2.66.0,
+  adaptador `SraKmd_arden`, `fastmem off`, shaders asincronos y XAudio2 activos. Por version,
+  esta build incluye la tabla limpia; los logs no tienen un marcador dedicado que identifique
+  esa tabla. `system.Run()` empieza a los 55,25 s y el log llega a los 179,35 s (~124 s
+  de emulacion). No hay `Critical`, device removal, `bad_alloc` ni crash registrado; tampoco
+  `RunHeadlessBoot returned 0`, por lo que no se acredita un cierre limpio ni ausencia visual
+  de corrupcion. Hay dos PSO rechazados del mismo par VS `d9effdee28edb3b2` / PS
+  `e721dbbf095a71c4`, independientes de una prueba de traduccion de memoria.
+- Rendimiento Series: las ventanas con ~177000--193000 draws y ~900 dispatches por 300 frames
+  (unos 590--640 draws/frame) dan 36,52 / 27,56 / 26,11 / 30,07 / 32,22 / 23,00 ms/frame,
+  equivalentes a 27,4 / 36,3 / 38,3 / 33,3 / 31,0 / 43,5 FPS. Son frames nuevos del guest,
+  confirmados por `D3D12 frame chain`, sin forzar swap intervals. Las ventanas tempranas de
+  18,39--19,06 ms (~52--54 FPS) tienen bastante menos draws y no representan la misma carga.
+  Frente a la referencia historica de ~33,3--34 ms en gameplay, hay indicios de mejora y ya
+  no todas las ventanas quedan a 30 FPS; no es un A/B del mismo recorrido y XAudio2 y otros
+  cambios impiden atribuir un porcentaje exacto exclusivamente al JIT. Todas las ventanas
+  siguen clasificadas `mostly guest CPU`; incluso sin stalls de pipeline hay una de 32,22 ms.
+  Pico observado en diag: 4541 de 5120 MiB. Funcionamiento observado en Series; quedan la
+  comparacion controlada contra 0.2.64.0, el gate prolongado y la confirmacion visual/cierre.
 
 ### Pool de placed textures (despues de 0.2.65.0)
 
@@ -518,3 +544,27 @@ vez:
   25,9 ms en el backend de uploads (algunas fases estan anidadas). El siguiente perfil debe partir
   `RefreshImage` en busqueda de solapes, conversion de copias, staging/unswizzle, transiciones y
   grabacion; no volver a cambiar descriptores sin datos.
+
+### PSO rechazado y sampler MIN/MAX de Wonder (30 sep 2026)
+
+- La capa de debug confirmo `CreateInputLayout` mensaje 61: RGBA8 UNORM en offset 14 requiere
+  alineacion a cuatro. Se sustituyo por dos pares RG8 normalizados, offsets 14 y 16, y el
+  recompiler recompone las cuatro componentes. Mismo tratamiento para SNORM y lecturas indirectas;
+  estas variantes adicionales no tienen todavia un gate especifico. No se repackean buffers.
+- El MAX puntual de Wonder es exactamente point normal: solo hay un texel en el footprint.
+  Se canoniza tambien en PC; desaparece la aproximacion para ese caso. MIN/MAX filtrado o
+  anisotropico sin soporte sigue pendiente y conserva un warning distinto.
+- La prueba encontro tambien un binding compute residual de ASTC/BC3. Graphics/compute comparten
+  PSO en D3D12: se centralizo la cache en `Scheduler::SetPipelineState`, usada por todos los
+  helpers y el rasterizador, y se limpia tras `Reset`. Evita bindings redundantes y restaura el
+  graphics correcto cuando el helper anterior uso compute.
+- Gate PC: Wonder 75 s con debug layer, ambos PSO antes rechazados construidos, MIN/MAX exacto
+  ejercitado, cero errores Render/capa de debug/PSO rechazados; cierre 0. Persisten ocho asserts
+  recuperables de BufferQueueProducer. No se midio mejora A/B de FPS. Evidencia en
+  `build-uwp/log-review-2026-09-30/pc-pso-minmax-fixed-debug.txt` y `pc-pso-minmax-fixed-diag.txt`.
+- Diseno, comparacion con Vulkan, fuentes Microsoft/Khronos y gate Series pendiente en
+  [`xbox_d3d12_phase4.md`](xbox_d3d12_phase4.md#pso-de-wonder-y-minmax-puntual-correccion-del-30-sep-2026).
+- Paquete local 0.2.67.0 preparado y firmado en `build-uwp/package/eden-xbox.appx`, EXE/PDB
+  archivados en `build-uwp/symbols/0.2.67.0/`. Usa `game=wonder.nsp` ya presente en LocalState,
+  `play=1 fastmem=0 audio_profile=1`, sin debug layer ni entradas automaticas. Instalar por
+  Device Portal en modo Game, repetir el recorrido y traer log/diag de Series a Descargas.

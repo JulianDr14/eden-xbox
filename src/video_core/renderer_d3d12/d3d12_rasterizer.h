@@ -208,7 +208,6 @@ private:
         bool valid{};
         bool heaps_bound{};
         ID3D12RootSignature* graphics_root{};
-        ID3D12PipelineState* graphics_pipeline{};
         std::array<SIZE_T, VideoCommon::NUM_RT> color_targets{};
         u32 num_color_targets{};
         SIZE_T depth_target{};

@@ -2215,6 +2215,17 @@ us y el hilo GPU paso la mayor parte de cada ventana esperando trabajo, por lo q
 frente a la ruta paginada empaquetada procede del lado CPU guest. No es aun una comparacion A/B del
 mismo punto: debe repetirse en Series y con el mismo recorrido antes de atribuir un porcentaje.
 
+La prueba Series de la tabla limpia ya tiene evidencia parcial: los logs de Descargas del
+29 sep 2026 corresponden a 0.2.66.0, `SraKmd_arden`, fastmem apagado y XAudio2 activo.
+El juego corre unos 124 s despues de `system.Run()`, sin crash, OOM ni device removal
+registrados, pero el archivo termina sin `RunHeadlessBoot returned 0`. En ventanas de gameplay
+de ~590--640 draws/frame se observan 23,00--36,52 ms/frame (~27--43 FPS), incluyendo
+27,56 y 26,11 ms (~36 y 38 FPS), frente a los ~33,3--34 ms de la referencia historica.
+La cadena de frames confirma frames nuevos y cero intervalos forzados. Hay indicios de mejora,
+pero no una medicion A/B que aisle el JIT; siguen dominando la CPU guest y los stalls de carga.
+No se da por cerrado el gate prolongado, visual ni de cierre. Detalle en `xbox_internal.md`,
+"Page table JIT limpia". Persisten dos rechazos de PSO del mismo par VS/PS.
+
 ### Pool de memoria para texturas
 
 El hitch de 648 texturas demostro que el coste dominante no eran sus 8,02 MiB de datos sino crear
@@ -2268,3 +2279,57 @@ el primer lote quedaron 80,8 ms de inserciones, con 56,2 ms atribuidos a refresh
 18,6 ms de repack y 25,9 ms de backend (contadores anidados). El proximo gate debe desglosar
 `RefreshImage` en solapes, construccion de regiones de copia, staging/unswizzle, transiciones y
 grabacion, y optimizar solo la subfase dominante.
+
+### PSO de Wonder y MIN/MAX puntual: correccion del 30 sep 2026
+
+El gate con la capa de debug identifica la causa de los dos PSO rechazados de VS
+`d9effdee28edb3b2` / PS `e721dbbf095a71c4`: `CreateInputLayout` (mensaje 61) exige
+alineacion de cuatro bytes para `R8G8B8A8_UNORM`, pero el atributo 3 comienza en el byte 14.
+RT0 `R11G11B10_FLOAT`, DSV, blending y profundidad no eran la causa. Las variantes del
+diagnostico conservaban ese offset y por eso ninguna podia funcionar.
+
+Se mantiene el buffer guest: para RGBA8 UNORM/SNORM cuyo offset es 2 modulo 4, el input
+layout declara dos pares `R8G8_UNORM` / `R8G8_SNORM` en N y N+32, en offsets originales
+y original+2. Ambos estan alineados a dos bytes. El runtime del shader indica
+`SplitNormalized8x4`; SPIR-V recupera XY del primer par y ZW del segundo. Las lecturas
+constantes seleccionan directamente el componente; las indirectas reconstruyen el vec4.
+Una funcion constexpr compartida decide la conversion del layout y del shader para que no
+puedan divergir. No hay staging, repack ni copia adicional del buffer en cada draw.
+Es una correccion para este formato y alineacion; no implementa vertex pulling general
+para cualquier formato desalineado ni elimina el limite de entradas del IA.
+
+El sampler que Wonder avisaba en Series es MAX con min/mag/mip puntuales, sin anisotropia
+(`0x180`). El footprint tiene un unico texel: MIN(x) = MAX(x) = x. Se canoniza a point
+normal antes de comprobar capacidades, tambien en PC: equivalencia exacta, sin operaciones
+adicionales de shader ni hardware MIN/MAX. Los filtros lineales o anisotropicos conservan
+reduccion nativa cuando esta disponible; sin ella sigue la aproximacion con un warning
+explicito de *filtered* MIN/MAX. Ese caso no esta resuelto por este cambio.
+
+Se revisaron `vk_texture_cache.cpp::Sampler` y `vk_scheduler.cpp::UpdateGraphicsPipeline`:
+Vulkan usa la extension MIN/MAX nativa y avisa si no existe; no aporta una emulacion general.
+El seguimiento de pipeline evita bindings redundantes. D3D12 necesita una unica cache de
+PSO para graphics y compute, porque ambos comparten el binding de la direct command list.
+La primera prueba tras reparar el input layout encontro mensajes 201/951: conversiones
+ASTC/BC3 dejaban un PSO compute activo y la cache local del rasterizador omitía restaurar el
+graphics. Ahora todos los usuarios (guest, conversiones, blits y present) pasan por
+`Scheduler::SetPipelineState`; compara un puntero y solo llama a D3D12 cuando cambia.
+`Flush` limpia esa cache tras `Reset`. Las root signatures graphics/compute siguen separadas.
+
+Fuentes primarias consultadas:
+
+- [Microsoft, especificacion funcional, 4.4.6 y 5.9.4.5.6](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm): alineacion del IA y footprint MIN/MAX.
+- [Khronos, VkSamplerReductionMode](https://registry.khronos.org/VulkanSC/specs/1.0-extensions/man/html/VkSamplerReductionMode.html): reduccion sobre texels con peso no nulo.
+- [Microsoft, gestion del estado D3D12](https://learn.microsoft.com/en-us/windows/win32/direct3d12/managing-graphics-pipeline-state-in-direct3d-12): PSO y estado de la command list.
+
+Gate PC: build incremental y Wonder durante 75 s, capa de debug activa, entradas
+programadas para avanzar del titulo. Ambos PSO se crean a 8,216 s con 10 entradas en lugar
+de 9; la ruta exacta MIN/MAX se ejerce a 63,201 s. Cero PSO rechazados, cero errores Render,
+cero mensajes de la capa de debug D3D12 y `RunHeadlessBoot returned 0` a 85,500 s incluyendo
+carga y cierre. Se ejercen ASTC/BC3 y draws/dispatches durante el recorrido. Persisten ocho
+asserts recuperables de BufferQueueProducer, ajenos a estas correcciones. No es un A/B de FPS
+ni una validacion visual automatizada. Logs preservados en
+`build-uwp/log-review-2026-09-30/pc-pso-minmax-fixed-{debug,diag}.txt`.
+Gate Series pendiente: repetir con la nueva build y revisar PSO, mensaje exacto MIN/MAX y
+resultado visual; la prueba de PC no certifica el driver de Xbox.
+Paquete 0.2.67.0 firmado, simbolos archivados: Wonder de LocalState, juego manual sin limite
+(`play=1 fastmem=0 audio_profile=1`), sin debug layer.

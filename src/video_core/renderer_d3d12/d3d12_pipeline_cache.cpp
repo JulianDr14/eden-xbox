@@ -24,6 +24,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
 #include "video_core/perf_counters.h"
+#include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 #include "video_core/renderer_d3d12/d3d12_pipeline_cache.h"
 #include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
@@ -101,6 +102,9 @@ Shader::CompareFunction MaxwellToCompareFunction(Maxwell::ComparisonOp compariso
 Shader::AttributeType CastAttributeType(const FixedPipelineState::VertexAttribute& attr) {
     if (attr.enabled == 0) {
         return Shader::AttributeType::Disabled;
+    }
+    if (MaxwellToD3D12::SplitNormalized8x4(attr.Type(), attr.Size(), attr.offset)) {
+        return Shader::AttributeType::SplitNormalized8x4;
     }
     if (attr.Type() == Maxwell::VertexAttribute::Type::SNorm &&
         attr.Size() == Maxwell::VertexAttribute::Size::Size_A2_B10_G10_R10) {

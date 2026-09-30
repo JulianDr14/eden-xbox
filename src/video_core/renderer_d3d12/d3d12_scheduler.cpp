@@ -226,6 +226,7 @@ u64 Scheduler::Flush() {
     current_allocator = AcquireAllocator();
     ThrowIfFailed(command_list->Reset(current_allocator.Get(), nullptr),
                   "ID3D12GraphicsCommandList::Reset");
+    current_pipeline = nullptr;
     BeginTimestamp();
     for (auto& callback : on_reset) {
         callback();

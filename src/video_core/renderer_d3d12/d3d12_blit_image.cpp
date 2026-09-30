@@ -327,7 +327,7 @@ void BlitImageHelper::DecodeAstc(const AstcDecode& decode) {
     ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
     cmd->SetDescriptorHeaps(2, heaps);
     cmd->SetComputeRootSignature(astc_root_signature.Get());
-    cmd->SetPipelineState(astc_pipeline.Get());
+    scheduler.SetPipelineState(astc_pipeline.Get());
     const std::array<u32, ASTC_CONSTANT_WORDS> constants{
         decode.block_width, decode.block_height,     decode.layer_stride,         decode.block_size,
         decode.x_shift,     decode.gob_block_height, decode.gob_block_height_mask,
@@ -402,7 +402,7 @@ void BlitImageHelper::EncodeBc3(const Bc3Encode& encode) {
     ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
     cmd->SetDescriptorHeaps(2, heaps);
     cmd->SetComputeRootSignature(bc3_root_signature.Get());
-    cmd->SetPipelineState(bc3_pipeline.Get());
+    scheduler.SetPipelineState(bc3_pipeline.Get());
     const std::array<u32, BC3_CONSTANT_WORDS> constants{
         encode.width, encode.height, encode.band_height, encode.output_row_words};
     cmd->SetComputeRoot32BitConstants(BC3_CONSTANTS_PARAM, BC3_CONSTANT_WORDS, constants.data(), 0);
@@ -421,7 +421,7 @@ void BlitImageHelper::DispatchPack(ID3D12PipelineState* pipeline, const DepthSte
     }
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
     cmd->SetComputeRootSignature(pack_root_signature.Get());
-    cmd->SetPipelineState(pipeline);
+    scheduler.SetPipelineState(pipeline);
     const std::array<u32, PACK_CONSTANT_WORDS> constants{
         pack.packed_offset, pack.packed_row,  pack.depth_pitch, pack.stencil_offset,
         pack.stencil_pitch, pack.x,           pack.y,           pack.width,
@@ -544,7 +544,7 @@ void BlitImageHelper::Begin(ID3D12PipelineState* pipeline, const Target& target,
     ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
     cmd->SetDescriptorHeaps(2, heaps);
     cmd->SetGraphicsRootSignature(root_signature.Get());
-    cmd->SetPipelineState(pipeline);
+    scheduler.SetPipelineState(pipeline);
     if (is_depth) {
         cmd->OMSetRenderTargets(0, nullptr, FALSE, &target.view);
     } else {

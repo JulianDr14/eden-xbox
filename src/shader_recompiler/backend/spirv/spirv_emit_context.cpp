@@ -201,6 +201,7 @@ void DefineGenericOutput(EmitContext& ctx, size_t index, std::optional<u32> invo
 Id GetAttributeType(EmitContext& ctx, AttributeType type) {
     switch (type) {
     case AttributeType::Float:
+    case AttributeType::SplitNormalized8x4:
         return ctx.F32[4];
     case AttributeType::SignedInt:
         return ctx.TypeVector(ctx.TypeInt(32, true), 4);
@@ -223,6 +224,9 @@ InputGenericInfo GetAttributeInfo(EmitContext& ctx, AttributeType type, Id id) {
     switch (type) {
     case AttributeType::Float:
         return InputGenericInfo{id, ctx.input_f32, ctx.F32[1], InputGenericLoadOp::None};
+    case AttributeType::SplitNormalized8x4:
+        return InputGenericInfo{id, ctx.input_f32, ctx.F32[1],
+                                InputGenericLoadOp::SplitNormalized8x4};
     case AttributeType::UnsignedInt:
         return InputGenericInfo{id, ctx.input_u32, ctx.U32[1], InputGenericLoadOp::Bitcast};
     case AttributeType::SignedInt:
@@ -786,6 +790,19 @@ void EmitContext::DefineAttributeMemAccess(const Info& info) {
             const Id generic_id{generic.id};
             if (!ValidId(generic_id)) {
                 OpReturnValue(Const(0.0f));
+                ++label_index;
+                continue;
+            }
+            if (generic.load_op == InputGenericLoadOp::SplitNormalized8x4) {
+                // Only a vertex input uses this host format. Dynamic component reads assemble
+                // the same vector as the ordinary input; constant reads load just one pair.
+                const Id lo{OpLoad(F32[4], generic.id)};
+                const Id hi{OpLoad(F32[4], generic.second_pair)};
+                const Id joined{OpCompositeConstruct(
+                    F32[4], OpCompositeExtract(F32[1], lo, 0),
+                    OpCompositeExtract(F32[1], lo, 1), OpCompositeExtract(F32[1], hi, 0),
+                    OpCompositeExtract(F32[1], hi, 1))};
+                OpReturnValue(OpVectorExtractDynamic(F32[1], joined, masked_index));
                 ++label_index;
                 continue;
             }
@@ -1653,6 +1670,12 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         Decorate(id, spv::Decoration::Location, static_cast<u32>(index));
         Name(id, fmt::format("in_attr{}", index));
         input_generics[index] = GetAttributeInfo(*this, input_type, id);
+        if (input_type == AttributeType::SplitNormalized8x4) {
+            const Id second{DefineInput(*this, F32[4], true)};
+            Decorate(second, spv::Decoration::Location, static_cast<u32>(index + IR::NUM_GENERICS));
+            Name(second, fmt::format("in_attr{}_zw", index));
+            input_generics[index].second_pair = second;
+        }
 
         if (info.passthrough.Generic(index) && profile.support_geometry_shader_passthrough) {
             Decorate(id, spv::Decoration::PassthroughNV);

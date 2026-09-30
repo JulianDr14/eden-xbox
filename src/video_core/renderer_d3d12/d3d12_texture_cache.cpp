@@ -342,6 +342,7 @@ bool logged_stencil_blit = false;
 bool logged_no_blit_helper = false;
 bool logged_missing_rtv = false;
 bool logged_min_max_filter = false;
+bool logged_point_reduction = false;
 bool logged_srv_fallback = false;
 bool logged_view_family = false;
 
@@ -2721,6 +2722,7 @@ Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& 
     const bool linear_min = config.min_filter == Tegra::Texture::TextureFilter::Linear;
     const bool linear_mag = config.mag_filter == Tegra::Texture::TextureFilter::Linear;
     const bool linear_mip = config.mipmap_filter == Tegra::Texture::TextureMipmapFilter::Linear;
+    const f32 anisotropy = std::clamp(config.MaxAnisotropy(), 1.0f, 16.0f);
     D3D12_FILTER_REDUCTION_TYPE reduction = D3D12_FILTER_REDUCTION_TYPE_STANDARD;
     if (config.depth_compare_enabled) {
         reduction = D3D12_FILTER_REDUCTION_TYPE_COMPARISON;
@@ -2729,14 +2731,25 @@ Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& 
     } else if (config.reduction_filter == Tegra::Texture::SamplerReduction::Max) {
         reduction = D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
     }
-    if ((reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM ||
-         reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM) &&
-        !runtime->supports_min_max_filter) {
-        WarnOnce(logged_min_max_filter, "min/max sampler reduction is not supported by this "
-                                        "device; filtering normally instead");
-        reduction = D3D12_FILTER_REDUCTION_TYPE_STANDARD;
+    const bool min_max = reduction == D3D12_FILTER_REDUCTION_TYPE_MINIMUM ||
+                         reduction == D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
+    if (min_max) {
+        // D3D's reduction footprint contains only texels with non-zero weights. With point
+        // min/mag/mip and no anisotropy it contains exactly one texel: min(x) == max(x) == x.
+        // Canonicalize on every host, so Xbox needs neither tier-2 samplers nor shader work.
+        if (!linear_min && !linear_mag && !linear_mip && anisotropy == 1.0f) {
+            reduction = D3D12_FILTER_REDUCTION_TYPE_STANDARD;
+            if (!logged_point_reduction) {
+                logged_point_reduction = true;
+                LOG_INFO(Render, "D3D12: point MIN/MAX sampler uses its exact single-texel "
+                                 "equivalent (no reduction hardware required)");
+            }
+        } else if (!runtime->supports_min_max_filter) {
+            WarnOnce(logged_min_max_filter, "filtered min/max sampler reduction is not supported "
+                                            "by this device; filtering normally instead");
+            reduction = D3D12_FILTER_REDUCTION_TYPE_STANDARD;
+        }
     }
-    const f32 anisotropy = std::clamp(config.MaxAnisotropy(), 1.0f, 16.0f);
     filter = anisotropy > 1.0f ? D3D12_ENCODE_ANISOTROPIC_FILTER(reduction) :
         D3D12_ENCODE_BASIC_FILTER(linear_min ? D3D12_FILTER_TYPE_LINEAR : D3D12_FILTER_TYPE_POINT,
         linear_mag ? D3D12_FILTER_TYPE_LINEAR : D3D12_FILTER_TYPE_POINT,

@@ -312,6 +312,12 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, Id vertex) {
             // Attribute is disabled or varying component is not written
             return ctx.Const(element == 3 ? 1.0f : 0.0f);
         }
+        if (generic.load_op == InputGenericLoadOp::SplitNormalized8x4) {
+            const Id pair{element < 2 ? generic.id : generic.second_pair};
+            const Id pointer{AttrPointer(ctx, generic.pointer_type, vertex, pair,
+                                         ctx.Const(element & 1U))};
+            return ctx.OpLoad(ctx.F32[1], pointer);
+        }
         // Packed SNORM 10:10:10:2 keeps all four fields in the first component.
         const u32 load_element{
             generic.load_op == InputGenericLoadOp::SNormA2B10G10R10 ? 0U : element};

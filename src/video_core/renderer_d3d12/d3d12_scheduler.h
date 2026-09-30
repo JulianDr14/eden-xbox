@@ -47,6 +47,15 @@ public:
         return command_list.Get();
     }
 
+    /// Graphics and compute share one PSO binding on a direct list. All users, including internal
+    /// texture conversions, must go through this cache so the next draw restores its graphics PSO.
+    void SetPipelineState(ID3D12PipelineState* pipeline) {
+        if (current_pipeline != pipeline) {
+            CommandList()->SetPipelineState(pipeline);
+            current_pipeline = pipeline;
+        }
+    }
+
     /// Submits the recorded work; returns the tick it signals.
     u64 Flush();
 
@@ -140,6 +149,7 @@ private:
     ComPtr<ID3D12Fence> fence;
 
     ComPtr<ID3D12GraphicsCommandList> command_list;
+    ID3D12PipelineState* current_pipeline{};
     ComPtr<ID3D12CommandAllocator> current_allocator;
     std::deque<PooledAllocator> allocator_pool;
 
