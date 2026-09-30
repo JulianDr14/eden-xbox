@@ -92,7 +92,8 @@ struct EnumMetadata {
 // AudioEngine must be specified discretely due to having existing but slightly different
 // canonicalizations
 // TODO (lat9nq): Remove explicit definition of AudioEngine/sink_id
-enum class AudioEngine : u32 { Auto, Cubeb, Sdl3, Null, };
+// Keep new entries at the end: these values are persisted in user configurations.
+enum class AudioEngine : u32 { Auto, Cubeb, Sdl3, Null, XAudio2, };
 template<>
 inline std::vector<std::pair<std::string_view, AudioEngine>> EnumMetadata<AudioEngine>::Canonicalizations() {
     return {
@@ -100,6 +101,7 @@ inline std::vector<std::pair<std::string_view, AudioEngine>> EnumMetadata<AudioE
         {"cubeb", AudioEngine::Cubeb},
         {"sdl3", AudioEngine::Sdl3},
         {"null", AudioEngine::Null},
+        {"xaudio2", AudioEngine::XAudio2},
     };
 }
 /// @brief This is just a sufficiently large number that is more than the number of other enums declared here
@@ -113,7 +115,7 @@ inline AudioEngine EnumMetadata<AudioEngine>::GetFirst() {
 }
 template<>
 inline AudioEngine EnumMetadata<AudioEngine>::GetLast() {
-    return AudioEngine::Null;
+    return AudioEngine::XAudio2;
 }
 
 ENUM(AudioMode, Mono, Stereo, Surround);

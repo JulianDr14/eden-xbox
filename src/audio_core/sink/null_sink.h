@@ -6,13 +6,12 @@
 
 #pragma once
 
-#include <chrono>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 #include "audio_core/common/common.h"
+#include "audio_core/sink/realtime_pacer.h"
 #include "audio_core/sink/sink.h"
 #include "audio_core/sink/sink_stream.h"
 
@@ -35,27 +34,14 @@ public:
         if (type != StreamType::Render) {
             return;
         }
-        using namespace std::chrono;
-        constexpr auto max_lead = milliseconds{10};
-        constexpr auto max_lag = milliseconds{50};
-        const auto now = steady_clock::now();
-        if (next_deadline + max_lag < now) {
-            // Behind by more than a few buffers (loading, a paused guest): restart the clock
-            // instead of rendering the backlog at full speed.
-            next_deadline = now;
-        }
-        next_deadline += duration_cast<steady_clock::duration>(
-            nanoseconds{buffer.frames * 1'000'000'000ULL / TargetSampleRate});
-        if (next_deadline - now > max_lead) {
-            std::this_thread::sleep_until(next_deadline - max_lead);
-        }
+        pacer.Wait(buffer.frames);
     }
     std::vector<s16> ReleaseBuffer(u64) override {
         return {};
     }
 
 private:
-    std::chrono::steady_clock::time_point next_deadline{};
+    RealtimePacer pacer;
 };
 
 /**
