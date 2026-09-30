@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/settings.h"
+#include "core/arm/cpu_profile.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
@@ -23,6 +24,7 @@ DynarmicCallbacks64::DynarmicCallbacks64(ArmDynarmic64& parent, Kernel::KProcess
 {}
 
 u64 DynarmicCallbacks64::MemoryRead(u64 vaddr, size_t size) {
+    CpuProfile::Add(m_parent.m_core_index, CpuProfile::Counter::Reads);
     CheckMemoryAccess(vaddr, size, Kernel::DebugWatchpointType::Read);
     switch (size) {
     case sizeof(u64): return m_memory.Read64(vaddr);
@@ -33,11 +35,14 @@ u64 DynarmicCallbacks64::MemoryRead(u64 vaddr, size_t size) {
     }
 }
 Dynarmic::A64::Vector DynarmicCallbacks64::MemoryRead128(u64 vaddr) {
+    CpuProfile::Add(m_parent.m_core_index, CpuProfile::Counter::Reads);
+    CpuProfile::Add(m_parent.m_core_index, CpuProfile::Counter::Reads128);
     CheckMemoryAccess(vaddr, 16, Kernel::DebugWatchpointType::Read);
     return {m_memory.Read64(vaddr), m_memory.Read64(vaddr + 8)};
 }
 
 std::optional<u32> DynarmicCallbacks64::MemoryReadCode(u64 vaddr) {
+    CpuProfile::Add(m_parent.m_core_index, CpuProfile::Counter::CodeWords);
     if (!m_memory.IsValidVirtualAddressRange(vaddr, sizeof(u32)))
         return std::nullopt;
     auto const aligned_vaddr = vaddr & ~Core::Memory::YUZU_PAGEMASK;
@@ -49,6 +54,7 @@ std::optional<u32> DynarmicCallbacks64::MemoryReadCode(u64 vaddr) {
 }
 
 void DynarmicCallbacks64::MemoryWrite(Dynarmic::A64::VAddr vaddr, u64 value, std::size_t size) {
+    CpuProfile::Add(m_parent.m_core_index, CpuProfile::Counter::Writes);
     if (CheckMemoryAccess(vaddr, size, Kernel::DebugWatchpointType::Write)) {
         switch (size) {
         case sizeof(u64): return m_memory.Write64(vaddr, u64(value));
@@ -60,6 +66,7 @@ void DynarmicCallbacks64::MemoryWrite(Dynarmic::A64::VAddr vaddr, u64 value, std
     }
 }
 void DynarmicCallbacks64::MemoryWrite128(u64 vaddr, Dynarmic::A64::Vector value) {
+    CpuProfile::Add(m_parent.m_core_index, CpuProfile::Counter::Writes);
     if (CheckMemoryAccess(vaddr, 16, Kernel::DebugWatchpointType::Write)) {
         m_memory.Write64(vaddr, value[0]);
         m_memory.Write64(vaddr + 8, value[1]);
@@ -154,6 +161,7 @@ u64 DynarmicCallbacks64::GetTicksRemaining() {
 }
 
 u64 DynarmicCallbacks64::GetCNTPCT() {
+    CpuProfile::Add(m_parent.m_core_index, CpuProfile::Counter::ClockReads);
     return m_parent.m_system.CoreTiming().GetClockTicks();
 }
 
@@ -344,6 +352,7 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
 }
 
 HaltReason ArmDynarmic64::RunThread(Kernel::KThread* thread) {
+    const CpuProfile::RunTimer timer{m_core_index};
     m_jit->ClearExclusiveState();
     return TranslateHaltReason(m_jit->Run());
 }

@@ -138,3 +138,9 @@ file. The usual causes, in the order worth checking:
 - **Missing `codeGeneration`**, which fails later, at the first JIT page protect.
 - **App mode instead of Game mode** — shows up as an out-of-memory death during DRAM reservation
   rather than at activation.
+
+Para diagnosticar CPU guest en 0.2.68.0 se puede agregar `cpu_profile=1` a BootCfg.
+El log informa Run y callbacks por core; Run es tiempo transcurrido e incluye traduccion,
+callbacks y preemption, no utilizacion CPU. El perfil esta desactivado por defecto y agrega
+trabajo si se activa: comparar rendimiento con la misma configuracion en ambas builds.
+Para estudiar las cargas, combinarlo con `gpu_profile=1` y repetir el mismo recorrido.

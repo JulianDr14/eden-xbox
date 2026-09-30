@@ -46,6 +46,7 @@ public:
     /// UAV). Buffers decay to COMMON at the end of every ExecuteCommandLists, so the tracked state
     /// only holds within the list that set it.
     void Transition(D3D12_RESOURCE_STATES next);
+    [[nodiscard]] D3D12_RESOURCE_STATES State() const noexcept { return state; }
 
 private:
     Scheduler* scheduler{};

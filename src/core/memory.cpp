@@ -602,7 +602,7 @@ struct Memory::Impl {
                     return GetPointerFromDebugMemory(vaddr);
                 case Common::PageType::RasterizerCachedMemory: {
                     u8* const host_ptr{GetPointerFromRasterizerCachedMemory(vaddr)};
-                    on_rasterizer();
+                    on_rasterizer(host_ptr);
                     return host_ptr;
                 }
                 case Common::PageType::Unmapped: [[unlikely]] {
@@ -626,12 +626,12 @@ struct Memory::Impl {
             [vaddr]() {
                 LOG_ERROR(HW_Memory, "Unmapped GetPointer @ {:#016x}", GetInteger(vaddr));
             },
-            []() {});
+            [](u8*) {});
     }
 
     [[nodiscard]] u8* GetPointerSilent(const Common::ProcessAddress vaddr) const {
         return GetPointerImpl(
-            GetInteger(vaddr), []() {}, []() {});
+            GetInteger(vaddr), []() {}, [](u8*) {});
     }
 
     /// @brief Reads a particular data type out of memory at the given virtual address.
@@ -643,8 +643,8 @@ struct Memory::Impl {
         const u64 addr = GetInteger(vaddr);
         if (auto const ptr = GetPointerImpl(addr, [addr]() {
             LOG_ERROR(HW_Memory, "Unmapped Read{} @ {:#016x}", sizeof(T) * 8, addr);
-        }, [&]() {
-            HandleRasterizerDownload(addr, sizeof(T));
+        }, [&](u8* host_ptr) {
+            HandleRasterizerDownload(addr, sizeof(T), host_ptr);
         }); ptr) [[likely]] {
             // It may be tempting to rewrite this particular section to use "reinterpret_cast";
             // afterall, it's trivially copyable so surely it can be copied ov- Alignment.
@@ -664,7 +664,7 @@ struct Memory::Impl {
         const u64 addr = GetInteger(vaddr);
         if (auto const ptr = GetPointerImpl(addr, [addr, data]() {
             LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x}", sizeof(T) * 8, addr, u64(data));
-        }, [&]() { HandleRasterizerWrite(addr, sizeof(T)); }); ptr) [[likely]]
+        }, [&](u8* host_ptr) { HandleRasterizerWrite(addr, sizeof(T), host_ptr); }); ptr) [[likely]]
             std::memcpy(ptr, &data, sizeof(T));
     }
 
@@ -676,7 +676,7 @@ struct Memory::Impl {
                 LOG_ERROR(HW_Memory, "Unmapped WriteExclusive{} @ {:#016x} = {:#016x}",
                           sizeof(T) * 8, GetInteger(vaddr), static_cast<u64>(data));
             },
-            [&]() { HandleRasterizerWrite(GetInteger(vaddr), sizeof(T)); });
+            [&](u8* host_ptr) { HandleRasterizerWrite(GetInteger(vaddr), sizeof(T), host_ptr); });
         if (ptr) {
             return Common::AtomicCompareAndSwap(reinterpret_cast<T*>(ptr), data, expected);
         }
@@ -690,16 +690,16 @@ struct Memory::Impl {
                 LOG_ERROR(HW_Memory, "Unmapped WriteExclusive128 @ {:#016x} = {:#016x}{:016X}",
                           GetInteger(vaddr), static_cast<u64>(data[1]), static_cast<u64>(data[0]));
             },
-            [&]() { HandleRasterizerWrite(GetInteger(vaddr), sizeof(u128)); });
+            [&](u8* host_ptr) { HandleRasterizerWrite(GetInteger(vaddr), sizeof(u128), host_ptr); });
         if (ptr) {
             return Common::AtomicCompareAndSwap(reinterpret_cast<u64*>(ptr), data, expected);
         }
         return true;
     }
 
-    void HandleRasterizerDownload(VAddr v_address, size_t size) {
-        const auto* p = GetPointerImpl(
-            v_address, []() {}, []() {});
+    void HandleRasterizerDownload(VAddr v_address, size_t size, const u8* resolved = nullptr) {
+        const auto* p = resolved ? resolved : GetPointerImpl(
+            v_address, []() {}, [](u8*) {});
         if (!gpu_device_memory) [[unlikely]] {
             gpu_device_memory = &system.Host1x().MemoryManager();
         }
@@ -715,9 +715,9 @@ struct Memory::Impl {
         });
     }
 
-    void HandleRasterizerWrite(VAddr v_address, size_t size) {
-        const auto* p = GetPointerImpl(
-            v_address, []() {}, []() {});
+    void HandleRasterizerWrite(VAddr v_address, size_t size, const u8* resolved = nullptr) {
+        const auto* p = resolved ? resolved : GetPointerImpl(
+            v_address, []() {}, [](u8*) {});
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
         const size_t core = (std::min)(system.GetCurrentHostThreadID(),
                                      sys_core); // any other calls threads go to syscore.
@@ -991,7 +991,7 @@ bool Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t size) {
                       GetInteger(vaddr));
             mapped = false;
         },
-        [&] { rasterizer = true; });
+        [&](u8*) { rasterizer = true; });
     if (rasterizer) {
         impl->InvalidateGPUMemory(ptr, size);
     }

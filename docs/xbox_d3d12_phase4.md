@@ -2333,3 +2333,80 @@ Gate Series pendiente: repetir con la nueva build y revisar PSO, mensaje exacto 
 resultado visual; la prueba de PC no certifica el driver de Xbox.
 Paquete 0.2.67.0 firmado, simbolos archivados: Wonder de LocalState, juego manual sin limite
 (`play=1 fastmem=0 audio_profile=1`), sin debug layer.
+
+### Depth feedback, CPU guest y cargas (30 sep 2026)
+
+El warning anterior mezclaba dos situaciones: tener depth_write_enable activo no escribe
+profundidad si depth_test_enable esta desactivado. Wonder ejercita precisamente ese caso:
+se mantiene el DSV de solo lectura combinado con SRV, sin warning ni copia innecesaria.
+Si el attachment se muestrea y hay escritura efectiva de depth o posible escritura stencil,
+se toma una copia GPU antes del draw. Los SRV conservan formato, swizzle, mip y capas de la
+vista, pero apuntan al snapshot; el DSV original permite escribir. La copia se asigna de
+forma perezosa una vez por Image y se refresca una vez por Configure aunque haya varios SRV.
+La misma cola directa ordena draws/copia y barriers; no hay readback ni espera CPU por draw.
+Los recursos se retiran con el allocator existente y los descriptores con ImageView.
+Si falla la creacion del recurso, se conserva la ruta anterior de solo lectura y un warning.
+
+Esta ruta conserva el contenido previo al draw; no reproduce feedback entre fragmentos del
+mismo draw. Tampoco esta validada aqui con D24/S8 o MSAA. CopyResource exige recursos distintos
+con dimensiones/formato y numero de muestras compatibles; DEPTH_WRITE es exclusivo, mientras
+DEPTH_READ puede combinarse con SRV. Por eso no basta trasladar una barrera Vulkan a D3D12.
+Se revisaron BarrierFeedbackLoop y CopyImage de vk_texture_cache.cpp: sirven como modelo de
+orden GPU y lifetime, pero la barrera Vulkan no autoriza combinar estados incompatibles D3D12.
+Dolphin D3D12 tambien explicita transiciones y staging con pitch alineado; no se ha copiado
+una implementacion externa ni anadido una segunda cola o nuevas esperas.
+
+Fuentes primarias:
+
+- [Microsoft, estados de recursos](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resource_states).
+- [Microsoft, CopyResource](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-copyresource).
+- [Microsoft, barriers D3D12](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-resource-barriers-to-synchronize-resource-states-in-direct3d-12).
+- [Dolphin, backend D3D12](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/VideoBackends/D3D12/DX12Texture.cpp).
+- [Microsoft PIX, timing captures](https://learn.microsoft.com/en-us/windows/win32/direct3dtools/pix/articles/timing-captures/pix-timing-captures).
+
+El perfil de cargas previo mostraba 30,9 ms de unswizzle dentro de 58,3 ms de RefreshImage,
+para un lote de 672 imagenes; las fases estan anidadas y no se deben sumar. Se optimizo el
+decoder comun que tambien usa Vulkan: deswizzle de pixeles de 1/2/4/8 bytes copia sectores
+contiguos de 16 bytes con memcpy constante. Colas de fila y otros tamanos conservan la ruta
+escalar, sin requerir intrinsics ni alineacion del puntero. El swizzle inverso queda escalar
+para servir de referencia independiente. No se cambio el layout ni la coherencia de caches.
+
+Gate decoder: 5.400 round trips exactos, incluyendo colas, strides con padding, bloques 3D y
+punteros desalineados, con guardas. El test esta registrado en src/tests/CMakeLists.txt.
+Como el preset UWP no construye Catch, se ejecuto el mismo archivo de test mediante un runner
+local pequeno, enlazado con el objeto real de decoders del build. Benchmark MSVC /O2 contra
+el decoder del commit b3237ab889, 1023x1024, 40 iteraciones alternadas con bytes iguales:
+
+| Bytes/pixel | Primera medicion | Repeticion durante la prueba PC |
+|---|---:|---:|
+| 1 | 11,10x | 10,20x |
+| 2 | 6,01x | 5,30x |
+| 4 (RGBA8) | 3,07x | 2,66x |
+| 8 | 1,55x | 1,44x |
+
+Son mejoras aisladas del decoder, no de FPS ni del tiempo total de carga. El benchmark y
+runner quedan en build-uwp/log-review-2026-09-30 (ignorados por Git).
+
+CPU guest: cpu_profile=1 habilita contadores separados por core (atomicos relaxed, separados
+por cache line), Run, palabras de codigo, callbacks de lectura/escritura y reloj. Por defecto
+esta desactivado y no toma timestamps ni incrementa contadores. El tiempo de Run incluye
+traduccion, callbacks y preemption: no equivale a utilizacion CPU ni a tiempo puro del JIT.
+El recorrido encontro millones de lecturas escalares lentas frente a solo cientos de vectores;
+se descarto optimizar Read128 porque no justificaba cambiar esa ruta. En memoria cacheada por
+GPU, Read/Write y exclusivas ahora entregan al handler el puntero que GetPointerImpl ya resolvio,
+evitan una segunda traduccion y conservan descargas, invalidaciones y chequeos de coherencia.
+Los accesos por bloques siguen usando su ruta existente. No hay un porcentaje A/B de mejora CPU
+certificado; los contadores no identifican por si solos cuantas lecturas son RasterizerCached.
+
+Gate GPU: clear D32 a 0,25, snapshot, clear original a 0,75, readback de las dos imagenes;
+los 91 texels conservan los valores esperados. Wonder usa la ruta de solo lectura, asi que el
+contador de copias queda en 1 (self-test); no afirmar que el juego ejercito feedback con writes.
+Gate PC final y gate Series se registran en xbox_internal.md. La validacion en PC no certifica
+el driver de Xbox; faltan prueba visual y medida de rendimiento comparable en Series.
+La ultima repeticion descubrio ocho mensajes 538 por uploads tardios sobre un vertex buffer
+ya ligado: la cache generica omite el rebind si el stream no cambia, pero Copy dejaba el
+recurso en COPY_DEST. Copy ahora restaura GENERIC_READ cuando el destino ya tenia ese uso;
+los buffers nuevos y lotes aun no ligados permanecen en COPY_DEST hasta su primer binding.
+Esto mantiene el IA cacheado valido sin forzar todos los streams dirty ni duplicar uploads.
+La barrera se agrega solo al upload de un destino previamente legible. La prueba con este
+fallo queda preservada como pc-depth-loads-late-upload-{debug,diag}.txt.

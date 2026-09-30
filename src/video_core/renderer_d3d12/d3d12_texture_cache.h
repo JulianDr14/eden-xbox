@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -79,6 +80,7 @@ public:
     void TickFrame();
     u64 GetDeviceLocalMemory() const;
     u64 GetDeviceMemoryUsage() const;
+    [[nodiscard]] u64 DepthFeedbackCopies() const noexcept { return depth_feedback_copies; }
     bool CanReportMemoryUsage() const { return true; }
     std::optional<size_t> GetSamplerHeapBudget() const { return SamplerHeap::CAPACITY; }
 
@@ -144,6 +146,7 @@ private:
     /// MIN/MAX sampler reductions need tiled resources tier 2; the Xbox Series reports tier 1 and
     /// creating such a sampler there removes the device (DXGI_ERROR_INVALID_CALL).
     bool supports_min_max_filter{};
+    u64 depth_feedback_copies{};
     /// FORMAT_SUPPORT answers by format, each logged once (see SupportsView).
     mutable std::mutex format_support_mutex;
     mutable std::unordered_map<DXGI_FORMAT, D3D12_FEATURE_DATA_FORMAT_SUPPORT> format_support;
@@ -215,6 +218,11 @@ public:
     /// draw or dispatch that reads SliceArray().
     void RefreshSliceArray();
 
+    /// Snapshot before a draw that samples and writes this depth/stencil attachment. Reuses the
+    /// allocation; copies on the GPU without waiting. Null keeps the read-only fallback on failure.
+    [[nodiscard]] Image* PrepareDepthFeedback();
+    [[nodiscard]] Image* DepthFeedback() const noexcept { return depth_feedback.get(); }
+
     /// This image's texels in another typeless family of the same texel size, for views D3D12
     /// cannot cast to (the guest reads and renders an R32 image as R16G16, Mario Wonder's world
     /// map). A copy through a buffer, created on first use; null when it cannot be made
@@ -276,6 +284,8 @@ private:
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     /// Bumped by every transition into a writable state: every GPU write to the image follows one.
     u64 write_version{1};
+    std::unique_ptr<Image> depth_feedback;
+    bool depth_feedback_failed{};
     ComPtr<ID3D12Resource> slice_array;
     D3D12_RESOURCE_STATES slice_array_state{D3D12_RESOURCE_STATE_COMMON};
     u64 slice_array_version{};
@@ -336,6 +346,10 @@ public:
     /// refreshes its slice copy); call before the draw or dispatch, outside any other copy.
     void PrepareRead(Shader::TextureType texture_type) const;
 
+    /// Same format, swizzle and subresources as Handle(), on the prepared depth snapshot.
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthFeedbackHandle(
+        Shader::TextureType texture_type) const;
+
 private:
     /// What the per-type SRVs are created from.
     struct SrvParams {
@@ -350,7 +364,8 @@ private:
         u32 resource_layers{1};
     };
 
-    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE CreateSrv(Shader::TextureType texture_type) const;
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE CreateSrv(
+        Shader::TextureType texture_type, ID3D12Resource* override_resource = nullptr) const;
     void Release();
     TextureCacheRuntime* runtime{};
     SlotVector<Image>* slot_images{};
@@ -360,6 +375,8 @@ private:
     SrvParams srv_params{};
     Shader::TextureType natural_type{Shader::TextureType::Color2D};
     mutable std::array<D3D12_CPU_DESCRIPTOR_HANDLE, Shader::NUM_TEXTURE_TYPES> srvs{};
+    mutable std::unique_ptr<std::array<D3D12_CPU_DESCRIPTOR_HANDLE, Shader::NUM_TEXTURE_TYPES>>
+        depth_feedback_srvs;
     D3D12_CPU_DESCRIPTOR_HANDLE uav{};
     D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
     bool rtv_on_copy{};

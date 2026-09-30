@@ -568,3 +568,34 @@ rellenan con cero, pero no prueban corrupcion sin identificar consumidor y mappi
   archivados en `build-uwp/symbols/0.2.67.0/`. Usa `game=wonder.nsp` ya presente en LocalState,
   `play=1 fastmem=0 audio_profile=1`, sin debug layer ni entradas automaticas. Instalar por
   Device Portal en modo Game, repetir el recorrido y traer log/diag de Series a Descargas.
+
+### Depth, CPU guest y cargas: correcciones y gates (30 sep 2026, 0.2.68.0)
+
+- Depth: el warning de Wonder era un falso positivo (depth test off). Ahora se comprueba la
+  escritura efectiva; muestrear un attachment con escritura usa snapshot GPU perezoso y deja
+  writable el DSV original. La prueba D32 de 13x7 conserva 0,25 en snapshot y 0,75 en original.
+  Wonder no ejercita escritura real con feedback: contador 1 corresponde al self-test.
+  Pendientes D24/S8, MSAA y semantica entre fragmentos dentro del mismo draw; el snapshot toma
+  el contenido anterior al draw. Diseno y fuentes Microsoft/Dolphin/Vulkan en fase 4.
+- Cargas: decoder comun comparte la mejora con Vulkan. Copias de 16 bytes para deswizzle
+  1/2/4/8 Bpp, colas escalares y sin requisito de alineacion. Gate 5.400 casos exactos.
+  RGBA8: 3,07x en primera medicion aislada y 2,66x al repetir durante la prueba PC. No FPS A/B.
+- CPU: perfil opt-in cpu_profile=1 por core. Millones de lecturas lentas escalares y muy pocas
+  vectoriales: se descarto cambiar Read128. La ruta RasterizerCached reutiliza el puntero
+  ya resuelto y evita traducirlo dos veces, conservando la sincronizacion GPU. No hay mejora
+  porcentual de CPU demostrada. Tiempo de Run incluye callbacks/traduccion/preemption.
+- Trampa detectada: uploads sobre vertices ya ligados pueden dejar COPY_DEST aunque la cache
+  generica salte el rebind del stream sin cambios. Se restaura GENERIC_READ si el destino ya
+  estaba legible; no se fuerza dirty global ni una barrera nueva en cada draw sin uploads.
+- Evidencia y runner local bajo build-uwp/log-review-2026-09-30. El target de tests Catch no
+  existe en este preset UWP: el test registrado se ejecuto con un runner local contra el
+  objeto de produccion, y el benchmark compara el decoder b3237ab889 compilado con MSVC /O2.
+- Pendiente gate Series: instalar 0.2.68.0 en Game, repetir recorrido comparable y revisar
+  resultado visual, CPU por core, cargas y errores D3D12; no certificar mejora por un solo FPS.- Gate PC final: Wonder 75 s, cpu_profile=1/gpu_profile=1 y debug layer, cierre 0 a 86,109 s
+  incluyendo carga/cierre. Cero mensajes de debug D3D12 y cero errores Render; ocho asserts
+  conocidos de BufferQueueProducer. Prueba depth pasada, snapshot solo en self-test. Logs:
+  pc-depth-loads-final-debug.txt y pc-depth-loads-final-diag.txt. Persisten errores del fichero
+  play_time al cerrar, sin fallo del renderer. No se certifica mejora global CPU/FPS.- Paquete 0.2.68.0 creado y firmado; exe/pdb archivados en build-uwp/symbols/0.2.68.0.
+  Juego manual sin limite: play=1, fastmem=0, audio_profile=1, gpu_profile=1, cpu_profile=1,
+  sin debug layer. Es un paquete de diagnostico: los perfiles activados tienen sobrecoste.
+  Pendiente instalar en Series y devolver log/diag de Descargas. No se hizo commit.

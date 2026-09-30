@@ -33,6 +33,7 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/windows/timer_resolution.h"
+#include "core/arm/cpu_profile.h"
 #include "core/core.h"
 #include "core/cpu_manager.h"
 #include "core/file_sys/registered_cache.h"
@@ -128,6 +129,8 @@ struct BootConfig {
     bool descriptor_checks{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
+    /// Per-core JIT elapsed time and slow callback counts ("cpu_profile=1"). Diagnostic only.
+    bool cpu_profile{};
     /// XAudio2 performance samples and queue counters ("audio_profile=1").
     bool audio_profile{};
     /// Timed silent output for comparison and audio-device diagnosis ("audio=null").
@@ -184,6 +187,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         Settings::values.sink_id = Settings::AudioEngine::Null;
     }
     AudioCore::Sink::SetXAudio2ProfileEnabled(config.audio_profile);
+    Core::CpuProfile::SetEnabled(config.cpu_profile);
     // Read by HostMemory when Core::System builds the DRAM, so it has to be set before that.
     // The 384-MiB Series experiment covered only 388 of 2637 MiB requested by Wonder (15%). The
     // resulting fastmem fault/recompile storm was markedly slower than the page table, so Auto
@@ -1087,6 +1091,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     } else if (line == "gpu_profile=1") {
                         config.gpu_profile = true;
                         WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
+                    } else if (line == "cpu_profile=1") {
+                        config.cpu_profile = true;
+                        WriteDiag("boot.cfg: per-core guest CPU profiling enabled");
                     } else if (line == "audio_profile=1") {
                         config.audio_profile = true;
                         WriteDiag("boot.cfg: XAudio2 profiling enabled");
