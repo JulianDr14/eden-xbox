@@ -7,6 +7,7 @@
  */
 
 #include "dynarmic/backend/x64/a64_emit_x64.h"
+#include "dynarmic/interface/jit_profile.h"
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
@@ -24,6 +25,7 @@
 #include "dynarmic/backend/x64/nzcv_util.h"
 #include "dynarmic/backend/x64/perf_map.h"
 #include "dynarmic/backend/x64/stack_layout.h"
+#include "dynarmic/common/crypto/crc32.h"
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
 #include "dynarmic/frontend/A64/a64_types.h"
 #include "dynarmic/ir/basic_block.h"
@@ -78,7 +80,10 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) noexcept {
         std::puts(IR::DumpBlock(block).c_str());
     }
 
+    JitProfile::Timer write_open{JitProfile::Phase::WriteOpen};
     code.EnableWriting();
+    write_open.Stop();
+    JitProfile::Timer setup{JitProfile::Phase::EmitSetup};
     new (&this->reg_alloc) RegAlloc{[this] {
         std::bitset<32> gprs = any_gpr;
         if (conf.fastmem_pointer)
@@ -98,7 +103,8 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) noexcept {
 
     DEBUG_ASSERT(block.GetCondition() == IR::Cond::AL);
     typedef void (EmitX64::*EmitHandlerFn)(EmitContext& context, IR::Inst* inst);
-    constexpr EmitHandlerFn opcode_handlers[] = {
+    // Immutable dispatch tables must not be rebuilt on the stack for every compiled block.
+    static constexpr EmitHandlerFn opcode_handlers[] = {
 #define OPCODE(name, type, ...) &EmitX64::Emit##name,
 #define A32OPC(name, type, ...)
 #define A64OPC(name, type, ...)
@@ -108,7 +114,7 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) noexcept {
 #undef A64OPC
     };
     typedef void (A64EmitX64::*A64EmitHandlerFn)(A64EmitContext& context, IR::Inst* inst);
-    constexpr A64EmitHandlerFn a64_handlers[] = {
+    static constexpr A64EmitHandlerFn a64_handlers[] = {
 #define OPCODE(...)
 #define A32OPC(...)
 #define A64OPC(name, type, ...) &A64EmitX64::EmitA64##name,
@@ -118,6 +124,8 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) noexcept {
 #undef A64OPC
     };
 
+    setup.Stop();
+    JitProfile::Timer instructions{JitProfile::Phase::Instructions};
     for (auto& inst : block.instructions) {
         auto const opcode = inst.GetOpcode();
         // Call the relevant Emit* member function.
@@ -145,26 +153,40 @@ finish_this_inst:
 #endif
     }
 
+    instructions.Stop();
+    JitProfile::Timer terminal{JitProfile::Phase::Terminal};
     reg_alloc.AssertNoMoreUses();
     if (conf.enable_cycle_counting)
         EmitAddCycles(block.CycleCount());
     code.mov(rbp, code.qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, abi_base_pointer)]);
     EmitTerminal(block.terminal, ctx.Location().SetSingleStepping(false), ctx.IsSingleStep());
     code.int3();
+    terminal.Stop();
+    JitProfile::Timer deferred{JitProfile::Phase::Deferred};
     for (auto& deferred_emit : ctx.deferred_emits)
         deferred_emit();
     code.int3();
 
     const size_t size = size_t(code.getCurr() - entrypoint);
+    deferred.Stop();
+    JitProfile::Timer ranges{JitProfile::Phase::Ranges};
 
     const A64::LocationDescriptor descriptor{block.Location()};
     const A64::LocationDescriptor end_location{block.EndLocation()};
 
     const auto range = boost::icl::discrete_interval<u64>::closed(descriptor.PC(), end_location.PC() - 1);
     block_ranges.AddRange(range, descriptor);
+    ranges.Stop();
 
-    auto bdesc = RegisterBlock(descriptor, entrypoint, size);
+    BlockDescriptor bdesc;
+    {
+        const JitProfile::Timer registration{JitProfile::Phase::Register};
+        bdesc = RegisterBlock(descriptor, entrypoint, size);
+    }
+    JitProfile::Timer write_close{JitProfile::Phase::WriteClose};
     code.DisableWriting();
+    write_close.Stop();
+    const JitProfile::Timer cleanup{JitProfile::Phase::EmitCleanup};
     shared_labels.clear();
     return bdesc;
 }
@@ -798,9 +820,15 @@ void A64EmitX64::EmitPatchMovRcx(CodePtr target_code_ptr) {
 void A64EmitX64::Unpatch(const IR::LocationDescriptor& location) {
     EmitX64::Unpatch(location);
     if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
-        code.DisableWriting();
-        (*fast_dispatch_table_lookup)(location.Value()) = {};
-        code.EnableWriting();
+        // Match GenTerminalHandlers' CRC32 r64,r64: low 32 bits of the descriptor are
+        // the seed, and the table address is the eight-byte input. This is host data,
+        // so invalidation need not execute a JIT helper or flip code RX/RW per block.
+        const u64 hash = code.HasHostFeature(HostFeature::SSE42)
+            ? Common::Crypto::CRC32::ComputeCRC32Castagnoli(
+                  static_cast<u32>(location.Value()),
+                  reinterpret_cast<u64>(fast_dispatch_table.data()), sizeof(u64))
+            : location.Value();
+        fast_dispatch_table[(hash & fast_dispatch_table_mask) / sizeof(FastDispatchEntry)] = {};
     }
 }
 

@@ -7,6 +7,7 @@
  */
 
 #include "dynarmic/backend/x64/emit_x64.h"
+#include "dynarmic/interface/jit_profile.h"
 
 #include <iterator>
 
@@ -349,17 +350,29 @@ Xbyak::Label EmitX64::EmitCond(IR::Cond cond) {
 }
 
 EmitX64::BlockDescriptor EmitX64::RegisterBlock(const IR::LocationDescriptor& descriptor, CodePtr entrypoint, size_t size) {
+#if defined(__linux__) && !defined(__ANDROID__)
+    // The non-Linux registration is a no-op, but evaluating the virtual name formatter
+    // would still allocate and format a string for every block on Windows/UWP.
     PerfMapRegister(entrypoint, code.getCurr(), LocationDescriptorToFriendlyName(descriptor));
-    Patch(descriptor, entrypoint);
+#endif
+    {
+        const JitProfile::Timer patch_timer{JitProfile::Phase::LinkPatch};
+        Patch(descriptor, entrypoint);
+    }
 
+    const JitProfile::Timer insert_timer{JitProfile::Phase::DescriptorInsert};
     BlockDescriptor block_desc{entrypoint, size};
     block_descriptors.insert({IR::LocationDescriptor{descriptor.Value()}, block_desc});
     return block_desc;
 }
 
 void EmitX64::Patch(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
+    const auto it = patch_information.find(target_desc);
+    if (it == patch_information.end()) {
+        return; // No incoming links: do not allocate four empty patch lists for this block.
+    }
     const CodePtr save_code_ptr = code.getCurr();
-    const PatchInformation& patch_info = patch_information[target_desc];
+    const PatchInformation& patch_info = it->second;
     // Patch sites are in blocks already emitted, so behind the write window (paged W^X).
     constexpr size_t MAX_PATCH_SIZE = 32;
 
@@ -391,9 +404,7 @@ void EmitX64::Patch(const IR::LocationDescriptor& target_desc, CodePtr target_co
 }
 
 void EmitX64::Unpatch(const IR::LocationDescriptor& target_desc) {
-    if (patch_information.count(target_desc)) {
-        Patch(target_desc, nullptr);
-    }
+    Patch(target_desc, nullptr);
 }
 
 void EmitX64::ClearCache() {

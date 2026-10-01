@@ -44,6 +44,7 @@ static void RaiseJitMemoryFailure(DWORD code, const void* base, size_t size, DWO
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -57,6 +58,8 @@ static void RaiseJitMemoryFailure(DWORD code, const void* base, size_t size, DWO
 #include "dynarmic/backend/x64/hostloc.h"
 #include "dynarmic/backend/x64/perf_map.h"
 #include "dynarmic/backend/x64/stack_layout.h"
+#include "dynarmic/backend/x64/writable_code_ranges.h"
+#include "dynarmic/interface/jit_profile.h"
 
 namespace Dynarmic::Backend::X64 {
 
@@ -125,19 +128,46 @@ const u8* WxPageUp(const u8* ptr) {
 #endif
 
 #ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
-void ProtectMemory(const void* base, size_t size, bool is_executable) {
+void ProtectMemory(const void* base, size_t size, bool is_executable,
+                   [[maybe_unused]] bool preserve_cfg = false) {
     // The constructor enables writing before anything is committed (committed_size == 0); there is
     // nothing to protect yet, and a zero-sized protect is an error on the UWP path.
     if (size == 0) {
         return;
     }
 #    ifdef _WIN32
+    const JitProfile::Timer timer{JitProfile::Phase::Protect};
     DWORD oldProtect = 0;
     // The is_executable→PAGE_EXECUTE_READ transition is the call that requires the `codeGeneration`
     // capability under the AppContainer (VirtualProtectFromApp); the W^X invariant means we only ever
     // hold RW or RX, never RWX.
-    const DWORD protection = is_executable ? PAGE_EXECUTE_READ : PAGE_READWRITE;
-    const BOOL protected_ok = DYNARMIC_VIRTUAL_PROTECT(const_cast<void*>(base), size, protection, &oldProtect);
+    static std::atomic_bool preserve_cfg_supported{true};
+    const bool keep_targets = is_executable && preserve_cfg &&
+                              preserve_cfg_supported.load(std::memory_order_relaxed);
+    DWORD protection = is_executable ? PAGE_EXECUTE_READ : PAGE_READWRITE;
+    if (keep_targets) {
+        protection |= PAGE_TARGETS_NO_UPDATE;
+    }
+    BOOL protected_ok;
+    if (is_executable) {
+        const JitProfile::Timer rx_timer{keep_targets ? JitProfile::Phase::CfgPreserveRx
+                                                    : JitProfile::Phase::CfgInitializeRx};
+        protected_ok = DYNARMIC_VIRTUAL_PROTECT(const_cast<void*>(base), size, protection, &oldProtect);
+    } else {
+        protected_ok = DYNARMIC_VIRTUAL_PROTECT(const_cast<void*>(base), size, protection, &oldProtect);
+    }
+    if (!protected_ok && keep_targets) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_SUPPORTED) {
+            // Some AppContainer runtimes may reject the modifier. Keep the established
+            // RX path and stop retrying the unsupported flag on subsequent blocks.
+            preserve_cfg_supported.store(false, std::memory_order_relaxed);
+            protection = PAGE_EXECUTE_READ;
+            const JitProfile::Timer fallback_timer{JitProfile::Phase::CfgFallback};
+            protected_ok = DYNARMIC_VIRTUAL_PROTECT(const_cast<void*>(base), size, protection,
+                                                    &oldProtect);
+        }
+    }
 #        if defined(DYNARMIC_UWP_APPCONTAINER)
     if (!protected_ok) {
         RaiseJitMemoryFailure(DYNARMIC_UWP_PROTECT_FAILED, base, size, protection);
@@ -295,13 +325,24 @@ void BlockOfCode::DisableWriting() {
     }
     wx_writing = false;
     const u8* const write_end = WxPageUp(getCurr<const u8*>());
-    if (wx_write_begin < write_end) {
-        ProtectMemory(wx_write_begin, write_end - wx_write_begin, true);
-    }
+    // Return adjacent patch pages and the append window to RX in one syscall per
+    // contiguous range. Every included page was already RW; gaps remain untouched.
+    std::sort(wx_extra_pages.begin(), wx_extra_pages.end());
+    RestoreWritableCodeRanges<u8>(wx_extra_pages, wx_write_begin, write_end, WX_PAGE_SIZE,
+                                  [this](const u8* begin, size_t size) {
+                                      const u8* const end = begin + size;
+                                      // New pages must establish normal CFG call targets once.
+                                      // Only previously executable pages may preserve that bitmap.
+                                      const u8* const initialized_end = std::min(end, wx_exec_end);
+                                      if (begin < initialized_end) {
+                                          ProtectMemory(begin, initialized_end - begin, true, true);
+                                      }
+                                      const u8* const new_begin = std::max(begin, wx_exec_end);
+                                      if (new_begin < end) {
+                                          ProtectMemory(new_begin, end - new_begin, true);
+                                      }
+                                  });
     wx_exec_end = std::max(wx_exec_end, write_end);
-    for (const u8* page : wx_extra_pages) {
-        ProtectMemory(page, WX_PAGE_SIZE, true);
-    }
     wx_extra_pages.clear();
 #    else
     ProtectMemory(getCode(), maxSize_, true);

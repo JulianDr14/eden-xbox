@@ -59,6 +59,10 @@ public:
     /// Submits the recorded work; returns the tick it signals.
     u64 Flush();
 
+    [[nodiscard]] bool HasGpuTimestamps() const noexcept {
+        return timestamp_data != nullptr;
+    }
+
     /// Submits the recorded work and waits for the GPU to finish it.
     void Finish();
 

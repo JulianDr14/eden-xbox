@@ -23,6 +23,7 @@
 #include "common/settings.h"
 #include "common/swap.h"
 #include "core/core.h"
+#include "core/arm/cpu_profile.h"
 #include "core/device_memory.h"
 #include "core/gpu_dirty_memory_manager.h"
 #include "core/hardware_properties.h"
@@ -711,6 +712,7 @@ struct Memory::Impl {
                 [[likely]] {
                 return;
             }
+            const CpuProfile::CallbackTimer flush_timer{core, false};
             current_area = system.GPU().OnCPURead(address, size);
         });
     }

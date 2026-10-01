@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -34,11 +35,13 @@
 #include "common/settings.h"
 #include "common/windows/timer_resolution.h"
 #include "core/arm/cpu_profile.h"
+#include "core/arm/jit_prewarm.h"
 #include "core/core.h"
 #include "core/cpu_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/kernel/svc/svc_debug_string.h" // Kernel::Svc::SetDebugStringObserver
+#include "core/hle/kernel/k_process.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "hid_core/hid_core.h"
@@ -56,6 +59,7 @@ namespace D3D12 {
 void SetTracedFrame(u32 frame);
 void SetFrameDiagnostics(bool enabled);
 void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
+void ShowCpuLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
 void SetBcArrayDecode(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuVerify(bool enabled); // d3d12_texture_cache.h
@@ -77,6 +81,7 @@ void SetAstcArrayRecompression(bool enabled) noexcept; // texture_cache/util.h
 } // namespace VideoCommon
 
 namespace {
+std::atomic<u64> g_test_memory_limit{};
 void WriteDiag(const std::string& msg); // defined with the UWP entry point below
 std::string MemoryReport();             // likewise
 std::string LargestAllocations();       // likewise
@@ -118,6 +123,8 @@ static void ApplyHeadlessBootSettings(const BootSurface& surface) {
 struct BootConfig {
     /// > 0: the payload does not emit the sentinels (deko3d examples, games, ...); run it this long.
     u32 run_seconds{};
+    /// PC test budget; hard process-commit enforcement belongs to local-run.ps1.
+    u32 memory_limit_mib{};
     /// D3D12 debug layer (renderer_debug); PC only, the console has no SDK layers.
     bool debug_layer{};
     /// With the debug layer, GPU-based validation too ("debug_layer=gbv").
@@ -131,6 +138,7 @@ struct BootConfig {
     bool gpu_profile{};
     /// Per-core JIT elapsed time and slow callback counts ("cpu_profile=1"). Diagnostic only.
     bool cpu_profile{};
+    enum class JitPrewarm { Off, Record, Warm } jit_prewarm{JitPrewarm::Off};
     /// XAudio2 performance samples and queue counters ("audio_profile=1").
     bool audio_profile{};
     /// Timed silent output for comparison and audio-device diagnosis ("audio=null").
@@ -213,6 +221,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     D3D12::SetFrameDiagnostics(!config.play);
     // The GPU spends the same 5 GiB as the emulated DRAM and the JIT: the texture and buffer
     // caches evict against what the whole app has left, not DXGI's budget.
+    g_test_memory_limit = u64{config.memory_limit_mib} << 20;
     D3D12::SetAppMemoryQuery(QueryAppMemory);
     D3D12::SetBcArrayDecode(!config.bc_arrays_native);
     // RGBA8 ASTC made loading frames upload 150-260 MiB at once and the console run out of memory
@@ -338,6 +347,20 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 D3D12::ShowLoadProgress(renderer, done, total);
             });
         WriteDiag("step: disk shader cache built | " + MemoryReport());
+    }
+
+    if (config.jit_prewarm != BootConfig::JitPrewarm::Off) {
+        // All guest cores are still stopped. Each owns a separate JIT; never
+        // compile into an instance concurrently with Run or another compiler.
+        if (auto* process = system.ApplicationProcess(); process && process->Is64Bit()) {
+            WriteDiag("step: CPU JIT profile/prewarm starting | " + MemoryReport());
+            Core::ConfigureApplicationPrewarm(system,
+                config.jit_prewarm == BootConfig::JitPrewarm::Warm,
+                [&system](size_t done, size_t total) {
+                    D3D12::ShowCpuLoadProgress(system.Renderer(), done, total);
+                });
+            WriteDiag("step: CPU JIT profile/prewarm ready | " + MemoryReport());
+        }
     }
 
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
@@ -510,6 +533,10 @@ std::string MemoryReport() {
                std::to_string(MemoryManager::AppMemoryUsageLimit() >> 20) + " MiB limit, commit " +
                std::to_string(report.TotalCommitUsage() >> 20) + " of " +
                std::to_string(report.TotalCommitLimit() >> 20) + " MiB" +
+               (g_test_memory_limit.load() == 0 ? "" : ", PC test budget " +
+                    std::to_string(g_test_memory_limit.load() >> 20) + " MiB, headroom " +
+                    std::to_string((g_test_memory_limit.load() > report.TotalCommitUsage()
+                        ? g_test_memory_limit.load() - report.TotalCommitUsage() : 0) >> 20) + " MiB") +
                (stats.empty() ? "" : ", " + stats);
     } catch (...) {
         return "app memory: MemoryManager unavailable";
@@ -592,6 +619,11 @@ bool QueryAppMemory(u64& used, u64& limit) {
         using winrt::Windows::System::MemoryManager;
         used = MemoryManager::AppMemoryUsage();
         limit = MemoryManager::AppMemoryUsageLimit();
+        const u64 test_limit = g_test_memory_limit.load(std::memory_order_relaxed);
+        if (test_limit != 0) {
+            limit = (std::min)(limit, test_limit);
+            used = (std::max)(used, MemoryManager::GetAppMemoryReport().TotalCommitUsage());
+        }
         return true;
     } catch (...) {
         return false;
@@ -1031,9 +1063,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                 }
                 break;
             case VirtualKey::T:
-                // Frame chain timeline of the next two seconds, to the log (frame_trace.h).
+                // Frame chain timeline of the next four seconds, to the log (frame_trace.h).
                 if (pressed) {
-                    VideoCore::FrameTrace::Start(120);
+                    VideoCore::FrameTrace::Start(240);
                 }
                 break;
             default: break;
@@ -1093,6 +1125,21 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
                     } else if (line == "cpu_profile=1") {
                         config.cpu_profile = true;
+                    } else if (line.starts_with("memory_limit_mib=")) {
+                        const auto value = line.substr(17);
+                        unsigned long parsed{};
+                        const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+                        if (result.ec == std::errc{} && result.ptr == value.data() + value.size() && parsed <= 1048576) {
+                            config.memory_limit_mib = static_cast<u32>(parsed);
+                        } else {
+                            WriteDiag("boot.cfg: invalid memory_limit_mib, ignored");
+                        }
+                    } else if (line == "jit_prewarm=record") {
+                        config.jit_prewarm = EdenXbox::BootConfig::JitPrewarm::Record;
+                    } else if (line == "jit_prewarm=1") {
+                        config.jit_prewarm = EdenXbox::BootConfig::JitPrewarm::Warm;
+                    } else if (line == "jit_prewarm=0") {
+                        config.jit_prewarm = EdenXbox::BootConfig::JitPrewarm::Off;
                         WriteDiag("boot.cfg: per-core guest CPU profiling enabled");
                     } else if (line == "audio_profile=1") {
                         config.audio_profile = true;

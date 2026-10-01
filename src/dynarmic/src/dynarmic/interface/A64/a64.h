@@ -11,11 +11,13 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "dynarmic/interface/A64/config.h"
+#include "dynarmic/interface/block_profile.h"
 #include "dynarmic/interface/halt_reason.h"
 
 namespace Dynarmic {
@@ -121,6 +123,12 @@ public:
      * i.e.: We're in a callback.
      */
     bool IsExecuting() const;
+
+    // Owner-thread only, while the guest is stopped. Precompile never executes
+    // guest instructions and rejects code that differs from the recorded block.
+    void SetBlockProfileCallback(std::function<void(const BlockProfile&)> callback);
+    bool PrecompileBlock(const BlockProfile& block);
+    std::size_t GetCodeCacheSpaceRemaining() const;
 
     /// @brief Disassemble the instructions following the current pc and return
     /// the resulting instructions as a vector of their string representations.

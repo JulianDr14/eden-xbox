@@ -4,18 +4,71 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <fstream>
+#include "common/fs/path_util.h"
 #include "common/settings.h"
 #include "core/arm/cpu_profile.h"
+#include "core/arm/jit_prewarm.h"
+#include "core/arm/jit_prewarm_parallel.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
+#include "core/arm/dynarmic/jit_prewarm_profile.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_process.h"
 #include "dynarmic/interface/A64/config.h"
+#include "dynarmic/interface/jit_profile.h"
 
 namespace Core {
 
 using namespace Common::Literals;
+
+void ConfigureApplicationPrewarm(System& system, bool warm,
+                                const std::function<void(size_t, size_t)>& progress) {
+    auto* process = system.ApplicationProcess();
+    if (!process || !process->Is64Bit() || Settings::IsNceEnabled()) {
+        return;
+    }
+    try {
+        JitPrewarm::application_catalog = std::make_shared<JitPrewarm::Catalog>();
+    } catch (const std::exception& e) {
+        LOG_WARNING(Core, "JIT profile: cross-core index unavailable: {}", e.what());
+    }
+    std::array<ArmDynarmic64*, Hardware::NUM_CPU_CORES> owners{};
+    for (size_t core = 0; core < owners.size(); ++core) {
+        owners[core] = static_cast<ArmDynarmic64*>(process->GetArmInterface(core));
+        if (owners[core]) owners[core]->LoadPrewarmProfile();
+    }
+    if (JitPrewarm::application_catalog) {
+        try {
+            JitPrewarm::application_catalog->Finalize();
+        } catch (const std::exception& e) {
+            JitPrewarm::application_catalog->pcs.clear();
+            JitPrewarm::application_catalog->priority.clear();
+            LOG_WARNING(Core, "JIT profile: cross-core index unavailable: {}", e.what());
+        }
+        JitPrewarm::application_catalog.reset();
+    }
+    if (!warm) return;
+    std::array<size_t, Hardware::NUM_CPU_CORES> sizes{};
+    for (size_t core = 0; core < owners.size(); ++core) {
+        if (owners[core]) sizes[core] = owners[core]->PreparePrewarmCandidates();
+    }
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        JitPrewarm::RunOwners(sizes, [&](size_t core, const JitPrewarm::Progress& callback) {
+            owners[core]->PrewarmBlocks(callback);
+        }, progress);
+    } catch (const std::exception& e) {
+        // RunOwners joins all workers before unwinding. Prepared blocks remain valid.
+        LOG_WARNING(Core, "JIT prewarm: parallel stage incomplete, using normal JIT: {}", e.what());
+    }
+    LOG_INFO(Core, "JIT prewarm parallel: {} owners, {:.1f} ms wall time",
+             std::count_if(sizes.begin(), sizes.end(), [](auto size) { return size != 0; }),
+             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+
+}
 
 DynarmicCallbacks64::DynarmicCallbacks64(ArmDynarmic64& parent, Kernel::KProcess* process)
     : m_parent{parent}, m_memory(process->GetMemory())
@@ -24,6 +77,7 @@ DynarmicCallbacks64::DynarmicCallbacks64(ArmDynarmic64& parent, Kernel::KProcess
 {}
 
 u64 DynarmicCallbacks64::MemoryRead(u64 vaddr, size_t size) {
+    const CpuProfile::CallbackTimer read_timer{m_parent.m_core_index, true};
     CpuProfile::Add(m_parent.m_core_index, CpuProfile::Counter::Reads);
     CheckMemoryAccess(vaddr, size, Kernel::DebugWatchpointType::Read);
     switch (size) {
@@ -43,7 +97,9 @@ Dynarmic::A64::Vector DynarmicCallbacks64::MemoryRead128(u64 vaddr) {
 
 std::optional<u32> DynarmicCallbacks64::MemoryReadCode(u64 vaddr) {
     CpuProfile::Add(m_parent.m_core_index, CpuProfile::Counter::CodeWords);
-    if (!m_memory.IsValidVirtualAddressRange(vaddr, sizeof(u32)))
+    // Dynarmic guarantees four-byte-aligned instruction fetches: a word never crosses a
+    // guest page. Keep validating each fetch, but avoid the generic range walker.
+    if (!m_memory.IsValidVirtualAddress(vaddr))
         return std::nullopt;
     auto const aligned_vaddr = vaddr & ~Core::Memory::YUZU_PAGEMASK;
     if (last_code_addr != aligned_vaddr) {
@@ -198,6 +254,7 @@ void DynarmicCallbacks64::ReturnException(u64 pc, Dynarmic::HaltReason hr) {
 }
 
 void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_space_bits) {
+    Dynarmic::JitProfile::SetEnabled(CpuProfile::Enabled());
     Dynarmic::A64::UserConfig config;
 
     // Callbacks
@@ -396,7 +453,194 @@ ArmDynarmic64::ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProc
     MakeJit(&page_table_impl, page_table.GetAddressSpaceWidth());
 }
 
-ArmDynarmic64::~ArmDynarmic64() = default;
+ArmDynarmic64::~ArmDynarmic64() {
+#if defined(ARCHITECTURE_x86_64)
+    // Kernel finalization has already stopped the CPU owners. Guest memory may
+    // be released here: save only the hashes collected during translation.
+    if (!m_prewarm || (m_prewarm->observed.empty() && m_prewarm->gameplay_observed.empty())) {
+        return;
+    }
+    try {
+        auto& p = *m_prewarm;
+        JitPrewarm::Merge(p.loaded, p.observed);
+        JitPrewarm::Merge(p.loaded, p.gameplay_observed);
+        std::error_code ec;
+        std::filesystem::create_directories(p.path.parent_path(), ec);
+        if (ec) {
+            LOG_WARNING(Core, "JIT profile core {}: directory unavailable: {}", p.core, ec.message());
+            return;
+        }
+        auto temp = p.path;
+        temp += ".tmp";
+        std::ofstream file{temp, std::ios::binary | std::ios::trunc};
+        const bool written = JitPrewarm::Write(file, p.title, p.build, p.core, p.loaded);
+        file.flush();
+        const bool flushed = bool(file);
+        file.close();
+        if (!written || !flushed || file.fail()) {
+            LOG_WARNING(Core, "JIT profile core {}: write failed, previous profile retained", p.core);
+            return;
+        }
+        // Replace only after a complete close. No delete-before-rename gap.
+        std::filesystem::rename(temp, p.path, ec);
+        if (ec) {
+            LOG_WARNING(Core, "JIT profile core {}: replacement failed: {}", p.core, ec.message());
+            return;
+        }
+        LOG_INFO(Core, "JIT profile core {}: saved {} descriptors, {} observed, {} during T, {} dropped at limit",
+                 p.core, p.loaded.size(), p.observed.size(), p.gameplay_observed.size(), p.dropped);
+    } catch (const std::exception& e) {
+        LOG_WARNING(Core, "JIT profile: save skipped: {}", e.what());
+    }
+#endif
+}
+
+void ArmDynarmic64::LoadPrewarmProfile() {
+#if defined(ARCHITECTURE_x86_64)
+    if (m_prewarm || m_system.DebuggerEnabled()) {
+        return;
+    }
+    try {
+        auto profile = std::make_unique<JitPrewarm::Profile>();
+        auto& p = *profile;
+        p.title = m_cb->m_process->GetProgramId();
+        p.build = m_system.GetApplicationProcessBuildID();
+        p.core = static_cast<u32>(m_core_index);
+        p.base = GetInteger(m_cb->m_process->GetEntryPoint());
+        p.path = Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "jit-profile" /
+                 fmt::format("{:016x}", p.title) / fmt::format("core-{}.bin", p.core);
+        auto& table = m_cb->m_process->GetPageTable().GetBasePageTable();
+        const auto end = GetInteger(table.GetCodeRegionStart()) + table.GetCodeRegionSize();
+        for (u64 addr = GetInteger(table.GetCodeRegionStart()); addr < end;) {
+            Kernel::KMemoryInfo info{};
+            Kernel::Svc::PageInfo page{};
+            if (table.QueryInfo(&info, &page, addr).IsError() || info.m_size == 0 ||
+                info.m_address > addr || info.m_size > UINT64_MAX - info.m_address) {
+                break;
+            }
+            const auto next = info.m_address + info.m_size;
+            if (next <= addr) {
+                break;
+            }
+            const auto user = info.m_permission & Kernel::KMemoryPermission::UserMask;
+            const auto rx = (Kernel::KMemoryPermission::UserRead |
+                             Kernel::KMemoryPermission::UserExecute) & Kernel::KMemoryPermission::UserMask;
+            if (user == rx) {
+                p.executable_ranges.emplace_back(info.m_address, std::min<u64>(next, end));
+            }
+            addr = next;
+        }
+        p.observed.reserve(JitPrewarm::MaxRecords - JitPrewarm::GameplayCapacity);
+        p.gameplay_observed.reserve(JitPrewarm::GameplayCapacity);
+        std::error_code ec;
+        const auto bytes = std::filesystem::file_size(p.path, ec);
+        if (!ec) {
+            std::ifstream file{p.path, std::ios::binary};
+            if (!JitPrewarm::Read(file, bytes, p.title, p.build, p.core, p.loaded)) {
+                LOG_WARNING(Core, "JIT profile core {}: incompatible or corrupt, learning again", p.core);
+            }
+        }
+        p.status.assign(p.loaded.size(), JitPrewarm::WarmStatus::RecordOnly);
+        p.catalog = JitPrewarm::application_catalog;
+        if (JitPrewarm::application_catalog) {
+            auto& keys = JitPrewarm::application_catalog->descriptors[p.core];
+            keys.reserve(p.loaded.size());
+            for (const auto& r : p.loaded) {
+                keys.push_back(r.descriptor);
+                if (r.gameplay_samples != 0) JitPrewarm::application_catalog->priority.push_back(r);
+            }
+        }
+        LOG_INFO(Core, "JIT profile core {}: loaded {}, RX ranges {}", p.core, p.loaded.size(), p.executable_ranges.size());
+        m_prewarm = std::move(profile);
+        m_jit->SetBlockProfileCallback([this](const Dynarmic::BlockProfile& block) {
+            m_prewarm->Observe(block);
+        });
+    } catch (const std::exception& e) {
+        LOG_WARNING(Core, "JIT prewarm core {}: unavailable, using normal JIT: {}", m_core_index, e.what());
+    }
+#endif
+}
+
+size_t ArmDynarmic64::PreparePrewarmCandidates() {
+#if defined(ARCHITECTURE_x86_64)
+    if (!m_prewarm) return 0;
+    try {
+        return m_prewarm->PrepareShared();
+    } catch (const std::exception& e) {
+        m_prewarm->shared.clear();
+        m_prewarm->shared_status.clear();
+        LOG_WARNING(Core, "JIT profile core {}: shared candidates unavailable: {}", m_core_index, e.what());
+        return 0;
+    }
+#else
+    return 0;
+#endif
+}
+
+void ArmDynarmic64::PrewarmBlocks(const std::function<void(size_t, size_t)>& progress) {
+#if defined(ARCHITECTURE_x86_64)
+    if (!m_prewarm) return;
+    auto& p = *m_prewarm;
+    m_jit->SetBlockProfileCallback({}); // Warming must not record its own compilations.
+    try {
+        const auto plan = p.WarmPlan();
+        size_t priority_accepted{}, shared_accepted{};
+        const auto start = std::chrono::steady_clock::now();
+        size_t accepted{}, rejected{}, budget_skipped{};
+        const auto space = m_jit->GetCodeCacheSpaceRemaining();
+        constexpr size_t CodeBudget = 115 * 1024 * 1024;
+        {
+            m_cb->last_code_addr = u64(-1);
+            for (size_t n = 0; n < plan.size(); ++n) {
+                if (space - m_jit->GetCodeCacheSpaceRemaining() >= CodeBudget) {
+                    budget_skipped = plan.size() - n;
+                    break;
+                }
+                const auto candidate = plan[n];
+                auto block = p.GetRecord(candidate);
+                auto& status = candidate.shared ? p.shared_status[candidate.index] : p.status[candidate.index];
+                status = JitPrewarm::WarmStatus::Rejected;
+                const auto offset = block.descriptor & JitPrewarm::PcMask;
+                if (offset > JitPrewarm::PcMask - p.base ||
+                    !p.Contains(p.base + offset, block.code_bytes)) {
+                    ++rejected;
+                } else {
+                    block.descriptor = (block.descriptor & JitPrewarm::DescriptorMask) | (p.base + offset);
+                    if (m_jit->PrecompileBlock(block)) {
+                        ++accepted;
+                        status = JitPrewarm::WarmStatus::Accepted;
+                        shared_accepted += candidate.shared;
+                        priority_accepted += !candidate.shared && block.gameplay_samples != 0;
+                    } else {
+                        ++rejected;
+                    }
+                }
+                if (progress && (n % 256 == 0 || n + 1 == plan.size())) {
+                    progress(n + 1, plan.size());
+                }
+            }
+            if (progress && !plan.empty()) {
+                progress(plan.size(), plan.size());
+            }
+        }
+        LOG_INFO(Core, "JIT prewarm core {}: mode {}, RX ranges {}, loaded {}, accepted {}, rejected {}, budget skipped {}, code {:.2f} MiB, {:.1f} ms",
+                 p.core, "warm", p.executable_ranges.size(), p.loaded.size(), accepted, rejected, budget_skipped,
+                 (space - m_jit->GetCodeCacheSpaceRemaining()) / (1024.0 * 1024.0),
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        LOG_INFO(Core, "JIT prewarm core {}: priority blocks {}, accepted {}", p.core,
+                 std::count_if(p.loaded.begin(), p.loaded.end(), [](const auto& r) { return r.gameplay_samples != 0; }),
+                 priority_accepted);
+        LOG_INFO(Core, "JIT prewarm core {}: shared candidates {}, accepted {}", p.core, p.shared.size(), shared_accepted);
+    } catch (const std::exception& e) {
+        LOG_WARNING(Core, "JIT prewarm core {}: incomplete, using normal JIT: {}", m_core_index, e.what());
+    }
+    m_jit->SetBlockProfileCallback([this](const Dynarmic::BlockProfile& block) {
+        m_prewarm->Observe(block);
+    });
+#else
+    (void)progress;
+#endif
+}
 
 void ArmDynarmic64::SetTpidrroEl0(u64 value) {
     m_cb->m_tpidrro_el0 = value;

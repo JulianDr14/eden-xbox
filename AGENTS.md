@@ -38,6 +38,51 @@ detalle técnico está en [`docs/xbox_internal.md`](docs/xbox_internal.md) (cuad
 
 La rama de trabajo es `xbox`. `master` del fork es Eden tal cual.
 
+Objetivo FPS/estabilidad (30 sep 2026): pruebas manuales hasta Q; 60 FPS sostenidos aun
+no demostrados. Perfil JIT PC: protecciones de pagina suman 43,6% del tiempo agregado de
+compilacion. Candidato sin commit: tablas de handlers estaticas, eliminar nombres perf-map
+no-op en Windows e invalidar FastDispatch sin ejecutar lookup JIT ni cambiar RX/RW por bloque.
+Build UWP y 262144 casos de hash correctos; candidato PC 97 s manuales, retorno 0,
+sin errores Render y dos asserts BufferQueue; coste Compile agregado 1,6% menor observado,
+sin mejora FPS sostenida demostrada (ultimas ventanas 51--54 FPS); A/B y Series pendientes.
+Diseno y evidencia en [`docs/xbox_performance.md`](docs/xbox_performance.md).
+Fastmem Full PC: 84 s manuales, retorno 0; ultimas 900 presents 51,82 FPS frente a
+51,17 sin fastmem, callbacks reads ~95,7% menos; sin mejora sostenida demostrada ni
+60 FPS. Ocho asserts BufferQueue; Full Series/default Xbox no certificados ni cambiados.
+Diagnostico siguiente: T registra esperas IPC/SVC, guest Runnable y signal VSync;
+release->fin dequeue host observado 40--48 us mediana, max 112 us, no explica solo
+los tirones largos. Asserts BufferQueue ahora tienen contexto de slots/limites.
+T a 240 vsyncs (~4 s) validado PC en tres capturas completas; ocho asserts identifican
+slot 2 Queued/Acquired con limite 2. HUD superior derecho reutiliza texto/panel de shaders:
+FPS, FRAME/MAX, CPU por core y GPUQ de timestamps; build correcto, gate visual pendiente.
+Cierre de pruebas solo con Q.
+Candidato posterior zona nueva/vieja: evitar entradas de parche JIT vacias y agrupar
+restauracion RX de paginas contiguas ya modificadas. Build y 24573 casos de rangos
+con gate real de protecciones Windows correctos; mejora FPS y Series pendientes.
+Gate manual candidato 340 s, Q y retorno 0, cero errores Render, ocho asserts
+BufferQueue previos a T; Compile/bloque ~2,3% menor observado, sin mejora clara
+de tirones (nueva28,25 FPS, vieja53,75; muestras distintas). Sin commit.
+Perfil siguiente separa fases de emision A64 y registra totales JIT propios de cada T
+antes de volcar el log, sin consumir contadores de ventanas. Build correcto; gate pendiente.
+Gate desglose PC: nueva23874 bloques/1529ms Compile, recorridas334/363 bloques y~24ms;
+Protect42,25% de Compile agregado, instrucciones456ms. T2/3 truncadas~3,9s por
+~17k eventos/s; capacidad aumentada131072, build correcto. Foco proteccion/instrucciones.
+Candidato CFG preserva metadatos solo en paginas previamente RX, inicializa nuevas
+normal y conserva fallback FromApp. Gate desktop /guard:cf+80000 pares correcto;
+build UWP correcto, AppContainer/Series y mejora FPS pendientes. Sin commit.
+Gate CFG AppContainer315s/Q/retorno0, cero errores Render, fallback0, tres asserts
+previos aT; nueva~31FPS/vieja~58,75 y sin ahorro demostrado (Compile/bloque sube).
+T completas con131072eventos de capacidad. Candidato no validado para FPS/Series.
+Nuevo candidato: perfil A64 persistente+prewarm antes de Run, `jit_prewarm=record/1/0`
+(default0), por title/BuildId/core, hash/longitud y RX iniciales validados,64MiB
+emitidos/core. Build UWP y gate standalone con Dynarmic real correctos; corrida
+de aprendizaje/Q, segunda corrida prewarm/FPS y Series pendientes. Sin commit.
+Gate prewarm PC cerrado: aprendizaje guarda695927descriptores, warm prepara464635
+y omite231292 por presupuesto. Nueva~27,5->38,5FPS yCompile42,1% menos observado;
+recorrida~56,25->47,25FPS. Ambas Q/retorno0/Render0, asserts2/5 previos aT.
+No60 sostenidos ni mejora general demostrados; revisar seleccion/cobertura antes
+de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
+
 ## Reglas duras
 1. **Solo nuestro fork.** Los commits y pushes van únicamente a `origin` (`JulianDr14/eden-xbox`,
    fork de `eden-emulator/mirror`).
@@ -63,6 +108,7 @@ La rama de trabajo es `xbox`. `master` del fork es Eden tal cual.
 ## Cómo trabajamos
 - **Idioma:** el usuario escribe en español, a veces rápido y con erratas. Responde en español,
   directo y sin relleno.
+- **Pruebas de FPS y estabilidad:** usar `play=1`, sin limite de tiempo ni entradas programadas; el usuario prueba gameplay y cierra con Q cuando lo considere suficiente. No usar una sesion corta para certificar rendimiento.
 - **Operaciones pesadas, las ejecuta el usuario.** Un build completo, descargas grandes o extraer
   archivos: dale el comando para que lo corra él y vea el progreso. Tú sí puedes hacer builds
   incrementales cortos (unos pocos `.obj` o el link) y las pruebas en el PC.
@@ -128,3 +174,101 @@ La rama de trabajo es `xbox`. `master` del fork es Eden tal cual.
 - **Fuera del repo:** `..\mesa-build\`, con las fuentes, el build de Mesa y la DLL.
 - **Modelo a imitar:** `src/video_core/renderer_vulkan/` (`vk_scheduler`, `vk_staging_buffer_pool`,
   `vk_buffer_cache`, `vk_texture_cache`, `vk_fence_manager`, `vk_rasterizer`).
+
+
+Actualizacion candidato FPS (30 sep 2026): prewarm prioriza compilaciones observadas
+durante T, conserva perfiles v1 y guarda v2; cupo de observaciones reservado para T,
+mismo presupuesto64MiB/core. Contadores T clasifican misses por cobertura, presupuesto,
+core/FPCR, codigo distinto o recompilacion. Harness y build incremental UWP correctos;
+primera corrida aprende prioridad, segunda valida seleccion/FPS. Gate manual y Series
+pendientes; sin commit. Detalle en `docs/xbox_performance.md`.
+
+
+Gate PC prioridad JIT (30 sep 2026): Q71s, retorno0, dos T completas. Nueva43FPS
+con16414 compilaciones:69,75% presupuesto y28,80% perfil solo en otro core;
+recorrida59,25FPS/559 compilaciones.16973 registros T guardados en v2 y checksum
+verificado. Esta corrida aun cargo v1 sin prioridad; siguiente compara prewarm
+priorizado,64MiB/core. Cinco asserts BufferQueue antes de T, Render sin errores.
+Arranque tuvo pausa larga compatible con suspension host, causa sin confirmar.
+Detalle/evidencia en `docs/xbox_performance.md`; Series pendiente, sin commit.
+
+
+Gate PC prewarm priorizado (30 sep 2026):16973 prioritarios aceptados sin rechazos,
+64MiB/core; Q67s/retorno0, dos T completas. Nueva43->51,5FPS, Compile16414->5672,
+p99gap71,290->34,780ms y max200,573->50,043ms; recorrida59,25->58FPS con mas
+compilacion y peor p99. Mejora parcial observada, no60 sostenidos ni estabilidad
+general certificada.25157 registros prioritarios persistidos/checksum correcto;
+Render sin errores, dos asserts BufferQueue antes de T. Cobertura por presupuesto
+y perfil en otro core sigue pendiente; siguiente candidato prioridad entre cores
+con validacion de codigo. Series pendiente, sin commit; detalle en rendimiento.
+
+
+Decision usuario memoria: caches por juego, pruebas PC con limite5120MiB (Series
+medido,5GiB). local-run.ps1 aplica por defecto Job process-commit cap, verifica
+API y conserva limite tras cerrar launcher; MemoryLimitMiB0 opt-out. Frontend
+memory_limit_mib refleja presupuesto de caches/diag sin falsear limite OS.
+No aumenta prewarm64MiB/core ni cambia memoria guest: medir gameplay primero.
+Probe asignacion real rechazado al limite y build UWP correctos; app PC limitada
+lanzada, gate manual pendiente. GPU dedicada PC no reproduce RAM unificada Xbox.
+Detalles/fuentes/trampa de permisos en xbox_performance.md; sin commit.
+
+
+Gate PC5120MiB: Q84s/retorno0, T completas38FPS nueva/53 recorrida; maximo
+muestreado4653MiB commit con466MiB margen, sin errores Render/asignacion, dos
+asserts BufferQueue previos.25157 prioritarios precalentados,64MiB/core. Ventanas
+muestran mas recreacion/decodificacion de texturas y uso GPU; posible presion GC
+con politica5120, sin thrashing probado ni A/B determinista. Antes de ampliar JIT,
+medir evictions/hits y proteger conjunto de trabajo de gameplay. Job PC no equivale
+a RAM unificadaSeries. Detalle en xbox_performance.md, sin commit.
+
+
+Candidato autorizado usuario: prewarm100MiB por core emulado (antes64), hasta
+400MiB en cuatro instancias; con core3 sin perfil hasta300MiB. JIT capacidad512MiB
+se mantiene, PC cap5120MiB/caches por juego. Build incremental pasa; prueba manual
+T/Q, pico memoria, FPS y Series pendientes. Sin commit; detalle en rendimiento.
+
+
+Gate PC100MiB/core con limite5120: Q64s/retorno0, T completas; nueva38->57,25FPS
+yCompile6725->598, recorrida53->59,25FPS/637->251. Maximo muestreado4685MiB,
+434MiB margen; Render/asignacion sin errores, cinco asserts BufferQueue antes deT.
+Precarga40,4s frente27,9 con64MiB. Presupuesto ya solo45/1 misses; otro core533/249
+domina restantes. Mejora parcial manual, no60 sostenidos ni Series certificados.
+Mantener100, siguiente foco cobertura entre cores/precarga/GC; sin commit.
+
+
+Usuario autoriza candidato150MiB de prewarm por core (antes100), PC cap5120MiB
+y perfiles por juego. Build incremental correcto; gate manual T/Q y Series
+pendientes. Sin commit; evidencia/diseno en xbox_performance.md.
+
+
+Gate150 PC: Q67s/retorno0, T completas56/57,5FPS frente57,25/59,25 con100.
+Techo+50% pero codigo real+5,97% (317,37MiB), bloques+6,11%; p99 empeora22,38/25,75%.
+Maximo commit muestreado4814MiB/margen305, precarga43,8s. Perfil completo sin
+omitidos por presupuesto, misses otro core/nunca aprendido.100 mejor balance
+observado, A/B causal/Series no certificados. Codigo sigue150 autorizado, sin
+reversion automatica ni commit; detalle en xbox_performance.md.
+
+
+Candidato autorizado115MiB/core: comparte perfiles prioritarios entre cores del
+mismo juego/BuildId, valida codigo y emite por JIT; perfiles contradictorios no se
+comparten. Precarga paralela con un worker por JIT detenido y progreso solo en
+coordinador, join antes de Run/fallback. PC cap5120MiB conservado. Harness Dynarmic
+real pasa concurrencia/estado/hash y unwind, build incremental correcto. Gate
+manual tiempo/RAM/T/Q ySeries pendiente; sin commit, detalle en rendimiento.
+
+
+Arranque115 compartido/paralelo PC confirmado:4344 bloques de otros cores
+aceptados,777750 preparados total, cero rechazados/omitidos, codigo321,14MiB
+total(113,64/105,58/101,92). Precarga completa21,9s frente43,8 serial observados
+con perfiles distintos; workers21,39s wall. Commit2251MiB tras carga, cap5120
+verificado. Gameplay/T/Q, margen/FPS ySeries pendientes, sin commit.
+
+
+Gate115 compartido/paralelo PC: Q58s/retorno0, T completas56,25/57FPS;
+Compile334/20 frente797/140 con150(-58,09%/-85,71%), pero FPS sin mejora general.
+Precarga21,9s vs43,8;4344 compartidos aceptados y cero omitidos/rechazados.
+Commit maximo muestreado4811MiB/margen308; Render/asignacion sin errores,
+tres asserts BufferQueue previos aT. T1miss181otro-core/153nuevos, T2 10/10;
+solo compartimos prioritarios. CPU ejecucion/sync/pacing/caches siguiente diagnostico,
+no mas presupuesto ni60FPS certificados. Error playtime al cierre registrado,
+retorno0; Series pendiente, sin commit. Evidencia en xbox_performance.md.

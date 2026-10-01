@@ -1,0 +1,1456 @@
+# Xbox: objetivo de 60 FPS y estabilidad
+
+Meta: acercarse a 60 frames nuevos por segundo durante gameplay, mantener el p95/p99 bajo,
+y evitar picos y errores. Una media de presents o un cambio de swap interval no prueba que
+la simulacion vaya a 60 Hz. Las pruebas manuales duran hasta que el usuario cierra con Q.
+
+## Evidencia de partida, 30 sep 2026
+
+Commit previo: 111678c38 (depth/cargas). Recorrido manual de 90 s con cierre 0, sin debug ni
+perfiles detallados. Ventanas de 300 presents: 34,48/36,88 FPS, p99 91,23/67,68 ms. Hay picos
+de carga de 905 y 1.145 ms y frames sin uploads de 100--133 ms con 93--128 ms esperando comandos.
+El hilo GPU esperando comandos no distingue calculo del guest de esperas/planificacion.
+
+La ventana de 8,7 s tambien muestra 6,17 s de espera por framebuffer libre y 25,2 s de cores
+idle agregados. No concluir que todos los cores esten saturados ni quitar sincronizacion.
+El cuaderno documenta el fallback del juego a swap_interval=2; forzarlo a 1 no arreglo la
+simulacion. Fastmem completo e hibrido ya se investigaron y no sirven como ruta Series actual.
+Los presupuestos UWP requieren conservar la coherencia, los fallbacks y el uso real de memoria.
+
+## Primera iteracion implementada, sin commit
+
+- P50/p95/p99 nearest-rank de 300 intervalos presentados. Array fijo y sort una vez por ventana,
+  sin allocations por frame. No medir medias de percentiles como si fueran percentiles globales.
+- SamplerHeap: find heterogeneo C++20 por span; la clave vector se construye solo en un miss.
+  Evita allocate/free y copiar claves en todos los hits. Hash y comparacion completa siguen
+  iguales y los recursos GPU conservan su lifetime. Recorrido manual sin errores Render;
+  no hay FPS A/B demostrado ni resultado Series nuevo.
+- Fetch de instrucciones A64: Dynarmic garantiza alineacion de cuatro bytes. Como cada palabra
+  cabe en una pagina guest de 4096 bytes, basta IsValidVirtualAddress en cada fetch en vez de
+  IsValidVirtualAddressRange y su loop. La validacion se conserva incluso para la pagina ya
+  cacheada; no ampliar la vida de un puntero host ni omitir invalidaciones. Ahorro acotado a
+  fetch durante compilacion; no presentarlo como aceleracion de toda la ejecucion JIT.
+- Perfil dirigido cpu_profile=1: tiempo de una lectura escalar de cada 1024, numero de muestras
+  y media; tiempo exacto de cada fallo de area cacheada en OnCPURead, incluyendo locks y posible
+  descarga GPU. El total de misses no es el numero de descargas: un area preemptiva puede no
+  descargar. La suma muestreada no es tiempo total exacto y puede perder outliers raros.
+  Los tiempos de lectura y flush estan anidados, no se suman. Contadores por core alineados,
+  atomicos relaxed; el cursor de muestreo solo lo escribe el hilo CPU de ese core. Desactivado
+  por defecto, sin timestamps por acceso durante juego normal.
+
+## Investigacion y decisiones
+
+Microsoft documenta para UWP en Series un limite foreground de 5 GB en juegos, cuatro cores
+exclusivos y dos compartidos. Por eso los budgets de la app y Game mode importan; no extrapolar
+el total de RAM fisica de Series a la app. El PC de la ultima prueba alcanzo 4942 MiB usados,
+pero su limite difiere del de Xbox. No afirmar que el mismo pico quepa en la consola.
+
+La prioridad Critical de CPU/GPU y VeryHigh de timing/vsync ya estan en el codigo. El helper
+SetCurrentThreadToPerformanceCores solo aplica a Android actualmente, pero eso no demuestra
+un fallo en Series, con cores homogeneos. No fijar mascaras arbitrarias ni elevar prioridades
+sin conocer los cores disponibles y las dependencias. El profiling de sincronizacion precede
+esos cambios, como recomienda Microsoft. No usar APIs exclusivas de GDK en una UWP.
+
+Vulkan comparte memoria CPU/JIT, decoder y caches genericas. GetFlushArea Vulkan consulta
+texturas; D3D12 consulta tambien buffers para mantener coherencia. No copiar la omision de
+buffers sin demostrar que no hay writes GPU. Vulkan usa bancos de descriptors y sus reglas
+de sets no sustituyen los heaps D3D12. Se conserva FlipDiscard y Present(1) actuales; mover
+Present a otra cola/hilo o quitar VSync exige otro gate y no elimina el retraso del guest.
+
+Fuentes primarias consultadas:
+
+- [Microsoft: recursos UWP Xbox One y Series](https://learn.microsoft.com/en-us/previous-versions/windows/uwp/xbox-apps/system-resource-allocation).
+- [Microsoft: diagnostico de serializacion](https://learn.microsoft.com/en-us/gaming/gdk/docs/gdk-dev/console-dev/overviews/threads/serialization).
+- [Microsoft: PIX Timing Captures](https://learn.microsoft.com/en-us/windows/win32/direct3dtools/pix/articles/timing-captures/pix-timing-captures).
+- [Microsoft: unordered_map](https://learn.microsoft.com/en-us/cpp/standard-library/unordered-map-class).
+- [Dynarmic: contrato del callback A64](https://github.com/azahar-emu/dynarmic/blob/master/src/dynarmic/interface/A64/config.h), contrastado con src/dynarmic/src/dynarmic/interface/A64/config.h del repo.
+
+## Gates y siguiente decision
+
+### Acotacion de BufferQueue y traza de esperas guest
+
+La correlacion de trazas existentes empareja waits de dequeue >200 us con la ultima
+liberacion ocurrida dentro de esa espera (no causalidad por ID de evento). Sin fastmem:
+108/111 muestras, p50 ReleaseBuffer->DequeueWaitEnd 0,041/0,040 ms, max 0,079/0,089 ms.
+Full: 41/78/89 muestras, p50 0,048/0,041/0,041 ms, max 0,111/0,086/0,112 ms.
+Los registros de borde y waits sin release observado se excluyen. Ese despertar del
+hilo host de BufferQueue es rapido en las ventanas T; no explica por si solo tirones
+de 100--200 ms. No demuestra que el hilo guest se ejecute igual de rapido tras el IPC.
+Queue->Acquire ronda 15--16 ms (32 ms donde predomina intervalo 2), compatible con
+cadencia de VSync. La suma de waits por framebuffer no prueba que notify sea lento.
+
+Instrumentacion dirigida implementada, sin cambio de sincronizacion o swap interval:
+
+- Durante T: guest-svc-begin/end para WaitSynchronization (0x18), SendSyncRequest
+  (0x21) y SendSyncRequestWithUserBuffer (0x22). a = ID guest original, b = ID SVC.
+  Capturar el ID antes de Call permite emparejar aunque la fiber migre de host core.
+  Duracion SVC incluye bloqueo y trabajo HLE, no es solo CPU. Si el inicio fue fuera
+  de la traza, no registrar una duracion ficticia; bordes sin pareja se descartan.
+- guest-thread-ready: transicion a estado raw Runnable de un user thread en el
+  scheduler; a = ID guest, b = prioridad. Marca antes de encolar, con scheduler lock.
+  Ready->SvcEnd acota scheduler/retorno HLE; no mide la latencia de toda ejecucion guest.
+- guest-vsync-signal justo antes de SignalVsync, para correlacionar ready y retorno
+  de WaitSynchronization con la liberacion/composicion y QueueBuffer del frame siguiente.
+- ASSERT_MSG BufferQueue conserva la condicion y agrega slot, estado, preallocation,
+  presencia de buffer, max/override/default y cola. No silenciar ni corregir estados
+  sin conocer el caso. GetMaxBufferCount y SetPreallocatedBuffer no cambian todavia.
+- Dump de FrameTrace, tambien al llenarse, se realiza en VSync para evitar formatear
+  miles de lineas dentro del scheduler lock. Array acotado de 16384 eventos; si se llena
+  la captura se trunca y termina en el siguiente VSync. No interpretar su cola como
+  ausencia de eventos. Fuera de T, Mark retorna sin reloj/allocations; no tracing continuo.
+
+Build incremental UWP de 16 pasos y diff-check correctos. Gate manual dirigido abierto
+con fastmem=0 y cpu_profile=1; T requerido para esos eventos, Q decide el cierre.
+Es diagnostico para decidir el cambio, no una optimizacion de FPS certificada.
+
+### Hipotesis tras la comparacion Full
+
+Para el limite de FPS sostenidos, priorizar perdida de deadlines por dependencias y
+despertares del guest en la cadena dequeue/release/VSync. Full baja callbacks ~95,7%
+y elapsed Run ~26,9% en la cola de las sesiones, pero FPS solo ~1,3% observado. No
+descarta CPU ni prueba un bug de BufferQueue: bloquearse por un buffer libre es normal
+tambien cerca de 60 FPS. Los asserts de estado son una pista independiente, no causa
+demostrada de los tirones. Los VSync sin frame nuevo indican falta de frames a tiempo;
+ComposeWaitEnd casi nulo descarta una espera larga en esa fase especifica, no todas
+las dependencias. Tramos de 200 ms sin uploads muestran idle GPU 192,8 ms.
+
+Confirmacion dirigida: correlacionar ReleaseBuffer/SignalDequeueCondition, retorno del
+dequeue, evento VSync/despertar del hilo guest y primer envio GPU. Separar tiempo bloqueado,
+tiempo listo sin ejecutar y trabajo efectivo; capturar SVC/HLE fuera de Run si falta ese
+coste. JIT Emit/Protect sigue como segunda hipotesis fuerte para picos de carga.
+No forzar swap interval, aumentar buffers o prioridades sin demostrar la dependencia.
+Referencia: [Microsoft PIX: stalls, readying threads y context switches](https://devblogs.microsoft.com/pix/analyzing-stalls-and-context-switches-in-timing-captures/).
+
+### Comparacion manual con fastmem Full en PC
+
+Mismo binario del candidato, play=1 y cpu_profile=1; cambia fastmem=0 por fastmem=full.
+Full confirmado por HostMemory: arena de 512 GiB sobre seccion file-backed de 4096 MiB,
+no fallback hibrido. Q tras 84 s de guest, retorno 0 a 94,656 s. Evidencia preservada
+en pc-fps-manual-fastmem-full{,-diag}.txt, build-uwp/log-review-2026-09-30.
+
+Comparacion de las ultimas tres ventanas completas de cada corrida, 900 presents.
+FPS agregado = frames / suma del tiempo, no promedio aritmetico de FPS ni de percentiles.
+Los recorridos manuales y sus duraciones difieren (97 s sin fastmem, 84 s Full): son
+observaciones orientativas, no una prueba A/B controlada ni una medicion Series.
+
+| Medida de las ultimas tres ventanas | Sin fastmem | Full |
+|---|---:|---:|
+| FPS agregado de presents | 51,17 | 51,82 |
+| FPS por ventana | 50,99 / 51,14 / 51,37 | 48,13 / 58,44 / 50,00 |
+| p95 ms por ventana | 33,48 / 33,42 / 33,40 | 33,65 / 17,27 / 33,49 |
+| p99 ms por ventana | 41,56 / 39,59 / 33,57 | 39,03 / 33,43 / 49,63 |
+| Compilacion JIT us/bloque | 66,63 | 62,87 |
+| Lecturas escalares por callback / present | 16673,4 | 719,2 |
+| Elapsed Run agregado entre cores / present, ms | 20,43 | 14,94 |
+
+Full reduce ~95,7% los callbacks de lectura escalar observados en esas ventanas y
+~5,6% el coste medio de compilacion. Elapsed Run cae ~26,9%, pero incluye compilacion,
+callbacks y preemption, no es utilizacion host. FPS agregado solo sube ~1,3% observado;
+Full no alcanza 60 sostenidos y la estabilidad no mejora claramente. En cargas siguen
+p99 de 351,16/358,61 ms y hay una pausa de ~952 ms; sin uploads tambien aparecen
+167/200 ms, con idle GPU 160,5/192,8 ms. No atribuir todo el retraso a lecturas CPU.
+
+Todas las ventanas reportadas: 3000 presents Full frente a 3600 sin fastmem, FPS
+agregado 42,37 frente a 42,26 incluyendo cargas. JIT Compile 60,53 frente a 67,02 us
+por bloque; los bloques y mezcla de etapas difieren. Protecciones/bloque 2,280 frente
+a 2,325; cero invalidaciones JIT en ambas corridas. No extrapolar estos agregados
+como ganancia garantizada por cambiar fastmem ni restar tiempos de cores solapados.
+
+T: 51/81/91 frames encolados por 120 vsyncs (~25,5/40,5/45,5 FPS). Intervalos 1/2:
+8/43, 45/36, 65/26. ComposeWaitEnd total 0/0/0,001 ms, sin espera relevante por el
+hilo GPU en esa fase. Estas capturas estan tomadas en momentos distintos de las
+trazas sin fastmem y no son pares A/B.
+
+Estabilidad: cero errores Render y cierre limpio; ocho asserts recuperables BufferQueue
+frente a dos sin fastmem. No atribuir el incremento a Full sin reproducir el mismo tramo.
+Diag registra 32 access violations first-chance durante JIT; no representan un crash
+fatal, pues la app continua y retorna 0; no medir la tasa total de faults con ese conteo.
+App memory reportada al cierre: 3265 MiB Full frente a 4915 MiB sin fastmem. Full mueve
+DRAM a seccion file-backed; este contador y tamanos de regiones mapeadas no son una
+medida comparable de toda la RAM fisica residente ni validan el presupuesto de Series.
+
+Resultado: Full funciona en PC y evita muchos callbacks, pero en estas muestras no
+demuestra una ganancia importante de FPS ni 60 sostenidos. Conservarlo como diagnostico;
+no cambiar el default Xbox ni dar por resueltas sus restricciones de alias/mapeo.
+
+### Revision del candidato optimizado: 97 s manuales
+
+Evidencia pc-fps-manual-jit-optimized{,-diag}.txt en build-uwp/log-review-2026-09-30.
+Q tras 97 s de guest; RunHeadlessBoot retorno 0 a 107,140 s. CPU profiling habilitado,
+sin debug/GPU profiling detallado. Cero errores Render/device removal; dos asserts
+recuperables BufferQueue a 57,852 s. Memoria app al cierre: 4915 MiB; PC tiene otro limite.
+
+Comparacion agregada de ventanas, normalizada por bloques compilados, no por segundos
+totales de sesiones de distinta duracion. Ambas sesiones tienen CPU profiling habilitado:
+
+| Medida | Antes | Candidato |
+|---|---:|---:|
+| Bloques compilados reportados | 796895 | 797661 |
+| Compile us/bloque | 68,14 | 67,02 |
+| Emit us/bloque | 61,65 | 60,57 |
+| Protect us/llamada | 12,79 | 12,70 |
+| Llamadas Protect/bloque | 2,324 | 2,325 |
+
+La reduccion observada de Compile es 1,6% en el agregado, 8,4% en la primera ventana
+y 5,8% agrupando las ultimas cuatro. No elegir solo el subconjunto favorable: los bloques,
+el recorrido y la planificacion difieren, y no hay repeticiones A/B que midan variabilidad.
+La reduccion del trabajo de tablas esta probada por el ensamblado; la magnitud de mejora
+de FPS no lo esta. Invalidate registra cero llamadas en todas las ventanas: Unpatch no
+se ejercito, por lo que eliminar sus transiciones RX/RW no aporta ahorro en esta muestra.
+El numero de protecciones por bloque nuevo permanece practicamente igual.
+
+Ultimas ventanas: 54,21/50,99/51,14/51,37 FPS; p99 34,22/41,56/39,59/33,57 ms.
+Antes, ultimas cuatro: 52,17/51,28/45,92/58,44 FPS; p99 38,42/40,64/51,13/33,42 ms.
+Son ventanas de recorrido manual, no pares temporales equivalentes. Persisten tramos
+de 31,64/35,36 FPS y p99 200,08/118,12 ms; en cargas, p99 453,17 ms. A 104,808 s
+hay otro hitch de 150 ms con 143,3 ms de idle GPU, cero uploads y cero waits de fences/PSO.
+Esta pausa cae despues de la ultima ventana completa y no aparece en su p99.
+
+T recoge dos ventanas de 120 vsyncs con 110/114 frames nuevos (aprox. 55/57 FPS).
+Intervalos pedidos/efectivos 1: 104/111; intervalo 2: 6/3. Espera del VsyncThread por
+hilo GPU: 0,001/0,013 ms agregados; dequeue: 1690,5/1475,7 ms; idle GPU: 1227,6/1174,1 ms;
+fences guest: 36,6/116,1 ms. No sumar esperas de distintos hilos como tiempo serial.
+No hay Vsync perdido, pero hay Vsync sin frame nuevo; no atribuir los FPS solo al present.
+
+Resultado: gate funcional manual PC del candidato correcto con asserts conocidos;
+mejora pequena sugerida del coste JIT, sin mejora sostenida de FPS demostrada. 60 FPS,
+A/B normal sin CPU profiling y gate Series pendientes. Prioridad: coste de emision y
+proteccion de bloques nuevos, dependencias de framebuffer/guest y asserts BufferQueue.
+No seguir optimizando lecturas escalares o invalidaciones como si fueran el cuello probado.
+
+### Capturas manuales dirigidas y optimizacion del emisor
+
+La primera sesion dirigida cerro con Q a los 105 s de guest, retorno 0 a 115,250 s.
+Lecturas escalares muestreadas de 63--143 ns y decenas de ms de chequeos OnCPURead por
+ventana no explican por si solas las caidas a 30,20/32,26 FPS. Cero errores Render;
+dos asserts recuperables BufferQueue, sin debug. Memoria de app al cierre: 4907 MiB.
+En dos trazas T de 120 vsyncs se encolaron 72/92 frames nuevos. Requested/effective
+swap interval coinciden: 45/67 frames con intervalo 1 y 27/25 con intervalo 2.
+ComposeWaitEnd suma 0/0,539 ms: no era una espera prolongada del VsyncThread por el
+hilo GPU. Las esperas de dequeue suman 1190/1605 ms y el idle GPU 1500/1362 ms;
+se solapan, no sumarlas como presupuesto serial. Hay bordes de captura incompletos.
+
+La siguiente sesion, con desglose JIT, cerro con Q a los 91 s de guest y retorno 0
+a 101,062 s; cero Critical y cero errores Render, sin debug; app 4884 MiB al cierre.
+Evidencia: pc-fps-manual-jit-phases.txt y su diag en build-uwp/log-review-2026-09-30.
+En todas las ventanas reportadas se compilaron 796895 bloques: Compile 54304,0 ms,
+Emit 49124,6 ms y Protect 23686,0 ms en 1852223 llamadas. Son tiempos transcurridos
+agregados entre cores, con preemption, no utilizacion CPU. Protect representa el
+43,6% de Compile agregado, aunque tambien puede incluir protecciones fuera de Emit.
+
+| Fin de ventana | FPS presents | p99 ms | Bloques JIT | Compile ms | Protect ms |
+|---|---:|---:|---:|---:|---:|
+| 51,45 s, cargas | 28,62 | 477,88 | 179409 | 13089,4 | 5669,2 |
+| 75,30 s | 25,21 | 260,63 | 105795 | 6953,5 | 2975,7 |
+| 81,05 s | 52,17 | 38,42 | 6875 | 490,0 | 215,7 |
+| 93,44 s | 45,92 | 51,13 | 12577 | 899,1 | 392,9 |
+| 98,57 s | 58,44 | 33,42 | 2587 | 187,5 | 82,9 |
+
+No atribuir toda la perdida de FPS al JIT: hay ventanas casi a 60 con compilacion
+y otras lentas con menos compilacion; el recorrido y las dependencias importan.
+Los perfiles habilitados tampoco certifican FPS normales ni rendimiento en Series.
+
+Cambios elegidos tras inspeccionar el ensamblado MSVC y las invalidaciones:
+
+- Tablas de handlers A64/A32 como static constexpr. En A64, antes Emit reservaba
+  0x1650 = 5712 bytes de pila con __chkstk y reconstruia cientos de punteros; despues
+  reserva 0x160 = 352 bytes, sin esa llamada, e indexa tablas constantes directamente.
+  Dumpbin antes/despues preservados en a64-emit-{before,after}.asm.txt del directorio
+  de evidencia. Es una reduccion real del trabajo generado, no una medida de FPS.
+- RegisterBlock no evalua LocationDescriptorToFriendlyName en plataformas donde
+  PerfMapRegister es un no-op. Linux no Android conserva la funcion original.
+- Unpatch A64 calcula en C++ el indice de FastDispatch. Antes restauraba RX, ejecutaba
+  un lookup generado y volvia a RW por cada bloque invalidado. Ahora modifica datos
+  host sin esas dos transiciones. Usa el CRC Castagnoli existente: semilla low32 del
+  descriptor, ocho bytes de direccion de tabla; sin SSE4.2 conserva descriptor & mask.
+  W^X, parches de codigo, invalidacion RSB y lifetime de los bloques se conservan.
+  No reduce las dos transiciones necesarias para emitir y ejecutar un bloque nuevo.
+- cpu_profile=1 desglosa Translate/Optimize/Emit/Protect/Invalidate solo en caminos
+  frios. Desactivado no lee el reloj. Compile/Emit/Protect pueden anidarse; Take
+  intercambia contadores independientes y el borde de ventana no es transaccional.
+
+Regresion Windows x64 en tools/xbox/tests/jit-fast-dispatch.cpp: 262144 offsets
+comparados con instrucciones Xbyak equivalentes al dispatcher, con/sin CRC hardware,
+incluyendo bits altos, valores limite y varias direcciones. PASS con SSE4.2 en PC.
+Compilar el runner con vcvarsall x64 de escritorio, no build-env.bat: el CRT Store
+requiere DLLs APP al ejecutar fuera del paquete. Build incremental UWP y diff-check
+correctos. Gate manual del candidato y A/B de FPS pendientes; no hay commit.
+
+Fuentes adicionales:
+
+- [Microsoft: duracion automatica y estatica en C++](https://learn.microsoft.com/en-us/cpp/cpp/storage-classes-cpp).
+- [Microsoft: VirtualProtectFromApp y paginas](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotectfromapp).
+- [Intel: CRC32, semilla low32 y polinomio Castagnoli](https://cdrdv2-public.intel.com/851055/252046-079-sdm-change-document.pdf).
+
+El backend Vulkan comparte el mismo JIT; por tanto estos costes no tienen una
+solucion alternativa en vk_scheduler o vk_texture_cache. Esas rutas siguen siendo
+el modelo para las optimizaciones GPU, no para la proteccion de codigo x64.
+
+1. Build incremental: correcto. Samplers y percentiles pasaron el recorrido manual anterior.
+2. PC, diagnostico dirigido: play=1, fastmem=0, cpu_profile=1, sin GPU profiling detallado ni
+   debug. El usuario repite gameplay, pulsa T junto al tiron si puede y termina con Q.
+   Los FPS de esta sesion perfilada no certifican la mejora normal; sirven para elegir el cuello.
+3. Elegir optimizacion con esos datos: callbacks caros implican traducir/leer/flush; Run alto sin
+   callbacks caros requiere discriminar compilacion/ejecucion; waits de framebuffer/vsync requieren
+   examinar traza de queue/acquire/release y dependencias. No reutilizar areas de descarga extra
+   sin invalidacion coherente ni eliminar fences porque su suma sea pequena.
+4. A/B manual normal con mismo tramo, cache y ajustes, sin profiler/debug: FPS de frames nuevos,
+   p95/p99 y ausencia de fallos. Si hay regresion o no mejora, descartar el cambio responsable.
+5. Series: paquete y simbolos de version nueva tras el gate PC; verificar en modo Game.
+   No afirmar 60 FPS alcanzados hasta comprobarlo durante gameplay sostenido.
+
+## Captura de esperas guest y siguiente ventana T
+
+PC manual, Q a los 109 s, cierre 0 y sin Critical/errores Render. Evidencia en
+pc-fps-manual-guest-waits{,-diag}.txt del directorio de revision. Las capturas
+llenaron 16384 eventos antes de completar dos segundos: 1,55/1,44 s, 93/87 vsyncs
+y 52/54 frames encolados. Son muestras truncadas, no ventanas completas de FPS.
+
+En el hilo guest 83, 528 IPC emparejadas: maxima espera 37,994 ms, pero desde
+el ultimo Runnable hasta fin de SVC p95 0,06 ms y max 0,20 ms. En esas llamadas
+predomina la espera anterior a Runnable, no una demora general al reanudar.
+El guest 123 registra un outlier de 24,39 ms desde Runnable a fin de IPC que
+requiere identificar la dependencia. El ultimo Runnable puede seguir a otras
+transiciones; el tramo incluye completar HLE y no mide solo latencia del scheduler.
+Se excluyen llamadas incompletas en los bordes. No cambiar prioridades a partir
+de un caso aislado ni atribuir la espera completa a uso de CPU.
+
+T ampliado a 240 vsyncs (~4 s a 60 Hz) por peticion del usuario; capacidad 65536
+entradas (~2 MiB), suficiente para ~11k eventos/s observados con margen. Sigue
+acotada y puede truncarse si crece la actividad. Validacion manual pendiente.
+
+### Gate PC de T a cuatro segundos
+
+Evidencia pc-fps-manual-guest-waits-4s{,-diag}.txt, Q tras 93 s y cierre 0.
+Las tres capturas completaron 240 vsyncs: 3983/3989/3997 ms, 37362/51958/55766
+eventos, sin saturar las 65536 entradas. Gate de duracion PC correcto.
+
+| Captura | Frames encolados | Ritmo aproximado / 4 s | Intervalo pedido/efectivo 1/1 | 2/2 |
+|---|---:|---:|---:|---:|
+| 1 | 112 | 28 FPS | 15 | 97 |
+| 2 | 174 | 43,5 FPS | 111 | 63 |
+| 3 | 195 | 48,75 FPS | 151 | 44 |
+
+No hubo conversion inesperada del intervalo pedido al efectivo en estas muestras.
+ComposeWait max 0,002 ms; Release->fin dequeue p50 0,040--0,041 ms, max 0,082 ms.
+IPC guest 83: p95 espera 32,052/31,727/15,814 ms, pero ultimo Runnable->fin SVC
+p95 0,061/0,062/0,060 ms y max 0,218/0,299/0,121 ms. No reaparece el outlier
+anterior de 24 ms. Esto debilita la hipotesis de retraso general de reanudacion.
+No demuestra que forzar intervalo 1 respete la simulacion del guest.
+
+Ocho Critical BufferQueue a 57,449--57,472 s: slot 2 fuera de max 2, preallocated,
+con buffer, override/default 2, estado Queued (2) o Acquired (3). El codigo usa
+numero de preallocations como limite de indices y GetMaxBufferCountLocked retorna
+override sin examinar slots activos. Contexto concreto para revisar invariantes;
+no se suprime el assert ni se declara causa de todas las caidas. Hay ademas un
+Unmapped Device ReadBlock a 31,193 s; sin errores Render. Abandoned y playtime
+file missing al cierre deben distinguirse de los errores durante gameplay.
+
+Ventanas de presents: 33,21 FPS/p99 315,03 ms junto a 90408 bloques JIT y
+5618,4 ms Compile agregados; ultima 59,40 FPS/p99 17,48 ms con 1735 bloques y
+125,1 ms Compile. Compilacion sigue siendo candidato para tirones de cargas,
+con tiempos anidados/entre cores; correlacion no certifica causalidad ni mejora.
+Dump de las trazas tarda ~0,51/0,71/0,79 s y puede perturbar las ventanas
+posteriores: no usar esta corrida con T para certificar FPS estables normales.
+
+## Panel visual de rendimiento (D3D12)
+
+Panel permanente superior derecho, compartiendo AppendText/ClearRects y la fuente
+bitmap con el indicador de shaders y progreso de carga. Se amplian letras y signos;
+se unen celdas contiguas por fila. Dos clears por frame, sin PSO, shaders nuevos,
+descriptores, lecturas GPU bloqueantes ni fences adicionales. Rectangulos/texto se
+reconstruyen cada 500 ms; la capacidad del vector se conserva. Tambien en present
+por copia CPU, con transicion COPY_DEST->RENDER_TARGET->PRESENT.
+
+- FPS: presents del renderer por tiempo transcurrido de la muestra, no contador
+  de refresh del monitor ni garantia de frames guest distintos.
+- FRAME: ultimo intervalo entre presents completos en ms; MAX es el mayor intervalo
+  de la muestra. Incluye guest, compilacion, esperas y present; no solo generacion GPU.
+- CPU: delta kernel+user del proceso con GetProcessTimes, 100% = un core logico.
+  Puede superar 100%. MS/F suma tiempo CPU de todos los hilos por present; no tiempo
+  de pared del guest ni porcentaje de toda la capacidad de Xbox/PC.
+- GPUQ: delta GpuBusyUs de timestamps de command lists ya completadas, porcentaje
+  del tiempo de pared y MS/F por present. Tiene retardo de frames en vuelo y puede
+  cruzar bordes de muestra; no es utilizacion global de GPU. '--' si no hay timestamps
+  o GetProcessTimes falla, sin interrumpir la presentacion.
+
+Vulkan usa Composite/RendererFrameEndNotify para avanzar frames, pero no tiene un
+HUD reutilizable en este frontend UWP; reutilizamos el panel D3D12 ya existente.
+Build incremental correcto; gate visual PC y Series pendientes. No commit.
+
+Fuentes de las unidades y estados:
+- [Microsoft GetProcessTimes, suma de hilos y unidades de 100 ns](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes).
+- [Microsoft timestamps D3D12 y frecuencia de la cola](https://learn.microsoft.com/en-us/windows/win32/direct3d12/timing).
+- [Microsoft ClearRenderTargetView, rectangulos y estado RENDER_TARGET](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-clearrendertargetview).
+
+### Aviso de captura y lectura de CPU
+
+Tras feedback visual del usuario, CPU muestra cores equivalentes (2,30 CORES en
+vez de 230%); sigue siendo kernel+user del proceso dividido por tiempo de pared.
+No mide porcentaje de capacidad total. El usuario observa tirones al entrar en
+zonas nuevas, con ~60 FPS al volver a zonas preparadas; observacion compatible
+con trabajo de preparacion/JIT, aun sin atribucion por componente.
+
+Debajo del HUD: T N CAPTURANDO con segundos restantes aproximados a 60 Hz,
+GUARDANDO durante Dump y GUARDADA verde al terminar. TRUNCADA si se agota
+capacidad antes de terminar los vsyncs. ID por captura en UI/log, resultado
+persistente hasta la siguiente T. Estado atomico, cache de rects por cambio de
+estado/decima de segundo, independiente del muestreo de rendimiento a 500 ms.
+Saving bloquea nueva T para no sobrescribir entradas mientras Dump las lee.
+GUARDANDO puede no aparecer si el VSync esta ocupado volcando; GUARDADA aparece
+al volver a presentar. El volcado sigue siendo sincrono y puede introducir tiron.
+Siguiente gate: T 1 zona nueva, T 2 misma zona ya recorrida, terminar con Q.
+
+### Comparacion manual zona nueva / recorrida
+
+Evidencia pc-fps-new-old-zones{,-diag}.txt. Usuario confirma T 1 nueva, T 2 vieja
+y cierre por X; proceso ya no activo. Ultimo heartbeat 110 s, sin shutdown/retorno
+en diag: no certificar cierre ordenado ni interpretar su ausencia como crash.
+Dos capturas completas, 240 vsyncs/~4 s cada una, 43636/60437 eventos.
+
+| Metrica dentro de T | Nueva (1) | Recorrida (2) |
+|---|---:|---:|
+| Frames nuevos encolados | 137 | 210 |
+| Ritmo aproximado / 4 s | 34,25 FPS | 52,50 FPS |
+| Intervalo entre encolados p50 | 30,46 ms | 16,75 ms |
+| Intervalo entre encolados p95 | 54,72 ms | 33,25 ms |
+| Intervalo entre encolados p99 | 72,15 ms | 33,95 ms |
+| Intervalo entre encolados max | 153,73 ms | 48,59 ms |
+| Frames intervalo pedido/efectivo 2/2 | 75 | 28 |
+| Release->fin dequeue mediana | 41 us | 40 us |
+
+ComposeWait max 2 us en ambas; IPC guest 83 desde ultimo Runnable a fin p95
+66/58 us. Sigue sin aparecer una demora general de reanudacion que explique
+los tirones. Esperas dequeue y GPU idle se solapan; no sumar como costes extra.
+
+Ventana 300 presents que contiene T 1 (77,761--86,211 s): 35,50 FPS, p99 116,72 ms,
+34949 bloques JIT, Compile 2299,9 ms, Emit 2095,3 ms, Protect 975,3 ms agregados.
+La que contiene T 2 (98,328--104,645 s): 47,49 FPS, p99 33,86 ms, 4394 bloques,
+Compile 299,2 ms, Emit 270,6 ms, Protect 131,4 ms. Son ventanas mas largas que T,
+con fases anidadas/multiples cores y volcado de log: no atribuir esos totales a
+los cuatro segundos exactos. GPU busy similar 1256,8/1201,3 ms por 300 presents,
+pipeline stalls cero, uploads 81 (46,39 MiB) frente a cero: preparacion de zona
+y compilacion CPU son candidatos mas fuertes que saturacion GPU sostenida.
+Ultima ventana 59,79 FPS/p99 17,86 ms con Compile 81,2 ms y 1275 bloques.
+
+Ocho Critical BufferQueue repetidos en 57,674--57,703 s, antes de ambas T;
+cero errores Render. No afirmar que esos asserts causan los tirones capturados.
+Dump de T tarda 0,58/0,83 s despues de la captura y perturba las ventanas de presents.
+Prioridad: reducir preparacion/compilacion de codigo nuevo, mantener coherencia
+de cache y W^X; corregir aparte invariantes de BufferQueue. No forzar intervalo 1
+ni cambiar prioridades sin evidencia. Gate Series y FPS sostenidos pendientes.
+
+## Candidato: registro de bloques y restauracion RX agrupada
+
+Tras nueva/vieja, se eligen dos reducciones del trabajo frio, sin precompilar
+direcciones especulativas, compartir JIT entre cores ni invalidar menos codigo:
+
+- EmitX64::Patch usa find y retorna si el destino no tiene referencias entrantes.
+  Antes operator[] construia PatchInformation vacia (cuatro small_vector inline)
+  para cada bloque sin links, agrandando la tabla plana y futuras rehashes. Los
+  emisores de saltos/RSB siguen registrando referencias con operator[] y consultando
+  GetBasicBlock para destinos ya compilados. Unpatch delega a Patch sin buscar dos
+  veces; las referencias reales y recompilaciones siguen siendo parcheadas.
+- DisableWriting ordena las paginas de parche ya RW y devuelve a RX cada rango
+  contiguo en una llamada. Une tambien con la ventana de emision si se tocan;
+  no incluye huecos ni cambia las transiciones necesarias RW->RX por bloque.
+  Sin asignaciones adicionales: conserva el vector existente, callback inline.
+  Ejemplo: paginas de parche 1,3,4,7 y append 8--9: cinco restores anteriores
+  pasan a tres; paginas 2,5,6 siguen intactas. No prometer ese ahorro en cada bloque.
+
+Gate: build UWP incremental correcto. jit-writable-ranges.cpp verifica 24573
+combinaciones de paginas/huecos/ventana vacia o multiple, cobertura exacta sin
+dobles protecciones y minimo de rangos contiguos. Gate real VirtualAlloc/Protect/
+Query: paginas cambiadas RX y huecos READONLY, PASS. Ejecutar con CRT escritorio;
+el gate de API FromApp/Series sigue pendiente. No se ha certificado ahorro de FPS.
+Prueba manual siguiente mismo tramo nuevo/viejo, T 1/2 y Q del usuario.
+
+Investigacion: [Microsoft VirtualProtectFromApp](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotectfromapp)
+permite proteger rangos de paginas de una reserva, sin RWX. [Xenia X64CodeCache](https://github.com/xenia-project/xenia/blob/master/src/xenia/cpu/backend/x64/x64_code_cache.cc)
+usa vistas separadas de escritura/ejecucion cuando procede; no se adopta ese
+modelo sin validar sus mappings en Xbox AppContainer. [Boost.Unordered](https://www.boost.org/doc/libs/latest/libs/unordered/doc/html/unordered/intro.html)
+es la tabla plana usada aqui; evitar inserciones de consultas reduce su trabajo.
+Vulkan comparte el JIT y no ofrece un reemplazo de proteccion x64; uploads siguen
+la cache/staging del backend existente. BufferQueue se trata aparte: sus asserts
+ocurrieron antes de T y no prueban causa de estos tirones. Sin commit.
+
+### Gate manual del candidato de rangos/parches
+
+pc-fps-jit-ranges{,-diag}.txt: Q a 340 s, shutdown completo, retorno 0;
+cero errores Render, ocho asserts BufferQueue a 301,039--301,072 s (antes de T).
+T 1/2 completas, ~4 s, 37899/62000 eventos. No confundir sesion larga con
+340 s de gameplay equivalente al recorrido anterior; hay periodos distintos.
+
+| Captura | FPS nuevos anterior->candidato | p95 gaps anterior->candidato | Max gap anterior->candidato |
+|---|---:|---:|---:|
+| Nueva | 34,25->28,25 | 54,72->72,50 ms | 153,73->147,02 ms |
+| Recorrida | 52,50->53,75 | 33,25->33,35 ms | 48,59->34,98 ms |
+
+Nueva ahora tiene 93 frames intervalo 2 frente a 75 antes; vieja 24 frente a 28.
+Son muestras/instantes diferentes, no A/B controlado; no certificar mejora ni
+regresion causal del candidato. Intervalos pedidos y efectivos siguen coincidiendo.
+Release->fin dequeue mediana 42/41 us, max 68/59 us; ComposeWait max 2/1 us.
+
+Ventanas de 300 presents que contienen T nueva: anterior 34949 bloques,
+Compile 65,807 us/bloque, Emit 59,953 us/bloque, Protect 2,473 llamadas/bloque;
+candidato 34772 bloques, 64,316 us Compile (-2,27%), 58,369 us Emit (-2,64%),
+2,388 llamadas Protect (-3,44%). Protect elapsed/bloque 27,906->27,479 us (-1,53%).
+Ventanas cercanas y tiempos agregados, con preemption/anidamiento: ahorro pequeno
+observado, no prueba de mejora sostenida de FPS ni resolucion de tirones.
+Hay ventanas previas de 59,80/60 FPS, p99 ~17,1 ms; la entrada nueva sigue lenta.
+Build/regresion/gate funcional pasan; eficacia de rendimiento sigue pendiente.
+No repetir mas recorridos sin una nueva hipotesis o instrumentacion que discrimine
+trabajo de emision/registro de bloques de coste de proteccion. Sin commit.
+
+## Desglose de emision A64 y totales dentro de T
+
+cpu_profile=1 separa WriteOpen, setup de RegAlloc/contexto, instrucciones, terminal,
+emisiones diferidas, AddRange (Boost interval map), RegisterBlock, WriteClose y
+limpieza de labels. Registro contiene LinkPatch y DescriptorInsert; Protect se
+anida en apertura/cierre y parches. No sumar esas fases anidadas. Setup/instructions
+incluyen trabajo generado para callbacks/memoria; no se lee reloj por instruccion.
+Timer::Stop es idempotente y permite bordes precisos sin reestructurar el emisor.
+Desactivado no lee el reloj, pero conserva checks baratos en el camino de compilacion.
+
+Contadores JitProfile pasan a monotonic totals. Take del renderer (unico consumidor)
+retiene snapshot anterior en vez de resetear globales; Read permite muestrear bordes
+de T sin interferir con las ventanas de 300 presents. Cada captura registra antes
+de Dump sus deltas por fase como Frame trace JIT capture N. Se cuentan llamadas
+cuando terminan: una llamada que cruza borde aporta su duracion completa al acabar.
+Loads independientes entre fases/cores, no snapshot transaccional ni utilizacion CPU.
+Puede quedar residuo de destructores, timers y trabajo no instrumentado dentro de Emit.
+
+Build UWP incremental correcto. Gate manual pendiente T 1 nueva / T 2 recorrida.
+Esta instrumentacion agrega timestamps/atomics en compilacion con perfil habilitado:
+sirve para elegir el siguiente coste, no certificar FPS normales. Sin commit.
+
+### Resultado del desglose: T nueva frente a T recorridas
+
+pc-fps-jit-emission{,-diag}.txt: Q a108 s, shutdown/retorno0, cero errores Render,
+ocho asserts BufferQueue. T1 completa 3999 ms/240vsyncs/40230 eventos; T2/3
+alcanzan65536 entradas en3902/3909 ms y234/235vsyncs (truncadas). No descartar
+su contenido ni tratarlas como cuatro segundos completos. El ritmo estable
+produce~17k eventos/s, frente a~10k en zona nueva: la capacidad anterior queda corta.
+Se aumenta a131072 entradas (~4MiB, sin asignacion durante captura); build correcto,
+gate del nuevo limite pendiente. No hace falta repetir solo para confirmar el desglose.
+
+| Dato | T1 nueva (~4s) | T2 recorrida (~3,9s) | T3 recorrida (~3,9s) |
+|---|---:|---:|---:|
+| Frames encolados | 126 | 233 | 235 |
+| Ritmo aproximado | 31,5 FPS | ~60 FPS | ~60 FPS |
+| p99 gap entre encolados | 73,05 ms | 17,37 ms | 17,19 ms |
+| Max gap | 143,10 ms | 33,78 ms | 17,47 ms |
+| Bloques JIT completados | 23874 | 334 | 363 |
+| Compile agregado | 1528,925 ms | 25,442 ms | 23,992 ms |
+| Emit agregado | 1386,782 ms | 22,782 ms | 21,487 ms |
+| Protect agregado (anidado) | 645,931 ms | 11,912 ms | 11,125 ms |
+| Instructions | 456,030 ms | 6,855 ms | 6,574 ms |
+
+T1 apertura65,585ms, cierre568,066ms, setup50,176ms, terminal89,285ms,
+deferred39,688ms, rangos62,203ms, registro33,149ms (patch28,420 e insercion2,619),
+cleanup8,719ms. Protect representa42,25% de Compile agregado y46,58% de Emit;
+instrucciones32,88% de Emit. Protect contiene tanto restauracion RX como apertura
+RW/parches: no sumarlo a esos componentes. Cierre RX domina sus transiciones.
+Priorizar reducir coste/frecuencia de proteccion y generacion de instrucciones,
+no reescribir interval-map ni registrar bloques en workers a ciegas. Conteos no
+prueban duplicacion entre cores ni que pueda compartirse codigo sin contexto.
+Datos con preemption, overhead del profiler y llamadas cruzando bordes: no utilizacion
+CPU ni prueba de que todo tiron individual lo cause el JIT, pero refuerzan la
+preparacion de codigo nuevo como candidato principal. Ventanas fuera de Dump
+60,01FPS/p9917,16ms y59,80FPS/p9917,31ms; Series sigue pendiente.
+
+## Candidato CFG: conservar metadatos de paginas ya inicializadas
+
+Investigacion [Microsoft CFG](https://learn.microsoft.com/en-us/windows/win32/secbp/control-flow-guard)
+y [constantes de proteccion](https://learn.microsoft.com/en-us/windows/win32/memory/memory-protection-constants):
+VirtualProtect al volver ejecutable una pagina actualiza por defecto los destinos
+validos de llamadas indirectas. PAGE_TARGETS_NO_UPDATE preserva los metadatos
+existentes. Esto ofrece una reduccion posible del trabajo de cada restauracion RX,
+sin quitar CFG, dar RWX ni omitir proteccion de paginas.
+
+DisableWriting separa cada rango contiguo en paginas bajo el high-water RX anterior
+y paginas nuevas. Las nuevas se inicializan con PAGE_EXECUTE_READ normal; solo
+las que ya fueron RX usan PAGE_TARGETS_NO_UPDATE. Todo byte nuevo dentro de una
+pagina antes inicializada conserva destinos ya validos. ClearCache conserva su
+high-water original; las paginas tratadas como nuevas vuelven a inicializarse.
+Si FromApp rechaza el modificador con INVALID_PARAMETER/NOT_SUPPORTED, retry RX
+normal y deshabilitar la opcion atomicamente. Otros fallos conservan el diagnostico
+original. Perfil diferencia cfg-preserve-rx, cfg-initialize-rx y cfg-fallback;
+son tiempos anidados en Protect, no costes adicionales para sumar.
+
+Gate Windows: tools/xbox/tests/jit-cfg-preserve.cpp, cl y link /guard:cf, CFG activo.
+80000 pares RW/RX con FlushInstructionCache y llamadas indirectas al codigo
+reemitido y a nuevo entrypoint de la misma pagina: correcto. Benchmark inicial
+15,38/15,39 us normal frente14,24/14,34 us preservando (~7% menor). Repeticion
+con dos entrypoints15,27/15,62 frente14,40/15,43: ahorro variable menor; no prometer
+ese porcentaje en UWP ni FPS. Ambos llaman VirtualProtectFromApp desde proceso
+de escritorio: gate AppContainer/Series pendiente. Runner y exe ignorados en
+log-review-2026-09-30/run-cfg-bench.bat. Build UWP correcto.
+
+Revisado Xenia: sus vistas RW/RX distintas no se adoptan sin validar mappings en
+Series. Vulkan comparte este JIT, no alternativa para la proteccion x64. Se cambia
+una causa concreta antes de tocar generacion de instrucciones o habilitar workers
+de JIT; resultado manual pendiente y sin commit.
+
+### Gate manual CFG: sin ahorro demostrado
+
+pc-fps-jit-cfg{,-diag}.txt: Q315s, shutdown/retorno0, cero errores Render,
+tres asserts BufferQueue a279,092--279,100s, antes de T. T1/2 completas240vsyncs,
+3985/3990ms y39971/67116eventos: capacidad131072 valida este ritmo, sin truncacion.
+
+| Metrica | Antes CFG (T1 nueva) | Candidato CFG (T1 nueva) |
+|---|---:|---:|
+| Frames nuevos /4s | 126 (~31,5FPS) | 124 (~31FPS) |
+| p95 gap | 61,36ms | 51,88ms |
+| p99 gap | 73,05ms | 121,27ms |
+| Max gap | 143,10ms | 232,26ms |
+| Compile por bloque | 64,041us | 68,386us |
+| Protect por bloque | 27,056us | 29,710us |
+| Cierre RX por bloque | 23,794us | 26,347us |
+| Instructions por bloque | 19,102us | 21,958us |
+
+Candidato26267bloques/1796,306ms Compile; cfg-preserve-rx30394calls/635,668ms,
+initialize2872/50,448ms, fallback0. Ruta aceptada AppContainer durante gameplay,
+pero sin beneficio medido. Split de rangos viejos/nuevos introduce llamadas adicionales
+en los bloques que cruzan pagina, y el perfil CFG agrega timestamps anidados.
+Tambien instrucciones/bloque sube~15%: trabajo/preemption/recorrido distintos impiden
+atribuir todo a CFG. No promover este candidato como optimizacion de FPS validada
+ni afirmar regresion causal sin A/B equivalente con igual instrumentacion.
+
+T2 recorrida235frames(~58,75FPS), p99gap29,07ms y max38,48ms;937bloques y
+Compile61,869ms. Sigue mucho mas fluida que zona nueva. Release->fin dequeue
+mediana41us en ambas, max74/73us: no retraso general de wakeup. Dump0,55/0,94s
+posterior a T distorsiona las ventanas de presents. Siguiente foco instrucciones
+o A/B de proteccion dentro del mismo proceso para aislar overhead del flag;
+no mas comparaciones que solo cambian la duracion/ruta manual. Sin commit.
+
+## Investigacion externa: tirones al explorar zonas nuevas (30 sep 2026)
+
+Busqueda en foros de emuladores, informes de desarrolladores, codigo de Ryujinx,
+Dolphin/Xenia y documentacion Microsoft. Los reportes de otros usuarios son pistas,
+no prueba de una causa en este fork. Los datos recientes son PC AppContainer;
+no extrapolar porcentajes a Series sin una captura equivalente en consola.
+
+### Prioridades y pruebas que las distinguen
+
+1. **Compilacion JIT de CPU en el camino critico: evidencia mas fuerte.**
+   T1 CFG completa:26267 bloques y1796,306ms Compile agregado; T2:937 y61,869ms.
+   Protect780,387ms e Instructions576,763ms en T1 son partes anidadas de Compile,
+   no tiempo adicional. GetBlock compila sincronicamente al faltar el descriptor.
+   Es consistente con recuperar~60FPS al volver a una zona. No demuestra que cada
+   pausa individual provenga del JIT: falta correlacion temporal por hilo/bloque.
+2. **Demasiadas transiciones RW/RX: coste confirmado, causa interna pendiente.**
+   T1 registra65887 Protect en~4s, unas2,51 llamadas/bloque. El flag CFG no mostro
+   ahorro; no insistir en el mismo microbenchmark como evidencia de gameplay.
+   Agrupar restauraciones contiguas dentro de UN bloque ya esta implementado.
+   Compilar VARIOS bloques por lote seria un cambio distinto, con gate de enlaces,
+   invalidacion y W^X antes de ejecutar. No dejar RW una pagina que pueda ejecutarse.
+3. **Duplicacion por core/variantes: posible, aun sin conteo.**
+   KProcess crea ArmDynarmic64 por core; cada Impl contiene su BlockOfCode/emitter.
+   Config incluye processor_id, callbacks y punteros TPIDR por instancia. Que el
+   mismo PC aparezca en dos cores no autoriza compartir su codigo host. Medir
+   descriptor completo, core, identidad/version del codigo y motivo de recompilar;
+   separar bloques unicos de duplicados. Las dos T actuales tienen0 invalidaciones:
+   no hay evidencia en ellas de vaciado continuo por cache llena/codigo cambiante.
+4. **Planificacion host o coste externo de proteccion: medir con ETW en PC.**
+   Timers actuales incluyen tiempo desplanificado y suman varios cores. No separan
+   kernel, contencion ni actividad de otro proceso. WPR/WPA CPU Sampled/Precise
+   permite distinguir ejecucion, Ready y Wait, con stacks/context switches.
+   Relacionar pausas largas con Protect/Emit y actividad de MsMpEng si existe.
+5. **Shaders/PSO y streaming: candidatos secundarios, no descartados globalmente.**
+   D3D12 ya tiene workers y LoadDiskResources como Vulkan. Las ventanas anteriores
+   nueva/vieja tenian0 pipeline stalls y GPU busy similar, aunque la nueva subia
+   texturas (81 uploads/46,39MiB). Capturar en el tiron concreto espera de pipeline,
+   lectura/descompresion de assets, upload y fence. No llamar shader stutter a todo
+   bajon por aparecer en una zona nueva. BufferQueue tiene asserts reales pendientes,
+   pero ocurren fuera de las T recientes; release->dequeue~41us no explica232ms.
+
+### Lo que hacen otros proyectos y que podemos adaptar
+
+- [Discusion PPTC con explicacion del desarrollador](https://www.reddit.com/r/emulation/comments/haa3dc/):
+  Ryujinx distingue perfiles y traducciones CPU de distinta calidad; utiliza lo
+  aprendido en ejecuciones anteriores. La [guia Ryubing](https://docs.ryujinx.app/guides/setup-guide/)
+  describe PPTC como cache de funciones traducidas, distinta de la cache de shaders.
+  El [codigo original archivado, revision fija](https://git.axenov.dev/Museum/ryujinx/src/commit/dc8a1d5cbafc842c1ad52adcbf0a4a023931541a/ARMeilleure/Translation/PTC/Ptc.cs)
+  confirma MakeAndSaveTranslations de funciones perfiladas y PatchCode con
+  relocaciones a tablas, delegates y page table. No basta guardar bytes x64 con
+  punteros del proceso. Primer candidato propio: persistir descriptores/perfil
+  validado y precalentar en una fase de carga, conservando JIT normal como fallback.
+  Solo beneficia codigo ya conocido; no elimina el primer encuentro de codigo nuevo.
+- [Reporte/discusion Ryujinx febrero2022](https://www.reddit.com/r/emulation/comments/tdeeat/)
+  atribuye stutter de modulos dinamicos de Smash a traduccion CPU que no cubria la
+  cache. Es otro juego y una explicacion historica, no diagnostico de Wonder.
+  [Dolphin explica tambien pausas JIT que parecen shaders](https://dolphin-emu.org/blog/2017/07/30/ubershaders/).
+  Su fallback ubershader es especifico del GPU emulado: no trasladarlo directamente
+  a shaders Switch ni saltar dibujos como solucion de exactitud.
+- [Mozilla: compilaciones por lotes](https://bugzilla.mozilla.org/show_bug.cgi?id=1822650)
+  implemento batching para reducir cambios de proteccion, incluidos lotes fuera
+  del hilo principal. Es precedente para amortizar la transicion por lote, no
+  prueba de que Dynarmic sea seguro llamandolo concurrentemente. Nuestro IR reusable,
+  emitter y mapas son mutables; cualquier worker requiere aislamiento/publicacion.
+- [Mozilla: VirtualProtect y Defender](https://bugzilla.mozilla.org/page.cgi?bug_id=1441918&comment_id=16323586&id=comment-revisions.html)
+  documenta trabajo externo causado por eventos de proteccion y una correccion
+  del motor1.1.20200.2 en2023. Lectura local30sep: motor1.1.26080.3,
+  producto4.18.26080.4 y proteccion activa. No afirmar que ese bug antiguo persiste.
+  [Analizador oficial Defender](https://learn.microsoft.com/en-us/defender-endpoint/performance-analyzer-reference)
+  disponible en este PC (New-MpPerformanceRecording); requiere administrador.
+  Es complementario a WPR: un informe de scans no prueba por si solo ausencia
+  de todo coste de eventos de memoria. No se cambio configuracion de seguridad.
+- [Mozilla: alternativa VirtualAlloc para reproteger](https://bugzilla.mozilla.org/show_bug.cgi?id=1823634)
+  funciono en su contexto Win32. **Descartada como sustitucion directa UWP**:
+  [VirtualAllocFromApp](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualallocfromapp)
+  rechaza PAGE_EXECUTE_READ y otras protecciones ejecutables. Evita otra prueba
+  basada en una optimizacion de escritorio incompatible con nuestra API.
+- [Xenia D3D12 pipeline cache](https://github.com/xenia-project/xenia/blob/master/src/xenia/gpu/d3d12/pipeline_cache.cc)
+  conserva descripciones/shaders y prepara traducciones en workers. Vulkan local
+  ya aporta un modelo equivalente para pipelines, no para cache/permiso del JIT CPU.
+
+### Siguiente gate recomendado
+
+Primero correlacion por hilo de compilaciones largas con frames y contar
+duplicacion real entre cores. Una captura WPR de CPU/context switches en PC
+permite saber si Protect consume CPU del kernel o incluye esperas/preemption;
+[Microsoft CPU Analysis](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis)
+y [PIX Timing Captures](https://devblogs.microsoft.com/pix/analyzing-stalls-and-context-switches-in-timing-captures/)
+explican esa distincion. wpr.exe y comandos Defender disponibles; no se inicio
+grabacion ni se relanzo app. No cambiar afinidad/prioridad ni aumentar workers
+a ciegas: comparar recursos asignados realmente a UWP en Series.
+
+Con esos datos elegir gate pequeno: prewarm de perfil conocido para repeticiones,
+o lote limitado de bloques para reducir coste en primeras visitas. Verificar
+codigo/descriptor/config antes de prewarm, limite de memoria, enlaces y ejecucion
+RX; medir mismorecorrido, igual instrumentacion y p95/p99 de frames. Mejora PC
+no certifica Series. Esta investigacion no modifica renderer/JIT ni hace commit.
+
+### Alternativa consultada: portar Ryujinx a Xbox
+
+Antes de implementar prewarm, el usuario pregunta por trasladar el port/backend
+a Ryujinx. No hay comparativa local equivalente que demuestre mayor rendimiento
+de Ryujinx para este juego/recorrido, y menos bajo UWP Series. No usar esa premisa
+como resultado medido. No se aplicaron aun cambios de prewarm.
+
+Ryujinx usa C# y una interfaz grafica propia (Ryujinx.Graphics.GAL), frente al
+renderer/cache C++ de Eden. El [backend Vulkan original](https://www.git.axenov.dev/Museum/ryujinx/src/commit/dca5b14493e730960ed5cd67906278ecea969b3a/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs)
+implementa IRenderer. Device/scheduler/staging/descriptores y Mesa pueden servir
+como biblioteca nativa, pero hay que integrar handles, lifetime, sincronizacion
+y transferencias por una ABI; no cruzar C#/C++ individualmente por cada operacion
+pequena sin medir. Caches genericas, bindings y traduccion de shaders requieren
+adaptacion sustancial. Frontend, audio, entrada y empaquetado tambien requieren
+integracion; los gates en Xbox ya aprendidos siguen siendo reutilizables.
+
+Mayor incertidumbre inicial: runtime C# y sus dependencias dentro de Xbox UWP.
+[Microsoft .NET Native UWP](https://learn.microsoft.com/en-us/windows/uwp/dotnet-native/reflection-and-net-native)
+no incluye JIT administrado; [Native AOT](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/)
+limita generacion administrada dinamica/reflection. Esto NO prueba que un emisor
+nativo como ARMeilleure sea imposible: hay que separar JIT .NET de traduccion
+del guest y auditar llamadas de sistema, delegates/interop y permisos RW/RX.
+Tampoco basta compilar AOT para certificar APIs/ejecucion Xbox UWP.
+
+Decision recomendada: mantener mejora focalizada de Dynarmic/PPTC como camino
+actual. Si se decide evaluar Ryujinx, primer gate aislado: programa C# minimo
+en Series con runtime elegido y ARMeilleure generando/ejecutando un bloque ARM,
+antes de invertir en integrar D3D12. Es un port nuevo con componentes reutilizados,
+no un cambio de backend inmediato; dificultad alta, duracion no estimada sin ese gate.
+
+## Candidato: perfil persistente A64 y prewarm antes de Run
+
+Implementado para x64, habilitado explicitamente en UWP con boot.cfg:
+
+- `jit_prewarm=record`: aprende mientras se juega, sin precompilar al arrancar.
+- `jit_prewarm=1`: carga el perfil, valida/precompila antes de System::Run y sigue aprendiendo.
+- `jit_prewarm=0` (default): ruta anterior, sin hashes ni perfil persistente.
+
+No es aun una cache de bytes host como PPTC. El perfil guarda descriptor A64
+relativo al entrypoint del proceso (incluye FPCR), hash FNV64 de las instrucciones
+consumidas y su longitud. Cada core tiene su archivo en
+`LocalState/eden/cache/jit-profile/<title-id>/core-N.bin`; el directorio exacto
+depende del CacheDir configurado. Header EDJITP01, title, BuildId completo del
+ejecutable guest, core, count y checksum del payload. Enteros little endian,
+sin padding nativo, instrucciones guest ni direcciones/punteros host persistidos.
+No comparte codigo entre cores/configuraciones: cada JIT recompila con su config
+actual. El hash no es autenticacion criptografica; detecta divergencias/corrupcion
+en un perfil local que no contiene codigo host ejecutable.
+
+Gate de seguridad/correctitud: solo rangos RX sin escritura presentes al terminar
+Load, dentro del code region, y PC>=entrypoint. Se valida que el bloque entero
+quepa en uno de esos rangos. Perfiles con otros title/BuildId/core, tamano incorrecto,
+descriptores invalidos/duplicados/desordenados o checksum distinto se rechazan.
+Translate lee como maximo la longitud del bloque esperado; comprueba hash y longitud
+ANTES de Optimize/Emit. Un rechazo vuelve a la compilacion normal cuando el guest
+lo solicite, sin instalar un bloque de fault. No ejecutar guest ni modificar su
+estado para precalentar. Entradas ya compiladas no se reemplazan por prewarm.
+Modulos dinamicos posteriores a Load quedan fuera de esta primera version.
+
+Todos los cores guest parados; calentamiento secuencial por instancia, nunca
+worker sobre el mismo emitter/IR ni Run concurrente. W^X y el mecanismo habitual
+de invalidaciones permanecen. Limite262144 registros/core (~6MiB de observaciones
+preasignadas) y64MiB de codigo emitido/core durante prewarm, con guardia de espacio
+del cache; registrar cuantos bloques quedan fuera del presupuesto. El aprendizaje
+agrega hash solo durante compilacion, busqueda de rango y push sin asignar hasta
+el limite. Ordenacion/deduplicacion queda al cierre: ultima observacion gana.
+Perfil anterior se conserva/combina; archivo temporal, flush, close y rename sobre
+el destino, sin borrar primero el archivo anterior. Errores IO registran warning,
+no abortan gameplay. Cierre Q finaliza owners antes de guardar; X/terminacion
+forzada puede perder aprendizaje de esa sesion, conservando el perfil anterior.
+
+Frontend reutiliza progreso D3D12 con etiqueta CPU JIT y conteo, actualizacion
+limitada33ms, callback cada256 entradas. Log por core muestra loaded/accepted/
+rejected/budget skipped, MiB y ms; al cerrar saved/observed/dropped. CPU/JIT timers
+normales incluyen prewarm si estan habilitados: evaluar las T de gameplay, no
+una ventana agregada que mezcla arranque y frames.
+
+Validacion automatica: `tools/xbox/tests/jit-prewarm.cpp` enlaza la biblioteca
+Dynarmic del build UWP desde harness desktop. Aprende MOV X0,42;SVC, precalienta
+sin cambiar PC/registros ni ejecutar SVC/write; ejecucion posterior sin reads
+de traduccion; hash/longitud distintos rechazados sin emitir, relocation ASLR
+correcta. Codec rechaza cada truncacion/alteracion de un archivo, identidad
+incorrecta y bytes adicionales; merge reciente y limites de rangos/holes correctos.
+Reemplazo de archivo existente y recarga reales PASS. No es certificacion Series.
+Runner ignorado `build-uwp/log-review-2026-09-30/run-jit-prewarm.bat` usa
+vcvarsall x64, /utf-8 /std:c++20 /MD y dynarmic.lib+fmt.lib+OneCore.lib.
+Build UWP incremental correcto; sin commit. Se corrigio dependencia del frontend:
+no incluir arm_dynarmic_64.h (include path privado de Dynarmic) ni usar RTTI (/GR-);
+entry point ligero core/arm/jit_prewarm.h, implementacion en backend.
+
+Gate manual pendiente: primera corrida record con play=1, cpu_profile=1, fastmem=0,
+T nueva/vieja y Q; revisar cuatro archivos guardados/limite. Segunda corrida warm
+en el mismo recorrido, mismos flags, T y Q. Comparar bloques Compile en gameplay,
+p95/p99 y carga/memoria; observar cuanta cobertura da el presupuesto, no concluir
+fracaso del enfoque si el bloque nunca estuvo en el perfil o quedo fuera del limite.
+Si hay buena cobertura y sigue sin beneficio, evaluar cache de codigo relocalizable
+tipo PPTC con atribuciones/licencia y arquitectura propia Dynarmic; no copiar
+ARMeilleure C# literalmente. Primer encuentro de codigo nuevo sigue necesitando JIT.
+
+Primer arranque record descartado para cobertura/FPS: permiso RX filtrado contra
+UserReadExecute incluia KernelRead en un lado y UserMask en otro. No observaba
+bloques; Q65s/retorno0, no archivos de perfil. Corregir ambos operandos con UserMask;
+log muestra RX ranges para verificar seleccion en vivo. Build corregido correcto;
+evidencia preservada pc-prewarm-record-invalid-rx{,-diag}.txt. No confundir pruebas
+del codec/Translate con gate real de seleccion de memoria guest.
+
+### Gate manual de aprendizaje valido
+
+pc-prewarm-record{,-diag}.txt: Q89s, shutdown/retorno0, cero errores Render,
+dos asserts BufferQueue62,411s anteriores aT. RX ranges3 por core. Guardado
+core0:262144 descriptores,84504 observaciones descartadas al limite; core1:222383,
+core2:211400, sin descartes. Core3 no observa bloques y no escribe archivo.
+Total695927 registros (~13,27MiB en disco). Archivos checksum/identidad/title/core,
+orden/longitud validados y respaldados en log-review/prewarm-record-profiles antes
+de la siguiente corrida; no estan en Git.
+
+T1 completa240vsyncs/3996ms/36852eventos,110frames(~27,5FPS), p95gap73,622ms,
+p99122,773ms/max229,857ms;33755 compilaciones/2241,044ms. T2 completa240vsyncs/
+3986ms/63249eventos,225frames(~56,25FPS), p95gap23,276ms,
+p9933,342/max73,630ms;4042compilaciones/275,674ms. Release->dequeue42us mediana.
+El perfil no representa todos los bloques observados: cap de core0 limita cobertura.
+No interpretar una segunda corrida sin suficiente cobertura como fracaso de prewarm.
+Se lanza segunda corrida `jit_prewarm=1`, mismas opciones CPU profile/fastmem/play,
+sin entradas ni parada programadas; arranque inicia prewarm, gate de gameplay pendiente.
+Arranque warm confirmado: aceptados144398/160040/160197 por core0/1/2,
+sin rechazos; core3 sin perfil. Total464635 bloques preparados y231292 fuera del
+presupuesto64MiB/core. Emision192MiB total, prewarm~26,1s incluyendo lectura/progreso;
+timers por core8,09/8,92/9,06s excluyen lectura del archivo. Guest arranca despues,
+sin fallo Render observado en arranque. Capturas/FPS/cierre pendientes.
+
+### Comparacion manual record frente a warm
+
+pc-prewarm-warm{,-diag}.txt: Q64s de gameplay (101,6s proceso incluyendo carga),
+shutdown/retorno0, cero errores Render, cinco asserts BufferQueue68,448--68,465s
+antes de T. Dos capturas completas240vsyncs,3989/3986ms; sin truncacion.
+
+| Metrica | Record T1 nueva | Warm T1 nueva | Record T2 recorrida | Warm T2 recorrida |
+|---|---:|---:|---:|---:|
+| Frames en~4s | 110 | 154 | 225 | 189 |
+| Ritmo aproximado FPS | 27,5 | 38,5 | 56,25 | 47,25 |
+| p95 gap entre encolados ms | 73,622 | 39,594 | 23,276 | 33,496 |
+| p99 gap ms | 122,773 | 84,358 | 33,342 | 36,361 |
+| Max gap ms | 229,857 | 194,788 | 73,630 | 79,040 |
+| Bloques Compile | 33755 | 19545 | 4042 | 5229 |
+| Compile agregado ms | 2241,044 | 1353,265 | 275,674 | 362,907 |
+| Protect agregado ms, anidado | 1001,162 | 585,778 | 121,335 | 161,107 |
+
+T1 observado:42,1% menos compilaciones,39,6% menos Compile agregado, p95~46,2%
+y p99~31,3% menores,40% mas frames. Favorable al precalentamiento, pero dos
+capturas manuales de~4s no son A/B determinista ni mejora causal certificada.
+T2 se degrada: mas interval2 (10->45), mas compilacion y menos frames. No evidencia
+de60FPS sostenidos ni estabilidad general. Compile/bloque T1~66,39->69,24us:
+la mejora observada es menos trabajo durante gameplay, no emisor mas rapido.
+
+Ventanas300presents cercanas a T1: pipeline stalls0 ambas, uploads95/46,85MiB
+frente92/46,77MiB, GPU busy1288,5 frente1244,8ms. Contenido GPU similar en esas
+ventanas, sigue dominando espera de trabajo guest. No son ventanas exactas T y
+contienen Dump; no sustituir percentiles de T por los de esa ventana.
+Release->dequeue42/44us mediana nueva y42/41us recorrida, sin retraso general largo.
+Memoria al Q4711MiB record frente4729MiB warm: recorridos/tiempos distintos,
+no A/B de RAM. La Series no esta validada; no aumentar memoria indiscriminadamente.
+
+Cobertura:464635 preparados,231292 omitidos por64MiB/core y84504 observaciones
+de core0 nunca persistidas en la corrida record. La lista se ordena por descriptor
+para integridad/merge y se precalienta desde el principio: sin informacion de
+demanda, selecciona por PC/FPCR, no prioridad de gameplay. Al guardar, Merge trunca
+tambien por descriptor; core0 cambia60448 entradas viejas por60448 nuevas al seguir
+limitado262144. Core1 añade18570 (240953), core2 añade14465 (225865). Cero cambios
+de hash entre descriptores compartidos de perfiles antes/despues. No prueba
+correlacion de cada fallo de cache con ese limite: falta clasificar miss perfil,
+presupuesto, core/FPCR y codigo distinto dentro de cada T.
+
+Decision: beneficio parcial observado, no declarar fracaso ni exito sostenido.
+Siguiente mejora focalizada propuesta: prioridad de prewarm/cap por demanda real
+y contadores de misses por causa para verificar cobertura en T. Luego repetir mismo
+tramo antes de invertir en serializar codigo host tipo PPTC. Una cache host mejora
+arranque, pero no resuelve por si sola falta de perfil/cobertura. No se modifica
+codigo ni se relanza otra prueba en esta revision. Sin commit.
+
+
+### Prioridad de gameplay y causas de compilacion pendiente (candidato PC)
+
+Implementado tras la comparacion manual: formato EDJITP02, lectura retrocompatible
+EDJITP01 sin borrar perfiles aprendidos. Se persiste un contador de observaciones
+que terminan su compilacion dentro de T, no frecuencia de ejecucion de bloques ya
+cacheados. El prewarm ordena primero esos registros; ties mantienen orden de
+descriptor. Merge conserva prioridad para el mismo hash/longitud y la reinicia
+si cambia el codigo. Al limitar el archivo, tambien conserva primero prioridad.
+El presupuesto de codigo sigue siendo 64MiB/core; no se comparte codigo host entre
+cores ni se cambia FPCR para intentar forzar hits.
+
+Las observaciones mantienen el limite total de262144/core:196608 generales y65536
+reservadas para T, con buffers preasignados. Esto evita que el arranque llene toda
+la capacidad. Registros v2 ocupan24bytes en disco frente20 en v1; los metadatos y
+el indice de diagnostico tienen coste de RAM propio, sin aumentar el presupuesto
+de codigo. Catalogo compartido inmutable al arrancar CPU: descriptors por core y
+PCs unicos, construido solo con perfiles de identidad/checksum validos.
+
+Cada T registra por core las compilaciones clasificadas como unlearned, budget,
+other-core, fpcr-variant, code-changed, prewarm-rejected, warmed-recompiled,
+record-only u outside-static-rx. Comparacion propia usa descriptor/hash/longitud;
+other-core/FPCR indican cobertura del descriptor/PC en perfiles, no validacion de
+contenido en otro core ni causa demostrada de invalidacion. warmed-recompiled
+indica que un bloque aceptado vuelve a compilar: no distingue eviction/invalidacion.
+Capturas y contadores usan limite al completar callback; no son una transaccion
+atomica entre cores. No se agrega trabajo a ejecucion de bloques cacheados.
+
+Gate automatizado: harness con Dynarmic UWP de produccion pasa precalentamiento sin
+alterar estado, hash/ASLR, corrupcion/identidad, migracion v1, prioridad al cap,
+merge con codigo cambiado, todas las categorias propias/cross-core/FPCR y registro
+T aun con buffer general lleno. Build incremental UWP pasa. Gate manual pendiente:
+la primera corrida carga perfiles v1 sin prioridad y aprende T; la segunda debe
+mostrar priority blocks/accepted >0, mismo presupuesto y comparar mismo recorrido.
+No se certifica mejora de FPS ni Series antes de ambas mediciones. Sin commit.
+
+
+### Gate PC: aprendizaje de prioridad y diagnostico de misses
+
+Evidencia archivada: pc-prewarm-priority-learn{,-diag}.txt. Cierre manual Q tras71s
+de gameplay, shutdown completo y RunHeadlessBoot returned0. Cero errores Render;
+cinco asserts BufferQueue411,170--411,185s, anteriores a ambas T. Memoria al Q4817MiB,
+no extrapolar al presupuesto de Series. Sin gate Series ni commit.
+
+Carga v1 aceptada sin rechazos: core0/1/2 precalientan147337/161938/162500 bloques,
+64MiB cada uno,471775 total;257187 omitidos por presupuesto. Priority blocks0 al
+arrancar es esperado: esta corrida aprende por primera vez las etiquetas T.
+
+| Metrica | T1 zona nueva | T2 zona recorrida |
+|---|---:|---:|
+| VSync/eventos | 240/51608 | 240/66616 |
+| Duracion ms | 4000,140 | 3998,323 |
+| Frames encolados / ritmo aproximado FPS | 172 /43 | 237 /59,25 |
+| p95/p99 gap ms | 35,213 /71,290 | 17,120 /17,289 |
+| Max gap ms | 200,573 | 42,936 |
+| Compile llamadas /agregado ms | 16414 /1144,591 | 559 /42,524 |
+| Protect agregado ms, anidado | 488,646 | 19,393 |
+| Miss budget | 11448 (69,75%) | 235 (42,04%) |
+| Miss other-core | 4727 (28,80%) | 181 (32,38%) |
+| Miss unlearned | 239 (1,46%) | 143 (25,58%) |
+
+Los contadores de misses suman exactamente Compile en ambas capturas. Sin
+code-changed, fpcr-variant, prewarm-rejected, warmed-recompiled, outside-static-rx
+ni invalidaciones observadas dentro de T. Other-core es cobertura del descriptor
+en un perfil ajeno, no prueba de identidad del contenido ni codigo host compartible.
+98,54% de la compilacion residual T1 tiene perfil conocido pero no preparado para
+ese core. Refuerza priorizar cobertura por core dentro del presupuesto, antes de
+serializar codigo host o atribuirlo a nuevas instrucciones nunca vistas.
+
+Guardado v2 verificado (longitud/checksum/orden/limites): core0/1/2 conservan
+262144/250825/238189 registros y6477/5504/4992 prioritarios respectivamente.
+Total16973 bloques T, todos retenidos pese a196608 observaciones generales llenas
+y9624 descartadas en core0; sin descartes en otros cores. Proxima corrida debe
+mostrar16973 priority blocks accepted total, salvo cambios de codigo/presupuesto.
+Luego comparar el mismo recorrido/capturas. Esta corrida aun no usa la nueva
+seleccion;43 y59,25FPS no demuestran que priorizar haya mejorado rendimiento.
+
+Anomalia separada de arranque: prewarm listo375,063s; timer core0=348898,7ms frente
+core1=8878,1ms/core2=8383,3ms. Diag sin heartbeats entre10,063 y356,844s, despues
+emite heartbeats atrasados cada~50ms. Durante seguimiento inicial el CPU acumulado
+del proceso dejo de avanzar en dos muestras separadas20s. Compatible con pausa/
+suspension del host, sin demostrar su causa. No interpretar esos348,9s como trabajo
+puro de compilacion; medir otra corrida en primer plano antes de atribuir regresion.
+
+
+Corrida priorizada lanzada: arranque confirma6477/5504/4992 bloques prioritarios
+aceptados por core0/1/2 (16973 total), cero rechazos,64MiB/core. Total471407
+preparados y279751 omitidos. Prewarm~26,7s, system.Run a34,844s; sin pausa larga
+observada esta vez. Gameplay/T y cierre Q pendientes; no declarar mejora FPS.
+
+
+### Gate PC: comparacion con precarga priorizada
+
+Evidencia pc-prewarm-priority-warm{,-diag}.txt: Q67s gameplay, cierre completo,
+retorno0, dos capturas completas240vsync sin truncar. Cero errores Render; dos
+asserts BufferQueue70,850--70,860s anteriores a T. Memoria al Q4814MiB frente4817
+previos, recorridos manuales: no prueba A/B de RAM. Sin commit ni gate Series.
+
+Arranque confirma16973 prioritarios aceptados(6477/5504/4992), cero rechazados.
+Total471407 preparados,279751 fuera de64MiB/core. Prewarm~26,7s incluyendo lectura/
+progreso, Run a34,844s; core0/1/2=8031,7/8825,3/8935,4ms. No pausa larga esta vez;
+la pausa previa no se reprodujo, causa sigue sin confirmar.
+
+| Metrica | Aprendizaje T1 | Prioridad T1 | Aprendizaje T2 | Prioridad T2 |
+|---|---:|---:|---:|---:|
+| Eventos | 51608 | 59135 | 66616 | 66221 |
+| Duracion ms | 4000,140 | 3990,956 | 3998,323 | 3999,380 |
+| Frames /FPS aproximados | 172 /43 | 206 /51,5 | 237 /59,25 | 232 /58 |
+| p95 gap ms | 35,213 | 33,411 | 17,120 | 19,043 |
+| p99 gap ms | 71,290 | 34,780 | 17,289 | 33,004 |
+| Max gap ms | 200,573 | 50,043 | 42,936 | 33,457 |
+| Compile llamadas | 16414 | 5672 | 559 | 2512 |
+| Compile agregado ms | 1144,591 | 377,749 | 42,524 | 162,488 |
+| Protect agregado ms, anidado | 488,646 | 165,776 | 19,393 | 71,036 |
+| Miss budget | 11448 | 4056 | 235 | 546 |
+| Miss other-core | 4727 | 1469 | 181 | 1170 |
+| Miss unlearned | 239 | 147 | 143 | 796 |
+
+T1 observado:19,8% mas frames,65,44% menos Compile llamadas,67,00% menos Compile
+agregado,51,21% menos p99 y75,05% menor max. Favorable a precarga/prioridad junto
+con perfil acumulado, no experimento que aisle ambas mejoras ni A/B determinista.
+No60FPS sostenidos:30 de206 frames T1 solicitan interval2 frente51 de172 previos.
+T2 requiere mas compilacion y peor p95/p99: no certificar estabilidad global a
+partir de T1. T2 tiene8 interval2 frente1 previo. Coste de ejecucion guest, PSO/GPU
+no quedan descartados para otros tramos, pero la cobertura JIT sigue siendo una
+fuente medible de trabajo al avanzar.
+
+Misses suman5672 y2512 exactamente. T1:71,51% budget,25,90% other-core,2,59%
+unlearned; T2:21,74% budget,46,58% other-core,31,69% unlearned. Sin warmed-recompiled,
+code-changed, fpcr-variant, prewarm-rejected ni invalidaciones T. Los bloques que
+si fueron preparados no muestran recompilacion en estas capturas. Release->dequeue
+41/40us mediana,max65/78us: no explica por si solo tirones de33--50ms.
+
+Perfiles v2 guardados y checksum/orden/longitud verificados: core0/1/2 registros
+262144/254066/243668, prioritarios10547/7321/7289(total25157). Todas las8184
+observaciones T nuevas retenidas; core0 descarta10326 generales al limite, sin
+perder cupo T. Se conserva presupuesto64MiB/core.
+
+Siguiente candidato: mejorar cobertura dentro del presupuesto y permitir que cada
+core seleccione tambien bloques prioritarios aprendidos en otros cores, despues
+de los propios. Siempre reconstruir descriptor propio y validar hash/longitud
+antes de emitir, sin compartir codigo host ni asumir otro FPCR. Repetir recorrido
+antes de serializar codigo host tipo PPTC; aun no implementado en esta revision.
+
+
+### Cambio de alcance: aprendizaje acumulativo, presupuesto y precarga
+
+El usuario pide evitar que la solucion termine siendo una seleccion parcial a64MiB:
+aumentar presupuesto, conservar aprendizaje amplio, investigar reutilizacion entre
+juegos y reducir precarga. Estos objetivos sustituyen la idea de resolver solamente
+other-core. No se cambian presupuesto/defaults ni se lanza una corrida en esta revision.
+
+Hechos del codigo: code_cache_size512MiB por JIT A64 x64 (reserva/capacidad, no prueba
+de512MiB residentes), prewarm64MiB/core independiente, perfil262144 registros/core,
+observaciones196608 generales+65536 T. La persistencia actual guarda descriptors/
+hash/longitud/prioridad: cada inicio repite traduccion/optimizacion/emision. Aprender
+mas bloques sin cambiar esto puede aumentar el tiempo de carga.
+
+Direccion de diseno, por gates:
+1. Separar capacidad en disco de residencia en RAM. Perfil indexado/segmentado con
+   deduplicacion y escritura incremental segura, sin truncar conocimiento por el
+   limite262144 ni requerir cargar todo al inicio. Retencion limitada por almacenamiento
+   configurable, corrupcion/identidad/version verificadas y sin perder perfil previo.
+   Registro completo acotado por buffers de ingestion: evitar I/O sincronico por bloque
+   y contabilizar backlog/drops. Aprendizaje continuo, T para medir/priorizar, no unico
+   medio de recordar gameplay. Cubrir modulos cargados despues solo al validar sus RX/
+   identidad y la invalidacion; RX inicial actual no cubre ese caso.
+2. Presupuesto configurable y luego adaptativo global, repartido entre cores con reserva
+   para compilar gameplay. Gate PC comparativo64/96/128MiB por core, considerando RAM
+   residente/commit total y memoria GPU/staging/guest en picos de zona nueva. Series
+   necesita medidas propias: limite reportado por PC no es presupuesto Xbox. No convertir
+   limite de512MiB por JIT en objetivo de residencia ni llenar cache hasta eviction.
+3. Reutilizacion entre cores del perfil validado primero; cada JIT emite codigo propio.
+   Guardar traducciones host con relocations/invalidation/version/CPU ISA/config como
+   gate posterior (PPTC), usando carga en lotes y W^X/CFG correcto para acelerar arranque.
+   Probar precarga paralela entre JIT independientes con owners detenidos y presupuesto
+   conjunto; no ejecutar workers concurrentes contra el mismo JIT ni tocar UI desde ellos.
+4. Reutilizacion entre juegos por contenido/modulo y contexto compatible, no por opcode.
+   Dynarmic ya implementa las operaciones ARM64; lo que se aprende es su codigo concreto.
+   Bloques pueden incrustar PC relativo/absoluto, saltos, direccion de datos, callbacks,
+   punteros al estado/page table y config FPCR. Incluso bytes iguales no autorizan copiar
+   host code sin validar/relocalizar ese contexto. Candidatos: helpers compartidos,
+   modulos identicos por identidad/offset, IR normalizada o plantillas relocalizables.
+   Indice global nuevo requeriria hash fuerte/validacion de contenido y contexto;
+   FNV actual de perfiles aislados no constituye identidad segura para reutilizacion global.
+   Medir proporcion de modulos/bloques realmente reutilizables en material de prueba antes
+   de implementar cache universal compleja. No prometer que un juego prepara cualquier otro.
+
+Limite del objetivo: aprender y conservar codigo efectivamente descubierto/ejecutado,
+con capacidad de atender nuevos modulos; no predecir todas las rutas o codigo generado
+futuro. Disco acumulativo puede crecer mas que RAM, cuya residencia debe seguir acotada.
+Criterios: menor compilacion en tramos repetidos, precarga en segundos vsbloques/bytes,
+RAM/commit pico, hits disco/RAM y motivos de rechazo, estabilidad/cierre Q, gate Series.
+
+Fuentes verificadas en esta revision:
+- Microsoft MemoryManager.AppMemoryUsageLimit: limite actual por app en bytes;
+  usar junto con consumo/commit del proyecto para decidir presupuestos, no RAM fisica.
+  https://learn.microsoft.com/en-us/uwp/api/windows.system.memorymanager.appmemoryusagelimit?view=winrt-26100
+- Codigo original Ryujinx Ptc.cs (mirror, commit fijo): guarda codes/relocs/unwind,
+  usa simbolos page table/count table/dispatch y organiza cache por titulo/version;
+  ilustra por que carga persistente requiere relocalizar y no demuestra cache universal.
+  https://git.axenov.dev/Museum/ryujinx/src/commit/dc8a1d5cbafc842c1ad52adcbf0a4a023931541a/ARMeilleure/Translation/PTC/Ptc.cs
+
+
+### Pruebas PC con presupuesto de memoria de Series (por juego)
+
+Decision del usuario: conservar perfiles/caches por juego, abandonar por ahora
+reutilizacion entre juegos. PC debe probar con presupuesto similar a Series y el
+prewarm no puede consumir margen necesario para gameplay.
+
+Verificacion: Microsoft documenta Game5GB/App1GB para Xbox One y Series; exceder
+limite hace fallar asignaciones. Nuestra consola confirma5120MiB de AppMemoryUsageLimit
+yTotalCommitLimit (diag Downloads29sep). Pico de esa corrida4541MiB:579MiB libres,
+no512MiB garantizados para precarga. PC previo con prewarm llego4814MiB:306MiB hasta
+5120, aunque contabilidad GPU/CPU difiere. Usar bytes medidos;5120MiB=5GiB, no5,1GB
+decimales. No aumentar precarga a512MiB global a partir del margen de una sola captura.
+
+Implementacion:
+- local-run.ps1 MemoryLimitMiB5120 por defecto,0 desactiva explicitamente para
+  diagnostico. Carga helper antes de activar UWP y asigna nuevo proceso a nested Job
+  con JOB_OBJECT_LIMIT_PROCESS_MEMORY. Verifica pertenencia y valor con API de Windows;
+  fallo visible, nunca etiqueta la prueba como limitada si falla verificacion.
+- Sin KILL_ON_JOB_CLOSE, timeout/retorno de launcher no termina app ni elimina limite:
+  Windows conserva job mientras proceso asociado viva. Usuario sigue play1/T/Q.
+- boot.cfg memory_limit_mib5120 permite al frontend limitar query de presupuesto para
+  caches D3D12 al minimo OS/test y considerar commit ademas de uso. Diag conserva
+  limites OS originales y muestra PC test budget/headroom aparte: no falsea reporte OS.
+  Campo boot.cfg por si solo es politica/diagnostico, NO enforcement del kernel.
+- No cambia DRAM/layout guest, presupuesto64MiB/core ni perfil title/build/core.
+  Esta corrida mide base bajo limite antes de aumentar precarga/reservar mas RAM.
+
+Alcance: Job limita commit de proceso segun Windows, no reproduce RAM unificada
+CPU/GPU de Xbox ni presupuesto de VRAM del adaptador PC. Memoria de GPU dedicada,
+secciones compartidas/fastmem y contabilidad driver no se deben considerar equivalentes.
+Gate actual fastmem0 usa backing private; Full/Series no certificados por este gate.
+No usar working-set trimming/paginacion como supuesto equivalente al limite Xbox.
+
+Gate: probe proceso Python limit64MiB intenta80MiB, Windows rechaza con MemoryError
+tras cerrar handle del job; verificacion API correcta. Build incremental UWP pasa.
+App real arranca con cap verificado5120MiB (PID12092), captura/FPS/pico/cierre pendientes.
+Error de implementacion corregido: OpenProcess necesita QUERY_INFORMATION ademas de
+SET_QUOTA/TERMINATE para IsProcessInJob. Sin ese permiso la asignacion tenia efecto
+pero la verificacion fallaba AccessDenied; se corrigio y repitio gate con exito.
+
+Fuentes:
+https://learn.microsoft.com/en-us/previous-versions/windows/uwp/xbox-apps/system-resource-allocation
+https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects
+https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information
+
+Comando de trial manual:
+`& .\tools\xbox\local-run.ps1 -NoBuild -Game wonder.nsp -MemoryLimitMiB 5120 -TimeoutSec 15 -BootCfg @('play=1','fastmem=0','cpu_profile=1','jit_prewarm=1')`
+Timeout solo espera del lanzador; no detiene gameplay.
+
+
+### Gate PC5120: presupuesto limitado y presion de caches
+
+pc-memory5120-warm{,-diag}.txt: Q84s, shutdown/retorno0, dos T completas240vsync.
+Sin errores Render ni fallos de asignacion registrados. Dos asserts BufferQueue
+77,579s previos a T. Cap kernel5120MiB verificado por launcher, presupuesto frontend
+reflejado explicitamente; limite OS original PC34710MiB conservado en diag.
+Prewarm25157 prioritarios aceptados sin rechazo,473178 bloques preparados y286700
+omitidos,64MiB/core(~192MiB total); core0 termina64,01MiB por granularidad de bloque.
+Run38,016s, precarga~27,9s despues de shaders.
+
+Maximo muestreado en diag4653MiB commit110,016s, headroom466MiB (contador redondeado);
+al Q4643MiB/headroom476MiB. NO pico continuo ni margen garantizado para otra zona.
+MemoriaGPU en ventanas~529--530MiB es contador separado PC; Job cap no certifica
+presupuesto unificado equivalente aSeries. No sumar arbitrariamente GPU/app por
+posible solapamiento, ni considerar libres466MiB Xbox sin medir Series.
+
+| Metrica | T1 zona nueva | T2 zona recorrida |
+|---|---:|---:|
+| Eventos/duracion ms | 48070 /3986,531 | 61730 /3995,649 |
+| Frames /FPS aproximados | 152 /38 | 212 /53 |
+| p95/p99 gap ms | 41,679 /49,156 | 33,407 /40,963 |
+| Max gap ms | 71,305 | 48,287 |
+| Compile llamadas /agregado ms | 6725 /526,197 | 637 /40,895 |
+| Protect agregado ms, anidado | 226,071 | 18,395 |
+| Miss budget | 4821 (71,69%) | 239 (37,52%) |
+| Miss other-core | 1856 (27,60%) | 390 (61,22%) |
+| Miss unlearned | 48 (0,71%) | 8 (1,26%) |
+
+Frente a anterior prioridad sin cap:51,5->38FPS T1 y58->53 T2; capturas manuales,
+perfil acumulado/recorrido cambian, no prueba causal aislada del Job. Especialmente
+T2 solo40,9ms Compile agregado en4s pero mantiene tirones: JIT no explica todo.
+ComposeWaitEnd max21,536/17,499ms, release->dequeue41/40us mediana max88/89us;
+ninguna demora general larga de dequeue host. Cero PSO pipeline stalls en ventanas.
+
+Indicio adicional de presion de caches: antes caches veian~707MiB GPU usados; con
+politica5120 ven~2973--2981MiB (proxy inicial_budget-app_free), presupuesto3447MiB,
+GPU real~530MiB. Ventanas300frames ahora crean212--311 recursos y GPU-decodifican
+81--98 uploads, antes ultimas ventanas17--36 recursos/0--3 decodes; GPUbusy~3,1--3,3s
+frente~1,2s, fence waits80--91ms frente25--35ms. Ventanas no corresponden exactamente
+T y no son recorrido determinista, pero compatible con expulsar/recrear/redecodificar
+texturas por presion. No afirmar thrashing probado sin contadores de evictions/hits.
+
+Antes de aumentar prewarm: medir GC/evictions/hits/redecodes y umbrales efectivos con
+limite5120, proteger conjunto de trabajo de gameplay y ajustar presupuesto conjunto
+CPU/GPU sin doble contabilizacion. No regalar512MiB extra a JIT a partir de margen
+muestreado466MiB. El juego consume memoria dinamicamente y este gate no demuestra
+60FPS ni cap unificado Series. Perfiles siguen por juego, sin nuevo cambio de codigo,
+sin commit. Persistidos core0/1/2:262144/256556/245325 registros,13732 observaciones
+generales core0 descartadas; T nuevas2808/1964/2590 conservadas segun logs de guardado.
+
+
+### Candidato autorizado: prewarm100MiB por core
+
+El usuario pide100MB por hilo emulado; se aplica100MiB por instancia/core A64, no
+por cada KThread guest. CodeBudget100*1024*1024, antes64MiB. Capacidad del JIT512MiB
+sin cambios; perfiles siguen por title/build/core, limite de proceso PC5120MiB.
+Hasta400MiB de precarga en cuatro cores; en registros actuales core3 sin perfil,
+los tres activos pueden consumir hasta300MiB frente192 previos. Incremento de
+codigo hasta108MiB en esos tres, sin contar metadatos/otros cambios de gameplay.
+No asumir margen restante a partir de esa resta: gate manual mide picos registrados,
+recursos/cache y FPS. Limite por bloques permite terminar ligeramente por encima
+(comportamiento previo); no corta un bloque a mitad de emision.
+
+Build incremental UWP correcto, sin nuevo test para cambio de constante. Se lanza
+play1/fastmem0/cpu_profile1/jit_prewarm1 con MemoryLimitMiB5120 verificado por Job,
+sin entradas/parada programadas. Capturas T, cierre Q, presupuesto/memoria y FPS
+pendientes. Series no certificada, sin commit.
+
+Arranque100 confirmado:232874/245399/245325 bloques aceptados,723598 total,
+40427 omitidos; cero rechazos. Emision100,00/100,00/99,50MiB,core3 sin perfil.
+32519 prioritarios aceptados. Prewarm~40,4s; Run48,500s. Commit al final de
+precarga2210MiB frente1822 del gate64; aumento~388MiB incluye metadatos/perfiles,
+no solo~108MiB adicionales de codigo. Gameplay/margen/FPS y Q aun pendientes.
+
+
+### Gate PC100MiB/core con cap5120
+
+Evidencia pc-memory5120-prewarm100{,-diag}.txt: Q64s gameplay, shutdown/retorno0,
+dos T completas240vsync, cero errores Render/fallos de asignacion registrados.
+Cinco asserts BufferQueue80,909--80,926s anteriores a T. No gate Series ni commit.
+
+| Metrica | 64MiB T1 | 100MiB T1 | 64MiB T2 | 100MiB T2 |
+|---|---:|---:|---:|---:|
+| Frames /FPS aproximados | 152 /38 | 229 /57,25 | 212 /53 | 237 /59,25 |
+| p95 gap ms | 41,679 | 22,909 | 33,407 | 19,433 |
+| p99 gap ms | 49,156 | 31,988 | 40,963 | 23,726 |
+| Max gap ms | 71,305 | 40,959 | 48,287 | 32,340 |
+| Compile llamadas | 6725 | 598 | 637 | 251 |
+| Compile agregado ms | 526,197 | 43,746 | 40,895 | 14,588 |
+| Protect agregado ms, anidado | 226,071 | 19,144 | 18,395 | 6,896 |
+| Miss budget | 4821 | 45 | 239 | 1 |
+| Miss other-core | 1856 | 533 | 390 | 249 |
+| Miss unlearned | 48 | 20 | 8 | 1 |
+
+T1 observado91,11% menos Compile,91,69% menos tiempo agregado; casi desaparece miss
+budget(4821->45). Interval2 pasa79/152->3/229; T2 pasa21/212->1/237. T1duracion
+3990,654ms/65993eventos, T2=3993,888ms/67566eventos. Manual/perfil acumulado: no
+A/B determinista que aisle incremento64->100 ni60FPS sostenidos certificados.
+
+Maximo muestreado de commit4685MiB(alQ),headroom434MiB, frente4653/466 previos:
++32MiB observado al final de gameplay, pese a+388MiB tras precarga. No implica
+coste fijo32MiB: compilacion normal posterior/caches y recorridos cambian residencia.
+No autorizacion para gastar434MiB enteros ni equivalencia RAM unificada Xbox.
+Precarga~40,4s frente27,9 con64, Run48,500s frente38,016: coste de arranque mayor.
+
+T1 misses:other-core533/598(89,13%),budget45(7,53%),unlearned20(3,34%). T2:
+other-core249/251(99,20%),budget1 y unlearned1. Sin warmed-recompiled ni code-changed
+ni fpcr-variant/rechazos dentro de T; el presupuesto deja de dominar lo pendiente.
+Reducir esos misses implica ampliar cobertura del perfil entre cores del mismo juego,
+siempre validar/emision propia, no subir simplemente otra vez presupuesto. Aun asi,
+Compile43,7/14,6ms en4s es poco agregado: no prometer60FPS solo eliminando estos misses.
+
+Persisten posibles costes de caches/texturas: ventanas300framesGPU~528--533MiB,
+proxy cache~3003--3009MiB,presupuesto3447MiB, recreaciones158--209/GPUdecodes62--79,
+GPUbusy~3028--3068ms y fence waits64--71ms. Pipeline stalls0. Siguen siendo ventanas
+fuera de limites exactos T y contienen Dump; thrashing no probado sin evictions.
+Release->dequeue41/40us, max130/57us; ComposeWaitEnd max8,903/0,003ms.
+Mantener100 para siguiente candidato con margen medido; priorizar velocidad de
+precarga/compartir perfiles entre cores y diagnostico GC para ultimos tirones,
+sin ampliar ahora presupuesto por iniciativa del agente.
+
+Guardado segun logs core0/1/2:262144/257986/247710descriptores; observaciones
+133128/11654/2374 generales y780/58/11T, cero drops por buffer en esta corrida.
+Mayor precalentamiento reduce observacion de compilacion durante gameplay; no
+interpretar menos registros nuevos como falta de ejecucion de esas zonas.
+
+
+### Candidato autorizado150MiB/core
+
+Usuario pide probar150MiB por instancia A64, manteniendo caches por juego y cap
+PC5120MiB. Cambio solo CodeBudget100->150; capacidad JIT512MiB sin cambios.
+Build incremental UWP correcto. Hasta600MiB de codigo si cuatro cores tienen
+perfil suficiente, no asignacion obligatoria; memoria total incluye metadatos.
+Play1/fastmem0/cpu_profile1/jit_prewarm1, sin parada ni entradas programadas;
+T/Q, RAM/FPS y Series pendientes. Sin commit.
+
+Arranque150 confirmado: todo perfil cargado aceptado(262144/257986/247710,
+767840 total), cero rechazos y cero omitidos por presupuesto. Uso real de codigo
+112,42/104,60/100,35MiB; core3 sin perfil,317,37MiB total. No se asignan150MiB
+obligatoriamente.33368 prioritarios aceptados. Prewarm~43,8s, Run53,469s,
+commit2250MiB tras carga (100:2210MiB). Gameplay/capturas/margen y Q pendientes.
+
+
+### Gate150 frente100: rendimiento no proporcional al presupuesto
+
+pc-memory5120-prewarm150{,-diag}.txt: Q67s, shutdown/retorno0, dos T completas240vsync,
+Render0/fallos asignacion0 registrados, cuatro asserts BufferQueue90,712--90,723s
+antes de T. Sin commit ni Series; codigo sigue150 autorizado, no revertido en revision.
+
+| Metrica | 100MiB/core | 150MiB/core | Cambio relativo |
+|---|---:|---:|---:|
+| Presupuesto/core | 100 | 150 | +50% |
+| Codigo precargado total MiB | 299,50 | 317,37 | +5,97% |
+| Bloques preparados | 723598 | 767840 | +6,11% |
+| FPS T1 nueva | 57,25 | 56 | -2,18% |
+| FPS T2 recorrida | 59,25 | 57,5 | -2,95% |
+| p99 gap T1 ms | 31,988 | 39,147 | +22,38% (peor) |
+| p99 gap T2 ms | 23,726 | 29,835 | +25,75% (peor) |
+| Max gap T1 ms | 40,959 | 48,210 | peor |
+| Max gap T2 ms | 32,340 | 63,892 | peor |
+| Precarga aprox s | 40,4 | 43,8 | +8,42% |
+| Maximo muestreado commit MiB | 4685 | 4814 | +2,75% |
+| Menor margen registrado MiB | 434 | 305 | -129MiB |
+
+Las cuatro instancias tienen limite150, pero core0/1/2 solo usan112,42/104,60/100,35
+MiB y core3 no tiene perfil. Todos los registros existentes preparados, cero omisiones
+por presupuesto: aumentar techo a150 no carga50% mas codigo ni fuerza gastar450MiB.
+Perfil core0 sigue truncado262144; otros cores no se precalientan con perfil ajeno.
+
+T1=224frames/3998,732ms/64367eventos, Compile797/51,952ms, Protect1998/23,890ms;
+misses746other-core(93,60%) y51unlearned(6,40%), budget0. T2=230frames/4000,407ms/
+66771eventos, Compile140/11,287ms, Protect390/5,209ms;129other-core(92,14%) y11
+unlearned(7,86%),budget0. T2 compila menos que100(251->140), pero FPS/p99 peores:
+el presupuesto/JIT no explica por si solo la estabilidad restante. ComposeWaitEnd
+max19,141/35,913ms, antes8,903/0,003ms. Release->dequeue41us ambas, max69/71us.
+
+Respuesta a proporcionalidad:64->100 es+56,25% presupuesto, T1observado+50,66% FPS
+yT2+11,79%;100->150 es+50% presupuesto y FPS negativos. No ley lineal. El aprendizaje
+acumulado/recorrido y carga host cambian; no afirmar que150causa causalmente una
+regresion con dos ventanas manuales de4s. Llegar cerca del limite60 tambien reduce
+el margen de mejora FPS; los percentiles importan tanto como promedio.
+
+Recomendacion:100 fue mejor balance observado (menos precarga/RAM, mejores FPS/p99),
+no ampliar mas presupuesto para estos perfiles. Siguiente foco cobertura entre cores
+por juego, velocidad de carga y diagnostico cache/esperas. No revertir150sin nueva
+instruccion del usuario; preservar comparacion para siguiente decision.
+Persistidos262144/259868/251394 registros, T810/63/64observaciones, sin dropsbuffer.
+
+
+### Candidato115MiB: perfiles compartidos dentro del juego y precarga paralela
+
+Autorizado por usuario: fijar115MiB por core, reutilizar perfiles del mismo juego y
+acelerar carga. Se mantiene JobPC5120MiB, perfiles title/BuildId/core y capacidad
+JIT512MiB. No cache entre juegos ni serializacion host nueva; sin commit.
+
+Arquitectura en tres pasos con guest detenido:
+1. LoadPrewarmProfile carga/verifica todos los cores en coordinador; callbacks
+   normales quedan instalados. Catalogo de descriptors/PC y registros prioritarios
+   se congela antes de arrancar workers. Duplicados de descriptor con hash/longitud
+   conflictivos se excluyen del catalogo prioritario compartido; propios son autoridad.
+2. PrepareShared selecciona candidatos prioritarios ausentes en perfil propio y
+   promueve propios no prioritarios con fingerprint compatible aprendido en otro core.
+   Orden: prioridad propia, prioridad compartida/promovida, normales. Limite importados
+   GameplayCapacity65536/core; si excede conserva mayor prioridad, luego orden estricto.
+   Cores sin registros propios no precalientan especulativamente. Importados no inflan
+   contadores de prioridad ni reescriben perfil propio por el hecho de precompilar.
+3. RunOwners ejecuta un trabajador por instancia activa, hasta4; nunca dos contra
+   mismo JIT. Cada owner hace hash/longitud/FPCR-descriptor/RX/ASLR validacion ya existente
+   antes de emitir en su propio cache. Callbacks de aprendizaje desactivados durante
+   warm y reinstalados al final. Estados propios y compartidos permiten clasificar
+   rechazos/budget/recompilacion en T. Presupuesto115MiB incluye ambos tipos de codigo.
+
+RunOwners usa std::jthread con join antes de Run, tambien en unwind. Trabajadores
+solo actualizan progreso atomico por owner; coordinador muestra progreso total cada
+33ms (panel CPU JIT existente), sin renderer/swapchain/UI desde workers. Un fallo
+std::system_error al crear hilo usa ruta secuencial para ese owner; errores de tarea
+se transportan tras join, callbackUI que lanza tambien une workers antes de salir.
+PrewarmBlocks captura excepciones y conserva codigo preparado valido/normalJIT.
+Compartir el perfil no implica copiar punteros/host code ni estado guest entre cores.
+Memoria final de codigo115MiB/core sigue limitada; planes temporales/metadatos/importados
+consumen tambien RAM y se evaluan en gate5120. No garantiza velocidad multiplicada.
+
+Validacion: harness Dynarmic produccion pasa concurrencia de3JITs con barrera de entrada,
+2precompilan y1rechaza hash distinto independientemente; PC/registros/SVC/writes
+preservados, ejecucion posterior de aceptados no lee codigo guest. Callback progreso
+solo coordinador. Fallos de owner/UI unen los demas antes de destruir capturas.
+Catalogo dedup/conflitos, priorizacion propia/shared/promocion, owner vacio y misses
+compartidos pasan; gates previos identidad/corrupcion/v1/hash/ASLR tambien pasan.
+Build incremental UWP correcto. Arranque real/tiempo wall/RAM/FPS ySeries pendientes.
+
+Fuentes/modelos revisados antes del cambio:
+- Microsoft recomienda std::thread/std::jthread RAII para C++ moderno y sincronizar
+  vida de datos con terminacion de workers:
+  https://learn.microsoft.com/en-us/windows/win32/procthread/creating-threads
+- Ryujinx Ptc.cs distingue perfil/codigo/relocs; no copiar hostcode sin esas adaptaciones:
+  https://git.axenov.dev/Museum/ryujinx/src/commit/dc8a1d5cbafc842c1ad52adcbf0a4a023931541a/ARMeilleure/Translation/PTC/Ptc.cs
+- Modelo repo Vulkan: vk_pipeline_cache.cpp LoadDiskResources, workers.QueueWork,
+  ShaderPools por tarea, estado/progreso sincronizado y WaitForRequests antes de terminar.
+  CPU aqui usa ownership por instancia y progreso solo en coordinador.
+
+
+Arranque PC del candidato115 compartido/paralelo confirmado (cap5120 verificado):
+core0/1/2 aceptan265109/260668/251973 bloques,777750 total; cero rechazos y cero
+omitidos. Compartidos2965/800/579,4344 total, todos validados/aceptados. Prioritarios
+propios14945/9406/9954(34305). Codigo113,64/105,58/101,92MiB,321,14MiB total,
+core3 sin perfil no precalentado. Ningun owner alcanza115MiB en esta carga.
+
+Run30,609s, prewarm entero21,906s desde8,703; workers21,391s wall sin lectura/preparacion.
+Frente150 serial43,8s de prewarm (~50% menos observado), con perfiles/bloques distintos:
+no benchmark aislado. Tiempos owners20,314/20,874/21,364s simultaneos, NO sumarlos
+como duracion de arranque. Cada owner tarda mas que serial por contencion, pero
+wall baja: paralelismo3 no implica3x. Commit despues2251MiB frente2250 anterior;
+gameplay/margen/T/Q y estabilidad siguen pendientes. Sin errores Render observados
+hasta inicio de gameplay; Series no validada.
+
+
+Gate PC115 compartido/paralelo (30 sep 2026): cierre Q tras58s gameplay,
+RunHeadlessBoot returned0; dos T completas240vsyncs(64640/65913eventos), sin truncar.
+Evidencia: build-uwp/log-review-2026-09-30/pc-memory5120-prewarm115-shared.txt
+ y pc-memory5120-prewarm115-shared-diag.txt. Capturas T1/T2 se comparan como
+nueva/recorrida siguiendo protocolo; recorridos manuales/perfiles acumulados distintos,
+no A/B determinista. FPS estimado por buffers/4s, no certificacion60 sostenidos.
+
+                        100/core    150/core    115 compartido/paralelo
+FPS T1                  57,25       56,00       56,25
+FPS T2                  59,25       57,50       57,00
+Compile bloques T1      598         797         334
+Compile bloques T2      251         140         20
+Compile ms T1           43,746      51,952      28,980
+Compile ms T2           14,588      11,287      2,346
+p99 gap T1 ms           31,988      39,147      36,928
+p99 gap T2 ms           23,726      29,835      32,106
+max gap T1 ms           40,959      48,210      49,191
+max gap T2 ms           32,340      63,892      33,595
+Precarga completa s     40,4        43,8        21,9
+Max commit MiB          4685        4814        4811
+Min margen MiB          434         305         308
+
+115 vs150 reduce compilaciones58,09%/85,71% y tiempo Compile44,22%/79,21%,
+pero FPS+0,45%/-0,87%; reutilizacion validada sin mejora general FPS demostrada.
+Misses T1:181other-core y153unlearned; T2:10other-core y10unlearned; budget0,
+rechazo/recompiled0. Compartimos solo prioritarios: quedan bloques no prioritarios
+conocidos en otro core, no implica fallo de los4344 importados. Protect11,094/1,173ms.
+
+GPU compose espera maxima4,107/0ms, release->dequeue40/41us mediana,max75/71us.
+GPUthread espera trabajo2347,989/2378,179ms en T; esto no prueba que ese tiempo sea
+compilacion: Compile apenas28,980/2,346ms agregados. Ventanas vecinas muestran
+~3,04-3,10s GPU busy por300frames,202/262 recursos nuevos y73/85GPU decodes,
+con cero pipeline stalls. Cuello restante por separar ejecucion CPU guest,
+sincronizacion/pacing y actividad de caches; no justificar mas presupuesto JIT
+ni PPTC solo con esta captura. Instrumentar siguiente los intervalos largos por
+CPU guest runnable/Run, scheduler, envio frames y evicciones/recreacion de texturas.
+
+Commit maximo muestreado4811MiB, margen308 con limite5120; no es pico continuo
+ni equivale a memoria GPU unificada Series. Sin errores Render/asignacion observados.
+Tres asserts BufferQueue conocidos antes deT. Cierre registra BufferQueue abandoned
+al iniciar shutdown y error persistencia playtime.bin directorio ausente; retorno0.
+No atribuir esos errores a precarga/JIT. Excepcion first-chance0x80010012 tras
+worker joined/exiting; no cambia retorno0. Sin commit; Series pendiente.

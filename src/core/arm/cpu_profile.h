@@ -11,10 +11,14 @@
 
 namespace Core::CpuProfile {
 
-enum class Counter : size_t { Runs, RunNs, CodeWords, Reads, Reads128, Writes, ClockReads, Count };
+enum class Counter : size_t {
+    Runs, RunNs, CodeWords, Reads, Reads128, Writes, ClockReads,
+    ReadSamples, ReadSampleNs, FlushChecks, FlushCheckNs, Count
+};
 using Snapshot = std::array<u64, static_cast<size_t>(Counter::Count)>;
 struct alignas(64) CoreCounters {
     std::array<std::atomic<u64>, static_cast<size_t>(Counter::Count)> values{};
+    u32 read_cursor{}; ///< single writer: this emulated core's CPU thread
 };
 inline std::array<CoreCounters, 4> cores;
 inline std::atomic_bool enabled{};
@@ -37,6 +41,33 @@ inline void Add(size_t core, Counter counter, u64 value = 1) {
 [[nodiscard]] inline u64 Get(const Snapshot& snapshot, Counter counter) {
     return snapshot[static_cast<size_t>(counter)];
 }
+
+/// Sample scalar reads once in 1024; time cache-area misses individually. Disabled profiling
+/// takes no timestamps. Samples identify expensive callbacks, not an exact sum of all reads.
+class CallbackTimer {
+public:
+    CallbackTimer(size_t core_, bool sample_reads)
+        : core{core_}, count{sample_reads ? Counter::ReadSamples : Counter::FlushChecks},
+          elapsed{sample_reads ? Counter::ReadSampleNs : Counter::FlushCheckNs} {
+        if (Enabled()) {
+            active = !sample_reads || (++cores.at(core).read_cursor & 1023) == 0;
+            if (active) start = std::chrono::steady_clock::now();
+        }
+    }
+    ~CallbackTimer() {
+        if (!active) return;
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        Add(core, count);
+        Add(core, elapsed, static_cast<u64>(ns));
+    }
+private:
+    size_t core;
+    Counter count;
+    Counter elapsed;
+    bool active{};
+    std::chrono::steady_clock::time_point start;
+};
 
 /// Time inside Run(), including JIT translation, callbacks and host preemption. It is elapsed
 /// time, not host CPU utilization. Disabled during normal play: no clock reads or atomic adds.

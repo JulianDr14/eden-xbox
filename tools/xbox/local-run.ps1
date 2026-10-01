@@ -8,7 +8,7 @@
 #
 #   powershell -ExecutionPolicy Bypass -File tools\xbox\local-run.ps1 [-NoBuild] [-TimeoutSec 75]
 #       [-BootNro path\to\payload.nro] [-RunSeconds 20] [-DebugLayer]
-#       [-Keys dir] [-Firmware dir] [-Game path\to\game.nsp]
+#       [-Keys dir] [-Firmware dir] [-Game path\to\game.nsp] [-MemoryLimitMiB 5120]
 #
 # -RunSeconds runs payloads without the sentinels (deko3d examples, ...) for that long, then exits.
 # -DebugLayer turns on the D3D12 debug layer; its errors and warnings land in eden_log.txt.
@@ -18,8 +18,15 @@
 # printed at the end).
 
 param([int] $TimeoutSec = 75, [switch] $NoBuild, [string] $BootNro, [int] $RunSeconds = 0,
-      [switch] $DebugLayer, [string] $Keys, [string] $Firmware, [string] $Game, [string[]] $BootCfg = @())
+      [switch] $DebugLayer, [string] $Keys, [string] $Firmware, [string] $Game, [string[]] $BootCfg = @(),
+      [ValidateRange(0, 1048576)] [int] $MemoryLimitMiB = 5120)
 $ErrorActionPreference = 'Stop'
+if ($MemoryLimitMiB -gt 0) {
+    . (Join-Path $PSScriptRoot 'process-memory-limit.ps1')
+}
+# Keep cache policy consistent with the external commit cap. A zero cap opts out.
+$BootCfg = @($BootCfg | Where-Object { $_ -notmatch '^memory_limit_mib=' })
+$BootCfg += "memory_limit_mib=$MemoryLimitMiB"
 $r = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $BootNro) { $BootNro = "$r\tools\xbox\boot_nro\boot.nro" }
 $BootNro = (Resolve-Path $BootNro).Path
@@ -49,6 +56,17 @@ $local = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalSt
 $diag = Join-Path $local 'eden_uwp_diag.txt'
 Remove-Item -LiteralPath $diag -ErrorAction SilentlyContinue
 Start-Process "shell:AppsFolder\$($pkg.PackageFamilyName)!App"
+if ($MemoryLimitMiB -gt 0) {
+    $attachDeadline = (Get-Date).AddSeconds(10)
+    do {
+        $appProcess = Get-Process -Name eden-uwp -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($appProcess) { break }
+        Start-Sleep -Milliseconds 25
+    } while ((Get-Date) -lt $attachDeadline)
+    if (-not $appProcess) { throw 'App did not appear: memory-limited trial was not started.' }
+    Set-EdenProcessMemoryLimit -ProcessId $appProcess.Id -LimitMiB $MemoryLimitMiB
+    Write-Host "PC process commit limit verified: $MemoryLimitMiB MiB (PID $($appProcess.Id)); GPU memory is separate."
+}
 
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 while ((Get-Date) -lt $deadline) {

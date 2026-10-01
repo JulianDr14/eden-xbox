@@ -14,6 +14,7 @@
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/kernel/svc.h"
 #include "video_core/perf_counters.h"
+#include "video_core/frame_trace.h"
 
 namespace Kernel {
 
@@ -153,7 +154,23 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
         // Handle system calls.
         if (supervisor_call) {
             // Perform call.
-            Svc::Call(system, interface->GetSvcNumber());
+            const auto svc_number = interface->GetSvcNumber();
+            const bool trace_wait = VideoCore::FrameTrace::Active() &&
+                (svc_number == static_cast<u32>(Svc::SvcId::WaitSynchronization) ||
+                 svc_number == static_cast<u32>(Svc::SvcId::SendSyncRequest) ||
+                 svc_number == static_cast<u32>(Svc::SvcId::SendSyncRequestWithUserBuffer));
+            // A blocking SVC may migrate the guest fiber to another host core. Capture the
+            // original guest ID, so begin/end remain pairable across host thread changes.
+            const u64 trace_thread = trace_wait ? thread->GetThreadId() : 0;
+            if (trace_wait) {
+                VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestSvcBegin,
+                                            trace_thread, svc_number);
+            }
+            Svc::Call(system, svc_number);
+            if (trace_wait) {
+                VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestSvcEnd,
+                                            trace_thread, svc_number);
+            }
             return;
         }
 
