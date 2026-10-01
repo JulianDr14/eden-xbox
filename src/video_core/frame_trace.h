@@ -65,8 +65,115 @@ enum class Event : u8 {
     GuestIpcName2, ///< a = last 8 bytes; names longer than 24 explicitly truncated
     GuestIpcLock, ///< a = service mutex acquisition elapsed us >=200, b = guest ID
     GuestIpcHandler, ///< a = handler/response elapsed us >=200, b = guest ID (may defer response)
+    VsyncTick, ///< a = CoreTiming callback lateness us; marked before waking VSyncThread
+    FrameLeaseAcquire, ///< a = guest frame number, b = consumer high32/normalized interval low32
+    FrameLeaseHold, ///< a = guest frame number, b = consumer high32/remaining vsyncs low32
+    FrameLeaseRelease, ///< a = guest frame number, b = consumer high32/held vsyncs low32; release decision
+    DisplayComposeLock, ///< a = container mutex wait us >=200, b = display ID
+    DisplayComposeLong, ///< a = compose elapsed us >=200, b = composer frame number
+    HostPresentLong, ///< a = DXGI Present host elapsed us >=200, not GPU duration
+    AddressWaitBegin, ///< a = address, b = guest ID; actual arbiter enqueue, target only
+    AddressWaitCondition, ///< a = observed low32/expected high32, b = guest low32/type high32
+    AddressWaitTimeout, ///< a = signed absolute timer ticks, b = guest ID; -1 indefinite
+    AddressWaitEnd, ///< a = Result raw, b = guest ID; after resumption, same capture
+    AddressWake, ///< a = address, b = target low32/signalling guest high32; actual EndWait
+    AddressCancel, ///< a = Result raw, b = guest ID; timeout/cancel, before removal
+    GuestSvcPc, ///< a = live SVC entry PC, b = guest high bits/SVC low8
+    GuestSvcLr, ///< a = live SVC entry LR, same context as GuestSvcPc
+    AddressSignalRequest, ///< a = address, b = signalling guest; attempt, not effective wake
+    AddressSignalArgs, ///< a = expected low32/count high32, b = guest low32/type high32
+    AddressSignalEnd, ///< a = Result raw, b = original guest; same capture
+    FenceQueued, ///< a=fence object identity, b=operation count; lifetime-local
+    FenceDequeued, ///< a=fence identity, b=stubbed flag
+    FenceWaitLong, ///< a=host elapsed us>=200, b=fence identity; not GPU busy
+    FenceFlushLong, ///< a=async flush elapsed us>=200, b=fence identity
+    FenceFlushLockLong, ///< a=cache mutex acquisition us>=200, b=fence identity
+    FenceTextureFlushLong, ///< a=texture async flush us>=200, b=fence identity
+    FenceBufferFlushLong, ///< a=buffer async flush us>=200, b=fence identity
+    FenceQueryFlushLong, ///< a=query async flush us>=200, b=fence identity
+    FenceCallbacksBegin, ///< a=fence identity, b=operation count
+    FenceCallbacksLong, ///< a=callback batch elapsed us>=200, b=fence identity
+    FenceDone, ///< a=fence identity
+    FenceBackendTick, ///< a=D3D12 scheduler tick, b=fence identity
+    FenceSubmitWaitLong, ///< a=waiting for recording submission us>=200, b=scheduler tick
+    FenceGpuWaitLong, ///< a=SetEventOnCompletion/event wait us>=200, b=scheduler tick
+    SyncWaitBegin, ///< a=object count, b=guest ID; actual kernel wait
+    SyncWaitObject, ///< a=object identity, b=guest high32/index low32
+    SyncWakeObject, ///< a=object identity, b=guest ID; actual NotifyAvailable
+    SyncWaitEnd, ///< a=Result raw, b=guest ID; same capture after resumption
+    NvEventArmed, ///< a=readable event identity, b=syncpoint low32/target high32
+    NvEventSignal, ///< a=readable event identity, b=syncpoint low32/target high32; before Signal
+    PipelineFrontendLong, ///< a=guest IR/SPIR-V/root-signature factory us>=200, b=PSO key hash
+    PipelineBuildRequested, ///< a=pipeline identity, b=full PSO key hash; lifetime-local
+    PipelineWorkerBegin, ///< a=pipeline identity; queued-before-T requests are unknown
+    PipelineWorkerLong, ///< a=build worker elapsed us>=200, b=pipeline identity
+    PipelineDxilLong, ///< a=cache lookup/shared wait/translation/sign elapsed, b=pipeline identity
+    PipelineTranslateLong, ///< a=Mesa linked translation us>=200, b=pipeline identity
+    PipelineValidatorLockLong, ///< a=validator mutex acquisition us>=200, b=pipeline identity
+    PipelineSignLong, ///< a=DXIL validation/sign elapsed us>=200, b=pipeline identity
+    PipelinePsoLong, ///< a=CreateGraphicsPipelineState host elapsed us>=200, b=pipeline identity
+    PipelineWaitLong, ///< a=WaitBuilt elapsed us>=200, b=pipeline identity
+    PipelineCacheResult, ///< a=0 compiled/1 hit/2 shared in-flight/3 bypassed, b=pipeline identity
+    PipelineBuildDone, ///< a=pipeline identity, b=1 if PSO valid; measured before notify
+    NvEventSignalLong, ///< a=KEvent Signal host elapsed us>=200, b=readable event identity
     VsyncSignal,     ///< immediately before signalling the display's guest VSync event
 };
+
+// Focused diagnostic for this investigation. Change the target here for another run.
+inline constexpr u64 TargetGuest = 83;
+inline constexpr u64 SignallingGuest = 79;
+[[nodiscard]] constexpr bool TracksGuest(u64 guest) {
+    return guest == TargetGuest || guest == SignallingGuest;
+}
+[[nodiscard]] constexpr bool TracksRunGuest(u64 guest) {
+    return TracksGuest(guest) || guest == 123 || guest == 124 || guest == 125;
+}
+[[nodiscard]] constexpr bool Enabled(Event event, u64 a = 0, u64 b = 0) {
+    switch (event) {
+    case Event::GuestThreadReady:
+    case Event::GuestDispatch:
+    case Event::GuestSvcBegin:
+    case Event::GuestSvcEnd: return TracksGuest(a);
+    case Event::GuestSvcLong:
+    case Event::GuestRunLong:
+    case Event::GuestRunPc:
+    case Event::GuestRunStop: return TracksRunGuest(b >> 8);
+    case Event::GuestIpcCommand:
+    case Event::GuestIpcName0:
+    case Event::GuestIpcName1:
+    case Event::GuestIpcName2:
+    case Event::GuestIpcHandler: return TracksGuest(b);
+    case Event::GuestRunCompile:
+    case Event::GuestRunFlush:
+    case Event::GuestRunClock:
+    case Event::GuestRunIcache:
+    case Event::GuestRunMemory:
+    case Event::GuestHostCpuWindow:
+    case Event::GuestIpcLock:
+    case Event::TextureCreate:
+    case Event::TextureEvict:
+    case Event::TextureHeapUsage:
+    case Event::TextureHeapFree:
+    case Event::TextureHeapPending:
+    case Event::TextureGcPressure:
+    case Event::TextureGcReadback:
+    case Event::TextureUploadInfo:
+    case Event::TextureUploadFormat:
+    case Event::TextureUploadStaging:
+    case Event::TextureUploadRead:
+    case Event::TextureUploadUnswizzle:
+    case Event::TextureUploadConvert:
+    case Event::TextureUploadBackend:
+    case Event::TextureUploadRepack:
+    case Event::VsyncTick:
+    case Event::VsyncSignal:
+    case Event::DisplayComposeLock:
+    case Event::DisplayComposeLong:
+    case Event::HostPresentLong:
+    case Event::GpuSubmit: return false;
+    default: return true;
+    }
+}
 
 /// Records the next `vsyncs` vsyncs (ignored while a trace is running).
 void Start(u32 vsyncs);
@@ -90,7 +197,7 @@ void Mark(Event event, u64 a = 0, u64 b = 0);
 class ScopedSpan {
 public:
     ScopedSpan(Event event_, u64 context_, bool enabled = true)
-        : event{event_}, context{context_}, active{enabled && Active()} {
+        : event{event_}, context{context_}, active{enabled && Enabled(event_, 0, context_) && Active()} {
         if (active) {
             id = GetCaptureStatus().id;
             start = std::chrono::steady_clock::now();

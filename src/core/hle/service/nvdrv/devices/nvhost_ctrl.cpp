@@ -15,6 +15,7 @@
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
+#include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/nvdrv/core/container.h"
 #include "core/hle/service/nvdrv/core/syncpoint_manager.h"
 #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
@@ -202,6 +203,9 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
 
     VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GpuFenceWait, fence_id,
                                 target_value);
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::NvEventArmed,
+        reinterpret_cast<uintptr_t>(static_cast<Kernel::KSynchronizationObject*>(&event.kevent->GetReadableEvent())),
+        static_cast<u64>(fence_id) | (static_cast<u64>(target_value) << 32));
     event.wait_handle =
         host1x_syncpoint_manager.RegisterHostAction(fence_id, target_value,
                                                     [this, slot, fence_id,
@@ -213,6 +217,12 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
             auto& event_ = events[slot];
             if (event_.status.exchange(EventState::Signalling, std::memory_order_acq_rel) ==
                 EventState::Waiting) {
+                const u64 trace_object = reinterpret_cast<uintptr_t>(static_cast<Kernel::KSynchronizationObject*>(&event_.kevent->GetReadableEvent()));
+                VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::NvEventSignal,
+                    trace_object, static_cast<u64>(event_.assigned_syncpt) |
+                                  (static_cast<u64>(event_.assigned_value) << 32));
+                const VideoCore::FrameTrace::ScopedSpan span{
+                    VideoCore::FrameTrace::Event::NvEventSignalLong, trace_object};
                 event_.kevent->Signal(system.Kernel());
             }
             event_.status.store(EventState::Signalled, std::memory_order_release);

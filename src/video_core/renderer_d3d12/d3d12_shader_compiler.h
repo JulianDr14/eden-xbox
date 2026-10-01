@@ -69,10 +69,10 @@ public:
     /// Translates, links and signs the stages of one pipeline, given in pipeline order. Returns
     /// one entry per input stage. Throws std::runtime_error on failure.
     std::vector<CompiledStage> CompilePipeline(std::span<const PipelineStage> stages,
-                                               const PipelineOptions& options) const;
+                                               const PipelineOptions& options, u64 trace_pipeline = 0) const;
 
 private:
-    void Sign(std::vector<u8>& dxil) const;
+    void Sign(std::vector<u8>& dxil, u64 trace_pipeline = 0) const;
     dxil_spirv_runtime_conf MakeConf() const;
 
     using PFN_spirv_to_dxil = decltype(&::spirv_to_dxil);

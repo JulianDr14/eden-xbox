@@ -24,6 +24,8 @@
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/rasterizer_interface.h"
 
+#include "video_core/frame_trace.h"
+
 namespace VideoCommon {
 
 class FenceBase {
@@ -86,6 +88,8 @@ public:
             uncommitted_operations.emplace_back(std::move(func));
         }
         pending_operations.emplace_back(std::move(uncommitted_operations));
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::FenceQueued,
+            reinterpret_cast<uintptr_t>(new_fence.get()), pending_operations.back().size());
         QueueFence(new_fence);
         if (!delay_fence) {
             func();
@@ -211,13 +215,31 @@ private:
                 fences.pop();
                 pending_operations.pop_front();
             }
-            if (!current_fence->IsStubbed()) {
-                WaitFence(current_fence);
+            const u64 trace_fence = reinterpret_cast<uintptr_t>(current_fence.get());
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::FenceDequeued,
+                                       trace_fence, current_fence->IsStubbed());
+            {
+                const VideoCore::FrameTrace::ScopedSpan span{
+                    VideoCore::FrameTrace::Event::FenceWaitLong, trace_fence};
+                if (!current_fence->IsStubbed()) {
+                    WaitFence(current_fence);
+                }
             }
-            PopAsyncFlushes();
-            for (auto& operation : current_operations) {
-                operation();
+            {
+                const VideoCore::FrameTrace::ScopedSpan span{
+                    VideoCore::FrameTrace::Event::FenceFlushLong, trace_fence};
+                PopAsyncFlushes(trace_fence);
             }
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::FenceCallbacksBegin,
+                                       trace_fence, current_operations.size());
+            {
+                const VideoCore::FrameTrace::ScopedSpan span{
+                    VideoCore::FrameTrace::Event::FenceCallbacksLong, trace_fence};
+                for (auto& operation : current_operations) {
+                    operation();
+                }
+            }
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::FenceDone, trace_fence);
             {
                 std::unique_lock lock(ring_guard);
                 delayed_destruction_ring.Push(std::move(current_fence));
@@ -237,12 +259,25 @@ private:
                query_cache.HasUncommittedFlushes();
     }
 
-    void PopAsyncFlushes() {
+    void PopAsyncFlushes(u64 trace_fence = 0) {
         {
+            VideoCore::FrameTrace::ScopedSpan lock_span{
+                VideoCore::FrameTrace::Event::FenceFlushLockLong, trace_fence, trace_fence != 0};
             std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-            texture_cache.PopAsyncFlushes();
-            buffer_cache.PopAsyncFlushes();
+            lock_span.Finish();
+            {
+                const VideoCore::FrameTrace::ScopedSpan span{
+                    VideoCore::FrameTrace::Event::FenceTextureFlushLong, trace_fence, trace_fence != 0};
+                texture_cache.PopAsyncFlushes();
+            }
+            {
+                const VideoCore::FrameTrace::ScopedSpan span{
+                    VideoCore::FrameTrace::Event::FenceBufferFlushLong, trace_fence, trace_fence != 0};
+                buffer_cache.PopAsyncFlushes();
+            }
         }
+        const VideoCore::FrameTrace::ScopedSpan span{
+            VideoCore::FrameTrace::Event::FenceQueryFlushLong, trace_fence, trace_fence != 0};
         query_cache.PopAsyncFlushes();
     }
 

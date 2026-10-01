@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "core/core.h"
+#include "video_core/frame_trace.h"
 #include "core/hle/service/nvdrv/nvdrv_interface.h"
 #include "core/hle/service/nvnflinger/buffer_queue_producer.h"
 #include "core/hle/service/nvnflinger/hos_binder_driver.h"
@@ -273,7 +274,10 @@ Result Container::CloseLayerLocked(u64 layer_id) {
 
 bool Container::ComposeOnDisplay(s32* out_swap_interval, f32* out_compose_speed_scale,
                                  u64 display_id) {
+    VideoCore::FrameTrace::ScopedSpan trace_lock{
+        VideoCore::FrameTrace::Event::DisplayComposeLock, display_id};
     std::scoped_lock lk{m_lock};
+    trace_lock.Finish();
     return m_surface_flinger->ComposeDisplay(out_swap_interval, out_compose_speed_scale,
                                              display_id);
 }

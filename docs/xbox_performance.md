@@ -2122,3 +2122,416 @@ CPUflushT1 puntual9,971ms, no desaparece. No recortar sleeps/esperas a ciegas.
 
 Staging256MiB,prewarm115MiB/core,Job5120MiB,T8 intactos. Sin nuevo commit ni
 relanzamiento durante revisión. Series/60FPSsostenidos/A/B pendientes.
+
+
+## BufferQueue/VSync después del commit b7aa63d14 (30 sep2026)
+
+Commit solicitado por usuario b7aa63d14 guarda GC diferido/bestfit, staging256,
+T8/CPU/IPC/upload ydecoderBC45 validado. No push. Siguiente trabajo separado,
+no incluido enesecommit.
+
+Lectura dirigida de los logs existentes cambia la hipótesis: QueueBuffer registra
+requested/applied low/high32. Gate antesBC45: T1 408interval1+34interval2,
+T2 460+7; despuésBC45 T1 466+5,T2 471+3. Esto es el guest solicitando presentar
+cada dos vsyncs, no un incrementoinventado enelcompositor. Todavía no prueba por
+qué elguest pide2 ni convierteFPS de presentación en simulación60Hz.
+
+Ejemplo T1 postBC45: buffer0 se encola3894,567ms con2->2, adquiere3910,245,
+VSync3926,782 no lo libera, libera3943,876 después de2vsyncs; WaitForComposite
+0us en ambos ticks. Productor espera ycontinúa3943,913(37us despuésrelease).
+Su siguienteQueueBuffer3945,120 cierraelgap38,023ms. T2: adquiere intervalo2
+909,376, tick925,773 retiene, libera942,678, dequeuefin942,721(43us), siguiente
+queue944,082. Vsync no faltó enesos ejemplos: retención correspondeal contrato2.
+No cambiar intervalo2 ni soltar guestbuffers antesde sus fences por aparentar60;
+el ensayo force_swap_interval1 anterior no arregló simulación (cabecera documento).
+
+Investigación fuentes:
+- AOSP define acquire/release fences y cuándo el productor puede reutilizar buffers:
+  https://source.android.com/docs/core/graphics/sync
+- Microsoft explica sincronización/flight limiting de la swap chain D3D12:
+  https://learn.microsoft.com/en-us/windows/win32/direct3d12/swap-chains
+- UWP describe el objeto waitable de frame latency:
+  https://learn.microsoft.com/en-us/windows/uwp/gaming/reduce-latency-with-dxgi-1-3-swap-chains
+No introducir flags/SetMaximumFrameLatency/present0 a ciegas sin probar cuello y
+capacidad Series. Cadena HardwareComposer/Conductor/GPU RequestComposite es común
+conVulkan; D3D12 terminaenDXGI Present(1,0), medible por separado. No atribuir
+hold2 a backend D3D12 sin evidencias.
+
+Candidato diagnóstico dirigido, preserva toda sincronización:
+- CoreTiming callback marca vsync-tick lateness antes Set; GetNextTicks se mantiene
+  despuésSet comoantes, sin cambiarorden temporal delcallback.
+- HardwareComposer registra framelease porconsumerID+guestframenumber: adquisición
+  con intervalo normalizado, hold conperiodosrestantes, decisiónrelease con edad
+  en ticks. Overlaysnormalizados1; no truncarframe number. LeaseRelease es decisión
+  previa aReleaseBuffer, no marcaGPU completado ni garantiza statusrelease.
+- Spans>=200us para mutexContainerCompose,ComposeLocked y DXGI Present.
+  Presentelapsed incluye bloqueohost; noGPUbusy. Nada de cambios de buffers/fences.
+- Analizador cuenta requested/applied, leaseintervals/retencionticks/residency y
+  extraheldticks, callbacklate/maxgap, solapePresent en gap. Wallresidency no es
+  declaración deVSync perdido: velocidad guest/host yborde deT importan.
+- Spans adquiridos/released fueraT no se emparejan; consumidor incluidoevita colisión
+  deguestframenumbers entrecapas. Holdevents no equivalen espera CPU.
+
+Fixtures dehold2legal, mismo frame en2consumers, retenciónextra1tick, Present/tick
+pasan; dos480anteriores compatibles, fields nuevos ausentes no inventan muestras.
+IncrementalUWP26ops yfinal26ops (header común) pasan; gitdiffchecklimpio. Gate
+manual T8/Q/capacidad/interval1delay/Presents/Series pendientes. SinRAMextra,
+almacenamiento524288 fijo; eventosnuevos~unosmilesT, no perdraw/perGuestRunextra.
+Staging256/prewarm115core/Job5120 mantenidos. Este cambio mide el siguiente cuello,
+no se presenta como optimizaciónFPS certificada. Sincommitnuevo.
+
+
+## Gate PC BufferQueue/VSync y frame lease (30 sep 2026)
+
+Evidencia: `build-uwp/log-review-2026-09-30/pc-frame-lease-chain{,-diag}.txt`
+y `pc-frame-lease-chain-analysis.jsonl`. Q tras89s de gameplay, retorno0.
+T480 completas394720/395684 eventos, FPS59,125/59,375; p99gap28,684/28,590ms,
+max39,181/33,702ms. Frente58,875/59,25 previo, la diferencia pequeña no demuestra
+mejora causal: esta versión añade diagnóstico, no cambia sincronización.
+
+- Los480 callbacks CoreTiming aparecen en ambasT; lateness máximo0,509/0,539ms,
+  separación máxima17,074/17,135ms. No retraso largo del tick en estas muestras.
+- Leases completas472/474, una incompleta por bordeT cada captura; cero leases
+  retenidas más ticks que su intervalo. Intervalo1 máximo17,075/17,145ms;
+  intervalo2 aproximadamente33,3--33,5ms. Requested/applied1->1:470/472,
+  2->2:3/3. No se justifica liberar temprano o forzarinterval1.
+- Present host>=200us:5/7 muestras, máximo0,224/0,252ms; cero spans de mutex
+  Compose o ComposeLocked>=200us. No explican los gaps largos observados.
+- T1 gap39,181ms (4382,965--4422,146): release4398,144 y DequeueWaitEnd4398,185
+  (~41us desde ReleaseBuffer, ~37us desde adquisición siguiente); QueueBuffer
+  siguiente4422,146, unos23,961ms tras finDequeue. Guest83 WaitForAddress(SVC52)
+  termina4421,756 tras23,359ms, por tanto comienza4398,397. Solapa casi todo el
+  tramo posterior aDequeue; GPUthreadwait23,153ms termina4421,944. Esto apunta
+  a disponibilidad/sincronización del productor guest, no alease retenida.
+  El evento SVC no identifica todavía dirección ni quién despierta: correlación,
+  no prueba de origen ni CPUbusy. Uploads largos previos suman1,152ms en el gap.
+- T1 gap34,968ms: finDequeue4315,020, Queue4335,198 (+20,178ms), WaitForAddress
+  guest83 de19,534ms termina4334,745. Uploads previos7,376ms; la espera posterior
+  requiere seguir la cadena de wakeups, sin sumar fases solapadas.
+- T2 max33,702ms coincide conlease3659 intervalo2 adquirida211,268 y liberada
+ 244,766 (33,498ms/2ticks); Binder guest83 espera32,345ms. La política solicitada
+ explica esta retención; no es un bug demostrado del compositor.
+
+RenderError0; ocho asserts BufferQueue slot2 fuera del límite2 entre93,265--93,293s,
+antes deT1(108,944s), permanecen pendientes y no explican por sí solos estos gaps.
+Headroom mínimo83,426/111,543MiB; readbacks4/4 y8/8 queued/ready, sinfallback/stale
+T. Mantener staging256MiB/prewarm115MiB porcore/Job5120MiB/T8. Series pendiente,
+no60 sostenidos certificados. Siguiente foco: WaitForAddress del productor guest83,
+dirección/valor esperado y señalizador, junto al tramo Dequeue terminado->QueueBuffer;
+conservar semántica de fences y swapinterval. Diagnóstico posterior a b7aa63d14 sincommit.
+
+
+## Traza concentrada en WaitForAddress, limpieza de diagnóstico (1 oct 2026)
+
+Usuario autoriza desactivar diagnóstico ya innecesario. Política central constexpr
+FrameTrace::Enabled/TargetGuest83: no registrar scheduler/Run/SVC/IPC de otros guests;
+ScopedSpan desactivado no lee reloj. Scheduler descarta otros guests antes deMark.
+Se desactivan timestamps CPU host, contadores Run/callbacks, detalle de uploads por
+fase/formato, churn/packing/readbacks por evento, GPU submit, ticklateness, señales
+VSync duplicadas, mutex/Compose/Present. Se conservan HUD FPS/CPU/GPUQ, estado T8,
+Queue/Acquire/Release/Dequeue, framelease/intervalos, fences, GPU idle/composite,
+Run PC/stop guest83, IPC guest83, elapsed largo upload/GC y headroom. La información
+que se elimina deja de estar disponible; ausencia no implica coste0.
+Autotests históricos buffer/texture del arranque quedan tras constexprfalse, código
+retenido para gates de desarrollo. Errores/fallbacks/asserts siguen activos.
+Nueva corrida sin cpu_profile=1 (defaultfalse): CPU callback/JIT timing detallado
+apagado; prewarm115MiB/core sigue funcional, no confundir aprender perfiles con
+contadores de diagnóstico. gpu_profile/audio_profile/debug_layer/GBV ya opt-infalse.
+
+KAddressArbiter registra solo target83 y duranteT: enqueue real tras validar condición
+(usando user_value ya leído, sin lectura guest adicional), address/value observed/
+expected/type, timeout absoluto en ticks; signal identifica sourceguest ytarget
+justo antes EndWait en las tres rutas. CancelWait identifica Result de timeout/cancel.
+Al volver del wait se registra Result solo en la misma captureID. Señal no equivale
+CPU inmediata: parser diferencia wake->dispatch y wake->resume, conservando guest
+ID aunque cambie host/core. No se cambia el árbitro, condición, orden de EndWait,
+colas, exclusivas ni timer. No se rastrean escrituras arbitrarias de memoria guest:
+una dirección permite localizar el objeto en la siguiente captura, no nombrarlo
+sin evidencia. Esperas cruzando bordeT quedan desconocidas/incompletas explícitas.
+IDs signal/target empaquetados32bits (IDs observados83 ymenores); dirección64bits.
+Valores signed32 ytimeout signed64 decodificados. MemoriaT fija524288 sin ampliar.
+
+Referencia ABI primaria libnx: https://github.com/switchbrew/libnx/blob/master/nx/include/switch/kernel/svc.h
+WaitForAddress0x34 ySignalToAddress0x35 aceptan address/type/value ytimeout/count;
+implementación común Kernel sirve D3D12 yVulkan. Por eso el seguimiento se sitúa en
+el árbitro, no en el renderer ni modifica semántica para forzarFPS.
+Fixtures tools/xbox/tests/address-wait-trace.py pasan: dirección errónea no atribuye
+wake, signal/cancel/migración, valoresnegativos, bordesT. Analizador previo480 conserva
+FPS59,125/59,375; fields nuevos ausentes no inventan resultados. IncrementalUWP27ops
++4ops y scheduler final por registrar. Tmanual para identificar dirección/señalizador,
+overhead real/FPS ySeries pendientes. Limpieza no certifica mejora deFPS. Sincommit.
+
+Gatebuild final scheduler4ops pasa; gitdiffchecklimpio. Trialmanual concentrado
+lanzadoPID11468, Job5120MiB verificado, play1/fastmem0/jit_prewarm1; cpu_profile
+omitido(defaultfalse), sin timeout de gameplay ni entradas programadas. Arranque
+shadercache yprewarm enprogreso. T8 completas/overhead/dirección/waker/Series
+pendientes; cierre usuarioQ. Sincommit.
+
+
+## Gate PC diagnóstico concentrado: dirección y señalizador identificados (1 oct 2026)
+
+Evidencia `build-uwp/log-review-2026-09-30/pc-focused-address-wait{,-diag}.txt`
+y `pc-focused-address-wait-analysis.jsonl`. Q71s gameplay, retorno0; proceso ausente.
+T480 completas27831/27911 eventos, FPS58,75/58,75, p99gap32,881/31,637ms,
+max39,055/38,737ms, gaps>=25ms11/12. No mejoraFPS validada frente59,125/59,375;
+escenas distintas yprofiling distinto impiden atribución causal.
+
+Limpieza reduce eventos~92,95% frente394720/395684 previos. Dump fueraT tarda
+0,346/0,388s frente~5,09/5,25s; consecuencia del menor volumen, no nuevo trabajo
+sobre guardado. Sin truncamiento ni ampliaciónRAM/capacidadT.
+
+Las470/470 esperas reales del guest83 se producen exclusivamente en dirección
+0x210a010120, observed1/expected1, ArbitrationType2 WaitIfEqual, timeout-1 indefinido.
+Todas despiertan por señal efectiva del ID79 enhost16012, retornan ResultSuccess0;
+no cancelaciones, cero esperas incompletas. HostGPU productor1920 (idle/uploads)
+es distinto delhost16012. Callgraph local SignalAddressArbiter solo entra desde
+SVCSignalToAddress; no confundir79 conhiloGPU ni inventar su rol funcional.
+
+Wake->resume median4/5us, p9918/10us, max33/70us. Mayor espera27,426/26,789ms:
+T1begin5462,432,wake5489,852,resume5489,858 (+6us);
+T2begin6694,930,wake6721,712,resume6721,719 (+7us).
+Por tanto estas esperas largas ocurren ANTES delSignal del79; el árbitro/scheduler
+no añade decenas dems después delwake en estas muestras. El valor1 es condición
+observada antes dormir; no indica por sí solo qué objeto/semaforo representa ni
+si la señal modifica la palabra (tipoSignal del79 todavía no capturado).
+
+Mayor espera deambasT no contiene upload/GC>=200us: GPUthreadidle solapa21,974/
+20,689ms. SegundaT tiene otras correlaciones: Wait22,951ms contiene11,182ms upload;
+gap34,211ms incluye17,859ms GC. No hayuna causaGPU única ni prueba causal por
+solape; parte delretraso puede venir detrabajo/sincronización del79 con terceros.
+T1maxgap39,055ms yT2gap33,218ms sí incluyen leasesinterval2 legales. Cero retención
+extra de ticks enambasT. Métricas apagadas (CPU otrosguests, Present, phasespacking,
+readbackstates) son desconocidas, no deben interpretarse susceros como ausencia.
+
+RenderError0;4assertsBQ a66,205--66,223s antesT1(79,562s). Headroom mínimo57,887/
+73,738MiB (T1 cruza umbral64MiB de recovery GC; sintrace estados no certificar
+fallback0). Diag pico muestreado5051MiB/margen68MiB. Mantener staging256/prewarm115
+porcore/Job5120/T8. Próximo paso dirigido: seguirguest79 (PC/stop, Run largos,
+IPC yesperas propias) ysourcePC/args deSignalToAddress paraesa dirección; conservar
+83 yframechain. Determinar qué retrasa la señal antes de cambiarsemántica dewait,
+prioridades o liberarframebuffers temprano. Sin nuevo cambio ni commit en estarevisión;
+Series y60sostenidos pendientes.
+
+
+## Candidato seguimiento del señalizador79 (1 oct 2026)
+
+Tras gatefocus83, ambasT identifican mismo source79. TracksGuest central permite
+solo79/83 en scheduler ready/dispatch, Run>=200us PC/stop, IPC/longSVC. Árbitro
+registra también esperas reales del79 yquién las despierta (tercerhilo IDsolo en
+wake efectivo, no se habilita profiler global). Permite dependencia83<-79<-otro.
+CPUprofile/JIT detallado siguenfalse yautotestsbootfalse; HUD yT8 permanecen.
+
+PC/LR deentradaSVC registrados desdeContextguardado porExitContext, sinleer código
+ni memoria guest adicional. ParaSignalToAddress validado se registran address,
+signaltype/expected/count signed32, sourceguest yResult final enmisma captureID.
+Request/End no equivalen wake: se enlazan solo aEndWait efectivo capturado de
+misma dirección/source. Args pueden señalar varios waiters; metadata objeto
+compartido hastaResult final. Si wake externo alSVC orequestantesT, argsdesconocidos.
+Dirección elegida enruntime, sinhardcode0x210a010120 porqueASLR puede cambiarla.
+No se modifica prioridad, Signal, exclusivas, condiciones/timers ni colaBufferQueue.
+
+Analizador enlaza PC/LR sourceSVC yargs/result alwait, yrecorta/unifica spans Run
+>=200us yesperasSVC delseñalizador dentro begin->wake deltarget. Incluye4mayores
+Run/esperas conPC/IPC porwait, sinconfundir solape con causalidad nielapsedconCPUbusy.
+Cuantización timestamp1us: asociaciónPCalspan admite2us para redondeo; sólo usa
+puntos deSVCcapturados, no decodifica función ni adjudica trabajo deguest porPCfinal.
+El resto delwait sinspans conocidos no significaCPUpuro (runs<200us, JIT/flush,
+preemption ycalls enborde no clasificados). Capacidad fija524288; gatevolumenTreal
+pendiente, no inferir overhead0. IDs79/83 actuales deestegate; otrascorridas pueden
+necesitar actualizarTracksGuest si el orden de creación cambia.
+
+ReferenciaABI libnx https://github.com/switchbrew/libnx/blob/master/nx/include/switch/kernel/svc.h
+Signaltype0 no modifica valor;1 incrementa sicoincide;2 modifica porwaitercount.
+Por eso elobserved1 delwait83 no basta para afirmar qué variable representa sin
+capturar tipo/PC delsignal. RutaKernelcomún Vulkan/D3D12, referencia local
+k_address_arbiter/k_process/svc_address_arbiter yphysical_core::ExitContext.
+
+Fixtures tools/xbox/tests/address-wait-trace.py pasan wake/cancel/migración/bordes,
+83<-79<-77, PCs/args signed/count-1/Result0 ysolapesrecortados independientes.
+AmbasTprevias conservan58,75FPS y470waits/source79; no inventan args ausentes.
+IncrementalUWP28ops pasa, gitdiffchecklimpio. Gate manualT8/dirección/sourcePC/
+cuello79/capacidad/overhead ySeries pendientes; cambiosdiagnóstico sincommit.
+Staging256MiB/prewarm115porcore/Job5120/T8 mantenidos. Ninguna mejoraFPS certificada.
+
+Trial79chain lanzadoPID10568, Job5120MiB verificado;play1/fastmem0/prewarm1,
+CPUprofile omitido0. Shadercache/prewarm enprogreso; usuarioT8 yQ sinlimitetime
+ni entradasprogramadas. Gate79sourcePC/args/Run/esperas/volumenpendiente. Sincommit.
+
+
+## Gate79chain: espera de syncpoint1 y trabajadores, corrección PC (1 oct 2026)
+
+Evidencia `build-uwp/log-review-2026-09-30/pc-signalling-79-chain{,-diag}.txt`
+y análisisJSONL regenerado descartando PCs inválidos. Q123s/retorno0, procesoausente;
+T480 completas253950/245393events,FPS55,375/52,75, p99gap39,859/35,769ms,
+max53,350/58,441ms. No mejoraFPS, no atribuir regresión causal a79trace: escenas,
+presiónRAM ymetadata mucho más frecuente. PC/LR generó134774/131784events (>50%
+volumenT); volver acompactar metadata corta si no hace falta en siguiente diseño.
+Sin truncar, capacidad524288 ysinRAMextra. Dump3,198/3,162s fueraT.
+
+Guest83443/422 waits reales, address0x210a610120, expected/observed1, WaitIfEqual,
+todaswake79/Result0. Signal validado tipo1 SignalAndIncrementIfEqual,value1,count-1
+(allwaiters), incrementa palabra condicionada; no eliminar esaespera ni cambiar
+valor paraforzarFPS. Wake->resume median5us ambasT,p9931/23us,max71/74us.
+Guest79 registra5431/5220 waits, cuatroaddresses; despiertan123/124/125.
+
+Ejemplo determinanteT1gap53,350ms (5039,387--5092,737):83wait5055,262--5092,317
+37,055ms. Guest79WaitSynchronization5055,553--5091,67236,119ms; previamente dos
+nvdrvcommand1/ioctl. game-fence-wait a5055,502:syncpoint1,value14669;
+game-fence-signal5091,612 tras36,110ms.79retornaWaitSynchronization60usdespués,
+luegoSignalAddress al83 en5092,311;83resume6usdespués. Esto identifica una cadena
+coherente deeventGPU/syncpoint1->79->83. Falta IDobjeto/handle deWaitSynchronization
+para probar que es exactamentelamismakevent; no equiparar hostelapsed aGPUbusy.
+T2tambiénsyncpoint1,value16908 espera31,411ms (5999,937--6031,351),79svc24termina
+6031,435 y83wake6031,973. Consulta de código: nvhost_ctrlRegisterHostAction marca
+GpuFenceSignal antesKEvent::Signal. FenceManagercommon ya usaGPUFencingThread en
+Vulkan yD3D12(HAS_ASYNC_CHECKtrue), WaitFence->PopAsyncFlushes->IncrementHost.
+Siguiente foco separar backendFencecompletion/asyncflush/callback/eventwakeup;
+no asumir falta de polling porque ya haythread asíncrono.
+
+T2mayorwait83 38,930ms (4968,100--5007,030) contienewaits79:
+address0x210a6590dc espera21,368ms,wake123 en4998,890; otrospanmismaaddr5,406ms
+wake124; address0x2153b8b9ac6,341ms,wake125 en5006,220. EstasdependenciasCPUworker
+sonsegundafamilia, no justificar todoporGPU. MayorgapT2 58,441ms tieneleaseinterval2
+legal,GC25,372ms yRun79elapsed25,267ms, tambiénArbitrateLock23,347ms. No sumar
+solapes ni llamarRunCPUbusy (perfilglobalJIT/flushapagado). T2interval2sube5->43
+respectoT1; cero lease extraticks. Headroommin50,414/74,363MiB, cruza64recoveryT1;
+RenderError0,6BQasserts103,131--103,152 antesT1(115,963). Series/60 pendientes.
+
+ERROR DE DIAGNÓSTICO CORREGIDO: sourcePC/LR tomaba thread->GetContext suponiendo
+ExitContext lo guardaba siempre. Enrealidad soloactualiza siDebuggerEnabled; copia
+puede serstale desdeúltimocontextswitch. Todos guest-svc-pc/lr deestegate ylas
+atribucionesPC derivadas quedan descartados. Duraciones/IDs/args/señalesválidos;
+GuestRunPc usabaGetContext vivo ysiguesiendopuntofinal válido, no hotPC.
+physical_core ahora lee interface->GetContext acontextlocal ANTES deSvc::Call,
+antesposiblefiber migration. Nuevo nombre guest-svc-live-pc/lr evita confundircon
+logsantiguos. Parser ignora explícitamentePCs antiguos ytestsverifican conservar
+args/timing sinadjuntarPCviejo. Fixtures pasan, buildincremental6ops ydiffcheck
+pasan. No nueva corrida conPCcorregido, no afirmar gatehardware porcompilación.
+Corrección necesaria realizadadurante revisión; sincommit. Próximo gate necesita
+identidadWaitSynchronization/event/syncpoint yworkerdependency, mantenertraza reducida.
+Staging256/prewarm115porcore/Job5120/T8 conservados.
+
+
+## Candidato cadena fence->evento->79 y trabajadores (1 oct 2026)
+
+Usuarioautoriza atacarambasfamilias. FenceManager compartidoVulkan/D3D12 añade
+identidaddefence porvida(.get), queued/dequeued, elapsedWaitFence>=200us,
+PopAsyncFlushes total, mutexcache, texture/buffer/query porfase, callbacksbegin/
+elapsed/done. D3D12 InnerFence::Queue relacionaidcontick. Scheduler::Wait separa
+espera de recording submission deSetEventOnCompletion+WaitForSingleObjectEx.
+No nuevasqueriesGPU, fences ni submits, no polling ni prioridadnueva: se conserva
+WaitFence->PopAsyncFlushes->operations. Spans nested no sumables yelapsedhost no
+GPUbusy. Identidadfence reciclable; parser crea nueva vida alqueued sin mutar la
+referencia que ya apunta avida anterior. BordeT oqueuedfueraT dejan camposunknown.
+
+KSynchronizationObject::Wait marca sólo esperas reales79/83 trasvalidación, objeto(s)
+yaresueltos/referenciados ydespuésresumptionResult mismacapture. NotifyAvailable
+marcaobjeto exactoque termina espera. Nolecturaguestextra/handlelookup ni referencia
+adicional. NVhostctrl relaciona readableevent consyncpoint+value alarmar; marca
+callbackevento sólo en transiciónWaiting->Signalling antesSignal, ytiempolargoSignal.
+Parser exige mismaidentidadobjeto+syncpoint+target para asociarwakeactual aNVevent;
+ademásrelacionaNVSignal albatchfenceencallbacken mismo host. No tratar request de
+señal como wake efectivo, ni lasesperasgenéricas comoGPU sineseenlace. Punteros
+son sólo IDs opacos durantevidaobjetos, no sedesreferencian analizando ni exponenUI.
+
+TracksRunGuest123/124/125 añade Run>=200us PC/stop yesperaslargas>=200us (incluye
+IPC/WaitSynchronization compactados paraworkers); no scheduleredges/IPCnames globales
+niperCPU/JITprofiling. Árbitro conserva target79/83 ysourceID dequienlosdespierta.
+Elimina metadataPC/LR deSleep/lock/addresscortos; quedan enIPC79/83 ySignalToAddress
+con contextoARMvivo. PC deARM aentradaSVC no necesariamente dirección delopcode;
+no inferir nombre/CPUbusy porPC. Workers danPCendpointRun ySVCID, sinPCporcada yield.
+CPUprofile0,prewarm115/staging256/Job5120/T8/524288 conservados. Gatevolumenreal
+pendiente: noafirmar coste0 ni proyectar garantía de capacidad.
+
+Microsoft: https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12fence-seteventoncompletion
+levantaevento alalcanzarvalor ypermitevarios threads;elapsed deAPI/eventwaitincluye
+planificaciónhost. https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12fence-getcompletedvalue
+UINT64_MAX indicadeviceremoved, semánticaoriginal/fallbackconservados. ModeloVulkan
+comparteFencingThread, PopAsyncFlushes yHostsyncpoint; D3D12Waittrazadoesbackendlocal.
+
+Fixtures address-wait-trace.py pasan identidadobject/syncpoint/fence, tick, fases
+nested, lifetime reutilizado yobjectincorrecto noheredaenlace; fixturesanteriores
+migración/signed/cancel/PCstale pasan. DosTpreviascompatibles55,375/52,75 conlinks
+nuevosausentes desconocidos, no inventados. IncrementalUWP38ops pasa(incluyeVulkan
+porheadercomún), gitdiffchecklimpio. ManualT/Q, chaincompleta/volumen/overhead ySeries
+pendientes; sólodiagnóstico, ningunamejoraFPScertificada. Sincommitnuevo.
+
+Trialcompletionchain lanzadoPID19100, Job5120MiB verificado;play1/fastmem0/
+prewarm1 yCPUprofile0. Shadercache/prewarm enprogreso. UsuarioT8manual yQ, sin
+timeoutgameplay/entradasprogramadas. Chain/volumen/overhead/Series pendientes.
+
+
+## Gate PC cadena de completion — 1 oct 2026 (T3 accidental excluida)
+
+Evidencia local archivada en `build-uwp/log-review-2026-09-30/pc-completion-object-chain{,-diag}.txt`; analisis JSONL contiene exclusivamente T1/T2. Cierre Q tras 139 s de gameplay, `RunHeadlessBoot returned 0`. CPU profile detallado apagado; staging 256 MiB, prewarm 115 MiB/core, Job 5120 MiB y T480 conservados.
+
+| Captura | Eventos | Vsyncs | FPS estimados | p99 gap | Max gap | Margen app minimo |
+|---|---:|---:|---:|---:|---:|---:|
+| T1 | 181785 | 480 | 56,25 | 39,721 ms | 96,803 ms | 82,938 MiB |
+| T2 | 186445 | 480 | 57,875 | 32,416 ms | 51,917 ms | 102,723 MiB |
+
+Ambas completas; T3 ignorada por instruccion del usuario. No mejora general ni 60 FPS certificados. Cinco asserts BufferQueue a 107,387--107,405 s, antes de T1 (125,854708 s); cero errores Render. Pico commit muestreado en diag 5031 MiB (88 MiB de margen), no pico instantaneo. Los intervalos guest 2 solicitados/aplicados son legales: 5 en T1 y 6 en T2; cero leases con ticks extra.
+
+La identidad real del objeto kernel confirma 316/316 y 263/263 esperas de `WaitSynchronization` del guest 79 enlazadas al evento NVDRV del syncpoint 1 y su target concreto, callback/fence/tick. Las 450/462 esperas de address del guest 83 reciben signal del 79, resultado Success; mediana wake->resume 5 us, p99 30/22 us, max 148/66 us. El cuello observado precede al despertar, no es una demora de decenas de ms del scheduler despues de la señal. PC vivo de SignalToAddress 0x845df194, LR 0x845acaa8; no identifica por si mismo una funcion simbolica del juego.
+
+T1 peor gap 5290,388--5387,191 ms relativos a T: 83 espera 93,193 ms; 79 espera el evento NV 5301,720--5386,378 (84,658 ms), target 16270. La fence que efectivamente lo despierta se encola a 5371,268 y se toma a 5371,386: 69,548 ms entre inicio de espera guest y enqueue, cola 0,118 ms, espera D3D12 host 14,918 ms, callback a 5386,328, resume 79 48 us despues del wake; 83 resume 4 us despues de su signal. No sumar fase GPU-wait y fence-wait: anidadas. El tiempo anterior a enqueue no puede llamarse ejecucion GPU. Upload medido 5,543 ms; GC 0,227 ms en el gap, insuficientes para explicar los ~70 ms anteriores.
+
+Pista accionable para ese tramo: `pipeline built` a 131,218135 s (5363,427 ms de T1), 7,841 ms antes de enqueue; la ventana perf a 132,498506 registra 3 pipeline stalls / 101,5 ms agregados. `PipelineCache::BuiltPipeline` espera `WaitBuilt()` para shaders sincronos o draws pequenos, igual que el modelo Vulkan. Es correlacion y total de una ventana distinta: falta medir WaitBuilt individual y separar espera de worker / DXIL / CreateGraphicsPipelineState antes de atribuir esos 70 ms a PSO. Preservar los draws pequenos que generan texturas: saltarlos para ganar FPS puede perder contenido.
+
+Otras esperas enlazadas de T1 llegan a 40,686 ms en SetEventOnCompletion+wait. T2 max 29,360 ms. Son elapsed host, incluyen despertar/preemption; no prueban GPU ocupada ese tiempo. Flush total max 0,901/1,049 ms, lock max 0,686/0,816 y callbacks max 0,376/1,137: esas fases no explican los principales tirones de esta corrida. Fences stubbed pueden quedar en cola detras de una fence real larga; no adelantarlas sin respetar orden de syncpoints/flushes.
+
+T2 peor gap 6586,206--6638,123: 83 espera 49,204 ms, pero 79 no espera NV en el tramo dominante: espera address 0x215418b9ac durante 33,381 ms y lo despierta guest 125. Guest 125 tambien presenta WaitForAddress largo, mientras guest 123 acumula ~35 ms de Run elapsed en core 1 dentro del gap. El hilo host que procesa GPU espera trabajo ~42,933 ms; esto NO mide inactividad de hardware GPU. No llamar CPU busy a Run ni atribuir al 125 computacion de esos 33 ms. Siguiente foco secundario: dependencias de los workers y desglose puntual de Run123; callbacks/JIT/flush/preemption desconocidos con perfil detallado apagado.
+
+Prioridad siguiente: (1) medir y reducir bloqueo de construccion de pipelines en el hilo que procesa comandos, con identidad de pipeline y fases DXIL/PSO/espera; (2) seguir la espera 79<-125 y el trabajo del guest123; (3) revisar espera D3D12 por tick y trabajo ya enviado, sin alterar semantica de fences. Memoria mantiene poco margen, sin fallo de asignacion observado. Sin cambios funcionales ni commit en esta revision; Series pendiente.
+
+
+## Candidato: reutilizacion de DXIL enlazado y fases de pipeline — 1 oct 2026
+
+El gate anterior confirma que en el peor gap hay ~69,5 ms antes de encolar la fence; un pipeline termina en ese tramo, pero la duracion individual de WaitBuilt no estaba medida. La optimizacion elegida elimina trabajo redundante demostrable por estructura: cada variante de estado fijo del PSO ejecutaba otra vez Mesa y la firma aunque sus entradas enlazadas fueran identicas. No atribuir a shaders todo el gap sin la nueva T.
+
+Investigacion/modelos:
+- Microsoft explica que CreateGraphicsPipelineState es sincrono y compila shaders para la GPU; recomienda controlar precarga y paralelismo desde la aplicacion: [background shader optimizations](https://devblogs.microsoft.com/directx/background-shader-optimizations/). No se introduce Device6/ASD ni APIs nuevas no certificadas en Series.
+- El PSO agrupa estado fijo ademas de bytecodes: [Managing Graphics Pipeline State](https://learn.microsoft.com/en-us/windows/win32/direct3d12/managing-graphics-pipeline-state-in-direct3d-12). Compartir shaders no equivale a compartir PSOs con distinto estado.
+- Dolphin separa caches de shaders y pipelines y coordina compilaciones pendientes: [ShaderCache.cpp](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/VideoCommon/ShaderCache.cpp). Se adopta el principio, no codigo externo.
+- Vulkan local: `vk_pipeline_cache.cpp` emite SPIR-V por variante y usa VkPipelineCache del driver, crea el PSO en workers y preserva draws pequenos que generan texturas. D3D12 requiere ademas Mesa/link/firma y la Series tiene prohibido GetCachedBlob; el nuevo cache actua antes de crear el PSO, no usa blobs del driver.
+
+`LinkedShaderCache<DxilStages>` vive en PipelineCache del juego y se destruye despues de unir los workers. Retencion con LRU limitada a 4 MiB contabilizados (keys con capacity, resultados DXIL con capacity, estructuras y slack de allocator), max128 entradas. No es una cuota OS exacta; el resultado activo/las copias por pipeline y temporales de compilacion pertenecen a la ruta existente, y consumidores pueden retener resultados mientras una entrada se expulsa. La reserva de keys en vuelo cuenta en el limite; si no caben, compila por la ruta habitual. No aumenta JIT/staging ni modifica el Job5120.
+
+La key incluye contenido completo SPIR-V de todos los stages en orden, enums, longitudes64 y opciones yz_flip/masks/first_vertex_and_base_instance. Conf del compilador/SM6.4/validator1.4/DLL son constantes de la instancia; no hay intercambio entre procesos ni ficheros nuevos. Hash acelera busqueda, igualdad completa resuelve colisiones. Hashes guest iguales no bastan porque runtime/atributos/emulacion/link pueden cambiar el SPIR-V. El cache solo contiene conjuntos enlazados, nunca stages aislados que puedan tener signatures incompatibles. Cada PSO conserva su estado y comparte un shared_ptr<const DxilStages>; no copia el DXIL firmado. El bytecode queda vivo aunque su entrada LRU se expulse mientras un pipeline lo use.
+
+Solicitudes concurrentes exactas comparten un promise/shared_future. El propietario compila inline en su worker sin mutex del cache; los otros esperan el resultado, nunca una tarea encolada detras del propio waiter. Resultados grandes no se retienen; entradas ready se expulsan por LRU, en vuelo nunca. Las excepciones se propagan a los waiters y se elimina la entrada para reintentar; se mantiene el manejo de fallo de GraphicsPipeline. Publicacion de DXIL/PSO corregida a store-release/load-acquire en IsBuilt (WaitBuilt mantiene mutex/condition). Los draws pequenos siguen esperando su pipeline para conservar contenido.
+
+T agrega solo en creacion/compilacion/WaitBuilt (no por draw ya construido): identidad lifetime-local del pipeline +hash de key PSO, request/workerbegin/done, frontend guest IR/SPIR-V/root-signature, tiempo DXIL incl cache/espera compartida, Mesa, espera mutex de validator, firma por stage y CreateGraphicsPipelineState. Cache outcome distingue compiled/hit/shared-in-flight/bypassed. Timers ScopedSpan solo dentro de T, >=200us completados en la misma captura; fueraT no reloj. Frontend y worker pueden solaparse; WaitBuilt incluye worker, DXIL incluye Mesa/firma/cachewait, firma y PSO no se suman al worker. Pipeline iniciado antesT tiene cola desconocida. No se reactiva CPU/global debug ni se cambia capacidadT16MiB.
+
+Gates locales: harness MSVC standalone pasa igualdad de contenido/opciones/stages/particiones, colision forzada,16 solicitudes concurrentes con una sola compilacion, retry,1000 expulsiones bajo limite, LRU y consumidores vivos tras eviction; fixtures parser pasan identidad por lifetime/puntero reutilizado, fases anidadas, multiples firmas, bordes y union de overlap. Fixtures address/object anteriores pasan. Build incremental UWP44 operaciones correcto; falta gate gameplay T/Q, hits reales, reduccion WaitBuilt/FPS y Series. Error harness inicial: build-env fuerza Store CRT, no sirve para un .exe console sin librerias de entrada UWP; el harness se compilo con vcvarsall x64 desktop /MD (no modifica build UWP). No perder tiempo arreglando ese script: runner del harness archivado localmente.
+
+Prueba prevista conserva play1/fastmem0/jit_prewarm1/115MiBcore/Job5120/staging256/T480 y CPUprofile0. El usuario cierra con Q; sin timeout gameplay. Sin commit solicitado en este turno y sin mejora FPS certificada por estos tests.
+
+
+Gate final candidato shaders: DXIL immutable compartido por shared_ptr entre PSOs, sin copias en hits; consumidores sobreviven a eviction. Harness actualizado valida eviction real y bypass al llenarse cupo de compilaciones en vuelo. Build10ops+4ops final correcto; parser pipeline/address y regresionT1/T2 previa correctos, gitdiffcheck limpio. Correccion include frame_trace omitido al ordenar includes: link final recompilado, no afecta corrida anterior. Trial manual lanzadoPID14184, Job5120MiB verificado;play1/fastmem0/prewarm1/CPUprofile0,115core/staging256/T480. T1/T2 hits/esperas/FPS/memoria ySeries pendientes; usuarioQ, sinlimitegameplay, sincommit.
+
+
+## Gate PC DXIL compartido — 1 oct 2026
+
+Evidencia `build-uwp/log-review-2026-09-30/pc-linked-shader-cache{,-diag}.txt` y analisis JSONL; proceso terminado, Q tras76s gameplay, RunHeadlessBoot returned0. Dos T480 completas182760/175587 eventos, sin truncamiento. InicioT1 80,033815s e inicioT2 94,068050s. Staging256/prewarm115core/Job5120/CPUprofile0 conservados.
+
+| Medicion | T1 previa | T1 actual | T2 previa | T2 actual |
+|---|---:|---:|---:|---:|
+| FPS T480 | 56,25 | 56,5 | 57,875 | 55 |
+| p99 gap ms | 39,721 | 41,761 | 32,416 | 40,624 |
+| Max gap ms | 96,803 | 56,828 | 51,917 | 48,932 |
+| Margen app minimo MiB | 82,938 | 25,918 | 102,723 | 61,996 |
+
+No mejora general validada: T1+0,44% FPS y T2-4,97%, p99 peor, max menor en muestras manuales distintas. No causalidad A/B ni60sostenidos. RenderError0; cinco BQasserts62,607--62,627s y ocho UnmappedDeviceReadBlock~52s, ambos antesT. Pico commit muestreado5066MiB/margen53MiB en diag; minimaheadroomT mas baja porque muestreo diag es esporadico. Playtime-file falla conocido al cierre; excepcion first-chance0x80010012 despuesretorno0, sin crash observado. Pausas de dump2,571/2,471s fueraT, guardado debug sigue fueraalcance.
+
+1718 graphicsPSOs se construyen durante carga; el ultimo a7,511713s, shadercache ready7,594s. No PipelineBuildRequested/Worker/Frontend/WaitBuilt/cacheoutcome durante ningunaT, y ventanas perf registran pipeline stalls0. Por tanto no podemos medir hits reales de DXIL ni ahorro de esa optimizacion con estasT: ya estaban aprendidos/precargados. Tampoco justifica declarar que la nueva cache elimino la espera anterior. No borrar perfiles para fabricar un caso frio: foco en los stalls que permanecen en gameplay.
+
+300/300 y249/249 waits79 ligados aNVsyncpoint1; guest83 451/440 waits observados, siempre signal79, p99wake->resume23/28us. Causa sigue antesde signal. Espera backend async larga hasta43,212/36,576ms host, noGPUbusy. Flush asyncmax1,747/2,109ms. Una batch callbackT1 llega5,809ms, tratar separado de la esperaGPU.
+
+T1 peor gap53,111--109,939ms relativosT dura56,828ms: dos GC suman24,479ms de overlap (19,251+5,546 con recorte), Run124 15,334ms simultaneo aGC, guest83WaitForAddress37,202ms y guest79WaitSynchronization28,516ms. Fence relevante encola78,549ms y no se toma hasta103,245 (cola24,696ms), callbacks103,261--109,071 (5,809ms); no atribuir toda esa cola a GPU ni sumarla a fases solapadas. Otro gap52,764ms (4286,667--4339,431) si contiene espera async D3D12 43,212ms; no pipelines niGC largo en ese tramo.
+
+T2 peor gap2151,945--2200,877 (48,932ms) contieneGC18,653ms. Snapshot appfree65085440bytes=62,070MiB, debajoRecoveryHeadroom64MiB. Varias esperas D3D12 en el hilo que procesa GPU coinciden conGC; trasGC queda fenceasync11,890ms. Codigo PrepareGcDownload activa recuperacion sincrona al bajar de64MiB y tambien en transferencias>8MiB/no soportadas. Contadores de readback/eviction estan desactivados por la limpieza debug: no podemos contar los fallbacks individuales en esta T, pero el umbral y la cadena temporal hacen de presion/GCsincrono una hipotesis fuerte. GCmax observado19,251/23,958ms; otrasRun79largas coincidenGC, elapsed noCPUbusy. Intervalos2 legales10/31 (antes5/6), ceroleasesextraticks: tambien afectanFPS, sin justificar forzarinterval1.
+
+Correccion del analizador necesaria para esta lectura: un Scheduler::Wait del hilo foregroundGC puede usar el mismo tick que una fenceasync antes de dequeued. Antes se guardaba como faseGPUdeesa fence solo por igualdad de tick. Ahora conserva backend_waits_on_tick con host/start/end, y solo marca part_of_fence_wait si coincide hostdequeuing y no comienza antes de dequeue (tolerancia2us). EjemploT1 espera20,174ms termina98,892, antesdequeuing103,245: relacionada con tick, no anidada en WaitFence. Fixture foregroundsameTick agregado y pasa, fixturesaddress/objectprevios pasan. No se modifica emulador ni sincronizacion en esta revision.
+
+Prioridad siguiente: recuperar margen real de memoria y evitar que GC de mantenimiento fuerce esperas largas en el hilo que procesa comandos; identificar descargas, bytes y tiempos de recovery de forma puntual. Mantener datos dirty/versiones/fences, limiteJob y memoria guest; no desactivar recuperacion a ciegas. Despues, explicar las esperas D3D12 de43ms sinGC y las dependencias CPUworkers. DXIL compartido queda candidato funcional, beneficioFPS no validado, Series pendiente, sincommit.

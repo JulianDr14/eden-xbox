@@ -9,6 +9,8 @@
 #include "common/adpf.h"
 #include "common/settings.h"
 #include "common/thread.h"
+#include <algorithm>
+
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/service/vi/conductor.h"
@@ -35,6 +37,8 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
             "ScreenComposition",
             [this](s64 time,
                    std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {
+                VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::VsyncTick,
+                    static_cast<u64>(std::max<s64>(0, ns_late.count()) / 1000));
                 m_signal.Set();
                 return std::chrono::nanoseconds(this->GetNextTicks());
             });

@@ -16,6 +16,7 @@
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/memory.h"
+#include "video_core/frame_trace.h"
 
 namespace Kernel {
 
@@ -25,6 +26,16 @@ KAddressArbiter::KAddressArbiter(Core::System& system_)
 KAddressArbiter::~KAddressArbiter() = default;
 
 namespace {
+
+void TraceAddressWake(KernelCore& kernel, u64 address, const KThread& target) {
+    if (!VideoCore::FrameTrace::TracksGuest(target.GetThreadId()) ||
+        !VideoCore::FrameTrace::Active()) {
+        return;
+    }
+    const u64 signalling_guest = GetCurrentThreadPointer(kernel)->GetThreadId();
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressWake, address,
+                               target.GetThreadId() | (signalling_guest << 32));
+}
 
 bool ReadFromUser(KernelCore& kernel, s32* out, KProcessAddress address) {
     *out = GetCurrentMemory(kernel).Read32(GetInteger(address));
@@ -117,6 +128,11 @@ public:
         : KThreadQueue(kernel), m_tree(t) {}
 
     void CancelWait(KernelCore& kernel, KThread* waiting_thread, Result wait_result, bool cancel_timer_task) override {
+        if (waiting_thread->IsWaitingForAddressArbiter() &&
+            VideoCore::FrameTrace::TracksGuest(waiting_thread->GetThreadId())) {
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressCancel,
+                                       wait_result.raw, waiting_thread->GetThreadId());
+        }
         // If the thread is waiting on an address arbiter, remove it from the tree.
         if (waiting_thread->IsWaitingForAddressArbiter()) {
             m_tree->erase(m_tree->iterator_to(*waiting_thread));
@@ -144,6 +160,7 @@ Result KAddressArbiter::Signal(uint64_t addr, s32 count) {
                (it->GetAddressArbiterKey() == addr)) {
             // End the thread's wait.
             KThread* target_thread = std::addressof(*it);
+            TraceAddressWake(system.Kernel(), addr, *target_thread);
             target_thread->EndWait(system.Kernel(), ResultSuccess);
 
             ASSERT(target_thread->IsWaitingForAddressArbiter());
@@ -173,6 +190,7 @@ Result KAddressArbiter::SignalAndIncrementIfEqual(uint64_t addr, s32 value, s32 
                (it->GetAddressArbiterKey() == addr)) {
             // End the thread's wait.
             KThread* target_thread = std::addressof(*it);
+            TraceAddressWake(system.Kernel(), addr, *target_thread);
             target_thread->EndWait(system.Kernel(), ResultSuccess);
 
             ASSERT(target_thread->IsWaitingForAddressArbiter());
@@ -236,6 +254,7 @@ Result KAddressArbiter::SignalAndModifyByWaitingCountIfEqual(uint64_t addr, s32 
                (it->GetAddressArbiterKey() == addr)) {
             // End the thread's wait.
             KThread* target_thread = std::addressof(*it);
+            TraceAddressWake(system.Kernel(), addr, *target_thread);
             target_thread->EndWait(system.Kernel(), ResultSuccess);
 
             ASSERT(target_thread->IsWaitingForAddressArbiter());
@@ -251,6 +270,7 @@ Result KAddressArbiter::SignalAndModifyByWaitingCountIfEqual(uint64_t addr, s32 
 Result KAddressArbiter::WaitIfLessThan(uint64_t addr, s32 value, bool decrement, s64 timeout) {
     // Prepare to wait.
     KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
+    u32 trace_capture{};
     KHardwareTimer* timer{};
     ThreadQueueImplForKAddressArbiter wait_queue(system.Kernel(), std::addressof(m_tree));
 
@@ -289,6 +309,18 @@ Result KAddressArbiter::WaitIfLessThan(uint64_t addr, s32 value, bool decrement,
             R_THROW(ResultTimedOut);
         }
 
+        if (VideoCore::FrameTrace::TracksGuest(cur_thread->GetThreadId()) &&
+            VideoCore::FrameTrace::Active()) {
+            trace_capture = VideoCore::FrameTrace::GetCaptureStatus().id;
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressWaitBegin,
+                                       addr, cur_thread->GetThreadId());
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressWaitCondition,
+                static_cast<u32>(user_value) | (static_cast<u64>(static_cast<u32>(value)) << 32),
+                cur_thread->GetThreadId() | (static_cast<u64>(decrement ? 1 : 0) << 32));
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressWaitTimeout,
+                                       static_cast<u64>(timeout), cur_thread->GetThreadId());
+        }
+
         // Set the arbiter.
         cur_thread->SetAddressArbiter(std::addressof(m_tree), addr);
         m_tree.insert(*cur_thread);
@@ -300,12 +332,19 @@ Result KAddressArbiter::WaitIfLessThan(uint64_t addr, s32 value, bool decrement,
     }
 
     // Get the result.
-    return cur_thread->GetWaitResult();
+    const auto result = cur_thread->GetWaitResult();
+    if (trace_capture != 0 && VideoCore::FrameTrace::Active() &&
+        VideoCore::FrameTrace::GetCaptureStatus().id == trace_capture) {
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressWaitEnd,
+                                   result.raw, cur_thread->GetThreadId());
+    }
+    return result;
 }
 
 Result KAddressArbiter::WaitIfEqual(uint64_t addr, s32 value, s64 timeout) {
     // Prepare to wait.
     KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
+    u32 trace_capture{};
     KHardwareTimer* timer{};
     ThreadQueueImplForKAddressArbiter wait_queue(system.Kernel(), std::addressof(m_tree));
 
@@ -337,6 +376,18 @@ Result KAddressArbiter::WaitIfEqual(uint64_t addr, s32 value, s64 timeout) {
             R_THROW(ResultTimedOut);
         }
 
+        if (VideoCore::FrameTrace::TracksGuest(cur_thread->GetThreadId()) &&
+            VideoCore::FrameTrace::Active()) {
+            trace_capture = VideoCore::FrameTrace::GetCaptureStatus().id;
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressWaitBegin,
+                                       addr, cur_thread->GetThreadId());
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressWaitCondition,
+                static_cast<u32>(user_value) | (static_cast<u64>(static_cast<u32>(value)) << 32),
+                cur_thread->GetThreadId() | (u64{2} << 32));
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressWaitTimeout,
+                                       static_cast<u64>(timeout), cur_thread->GetThreadId());
+        }
+
         // Set the arbiter.
         cur_thread->SetAddressArbiter(std::addressof(m_tree), addr);
         m_tree.insert(*cur_thread);
@@ -348,7 +399,13 @@ Result KAddressArbiter::WaitIfEqual(uint64_t addr, s32 value, s64 timeout) {
     }
 
     // Get the result.
-    return cur_thread->GetWaitResult();
+    const auto result = cur_thread->GetWaitResult();
+    if (trace_capture != 0 && VideoCore::FrameTrace::Active() &&
+        VideoCore::FrameTrace::GetCaptureStatus().id == trace_capture) {
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressWaitEnd,
+                                   result.raw, cur_thread->GetThreadId());
+    }
+    return result;
 }
 
 } // namespace Kernel

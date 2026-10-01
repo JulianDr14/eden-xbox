@@ -245,6 +245,8 @@ void Scheduler::Wait(u64 tick) {
             Flush();
         } else {
             // Never flush a list another thread is recording into: wait for it to be submitted.
+            const VideoCore::FrameTrace::ScopedSpan trace_submit{
+                VideoCore::FrameTrace::Event::FenceSubmitWaitLong, tick};
             std::unique_lock lock{submitted_mutex};
             submitted_cv.wait(lock, [this, tick] { return tick < CurrentTick(); });
         }
@@ -260,8 +262,12 @@ void Scheduler::Wait(u64 tick) {
     }
     const auto start = std::chrono::steady_clock::now();
     const HANDLE event = ThreadWaitEvent();
-    ThrowIfFailed(fence->SetEventOnCompletion(tick, event), "ID3D12Fence::SetEventOnCompletion");
-    WaitForSingleObjectEx(event, INFINITE, FALSE);
+    {
+        const VideoCore::FrameTrace::ScopedSpan trace_wait{
+            VideoCore::FrameTrace::Event::FenceGpuWaitLong, tick};
+        ThrowIfFailed(fence->SetEventOnCompletion(tick, event), "ID3D12Fence::SetEventOnCompletion");
+        WaitForSingleObjectEx(event, INFINITE, FALSE);
+    }
     StoreMax(known_gpu_tick, tick);
     if (counted) {
         VideoCore::Perf::Add(VideoCore::Perf::Counter::FenceWaits, 1);

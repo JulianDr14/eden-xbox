@@ -14,6 +14,7 @@
 #include "core/hle/kernel/k_thread_queue.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/svc_results.h"
+#include "video_core/frame_trace.h"
 
 namespace Kernel {
 
@@ -25,6 +26,10 @@ public:
         : KThreadQueueWithoutEndWait(kernel), m_objects(o), m_nodes(n), m_count(c) {}
 
     void NotifyAvailable(KernelCore& kernel, KThread* waiting_thread, KSynchronizationObject* signaled_object, Result wait_result) override {
+        if (VideoCore::FrameTrace::TracksGuest(waiting_thread->GetThreadId())) {
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::SyncWakeObject,
+                reinterpret_cast<uintptr_t>(signaled_object), waiting_thread->GetThreadId());
+        }
         // Determine the sync index, and unlink all nodes.
         s32 sync_index = -1;
         for (auto i = 0; i < m_count; ++i) {
@@ -81,6 +86,7 @@ Result KSynchronizationObject::Wait(KernelCore& kernel, s32* out_index,
 
     // Prepare for wait.
     KThread* thread = GetCurrentThreadPointer(kernel);
+    u32 trace_capture{};
     KHardwareTimer* timer{};
     ThreadQueueImplForKSynchronizationObjectWait wait_queue(kernel, objects, thread_nodes.data(),
                                                             num_objects);
@@ -119,6 +125,16 @@ Result KSynchronizationObject::Wait(KernelCore& kernel, s32* out_index,
             R_THROW(ResultCancelled);
         }
 
+        if (VideoCore::FrameTrace::TracksGuest(thread->GetThreadId()) &&
+            VideoCore::FrameTrace::Active()) {
+            trace_capture = VideoCore::FrameTrace::GetCaptureStatus().id;
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::SyncWaitBegin,
+                                       num_objects, thread->GetThreadId());
+            for (s32 i = 0; i < num_objects; ++i) {
+                VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::SyncWaitObject,
+                    reinterpret_cast<uintptr_t>(objects[i]), (thread->GetThreadId() << 32) | i);
+            }
+        }
         // Add the waiters.
         for (auto i = 0; i < num_objects; ++i) {
             thread_nodes[i].thread = thread;
@@ -143,7 +159,13 @@ Result KSynchronizationObject::Wait(KernelCore& kernel, s32* out_index,
     *out_index = thread->GetSyncedIndex();
 
     // Get the wait result.
-    R_RETURN(thread->GetWaitResult());
+    const auto result = thread->GetWaitResult();
+    if (trace_capture != 0 && VideoCore::FrameTrace::Active() &&
+        VideoCore::FrameTrace::GetCaptureStatus().id == trace_capture) {
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::SyncWaitEnd,
+                                   result.raw, thread->GetThreadId());
+    }
+    R_RETURN(result);
 }
 
 KSynchronizationObject::KSynchronizationObject(KernelCore& kernel) : KAutoObjectWithList{kernel} {}

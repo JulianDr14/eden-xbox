@@ -12,6 +12,7 @@
 #include <fmt/format.h>
 
 #include "common/logging.h"
+#include "video_core/frame_trace.h"
 
 namespace D3D12 {
 
@@ -137,7 +138,7 @@ std::vector<u8> ShaderCompiler::Compile(std::span<const u32> spirv, dxil_spirv_s
 }
 
 std::vector<ShaderCompiler::CompiledStage> ShaderCompiler::CompilePipeline(
-    std::span<const PipelineStage> stages, const PipelineOptions& options) const {
+    std::span<const PipelineStage> stages, const PipelineOptions& options, u64 trace_pipeline) const {
     if (!available) {
         throw std::runtime_error("D3D12: the shader path is unavailable");
     }
@@ -172,6 +173,8 @@ std::vector<ShaderCompiler::CompiledStage> ShaderCompiler::CompilePipeline(
     const dxil_spirv_debug_options debug_options{};
     const dxil_spirv_logger logger{.priv = nullptr, .log = LogTranslatorMessage};
     std::array<dxil_spirv_object, EDEN_SPIRV_TO_DXIL_MAX_STAGES> objects{};
+    VideoCore::FrameTrace::ScopedSpan translate_span{
+        VideoCore::FrameTrace::Event::PipelineTranslateLong, trace_pipeline, trace_pipeline != 0};
     if (translate_pipeline) {
         if (!translate_pipeline(inputs.data(), static_cast<unsigned>(stages.size()),
                                 VALIDATOR_VERSION, &debug_options, &logger, objects.data())) {
@@ -192,6 +195,7 @@ std::vector<ShaderCompiler::CompiledStage> ShaderCompiler::CompilePipeline(
         }
     }
 
+    translate_span.Finish();
     std::vector<CompiledStage> result(stages.size());
     for (size_t i = 0; i < stages.size(); ++i) {
         const auto* data = static_cast<const u8*>(objects[i].binary.buffer);
@@ -200,7 +204,7 @@ std::vector<ShaderCompiler::CompiledStage> ShaderCompiler::CompilePipeline(
         free_dxil(&objects[i]);
     }
     for (CompiledStage& stage : result) {
-        Sign(stage.dxil);
+        Sign(stage.dxil, trace_pipeline);
     }
     return result;
 }
@@ -216,11 +220,16 @@ dxil_spirv_runtime_conf ShaderCompiler::MakeConf() const {
     return conf;
 }
 
-void ShaderCompiler::Sign(std::vector<u8>& dxil) const {
+void ShaderCompiler::Sign(std::vector<u8>& dxil, u64 trace_pipeline) const {
     // The runtime refuses unsigned DXIL outside developer mode; the validator writes the hash in place.
     BorrowedBlob blob{dxil.data(), dxil.size()};
     ComPtr<IDxcOperationResult> result;
+    VideoCore::FrameTrace::ScopedSpan lock_span{
+        VideoCore::FrameTrace::Event::PipelineValidatorLockLong, trace_pipeline, trace_pipeline != 0};
     std::scoped_lock lock{validator_mutex};
+    lock_span.Finish();
+    VideoCore::FrameTrace::ScopedSpan sign_span{
+        VideoCore::FrameTrace::Event::PipelineSignLong, trace_pipeline, trace_pipeline != 0};
     ThrowIfFailed(validator->Validate(&blob, DxcValidatorFlags_InPlaceEdit, &result),
                   "IDxcValidator::Validate");
     HRESULT status = E_FAIL;

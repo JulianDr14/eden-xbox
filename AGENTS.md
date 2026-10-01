@@ -440,3 +440,98 @@ RenderError0/BQassert0,readbacks4/4 y6/6 sinfallbackT. Cuellosrestantes gaps38/
 31ms upload/GC0 yGPUthreadespera29/25ms conBinderdequeue36,8/30,2: siguiente
 cadenaBufferQueue/VSync/composición/release. 256/115/5120/T8,sincommit; visual/
 Series/ABy60sostenidospendientes. Evidencia enrendimiento.
+
+
+Commitb7aa63d14 solicitado: GC/staging/diagnósticoT8+BC45packed. BufferQueue:
+logsdemuestranhold2 solicitado porguest,vsyncticks puntuales yrelease->dequeue37/
+43us enejemplos38/31msgap; solicitudesinterval2bajan34->5/7->3trasBC45.
+Siguiente diagnósticoleasereleaseporconsumer/frame/ticks ycallbackCoreTiminglate,
+Composecontainerlock/elapsed yDXGI Present. Preserva sincronización/ordenSet->
+GetNextTicks/intervalos. Fixturesmulticonsumer/hold2/extra/present/oldlogs pasan,
+build26+26ops correcto; T8manual/Seriespendientes. 256/115/5120sinRAMextra.
+Cambios posteriorescommitsincomitear; docfuentes/limitaciones enrendimiento.
+
+
+GatePCframelease: Q89s/retorno0,T480 completas394720/395684,FPS59,125/59,375.
+Ticklate max0,509/0,539ms, cero leases con ticks extra, Presentmax0,224/0,252ms;
+no bloqueo largo del compositor demostrado. T1maxgap39,181ms: Dequeue termina
+y siguienteQueue llega23,961ms después; WaitForAddress guest83 dura23,359ms en
+ese tramo. T2max33,702ms coincideleaseinterval2 legal. Siguiente foco cadena
+WaitForAddress/wakeups delproductor, no liberacióntemprana. RenderError0,8BQasserts
+antesT; margen83/111MiB, readbacks4/4 y8/8 sinfallbackT. Diagnóstico sincommit,
+Series/60sostenidos pendientes; staging256/JIT115/core/Job5120/T8 conservados.
+Detalle/evidencia en xbox_performance.md.
+
+
+Candidato1oct: diagnósticoT concentrado en guest83, scheduler/Run/SVC/IPC otros
+guests ydetalleCPU/upload/packing/Present/tick desactivados; autotestsboot opt-infalse.
+HUD/T8/framechain/fences/elapseduploadGC/headroom y errores conservados. Árbitro
+registra address/observed/expected/type/timeout real, sourceguest enEndWait, cancel
+yresult alresume mismacapture; sinreads guestextra nisemántica modificada. Parser
+separa wake->dispatch/resume ybordes, fixtures yoldlogs pasan, build27+4ops pasa;
+manual/Series pendientes. Próxima corrida sincpu_profile1 (default0), prewarm115
+funcional/staging256/Job5120/T8 mantenidos. Sincommit; detalle enrendimiento.
+
+Gatebuild final scheduler4ops pasa; gitdiffchecklimpio. Trialmanual concentrado
+lanzadoPID11468, Job5120MiB verificado, play1/fastmem0/jit_prewarm1; cpu_profile
+omitido(defaultfalse), sin timeout de gameplay ni entradas programadas. Arranque
+shadercache yprewarm enprogreso. T8 completas/overhead/dirección/waker/Series
+pendientes; cierre usuarioQ. Sincommit.
+
+
+GatePCfocus83: Q71s/retorno0,T480 completas27831/27911 (eventos-92,95%),
+FPS58,75/58,75; no mejoraFPSdemostrada.940waits address0x210a010120, value1/
+expected1 WaitIfEqual indefinido, todasSignalID79/Result0. Wake->resume max33/70us,
+esperasmáximas27,426/26,789ms ocurrenantesSignal; no schedulerpostwake largo.
+Host79 distintoGPU, rolpendiente. Mayoreswaits sinupload/GC largo, otrasgaps
+correlacionanuploads/GC; siguiente seguirPC/Run/IPC/esperasdel79 ySignalargs.
+RenderError0,4BQassertantesT; margen58/74MiB, métricasapagadas desconocidas.
+256/115/5120/T8 intactos, Series/60pendientes, sincommitnuevo; detalle rendimiento.
+
+
+Candidato79chain1oct: TracksGuest79/83 solamente, PC/LRentradaSVC yargs/Result
+SignalToAddress válidoconwakeefectivo;waits79 registranquiénlodespierta. Parser
+recorta/unificaRun>=200us/esperasdel79 durantewait83 sinetiquetarCPUbusy. Fixtures
+83<-79<-77, metadata/signed/bordes yoldlogs pasan; incremental28ops pasa.
+CPU/JITdetalle0 yautotestsbootfalse conservados;256/115/5120/T8 intactos.
+ManualT/PCsource/overhead/capacidad/Seriespendientes, sincommit niFPScertificados.
+
+Trial79chain lanzadoPID10568, Job5120MiB verificado;play1/fastmem0/prewarm1,
+CPUprofile omitido0. Shadercache/prewarm enprogreso; usuarioT8 yQ sinlimitetime
+ni entradasprogramadas. Gate79sourcePC/args/Run/esperas/volumenpendiente. Sincommit.
+
+
+Gate79chain: Q123s/retorno0,T480completas253950/245393,FPS55,375/52,75.
+83wait37ms incluye79WaitSynchronization36,119 ysyncpoint1wait36,110; otraT
+syncpoint1wait31,411. Otraswait79 despiertan123/124/125 (21,368 y6,341ms): dos
+familiasGPUevent/CPUworkers. SourcePCviejo inválido:ExitContext solo guarda con
+debugger, ahoraGetContextliveantesSVC,nombreslivepc/lr yparserdescartaantiguos.
+Fixtures/build6ops/diffcheck pasan, manualcorrecciónpendiente. RenderError0,6BQ
+assertantesT,margen50/74MiB;noFPSmejora. SiguientecompletionFence/asyncflush/event
+ID yworkers, no asumirsinpolling(HAS_ASYNC_CHECKtrue).256/115/5120/T8 conservados,
+sincommit/Series/60pendientes;detalle rendimiento.
+
+
+Candidato1oct completionchain: fencequeued/dequeued/wait/flushlock/texture/buffer/
+query/callbacks enlazadoscontickD3D12; WaitSubmission separadoGPUeventwait.
+WaitSynchronization79/83 objetoexacto conNVevent syncpoint/value ybatchfence;
+sourceworkers123--125 sóloRun>=200us/longSVC, sinedgesglobales. MetadataPCcorta
+sleep/lock/address desactivada, PCvivoIPC/signalretenido. Fixtureslifetime/object
+incorrecto/nesting/oldlogs pasan, build38ops pasa,diffchecklimpio. Manualchain/
+volumen/overhead/Series pendientes, sincommit/FPSmejora;256/115/5120/T8 intactos.
+
+Trialcompletionchain lanzadoPID19100, Job5120MiB verificado;play1/fastmem0/
+prewarm1 yCPUprofile0. Shadercache/prewarm enprogreso. UsuarioT8manual yQ, sin
+timeoutgameplay/entradasprogramadas. Chain/volumen/overhead/Series pendientes.
+
+
+Gate PC completion-object (1 oct): Q139s/retorno0; T1/T2 completas181785/186445 eventos, FPS56,25/57,875, p99gap39,721/32,416,max96,803/51,917ms; T3 accidental excluida. Objeto kernel confirma316/316 y263/263 waits79 ligados a NV syncpoint1. T1wait83 93,193ms incluye wait79 84,658:69,548ms antesenqueuefence+14,918ms esperaD3D12host; pipelinebuilt termina7,841ms antesenqueue y ventana perf registra3stalls/101,5ms, candidatoWaitBuilt sincausalidadindividualconfirmada. T2wait79address33,381ms wake125; Run123~35ms elapsed, noCPUbusy. Wake83mediana5us; flushmax0,901/1,049ms, nocuello largo. Margen83/103MiB,commitmuestreado5031MiB; RenderError0,5BQassertantesT, leasesextraticks0. SiguienteWaitBuilt/DXIL/PSO ycadena workers.256/115/5120/T8, sincommit; Series/60pendientes. Detalleenxbox_performance.md.
+
+
+Candidato1oct pipelines: DXIL firmado enlazado reutilizado por inputSPIRV completo+opciones/stages/longitudes, por juego, LRU4MiB contabilizados/max128; concurrentes compartencompilacion sinmutex duranteMesa/firma, failedretry/bypassoversize preservados. PSOs siguenindependientes, noGetCachedBlob/noskipdrawspequenos. PublicacionPSO IsBuilt release/acquire. Tfrontend/worker/DXIL/Mesa/validatorlock/sign/PSO/WaitBuilt+cacheoutcome porpipeline, noCPUglobal/norelojfueraT; fasesanidadas nosumar. Harness16concurrentes/collision/content/options/retry/1000evictions/LRU yparserlifetime/borders/nesting pasan, build44ops UWP correcto. Gameplayhits/WaitBuilt/FPS/Series pendientes, sincommit;256/115/5120/T8 conservados. InvestigacionMicrosoft/Dolphin/Vulkan ylimites en rendimiento.
+
+
+Gate final candidato shaders: DXIL immutable compartido por shared_ptr entre PSOs, sin copias en hits; consumidores sobreviven a eviction. Harness actualizado valida eviction real y bypass al llenarse cupo de compilaciones en vuelo. Build10ops+4ops final correcto; parser pipeline/address y regresionT1/T2 previa correctos, gitdiffcheck limpio. Correccion include frame_trace omitido al ordenar includes: link final recompilado, no afecta corrida anterior. Trial manual lanzadoPID14184, Job5120MiB verificado;play1/fastmem0/prewarm1/CPUprofile0,115core/staging256/T480. T1/T2 hits/esperas/FPS/memoria ySeries pendientes; usuarioQ, sinlimitegameplay, sincommit.
+
+
+GatePC DXILcompartido: Q76s/retorno0; T480completas182760/175587events,FPS56,5/55,p9939,721->41,761 y32,416->40,624,max56,828/48,932ms. Sinmejorageneral.1718PSOsprecargados; cero creacion/WaitBuilt/cacheoutcome enT, ahorroDXIL/hits no medidos. Margen25,918/61,996MiB,GCmax19,251/23,958ms; gapT2GC18,653 conappfree62,070<64MiB compatible recoverysincrono (contadorreadbackoff, no conteo confirmado). OtragapT1WaitD3D12async43,212ms. RenderError0,5BQassert/8unmappedantesT. Parser corrigeforegroundwaitmismotick: host/dequeue necesarios parafaseanidada, fixturepasa. Siguiente margen/GCsync, despuesD3D12/CPUworkers.256/115/5120/T8 intactos, sincommit/Series/60pendientes; detalle enrendimiento.

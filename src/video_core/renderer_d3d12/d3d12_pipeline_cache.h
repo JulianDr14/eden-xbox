@@ -20,6 +20,7 @@
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_d3d12/d3d12_compute_pipeline.h"
 #include "video_core/renderer_d3d12/d3d12_graphics_pipeline.h"
+#include "video_core/renderer_d3d12/d3d12_linked_shader_cache.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/shader_cache.h"
@@ -114,6 +115,8 @@ private:
     Vulkan::DynamicFeatures dynamic_features{};
 
     std::filesystem::path pipeline_cache_filename;
+
+    LinkedShaderCache<GraphicsPipeline::DxilStages> linked_shaders;
 
     // Last, so they are joined before the pipelines they build are destroyed.
     Common::ThreadWorker workers;

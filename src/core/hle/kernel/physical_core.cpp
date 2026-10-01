@@ -107,9 +107,12 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
                 const u64 trace_context = (thread->GetThreadId() << 8) | static_cast<u64>(m_core_index);
                 const auto compile_begin = Dynarmic::JitProfile::ReadLocalCompileNs();
                 const auto flush_begin = Core::CpuProfile::ReadLocalFlushNs();
-                const bool tracing = VideoCore::FrameTrace::Active();
+                const bool tracing = VideoCore::FrameTrace::Enabled(
+                    VideoCore::FrameTrace::Event::GuestRunLong, 0, trace_context) &&
+                    VideoCore::FrameTrace::Active();
                 thread_local u32 cpu_sample_cursor{};
-                const bool sample_cpu = tracing && (++cpu_sample_cursor & 15) == 0;
+                const bool sample_cpu = VideoCore::FrameTrace::Enabled(
+                    VideoCore::FrameTrace::Event::GuestHostCpuWindow) && tracing && (++cpu_sample_cursor & 15) == 0;
                 // Windows CPU accounting may advance in ~15.6ms quanta. Aggregate 100ms
                 // windows instead of pretending an individual short Run has precise CPU time.
                 if (sample_cpu) {
@@ -233,14 +236,20 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
             // Perform call.
             const auto svc_number = interface->GetSvcNumber();
             const bool trace_wait = VideoCore::FrameTrace::Active() &&
+                VideoCore::FrameTrace::TracksGuest(thread->GetThreadId()) &&
                 (svc_number == static_cast<u32>(Svc::SvcId::WaitSynchronization) ||
                  svc_number == static_cast<u32>(Svc::SvcId::SendSyncRequest) ||
                  svc_number == static_cast<u32>(Svc::SvcId::SendSyncRequestWithUserBuffer));
             const bool trace_long_wait = VideoCore::FrameTrace::Active() &&
+                VideoCore::FrameTrace::TracksRunGuest(thread->GetThreadId()) &&
                 (svc_number == static_cast<u32>(Svc::SvcId::SleepThread) ||
                  svc_number == static_cast<u32>(Svc::SvcId::ArbitrateLock) ||
                  svc_number == static_cast<u32>(Svc::SvcId::WaitProcessWideKeyAtomic) ||
-                 svc_number == static_cast<u32>(Svc::SvcId::WaitForAddress));
+                 svc_number == static_cast<u32>(Svc::SvcId::WaitForAddress) ||
+                 (!VideoCore::FrameTrace::TracksGuest(thread->GetThreadId()) &&
+                  (svc_number == static_cast<u32>(Svc::SvcId::WaitSynchronization) ||
+                   svc_number == static_cast<u32>(Svc::SvcId::SendSyncRequest) ||
+                   svc_number == static_cast<u32>(Svc::SvcId::SendSyncRequestWithUserBuffer))));
             // Keep IPC edges, but compact frequent sleep/lock calls into completed long spans.
             // A blocking SVC may migrate its fiber: retain the original guest ID and capture.
             const u64 trace_thread = trace_wait || trace_long_wait ? thread->GetThreadId() : 0;
@@ -250,6 +259,20 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
             if (trace_wait) {
                 VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestSvcBegin,
                                             trace_thread, svc_number);
+            }
+            if (VideoCore::FrameTrace::Active() &&
+                VideoCore::FrameTrace::TracksGuest(thread->GetThreadId()) &&
+                (trace_wait ||
+                 svc_number == static_cast<u32>(Svc::SvcId::SignalToAddress))) {
+                // The saved thread context can lag behind when the debugger is disabled.
+                // Read the live ARM state before the SVC can block or migrate its fiber.
+                Svc::ThreadContext context{};
+                interface->GetContext(context);
+                const u64 svc_context = (thread->GetThreadId() << 8) | svc_number;
+                VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestSvcPc,
+                                           context.pc, svc_context);
+                VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestSvcLr,
+                                           context.lr, svc_context);
             }
             Svc::Call(system, svc_number);
             wait_span.Finish();

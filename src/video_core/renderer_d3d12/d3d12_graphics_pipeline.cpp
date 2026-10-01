@@ -13,6 +13,7 @@
 #include "common/cityhash.h"
 #include "common/logging.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "video_core/frame_trace.h"
 #include "video_core/memory_manager.h"
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
@@ -330,7 +331,7 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
                                    VideoCore::ShaderNotify* shader_notify,
                                    Common::ThreadWorker* worker_thread,
                                    const GraphicsPipelineCacheKey& key_,
-                                   std::function<DxilStages()> compile_dxil,
+                                   std::function<SharedDxilStages(u64)> compile_dxil,
                                    const std::array<const Shader::Info*, NUM_STAGES>& infos,
                                    const PipelineLayout& layout_)
     : device{device_}, key{key_}, layout{layout_} {
@@ -348,10 +349,17 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
         std::ranges::copy(info->constant_buffer_used_sizes, uniform_buffer_sizes[stage].begin());
         has_images |= !info->image_descriptors.empty();
     }
-    auto func{[this, &texture_runtime, shader_notify, compile_dxil = std::move(compile_dxil)] {
+    namespace FT = VideoCore::FrameTrace;
+    const u64 trace_pipeline = reinterpret_cast<uintptr_t>(this);
+    FT::Mark(FT::Event::PipelineBuildRequested, trace_pipeline, key.Hash());
+    auto func{[this, &texture_runtime, shader_notify, compile_dxil = std::move(compile_dxil),
+               trace_pipeline] {
+        FT::Mark(FT::Event::PipelineWorkerBegin, trace_pipeline);
+        FT::ScopedSpan worker_span{FT::Event::PipelineWorkerLong, trace_pipeline};
         bool compiled = false;
         try {
-            dxil = compile_dxil();
+            FT::ScopedSpan dxil_span{FT::Event::PipelineDxilLong, trace_pipeline};
+            dxil = compile_dxil(trace_pipeline);
             compiled = true;
         } catch (const std::exception& exception) {
             // Handle() stays null: draws with this pipeline are skipped.
@@ -363,8 +371,10 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
         }
         {
             std::scoped_lock lock{build_mutex};
-            is_built = true;
+            // Publish DXIL/PSO to IsBuilt's lock-free fast path as well as WaitBuilt.
+            is_built.store(true, std::memory_order::release);
         }
+        FT::Mark(FT::Event::PipelineBuildDone, trace_pipeline, pipeline_state.Get() != nullptr);
         build_condvar.notify_all();
         if (shader_notify) {
             shader_notify->MarkShaderComplete();
@@ -385,6 +395,8 @@ void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
 }
 
 void GraphicsPipeline::WaitBuilt() {
+    VideoCore::FrameTrace::ScopedSpan wait_span{
+        VideoCore::FrameTrace::Event::PipelineWaitLong, reinterpret_cast<uintptr_t>(this)};
     std::unique_lock lock{build_mutex};
     build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
 }
@@ -651,16 +663,17 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
     using VideoCore::Surface::PixelFormatFromDepthFormat;
     using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
 
+    const auto& stages = *dxil;
     const FixedPipelineState& state = key.state;
     const FixedPipelineState::DynamicState& dynamic = state.dynamic_state;
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
     desc.pRootSignature = layout.Handle();
-    desc.VS = Bytecode(dxil[0]);
-    desc.HS = Bytecode(dxil[1]);
-    desc.DS = Bytecode(dxil[2]);
-    desc.GS = Bytecode(dxil[3]);
-    desc.PS = Bytecode(dxil[4]);
+    desc.VS = Bytecode(stages[0]);
+    desc.HS = Bytecode(stages[1]);
+    desc.DS = Bytecode(stages[2]);
+    desc.GS = Bytecode(stages[3]);
+    desc.PS = Bytecode(stages[4]);
 
     // Vertex input: nir_to_dxil names generic attribute N "TEXCOORD" N. Strides are dynamic (they
     // go in the vertex buffer views), so the layout only needs slots and offsets.
@@ -705,7 +718,7 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
                         .NumElements = static_cast<UINT>(elements.size())};
     desc.IBStripCutValue = static_cast<D3D12_INDEX_BUFFER_STRIP_CUT_VALUE>(key.strip_cut);
 
-    const bool has_tessellation = !dxil[1].empty() || !dxil[2].empty();
+    const bool has_tessellation = !stages[1].empty() || !stages[2].empty();
     desc.PrimitiveTopologyType = MaxwellToD3D12::PrimitiveTopologyType(state.topology);
     if (has_tessellation) {
         desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
@@ -779,8 +792,11 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
     desc.SampleMask = UINT_MAX;
     desc.SampleDesc = {.Count = MaxwellToD3D12::SampleCount(state.msaa_mode), .Quality = 0};
 
+    VideoCore::FrameTrace::ScopedSpan pso_span{
+        VideoCore::FrameTrace::Event::PipelinePsoLong, reinterpret_cast<uintptr_t>(this)};
     const HRESULT hr =
         device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline_state));
+    pso_span.Finish();
     CheckRemovedAfter(device.Get(), [&] {
         return fmt::format("graphics PSO for VS {:016x} PS {:016x} (HRESULT 0x{:08X})",
                            key.unique_hashes[1], key.unique_hashes[5], static_cast<u32>(hr));
@@ -791,8 +807,8 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
                   "PS {:016x}: {} attributes, {} RTs (RT0 {}), DSV {}, features VS {:x} PS {:x}",
                   static_cast<u32>(hr), key.unique_hashes[1], key.unique_hashes[5],
                   elements.size(), num_attachments, static_cast<u32>(desc.RTVFormats[0]),
-                  static_cast<u32>(desc.DSVFormat), ShaderFeatureFlags(dxil[0]),
-                  ShaderFeatureFlags(dxil[4]));
+                  static_cast<u32>(desc.DSVFormat), ShaderFeatureFlags(stages[0]),
+                  ShaderFeatureFlags(stages[4]));
         DiagnoseFailedPipeline(device.Get(), desc);
         pipeline_state.Reset();
         return;
@@ -803,7 +819,7 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
              key.unique_hashes[1], key.unique_hashes[5], elements.size(), num_attachments,
              static_cast<u32>(desc.RTVFormats[0]), static_cast<u32>(desc.DSVFormat),
              layout.NumResourceDescriptors(), layout.NumSamplerDescriptors(),
-             ShaderFeatureFlags(dxil[0]), ShaderFeatureFlags(dxil[4]));
+             ShaderFeatureFlags(stages[0]), ShaderFeatureFlags(stages[4]));
 }
 
 } // namespace D3D12
