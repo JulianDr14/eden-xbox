@@ -468,16 +468,16 @@ CacheMemorySnapshot Device::QueryCacheMemoryPressure() const {
 }
 
 u64 Device::CacheMemoryUsage() const {
-    const DXGI_QUERY_VIDEO_MEMORY_INFO local = QueryVideoMemory();
-    const AppMemoryQuery query = app_memory_query.load(std::memory_order_acquire);
-    u64 used{};
-    u64 limit{};
-    if (query == nullptr || initial_budget == 0 || !query(used, limit) || limit == 0) {
-        return local.CurrentUsage;
+    return CacheMemoryUsage(QueryCacheMemoryPressure());
+}
+
+u64 Device::CacheMemoryUsage(const CacheMemorySnapshot& snapshot) const {
+    if (initial_budget == 0 || snapshot.app_limit == 0) {
+        return snapshot.gpu_used;
     }
-    const u64 app_free = limit > used ? limit - used : 0;
+    const u64 app_free = snapshot.AppFree();
     const u64 usage = initial_budget > app_free ? initial_budget - app_free : 0;
-    return (std::max)(usage, local.CurrentUsage);
+    return (std::max)(usage, snapshot.gpu_used);
 }
 
 u64 Device::CacheMemoryBudget() const {

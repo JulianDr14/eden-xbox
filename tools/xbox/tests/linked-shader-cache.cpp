@@ -124,11 +124,13 @@ int main() {
         }, Measure);
     });
     pending_started.get_future().wait();
+    pending_limit.SetBudget(0); // Reclamation must preserve a compiler already in flight.
     assert(pending_limit.Get({2}, [] { return Value{2}; }, Measure).outcome ==
            Cache::Outcome::Bypassed); // Cannot evict an in-flight compilation.
     pending_release.set_value();
     pending_owner.join();
-    assert(pending_limit.Get({1}, [] { return Value{9}; }, Measure).outcome == Cache::Outcome::Hit);
+    assert(pending_limit.RetainedBytes() == 0);
+    assert(pending_limit.Get({1}, [] { return Value{9}; }, Measure).outcome == Cache::Outcome::Bypassed);
     Cache lru{4096, 2};
     auto one = lru.Get({1}, [] { return Value{1}; }, Measure).value;
     lru.Get({2}, [] { return Value{2}; }, Measure);
@@ -136,6 +138,8 @@ int main() {
     lru.Get({3}, [] { return Value{3}; }, Measure);
     assert(lru.Get({1}, [] { return Value{9}; }, Measure).value == one);
     assert(lru.Get({2}, [] { return Value{2}; }, Measure).outcome == Cache::Outcome::Compiled);
+    lru.SetBudget(0);
+    assert(lru.RetainedBytes() == 0 && one->front() == 1);
     std::cout << "Linked shader cache: exact input/options/stages, collisions, 16 concurrent requests, "
                  "retry, bounded LRU and retained consumers passed\n";
 }

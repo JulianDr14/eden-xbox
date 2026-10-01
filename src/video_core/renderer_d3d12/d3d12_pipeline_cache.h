@@ -63,6 +63,14 @@ public:
                   VideoCore::ShaderNotify& shader_notify);
     ~PipelineCache();
 
+    void GuardMemory(const CacheMemorySnapshot& snapshot) {
+        // Shrink this optional cache once per game; no cache mutex is acquired on normal frames.
+        if (!memory_guard_trimmed && snapshot.app_limit && snapshot.AppFree() <= 128ULL * 1024 * 1024) {
+            linked_shaders.SetBudget(0);
+            memory_guard_trimmed = true;
+        }
+    }
+
     /// The pipeline of the current Maxwell state, or null while it is still compiling (or if it
     /// failed to compile).
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
@@ -117,6 +125,7 @@ private:
     std::filesystem::path pipeline_cache_filename;
 
     LinkedShaderCache<GraphicsPipeline::DxilStages> linked_shaders;
+    bool memory_guard_trimmed{};
 
     // Last, so they are joined before the pipelines they build are destroyed.
     Common::ThreadWorker workers;

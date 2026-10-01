@@ -172,7 +172,7 @@ RasterizerD3D12::RasterizerD3D12(Tegra::GPU& gpu_,
                                  DescriptorRing& descriptor_ring_, SamplerHeap& sampler_heap_,
                                  BlitImageHelper& blit_helper_, StagingBufferPool& staging)
     : gpu{gpu_}, device_memory{device_memory_}, scheduler{scheduler_}, staging{staging},
-      buffer_runtime{buffer_runtime_}, descriptor_ring{descriptor_ring_},
+      buffer_runtime{buffer_runtime_}, texture_runtime{texture_runtime}, descriptor_ring{descriptor_ring_},
       sampler_heap{sampler_heap_}, blit_helper{blit_helper_},
       indirect_args{device, scheduler_, staging},
       descriptor_queue{device.Get(), descriptor_ring_},
@@ -1143,8 +1143,20 @@ void RasterizerD3D12::FlushIfUploadHeavy() {
 void RasterizerD3D12::TickFrame() {
     draw_counter = 0;
     fence_manager.TickFrame();
-    { std::scoped_lock lock{texture_cache.mutex}; texture_cache.TickFrame(); }
-    { std::scoped_lock lock{buffer_cache.mutex}; buffer_cache.TickFrame(); }
+    {
+        // The fence worker shares staging with both caches. Retire resources only while neither
+        // cache can add a reference or release a pinned readback concurrently.
+        std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
+        auto snapshot = texture_runtime.BeginMemoryGuardFrame();
+        if (staging.GuardMemory(snapshot)) {
+            // A retired ring can return 256 MiB at once. Refresh only on that rare transition,
+            // so GC does not perform synchronous recovery using the pre-reclamation snapshot.
+            snapshot = texture_runtime.BeginMemoryGuardFrame();
+        }
+        pipeline_cache.GuardMemory(snapshot);
+        texture_cache.TickFrame();
+        buffer_cache.TickFrame();
+    }
 }
 bool RasterizerD3D12::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                             const Tegra::Engines::Fermi2D::Surface& dst,

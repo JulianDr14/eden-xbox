@@ -2535,3 +2535,145 @@ T2 peor gap2151,945--2200,877 (48,932ms) contieneGC18,653ms. Snapshot appfree650
 Correccion del analizador necesaria para esta lectura: un Scheduler::Wait del hilo foregroundGC puede usar el mismo tick que una fenceasync antes de dequeued. Antes se guardaba como faseGPUdeesa fence solo por igualdad de tick. Ahora conserva backend_waits_on_tick con host/start/end, y solo marca part_of_fence_wait si coincide hostdequeuing y no comienza antes de dequeue (tolerancia2us). EjemploT1 espera20,174ms termina98,892, antesdequeuing103,245: relacionada con tick, no anidada en WaitFence. Fixture foregroundsameTick agregado y pasa, fixturesaddress/objectprevios pasan. No se modifica emulador ni sincronizacion en esta revision.
 
 Prioridad siguiente: recuperar margen real de memoria y evitar que GC de mantenimiento fuerce esperas largas en el hilo que procesa comandos; identificar descargas, bytes y tiempos de recovery de forma puntual. Mantener datos dirty/versiones/fences, limiteJob y memoria guest; no desactivar recuperacion a ciegas. Despues, explicar las esperas D3D12 de43ms sinGC y las dependencias CPUworkers. DXIL compartido queda candidato funcional, beneficioFPS no validado, Series pendiente, sincommit.
+
+## Guard de memoria D3D12 (1 oct 2026)
+
+Objetivo autorizado: proteger el limite real de la app, con emergencia a 10 MiB libres,
+recuperando presupuestos prescindibles sin un hilo de vigilancia ni trabajo pesado normal.
+La ultima corrida tenia minimo 25,918/61,996 MiB libres; esperar a 10 seria demasiado tarde
+para devolver recursos todavia referenciados por la GPU. Por eso hay prevencion.
+
+Politica por juego, GPU recording thread:
+- <=128 MiB app-free: objetivo staging 128 MiB y cache enlazada DXIL 4 MiB -> 0.
+- <=64 MiB: objetivo staging 64 MiB.
+- <=10 MiB, incluido over-limit: objetivo staging 0; una sola Finish por episodio cuando
+  aun existe el ring, antes del GC, para retirar sus referencias GPU y poder devolverlo.
+- Los objetivos reducidos 128/64 no vuelven a 256 durante la sesion. Un ring deshabilitado
+  puede recuperar 64 MiB despues de 120 frames consecutivos con >=256 MiB libres. Query
+  desconocida interrumpe esa recuperacion; no se interpreta como RAM ilimitada.
+
+El ring deja de aceptar referencias mientras se retira. Se libera solamente cuando todos sus
+16 ticks estan completados; incluye comandos que aun no estaban enviados. Nunca se solapan
+ring viejo y nuevo. La reposicion requiere headroom >=target+64 MiB, no ocurre en emergencia
+y falla con fallback a uploads dedicados, reintento espaciado 120 frames. Esto devuelve
+recursos reales, no solo cambia un numero de presupuesto. Los uploads obligatorios siguen
+pudiendo necesitar asignaciones: no se garantiza ausencia absoluta de OOM ante crecimientos
+repentinos entre frames o memoria guest no recuperable.
+
+Se reutiliza la muestra AppMemoryUsage/limite y DXGI del GC en vez de agregar un polling thread:
+una muestra al inicio de frame se comparte entre guard y GC de texturas. Solo al liberar un
+ring se vuelve a consultar para no decidir recovery sincrono con el margen anterior. No hay
+relojes, logs por frame, heap allocations o locks adicionales de cache DXIL en el camino normal.
+Buffer/texture mutexes se toman juntos (como el fence worker) para no liberar staging mientras
+el otro cache crea referencias o cambia la propiedad de un readback. Normalmente no hay
+Flush/Wait adicional; Finish queda limitado a emergencia con ring aun existente.
+
+El barrido de staging libre examina cuatro buckets por frame de presion, 16 candidatos por
+bucket/tipo; emergencia recorre 64 buckets (max2048 candidatos). Se prioriza recorrer tamanos
+grandes. ReleaseLevel utiliza swap/pop con IDs estables: eliminacion O(1) por entrada, sin
+vector.erase que desplazaba el resto de un bucket grande. Mantiene todos los deferred/pinned
+readbacks y recursos con fence pendiente. Los heaps de texturas completamente libres siguen
+la politica existente TrimEmptyHeaps bajo presion; no se liberan texturas dirty sin sincronizar
+su contenido al guest. La cache DXIL pierde claves/resultados listos y limita nuevas retenciones;
+los PSOs vivos conservan su shared_ptr y los compiladores en vuelo finalizan normalmente.
+No se atribuyen 4 MiB de ahorro real si el DXIL sigue retenido por PSOs vivos.
+
+Alcance de esta primera implementacion: presupuestos GPU recuperables (staging/DXIL/heaps
+vacios/GC existente). JIT prewarm115 MiB/core y memoria guest siguen intactos: ClearCache de
+Dynarmic no hace MEM_DECOMMIT y bajar su numero no recuperaria paginas comprometidas. Tampoco
+se usa Evict como sustituto de liberacion de commit. No se agregaron handlers WinRT de cambios
+de limite: este guard opera en frame boundaries mientras el renderer avanza; proteccion al
+suspender/enviar a background o antes de cada asignacion obligatoria requiere otra fase.
+
+Contraste Vulkan: vk_staging_buffer_pool conserva el modelo de retiro por ticks/buckets y
+limita16 candidatos, pero usa vector.erase y no reduce dinamicamente el ring por limite app.
+Aqui preservamos su regla de fences y agregamos la reduccion segura para UWP/unified memory.
+
+Fuentes primarias:
+- https://learn.microsoft.com/en-us/windows/uwp/launch-resume/reduce-memory-usage
+  MemoryManager permite conocer presion/cambio de limite; en Xbox los cambios de limite por
+  background requieren devolver memoria rapidamente. La cifra de 2s corresponde a ese caso,
+  no es una tolerancia general frente a fallos de asignacion de gameplay.
+- https://learn.microsoft.com/en-us/windows/win32/direct3d12/residency
+  Separar budget/residency GPU de memoria de la app y mantener lifetime hasta finalizar GPU.
+
+Validacion: harness MSVC desktop pasa umbrales exactos, over-limit, query ausente, histeresis,
+1M frames sin crecimiento y10000 buffers (pinned/busy preservados, <=16 candidatos por llamada).
+Harness DXIL pasa trimming durante compilacion en vuelo, bypass posterior, retencion cero y
+consumidores vivos tras eviction; tambien regresiones previas de16 concurrentes/collision/LRU.
+Build incremental UWP y gate manual se registran al cerrar el cambio. No se certifican ahorro
+real en Series, ausencia de OOM ni mejora FPS por estas pruebas de politica.
+
+Gate guard memoria1oct: build incremental UWP final pasa15 operaciones, gitdiffcheck limpio. Harness policy/bounded staging yDXIL trimming pasan. Prueba manual lanzadaPID11496, Job5120MiB verificado,play1/fastmem0/jit_prewarm1/CPUprofile0,T480 yJIT115core. No limite de gameplay; usuarioT/Q. Reclamacionreal/coste/FPS/Series pendientes, sincommit.
+
+## Gate PC guard de memoria (1 oct 2026)
+
+Evidencia archivada: build-uwp/log-review-2026-09-30/pc-memory-guard.txt,
+pc-memory-guard-diag.txt y pc-memory-guard-analysis.jsonl. Proceso cerrado por Q despues
+231s de gameplay, RunHeadlessBoot returned0, proceso ausente. DosT completas480vsync,
+181034/186029 eventos; no truncadas. No cambios de codigo durante esta revision.
+
+El guard actuo antes deT, a230,077s con127,969MiB libres: objetivo256->128. Ring viejo
+retirado a230,102s (25,095ms despues; intervalo entre mensajes, NO costeCPU del guard),
+ring128 repuesto230,188s. Reduccion neta de capacidad persistente128MiB confirmada;
+no hubo transicion64/0 ni rama10MiB/Finish ni fallo de reposicion. DXILtrim no tiene
+contador dedicado; no atribuir ahorro adicional medido. JIT115/core sin cambios.
+
+Comparacion observada con pc-linked-shader-cache (escenas no deterministas):
+| Metrica | Anterior T1/T2 | Guard T1/T2 |
+|---|---|---|
+| FPS |56,5 /55 |56,5 /58,25 |
+| p99 gap (ms) |41,761 /40,624 |38,598 /30,355 |
+| Max gap (ms) |56,828 /48,932 |63,871 /40,592 |
+| Gaps >=25ms |23 /41 |16 /16 |
+| App-free minimo (MiB) |25,918 /61,996 |93,344 /136,520 |
+| GC max (ms) |19,251 /23,958 |43,977 /24,235 |
+
+MargenT aumenta67,426/74,523MiB observado, T2FPS+5,91%, p99gap-7,57%/-25,28%.
+No prueba causal ni60sostenidos: T1FPS igual y su peor tiron empeora12,40%, conGC43,977ms
+solapando63,871ms gap. T2peor40,592ms incluyeGC24,235ms. FueraGC sigueesperaGPUthread:
+T2gap39,198ms incluye32,105ms idle ybackend asyncwait31,545ms. No llamarGPUbusy
+ni confundir espera con trabajoCPU. GCmasfrecuente201/140 spans largos frente38/71;
+la politica emergency existente usa128MiB+histeresis, independiente de la emergencia
+10MiB delguard. App-freeT nunca bajo64MiB, pero readbacks >8MiB uotrasrutas pueden
+seguir siendo sincronas: contadores dirty/readback desactivados, causaindividual pendiente.
+
+Commit maximo muestreado4986MiB (margen133MiB), frente5066MiB previo. Muestreo10s
+no equivale a pico absoluto. Cierre4911MiB/208MiB libres. RenderError/Critical0;
+unassertBufferQueue a225,604s y4UnmappedDeviceReadBlock209,347s, ambosantesT.
+BQabandoned al apagar yplaytimefileerror conocidos; retorno0, no crashOOM demostrado.
+
+Resultado: gate funcional de reduccion real de staging PC positivo, margen observado mayor.
+Rama10MiB, recovery64, overhead CPU aislado, Series yprevencionOOM integral pendientes.
+No certificar estabilidadgeneral; GC43,977ms es foco siguiente, junto conesperasD3D12.
+Guard mantiene256normal inicial/115core/Job5120/T8 yCPUprofile0. Sincommitnuevo.
+## Pendientes priorizados tras el guard (1 oct 2026)
+
+1. **GC de texturas y readback que bloquean el frame.** Desglosar los43,977ms de T1
+   (y24,235ms de T2) en seleccion/descarga/esperaGPU/copiaCPU/liberacion. Identificar
+   cada fallback sincrono: transferencia>8MiB, formato no soportado o recovery por
+   headroom. El margen de ambasT supera64MiB: no dar por demostrado recovery por falta
+   de memoria. Medir churn/evictions y tiempo de descarga sin reactivar todo el debug.
+   Despues evaluar batches/bandas o readback diferido mayor SOLO con margen suficiente,
+   y GC incremental que no deje una descarga individual monopolizar el frame. Mantener
+   coherencia de datos dirty y limites de memoria; no descartar contenido guest.
+2. **Cadena de esperas D3D12 y workers CPU fuera del GC.** Explicar T2gap39,198ms con
+   GPUthreadidle32,105ms/backendwait31,545ms: diferenciar retraso de submission,
+   finalizacionGPU, colaCPU y entrega de completion. No interpretar esos elapsed como
+   GPUbusy o CPU saturada. Preservar sincronizacion y leases interval2 legales.
+3. **Coste y cobertura del guard.** Medir overhead aislado y picos transitorios al retirar
+   el ring con recursos pendientes. Validar ramas64MiB,10MiB/Finish, recovery64 tras120
+   frames saludables, fallo de reposicion y lifetime GPU real. El harness valida politica
+   y buffers simulados; la corrida PC solo valida256->128. Registrar ahorro real de DXIL
+   separado de la retencion por PSOs vivos si se necesita cuantificarlo.
+4. **Gate Series y proteccion completa frente a OOM.** Probar limite real y RAM unificada,
+   frente al Job PC5120MiB que no limita VRAM dedicada. Evaluar admission control antes
+   de asignaciones grandes y eventos WinRT de aumento/cambio de limite/background: el
+   guard actual depende de frame boundaries y no cubre todos esos casos. Presupuesto
+   JIT115/core y guest quedan intactos; recortar JIT requiere quiescencia y devolucion
+   real de paginas, no solo ClearCache. No ampliar presupuestos hasta medir el margen.
+
+Criterio final de rendimiento: dosT completas, recorrido nuevo/repetido comparable,
+60FPS sostenidos y cola de gaps reducida sin empeorar margen ni coherencia visual.
+Estas corridas manuales no son un A/B determinista. Guardado debug sigue fuera del
+alcance por decision del usuario. No se inicia otro candidato hasta su siguiente indicacion.

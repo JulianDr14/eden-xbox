@@ -688,10 +688,12 @@ void TextureCacheRuntime::TickFrame() {
     pressure_sampled = false;
 }
 std::optional<VideoCommon::TextureGcPolicy> TextureCacheRuntime::GetTextureGcPolicy(bool second_pass) {
-    if (!second_pass) {
+    if (!second_pass && !pressure_sampled) {
         pressure_sampled = true;
         pressure_snapshot = device.QueryCacheMemoryPressure();
         pressure_level = cache_pressure.Update(pressure_snapshot);
+    }
+    if (!second_pass) {
         VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcBudget,
                                     pressure_snapshot.app_limit ? pressure_snapshot.AppFree() : UINT64_MAX,
                                     static_cast<u64>(pressure_level));
@@ -701,7 +703,7 @@ std::optional<VideoCommon::TextureGcPolicy> TextureCacheRuntime::GetTextureGcPol
 }
 u64 TextureCacheRuntime::GetDeviceLocalMemory() const { return device.CacheMemoryBudget(); }
 u64 TextureCacheRuntime::GetDeviceMemoryUsage() const {
-    return device.CacheMemoryUsage();
+    return pressure_sampled ? device.CacheMemoryUsage(pressure_snapshot) : device.CacheMemoryUsage();
 }
 
 bool TextureCacheRuntime::SupportsView(DXGI_FORMAT format, D3D12_FORMAT_SUPPORT1 support1,
