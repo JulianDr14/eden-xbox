@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
+#include "video_core/frame_trace.h"
 
 #include <algorithm>
 #include <bit>
@@ -525,6 +526,9 @@ TextureCacheRuntime::~TextureCacheRuntime() {
     scheduler.Finish();
     scheduler.CollectGarbage();
     LOG_INFO(Render, "D3D12: {}", texture_allocator.Report());
+    LOG_INFO(Render, "D3D12: GC readbacks queued {}, ready {}, stale {}, sync {}, pending {} KiB, peak {} KiB",
+             gc_queued, gc_ready, gc_stale, gc_sync, gc_pending_bytes / 1024,
+             gc_peak_pending_bytes / 1024);
 }
 
 FormatInfo TextureCacheRuntime::Format(PixelFormat format) const { return NativeFormat(format); }
@@ -595,7 +599,106 @@ StagingBufferRef TextureCacheRuntime::DownloadStagingBuffer(size_t size, bool de
     return staging.Request(size, MemoryUsage::Download, deferred);
 }
 void TextureCacheRuntime::FreeDeferredStagingBuffer(StagingBufferRef& ref) { staging.FreeDeferred(ref); }
-void TextureCacheRuntime::TickFrame() { staging.TickFrame(); }
+void TextureCacheRuntime::ReleaseGcReadback(StagingBufferRef& map) {
+    if (!map.buffer) return;
+    gc_pending_bytes -= 1ULL << map.log2_level;
+    staging.FreeDeferred(map); // Remains fence-protected even if an obsolete copy is still in flight.
+    map.buffer = nullptr;
+}
+
+bool TextureCacheRuntime::PrepareGcDownload(Image& image,
+                                           std::span<const BufferImageCopy> copies,
+                                           StagingBufferRef& map) {
+    constexpr u64 PendingBudget = 8ULL * 1024 * 1024;
+    constexpr u64 RecoveryHeadroom = 64ULL * 1024 * 1024;
+    const bool recover_now = pressure_snapshot.app_limit != 0 &&
+                             pressure_snapshot.AppFree() < RecoveryHeadroom;
+    auto& pending = image.gc_readback;
+    if (pending && (pending->modification_tick != image.modification_tick ||
+                    pending->write_version != image.write_version ||
+                    True(image.flags & VideoCommon::ImageFlagBits::CpuModified))) {
+        pending.reset();
+        ++gc_stale;
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 2, image.gpu_addr);
+    }
+    if (True(image.flags & VideoCommon::ImageFlagBits::CpuModified)) return false;
+    if (pending) {
+        if (!scheduler.IsFree(pending->tick)) {
+            if (!recover_now) return false;
+            scheduler.Wait(pending->tick);
+            ++gc_sync;
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 3, image.gpu_addr);
+        }
+        map = pending->map;
+        ++gc_ready;
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 1, image.gpu_addr);
+        return true;
+    }
+    const u64 size = image.unswizzled_size_bytes;
+    // Large/unsupported transfers and real allocation emergencies preserve the original
+    // recovery path. Bound pinned readback memory by the dedicated pool's actual power-of-two size.
+    if (recover_now || size > PendingBudget || !image.CanTransfer()) {
+        map = DownloadStagingBuffer(size);
+        image.DownloadMemory(map, copies);
+        Finish();
+        ++gc_sync;
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 3, image.gpu_addr);
+        return true;
+    }
+    const u64 reserved = std::bit_ceil(std::max<u64>(size, 1));
+    if (reserved > PendingBudget - gc_pending_bytes) {
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 4, image.gpu_addr);
+        return false;
+    }
+    auto readback = std::make_unique<Image::GcReadback>();
+    readback->runtime = this;
+    readback->map = DownloadStagingBuffer(size, true);
+    gc_pending_bytes += 1ULL << readback->map.log2_level;
+    gc_peak_pending_bytes = std::max(gc_peak_pending_bytes, gc_pending_bytes);
+    image.DownloadMemory(readback->map, copies);
+    // DownloadMemory can write back a reinterpreted view; capture the version AFTER recording.
+    readback->write_version = image.write_version;
+    readback->modification_tick = image.modification_tick;
+    readback->tick = scheduler.CurrentTick();
+    pending = std::move(readback);
+    ++gc_queued;
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 0, image.gpu_addr);
+    return false;
+}
+
+void TextureCacheRuntime::CompleteGcDownload(Image& image) {
+    image.gc_readback.reset();
+}
+void TextureCacheRuntime::TickFrame() {
+    staging.TickFrame();
+    if (!pressure_sampled) {
+        pressure_snapshot = device.QueryCacheMemoryPressure();
+        pressure_level = cache_pressure.Update(pressure_snapshot);
+    }
+    texture_allocator.TrimEmptyHeaps(pressure_level != CachePressure::Normal);
+    if (VideoCore::FrameTrace::Active()) {
+        const auto stats = texture_allocator.GetStats();
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureHeapUsage,
+                                    stats.heap_bytes, stats.reserved_bytes);
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureHeapFree,
+                                    stats.free_bytes, stats.largest_free_range);
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureHeapPending,
+                                    stats.pending_bytes, gc_pending_bytes);
+    }
+    pressure_sampled = false;
+}
+std::optional<VideoCommon::TextureGcPolicy> TextureCacheRuntime::GetTextureGcPolicy(bool second_pass) {
+    if (!second_pass) {
+        pressure_sampled = true;
+        pressure_snapshot = device.QueryCacheMemoryPressure();
+        pressure_level = cache_pressure.Update(pressure_snapshot);
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcBudget,
+                                    pressure_snapshot.app_limit ? pressure_snapshot.AppFree() : UINT64_MAX,
+                                    static_cast<u64>(pressure_level));
+    }
+    if (!pressure_snapshot.Known()) return std::nullopt;
+    return CachePressureController::Policy(pressure_level, second_pass);
+}
 u64 TextureCacheRuntime::GetDeviceLocalMemory() const { return device.CacheMemoryBudget(); }
 u64 TextureCacheRuntime::GetDeviceMemoryUsage() const {
     return device.CacheMemoryUsage();
@@ -734,6 +837,12 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
 
 Image::Image(const VideoCommon::NullImageParams& params) : VideoCommon::ImageBase{params} {}
 
+Image::GcReadback::~GcReadback() {
+    if (runtime) runtime->ReleaseGcReadback(map);
+}
+
+Image::Image(Image&&) noexcept = default;
+
 Image::~Image() {
     if (runtime && resource) {
         runtime->texture_allocator.DeferRelease(
@@ -749,6 +858,7 @@ Image::~Image() {
 
 Image& Image::operator=(Image&& other) noexcept {
     if (this != &other) {
+        gc_readback.reset();
         if (runtime && resource) {
             runtime->texture_allocator.DeferRelease(
                 {std::move(resource), std::move(resource_allocation),
@@ -763,6 +873,7 @@ Image& Image::operator=(Image&& other) noexcept {
         static_cast<VideoCommon::ImageBase&>(*this) = std::move(other);
         allocation_tick = other.allocation_tick;
         runtime = other.runtime;
+        gc_readback = std::move(other.gc_readback);
         resource = std::move(other.resource);
         resource_allocation = std::move(other.resource_allocation);
         format = other.format;
@@ -1481,6 +1592,8 @@ void Image::UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* map
                 const StagingBufferRef packed = runtime->UploadStagingBuffer(
                     static_cast<size_t>(layout.padded_slice * layout.depth));
                 {
+                    const VideoCore::FrameTrace::ScopedSpan trace_repack{
+                        VideoCore::FrameTrace::Event::TextureUploadRepack, gpu_addr};
                     VideoCore::Perf::ScopedNsTimer timer{
                         VideoCore::Perf::Counter::TextureUploadRepackNs};
                     for (u32 z = 0; z < layout.depth; ++z) {
@@ -2945,6 +3058,67 @@ void TextureCacheRuntime::RunSelfTest() {
         FreeDeferredStagingBuffer(readback); Finish();
         if (!std::equal(upload.mapped_span.begin(), upload.mapped_span.begin() + bytes, readback.mapped_span.begin()))
             throw std::runtime_error{"texture round-trip mismatch"};
+        // Exercise the maintenance path with actual GPU copies, including ownership transfer
+        // and writes between recording and consumption. Finish is used ONLY by this test gate.
+        image.flags &= ~VideoCommon::ImageFlagBits::CpuModified;
+        StagingBufferRef gc_map{};
+        if (PrepareGcDownload(image, std::span{&copy, 1}, gc_map))
+            throw std::runtime_error{"GC readback was not deferred"};
+        Image moved{std::move(image)};
+        image = std::move(moved);
+        Finish();
+        if (!PrepareGcDownload(image, std::span{&copy, 1}, gc_map) ||
+            !std::equal(upload.mapped_span.begin(), upload.mapped_span.begin() + bytes,
+                        gc_map.mapped_span.begin()))
+            throw std::runtime_error{"GC deferred readback/move mismatch"};
+        CompleteGcDownload(image);
+        if (gc_pending_bytes != 0) throw std::runtime_error{"GC move leaked staging"};
+
+        if (PrepareGcDownload(image, std::span{&copy, 1}, gc_map))
+            throw std::runtime_error{"GC stale test was not deferred"};
+        Finish();
+        auto newer_upload = UploadStagingBuffer(bytes);
+        for (u32 i = 0; i < bytes; ++i)
+            newer_upload.mapped_span[i] = static_cast<u8>((i * 13 + 11) & 0xff);
+        image.UploadMemory(newer_upload, std::span{&copy, 1});
+        if (PrepareGcDownload(image, std::span{&copy, 1}, gc_map))
+            throw std::runtime_error{"GC accepted stale GPU bytes"};
+        Finish();
+        if (!PrepareGcDownload(image, std::span{&copy, 1}, gc_map) ||
+            !std::equal(newer_upload.mapped_span.begin(), newer_upload.mapped_span.begin() + bytes,
+                        gc_map.mapped_span.begin()))
+            throw std::runtime_error{"GC refreshed GPU bytes mismatch"};
+        CompleteGcDownload(image);
+        PrepareGcDownload(image, std::span{&copy, 1}, gc_map);
+        image.flags |= VideoCommon::ImageFlagBits::CpuModified;
+        if (PrepareGcDownload(image, std::span{&copy, 1}, gc_map) || gc_pending_bytes != 0)
+            throw std::runtime_error{"GC accepted stale CPU bytes or retained staging"};
+        image.flags &= ~VideoCommon::ImageFlagBits::CpuModified;
+        Finish();
+        // Fill the pending budget, prove another image cannot grow it, then discard in flight.
+        {
+            Image budget_image{*this, info, 0, 0};
+            budget_image.flags &= ~VideoCommon::ImageFlagBits::CpuModified;
+            budget_image.UploadMemory(newer_upload, std::span{&copy, 1});
+            budget_image.unswizzled_size_bytes = 8U * 1024 * 1024;
+            if (PrepareGcDownload(budget_image, std::span{&copy, 1}, gc_map) ||
+                gc_pending_bytes != 8ULL * 1024 * 1024 ||
+                PrepareGcDownload(image, std::span{&copy, 1}, gc_map) || image.gc_readback)
+                throw std::runtime_error{"GC pending budget exceeded"};
+        }
+        if (gc_pending_bytes != 0) throw std::runtime_error{"GC discarded readback leaked"};
+        Finish();
+        const auto saved_pressure = pressure_snapshot;
+        pressure_snapshot = {.app_used = 100ULL * 1024 * 1024,
+                             .app_limit = 128ULL * 1024 * 1024};
+        const bool recovered = PrepareGcDownload(image, std::span{&copy, 1}, gc_map);
+        pressure_snapshot = saved_pressure;
+        if (!recovered || gc_pending_bytes != 0 ||
+            !std::equal(newer_upload.mapped_span.begin(), newer_upload.mapped_span.begin() + bytes,
+                        gc_map.mapped_span.begin()))
+            throw std::runtime_error{"GC emergency recovery mismatch"};
+        CompleteGcDownload(image);
+        LOG_INFO(Render, "D3D12: GC deferred readback gate passed (GPU data, moves, GPU/CPU stale rejection, 8 MiB cap, discard, emergency)");
         VideoCommon::ImageViewInfo view_info{ImageViewType::e2D, info.format};
         ImageView view{*this, view_info, ImageId{1}, image};
         Tegra::Texture::TSCEntry tsc{};

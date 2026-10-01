@@ -1014,3 +1014,349 @@ tres asserts BufferQueue previos aT. T1miss181otro-core/153nuevos, T2 10/10;
 solo compartimos prioritarios. CPU ejecucion/sync/pacing/caches siguiente diagnostico,
 no mas presupuesto ni60FPS certificados. Error playtime al cierre registrado,
 retorno0; Series pendiente, sin commit. Evidencia en xbox_performance.md.
+
+
+Commit7eeb775e7 guarda perfilesJIT/prewarm115 compartido/paralelo y diagnosticos
+previos. Siguiente candidatoT: RunThread>=200us porguest/core, dispatchscheduler,
+GCpresion/evictions/creacion y cargastextura>=200us. SoloT, misma politicaLRU/JIT.
+Analizador de intervalos largos recorta/une solapes; no confundir elapsed con CPUbusy
+ni correlacion con causalidad. Fixtures y compatibilidad logsprevios correctos;
+build/gateTcapacidad/manual/Series pendientes; detalle en xbox_performance.md.
+
+Gate build del diagnosticoT: incremental UWP pasa (incluye objetos D3D12/Vulkan
+por header comun). Analizador pasa fixtures y dosTprevias. Prueba manual lanzada
+con115/core,play1,fastmem0,cpu_profile1,jit_prewarm1; Job5120 verificadoPID3436.
+PendienteT completas/capacidad, overhead y lectura del cuello restante; Series
+pendiente. Instrumentacion posterior al commit7eeb775e7 queda sin commit.
+
+
+Usuario ampliaT a8s: frontend arma480vsyncs. Nuevos eventos llenaron131072 entradas
+ a3,337/3,094s (~39-42k/s); ambas T truncadas, no comparacion FPS. Evidencia archivada
+pc-frame-stalls-truncated{,-diag}.txt. Proceso ausente, diag sinQ/retorno confirmado.
+Capacidad pasa524288 (~16MiB,+12MiB respecto131072), almacenamiento fijo y sin
+alloc duranteT; mantiene dump fuera de medicion. HUD calcula tiempo porvsync restante
+sin constantes4s. Analizador usa480 por defecto, --vsyncs240 para logsanteriores;
+FPS solo cuando ventana completa, rechaza interpretar truncada como8s completa.
+Incremental/manual por registrar; cambios posteriores7eeb775e7 sin commit.
+
+Gate8s: build incremental UWP correcto(5operaciones); analizador pasa captura480
+completa, compatibilidad240, unionrecortada y rechaza FPS de ambasTtruncadas reales.
+Relanzado manual conplay1/115MiBcore/fastmem0/prewarm1, Job5120 verificadoPID18888.
+Capturas480/HUD/capacidad ySeries pendientes; cierre usuarioQ, sin timeout gameplay.
+
+
+GateT8PC: Q66s/retorno0,480vsyncs completas303166/331495 eventos. FPS52,625/58,375,
+p99gap41,476/32,684,max144,634/43,036ms. GC315/311evictions,206/235recreaciones
+mismaaddr; proxy3004--3238MiB siempre sobrecritical2758. Gaps41/34ms coinciden
+GC30/20ms; peor145ms incluyeRun105,5ms guest125/core0 yGPUidle119ms (causaCPU
+no separada). JIT4433/1501Compile,418,6/107ms; no missesbudget. Commitmax4873,
+margen246; RenderError/Critical0,8unmappedDeviceReadBlock antesT. Dump provoca
+pausa3,79/4,14s fueraT: corregir guardado antesde evaluar estabilidadvisual;
+GC/presion yRun siguiente foco. Sin60sostenidos/Series, sin nuevo commit.
+
+
+CandidatoGC autorizado: guardado debug fueraalcance. PoolD3D12 trimheapstotalmente
+vacios trasfence, conserva1warm/clase normal yliberatodosbajopresion, tombstones
+indicesestables. TextureGC usaheadroomapp/DXGIactualconhisteresis, age120normal/
+60critico/10emergencia, trabajoincremental1ms salvoemergency; downloadindividual
+puedeexceder1ms. BufferGC/Vulkanfallbackoriginal. T8desglosaRunlargoCompile yCPU
+flushthreadlocal; noCPUbusy. TestsMSVCpolicy/harnessDynarmicrealTLS/parser pasan,
+buildUWPcorrecto; manualchurn/RAM/FPS/Seriespendientes, sincommit. Detallefuentes
+encuaderno rendimiento; 115/core y5120proceso mantenidos.
+
+PruebaPC candidataGC/Runlargo lanzadaPID19476, Job5120MiB verificado,play1,
+fastmem0,cpu_profile1,jit_prewarm1,115/core,T480. Sinlimitegameplay; usuarioQ.
+Arranque/precargaenprogreso, validarTchurn/maxGC/trimreal/headroomyCPUdetalle;
+no concluirmejoraFPSporbuild. Sincommit.
+
+Nota arranque: LruCache.ForEachItemBelow incluye tickigual al corte; clamp0 admitia
+imagestick0 antesdeedad minima. Fuente ahora omitepasada si frame_tick<age (sin
+unsignedwrap ni expulsarfirstframe). TrialPID19476 ya lanzado con clamp0 previo;
+susTgameplay despues120frames ejercenmisma politica steady-state. Correccion de
+arranque pendiente siguiente link/lanzamiento, no certificar gateearlyaging con
+ese proceso. No interrumpir corrida manual para substituirbinario.
+
+
+GatecandidatoGC: Q94s/retorno0,T8completas53,875/50,25FPS. No mejora validada:
+evictions395/429,recreaciones258/250; levelEmergency todaT,margen120,66--162,37/
+134,55--146,40MiB. Trim0,pool512MiB peak416(fragmentacion/ocupacionporinvestigar).
+Run34,431ms contieneFlush34,402 ycoincideGC35,796; Run33,929 contieneCompile33,223:
+CPUflush yJIT son ambosfocos. Parserempatestimestamp corregido ordenestable yfixture
+pasa. RenderError0,4BQassertantesT. Guardagingarranque buildincremental pasa trasQ;
+no relanzado,sincommit. Guardadodebug fueraalcance; siguienteGCpacking/descargas
+/margenreal,115/core y5120 intactos,Series y60sostenidos pendientes.
+
+Investigación de texturas y contraste Vulkan: documentada en
+[`xbox_texture_memory.md`](xbox_texture_memory.md). Vulkan usa VMA y presupuesto
+real, pero comparte GC síncrono GPU-dirty; sus flushes async no cubren esa ruta.
+No activa desfragmentación VMA. Distinguir fragmentación, retirada pendiente y
+presión de commit app frente a VRAM PC. Prioridad: readback GC diferido con
+validación de versiones, packing/estadísticas por heap y conjunto de trabajo.
+Fuentes Microsoft/GPUOpen, discusión MJP y experiencias de fragmentación,
+Dolphin/Xenia revisados; investigación no constituye mejora validada.
+
+Usuario autoriza experimento ring upload 256 MiB (antes 128). Cutoff por upload
+32 MiB conservado para aislar capacidad, 16 regiones ahora de 16 MiB. JIT115/core,
+Job5120 y T8 se mantienen. Build incremental correcto; margen real, fallbacks,
+esperas, p99/FPS y Series pendientes. No cambio de packing/readback aún, sin commit.
+
+Gate staging256 PC: Q74s/retorno0, dos T480 completas,58/59FPS frente53,875/50,25;
+p99 33,615/29,294ms frente46,860/35,976. Compile1261/258 frente3171/5447:
+aprendizaje/escenas impiden atribuir mejora a staging. Cero ringwaits en ventanas;
+margen T mínimo71,945/107,301MiB, diag pico5009MiB, RenderError0. Pool384MiB,
+trim2heaps/128MiB confirmado; no packing nuevo. GC máximo18,161/23,544ms,
+T2 peor gap40,081 coincideGC23,544/22evictions. Cinco BQasserts antesT; datos y
+límites en xbox_performance.md. Mantener256 pedido,115/core y5120; readbackGC/
+packing siguiente,60sostenidos/Series no certificados, sin commit.
+
+CandidatoGC diferido ybest-fit implementado; detalle/coherencia/fuentes en
+xbox_texture_memory.md. Pinnedreadback8MiB, versiónGPU/modificación/CPUvalidada,
+esperaFence diferida confallbacksíncrono siappfree<64MiB/copiamayor/noapta.
+Poolbase64MiB conservado, mejorhuecocompatible, tamañoheapgrandealineado sin
+potenciadedos. NuevosTstats distinguen reservas/libres/fencepending/GCpinned.
+Harness1.248.000 casos pasa; buildincremental pasa. GateGPU realAppContainerdebug
+pasa moves, bytes, escriturasGPU/CPU obsoletas, cap8MiB/descarte/emergency;
+queued5/ready2/stale2/sync1,peak8MiB/pending0,RenderError0,retorno0.
+No mejoraFPS certificada; gameplaymanual ySeries pendientes, sin commit.
+
+GateGCdiferido/bestfit: Q67s/retorno0,T480 completas58,25/57FPS frente58/59,
+sin mejoraFPSgeneral. GCmax18,161/23,544->9,312/6,812ms; Tqueued/ready11/11 y6/6,
+stale/sync0. Countersboot5/2/2/1 incluidosentotal452/449/2/1; gameplayporresta
+447queued/447ready,stale/sync0,pending0shutdown. PicoGCpinnedT3,75/2,754MiB.
+Heap384MiB,libre118–170/mayorhueco50,875,trim1heap64; packingventajacausalno
+demostrada. Margenmin98,617/126,891,RenderError0,8BQasserts antesT.
+Peoresgaps dominanGPUidle27–30ms yalgúnupload/Run sinCompile/Flush; siguiente
+desglosarguest/esperas/uploads.115/core,256staging,5120 intactos,sin commit;
+60sostenidos/Series pendientes,evidencia en rendimiento.
+
+DiagnósticoCPU siguiente implementado: T añade PCfinal/HaltReason/SVC porRunlargo,
+callbacksclock/icache elapsed ycontadoresmemory; SVCSleep/locks/condition/address
+amplíantrazaIPC. CPUhostGetThreadTimes enventanas>=100ms, no deltaRun: harnessPC
+observa~15,625ms cuantización, query551ns; UWP soportado segúnMicrosoft. No API
+QueryThreadCycleTime(desktoponly/ciclos no tiempo). ConsultasOS soloenT, check
+ventana cada16Runs. API unavailable explícita; PCendpoint nohotspot, callbacks
+anidados noCPUbusy. Fixturesmigración/SVC/PC/windows/oldlog pasan; detallesfuentes
+enxbox_performance.md. Staging256/JIT115/Job5120/T8 intactos; gateTmanual/Series
+pendientes,sin commit.
+
+
+Corrección capacidad T CPU/SVC (30 sep 2026): Q131s/retorno0; primera T llena
+524288 a5,382s/323vsyncs, segunda llena a~5,2s y volcado solo261vsyncs por
+límite100MiB del logger (archivo105830342bytes). No comparar FPS de estasT.
+Evidencia pc-cpu-run-detail-truncated{,-diag}.txt. Sleep/locks/address dominan
+nuevos eventos (126492 comienzos enT1). Se conservan edgesIPC/WaitSynchronization;
+SleepThread/ArbitrateLock/WaitProcessWideKeyAtomic/WaitForAddress se emiten como
+un único guest-svc-long al terminar>=200us, mismo captureID yguestoriginal aunque
+migre dehost. FueraT/sinSVCseleccionado no reloj ni eventos. Spans menores200us o
+cruzando bordes omitidos explícitamente; solape no prueba causalidad. Memoriafija
+524288(~16MiB),T480,staging256,JIT115/core,Job5120 intactos. Replay aproximadoT1:
+282195eventos frente524288,proyección8s419496 (no garantía de carga futura).
+Parser fixtures migratedIPC/longlock/border pasan; incrementalUWP22operaciones y
+gitdiffcheck pasan. Gate manual completitud deambasT ySeries pendientes,sincommit.
+
+
+Gate PC T CPU compacta (30 sep 2026): cierreQ72s/retorno0, proceso ausente.
+Capturas480vsyncs con ambos end presentes,415931/420795eventos (<524288).
+Evidencia pc-cpu-svc-compact{,-diag}.txt y analysis.jsonl. FPS58,625/56,375,
+p99gap33,377/33,540ms,max40,213/36,969,gaps>=25ms16/29. Frente al gate
+GCpacking58,25/57 no mejora general demostrada; diagnostico no optimizacion y
+escenas/perfiles distintos. Compile124calls/10,954ms y322/34,245ms: no dominante
+en ventanas agregadas, aunque Run7,949ms incluye4,966ms Compile enT2.
+API GetThreadTimes disponible0unavailable; ventanas100ms OSuser+kernel completas
+235/236. Utilizacion media hiloshost core0/1/2:46,08/41,22/45,53% T1 y
+50,76/48,39/51,93% T2. Incluye trabajo entreRuns, cuantizacion y sobrecosteT;
+no es porcentaje guest puro ni excluye cuello en hilo crítico/preemption/locks.
+Ready->dispatchp99subset0,140/0,145ms; no captura todos los episodios Runnable.
+
+Señales restantes: guest123/core1 terminaBreakLoop enPC0x81239648; Run11,004ms
+T1 y17,797ms T2 conCompile/Flush/Clock/Icache0. Coinciden con dos refreshcontents
+texturas (10,800/16,731ms solape) en OTRO hilo host15064, no tiempos anidados de
+ese Run. Guest124/core2 mismoPC12,317ms también coincideconuploads. Endpoint
+no prueba hotloop ni que upload causeespera; PC/cadena de señales por investigar.
+PeorgapT2 36,969ms incluye17,441ms refresh/upload, GC0,236. GapT1 36,761ms
+incluye19,330ms uploads. Prioridad1 separar refresh por staging/read/deswizzle/
+convert/repack/backend y tamaño/formato para escoger optimizacion medida.
+Otras gaps37,214/34,715ms tienenuploads0/GC0 yel hiloGPU esperando trabajo
+28,281/22,981ms (no medidor de ocupacionGPU). Guest83 SendSyncRequest espera
+35,839/31,612ms enesas gaps; tiene2344/2254 llamadas y7155/7249ms elapsedT.
+Prioridad2 identificar servicio/comando IPC ydependencia/wakeup que entrega
+trabajo al hilo gráfico; waits coincidentes de background como guest118 condvar
+1s no atribuirlos a tirones. Muchos WaitForAddress workers123--127 (~5--6sT)
+puedenser espera legítima; no recortar waits ni alterar guest scheduling sincausa.
+Prioridad3 CPUflush puntual: Run10,514ms guest124 contiene10,494ms Flush T1,
+aunque peoresRuns restantes carecenCompile/Flush. Desglosar lock/check/download
+si se confirma recurrente, no llamar restoCPUbusy.
+
+GCmax10,004/7,635ms,sum35,127/44,948,readbackqueued/ready9/9 y7/7,
+sync/stale0 dentroT, pinned3,750/2,754MiB. Evictions435/437,creates481/409:
+churn persiste. Headroommínimo84,156/119,133MiB. RenderError/Critical0;
+5BufferQueueasserts65,14--65,16s antesT77,06s. Erroresplaytime/abandoned al
+cierre ya conocidos. Mantener staging256/JIT115/core/Job5120/T8; no60sostenidos
+niSeriescertificados. Sincommit ni relanzamiento durante revisión.
+
+
+Candidato diagnóstico upload/IPC (30 sep2026): fases T>=200us separan staging,
+read/mapguest, CPUdeswizzle, convert, backend yCPUrepackD3D12; bytesguest/formato
+acompañan refresh. ReadUnsafe map no equivale a copia: fase puede ser solo acceso
+al span; deswizzle incluye cargas de ese span. AcceleratedUpload separaReadBlock
+ybackend. Repack está contenido enbackend, no sumar tiempos anidados; backend
+mide grabación host, no ejecuciónGPU. Ruta genérica instrumentada paraVulkan y
+D3D12, sin modificar selección/corrección/contenidos ni política de cachés.
+ServiceFramework HandleSyncRequest marca antesdelmutex el guestoriginal,
+command/type y24bytes delnombre (longitud original ytruncamiento explícitos).
+Nombre payload fijo sinalloc/format/logdirecto, parsereensambla porguest; spans
+mutex/handler>=200us. Handlerincluye respuesta/setupdeferred, no completa por sí
+soloelSVC; parserasocia despachos dentrodeSVC33/34 porguest aunque cambiehost.
+Resumenporguest/service/command solosiun despacho; variossonposiblesretries.
+Requests iniciados/finalizados fueradeT noatribuir completos. IPCidentity fueraT
+no leectx/nombres. FueraT timerssinlectura de reloj, memoriacapturaigual16MiB.
+
+Para conservarcapacidad seomiten RunCompile/Flush/Clock/Icache redondeados0us;
+evento finalRunMemory certifica timingsfaltantes0 enparser, antesdelmarkerfinal
+permanecenunknown. ReplaymanualTprevias omite37805/40702entradas; IPC6987/6838
+requests, incluso6entradas/request proyectan420048/421121 (sincontarfasesupload
+nuevas, nopromesa paraotroescenario). No cambiarcap/job/staging/prewarm/T8.
+Parser fixtures migratedSvc+namechunks+mutex/handler, uploadfases anidadas,
+Runcompacto/bordesunknown yservicelongtruncatedpasan; logs480previoscompatibles.
+Buildincremental23ops +final4ops correctos, gitdiffcheck limpio. PendienteTmanual
+completitud/overhead/identidad83/faseuploaddominante ySeries. Sincommit.
+
+
+Gate PC fases upload/IPC (30sep2026): Q76s/retorno0, procesoausente. AmbasT480
+completas397947/409314eventos yendlogpresentes. Evidencia pc-upload-ipc-phases
+{,-diag}.txt/analysis.jsonl. FPS55,25/58,375,p99gap33,789/32,102ms,max41,439/
+61,397,gaps>=25ms44/15. FrenteCPUcompacta58,625/56,375 variacionescenas/perfiles
+no admiteatribuirmejora/regresion ni certificaroverheadinstrumentacion. JIT300/
+148Compile32,649/12,450ms. CPUhostcore0/1/2media51,48/50,33/51,11% y52,33/
+47,05/51,74% OSuser+kernel, no guestbusy ni saturacionindividualdemostrada.
+
+Prioridad texturas ya concretada: enums28/29 son BC5_UNORM/BC5_SNORM,
+noASTC. Arrays786432bytesguest reaparecen enambasT; topT1 uploads5,787/5,890ms,
+convert3,533/3,600 ybackend2,088/2,129; T2 parejamax5,412/8,420ms,
+convert3,261/3,342 backend2,003/4,929. CoincidenRun123/124 terminandoBreakLoop
+comoantes, peroOTROhost: no sumarni tratarcomotiminganidado delRun. Conversion
+13,156/21,633ms en4/7spans>=200us; backend22,965/29,182ms en18/15spans;
+repack8,493/8,169ms en11/9spans contenidosenbackend,max1,683/1,991ms.
+Unswizzle10,951/1,492ms capturados;read3,484/2,826; staging0spans>=200us,
+no afirmarcostecero. Siguienteoptimizable BC4/BC5decodeCPU yuploadplaintexels,
+mantenerfallbackBCarraysqueevitacorrupcionSeries; rutaCPUConvertImage->
+DecompressBCn porbloques. Alternativas a investigar SIMD/batchedCPU ocomputeGPU
+reutilizandopatronASTC, con bytes/capas/SNORM validados. Topuploadsnoexplican
+por sísolos todosgaps. No cambiarRAM ni desactivarfallbackvisual paraFPS.
+
+IPCguest83 resuelto a IHOSBinderDriver comando3/type6 TransactParcelAuto,
+llamaTransactParcel contransaction_id queaunnoestácapturado. Ningúnnombretruncado;
+6794/6986dispatches; servicioMutexp0spans
+>=200us. Guest83binder883/933requests,sum6977,481/7017,055ms deSVCwait,
+max32,418/36,318ms. Nvdrv comandos1/11 cortos<=0,175ms. Tophandler32,332ms
+contiene32,319msunionDequeueWait; T2handler36,197 contiene36,185msdequeue
+(múltiples esperaspuedenunirse). Estoidentifica esperaBufferQueue porframebuffer
+libre, no30msdecomputo ni bloqueoMutexdelservicio. Normalbackpressure existe;
+no atribuircausa aesaespera por sísola. Siguiente cadena verificarAcquire/Release,
+VSync/composicion/fence ycantidadbuffers/readyframe; transactionBinder para
+vincularDequeue/Queue directamente si hacefalta. No reducir sleeps/lockswaits ni
+relajarsincronizacion guest/GPU paraforzarFPS.
+PeorgapT2 61,397ms solo0,718upload/GC0/11,738GPUthreadidle,guest83WaitForAddress
+52,107ms, no binderwaitlargo eneseintervalo. Distinto delgap37,417ms con
+BinderSVC36,318/dequeue36,185/GPUthreadidle30,151 yGC0,284. Dosrutasporinvestigar,
+no presentarBindercomocausaunica. RenderCPUflush puntual14,757msT1/12,519T2;
+Run79enT1 solapa14,656ms enotrocore,noCPUbusy exclusivo demostrado.
+
+Margenmin54,855/89,590MiB; GCsyncfallback1T1 alcruzar64MiBprotegecoherencia;
+queuedready5/5,6/6,stale0. GCmax5,570/4,647ms. RenderError/Critical0,
+BQassert0;unmappedDeviceReadBlockantesT(~60,64s),abandoned/playtimealQconocidos.
+Mantener256staging/115core/5120cap/T8. Series/60sostenidos/optimizaciónpendientes,
+revisión sin nuevo commit ni lanzamiento.
+
+
+## Candidato BC4/BC5: bloques completos y escritura por filas (30 sep 2026)
+
+La captura identifica BC5 UNORM/SNORM convertido por CPU. Se conserva la decisión
+D3D12 `decode_bc_arrays`: la textura final continúa en R8/RG8 para evitar la
+corrupción de arrays observada en Series. Vulkan mantiene BCn nativo si
+`IsOptimalBcnSupported`; cuando no, usa los mismos formatos R8/RG8 y el decoder
+genérico. El cambio acelera ese decoder compartido, no elimina el workaround.
+
+Fuentes consultadas:
+- Microsoft describe bloques4x4, dos canales BC5 y padding de mipmaps:
+  https://learn.microsoft.com/en-us/windows/uwp/graphics-concepts/block-compression
+- Referencia SwiftShader de la que deriva `externals/bc_decoder`:
+  https://github.com/google/swiftshader/blob/d070309f7d154d6764cbd514b1a5c8bfcef61d06/src/Device/BC_Decoder.cpp
+- bcdec documenta soporte signed/unsigned y prioriza tamaño, no velocidad;
+  no se incorpora otra dependencia ni se copia su código:
+  https://github.com/iOrange/bcdec
+- Modelo local `renderer_vulkan/maxwell_to_vk.cpp`: BCn nativo o conversión a R8/RG8.
+
+`bc45_decode.h` prepara la paleta una vez por canal/bloque, especializa signed y
+canales por plantilla, interleave RG antes de escribir y almacena una fila completa
+con memcpy de4/8bytes. No asigna RAM ni requiere instrucciones específicas de CPU;
+memcpy permite buffers desalineados y evita aliasing. Conserva byte por byte la
+interpolación entera y semántica SNORM del decoder existente, incluidos endpoints
+-128; no presenta esta compatibilidad como nueva certificación de precisión hardware.
+Solo aplica si ancho/alto por capa son múltiplos4 y source row texels >=width y
+múltiplo4. El resto de mipmaps conserva el decoder anterior. Capas y slices usan
+los mismos strides que el camino previo. No cambia transferencias/fences/eviction,
+ni cantidad/formatos de recursos; backend/repack siguen pendientes de ahorro propio.
+
+Gate MSVC desktop /O2:262144casos (65536endpointpairs xBC4/5 xUNORM/SNORM), cada
+uno con los8índices, y108 imágenes full-block con pitches extra, capas aplanadas,
+punteros input/output desalineados y guard bytes. Bytes idénticos al decoder
+`bcn::DecodeBc4/5`; asserts activos. Prueba aislada BC5 128x128x48, mediana9:
+UNORM4,281->1,7415ms (2,458x), SNORM4,3052->1,7997ms (2,392x).
+No es medición FPS ni Series ni mismo trabajo/cache/clock de lasT reales.
+Incremental UWP4operaciones (decoderobj,lib,exe) pasa ygitdiffcheck limpio.
+
+Trampa de harness: build-env usa StoreCRT; link standalone necesita windowsapp.lib
+pero ejecutarlo fueraAppContainer devolvió0xc0000135 (runtime UWP ausente).
+Se compila el test standalone con vcvarsall x64 desktop; el binario real de Eden
+se sigue compilando con build-env/UWP. No sustituir runtime del emulador para tests.
+Scripts/evidencia del harness quedan en build-uwp/log-review-2026-09-30 ignorado,
+fuente reproducible tools/xbox/tests/bc45-decode.cpp enrepo. Gate gameplay2T/Q,
+mejoraFPS/memoria/visual ySeries pendientes. 256staging/115MiBcore/5120cap/T8
+conservados. Sincommit.
+
+
+## Gate PC del decoder BC4/BC5 por filas (30 sep 2026)
+
+Prueba manual cerrada con Q tras75s de gameplay, retorno0 y proceso ausente.
+Evidencia: `build-uwp/log-review-2026-09-30/pc-bc45-packed{,-diag}.txt` y
+`pc-bc45-packed-analysis.jsonl`. Ambas capturas contienen480vsyncs y marcador
+end:399390/414750eventos. No truncamiento ni aumento de capacidad/RAM.
+
+Comparación manual con `pc-upload-ipc-phases` (no A/B determinista):
+- FPS55,25->58,875 y58,375->59,25 (+6,56%/+1,50%).
+- p99gap33,789->30,883ms y32,102->25,898ms (-8,60%/-19,32%).
+- gaps>=25ms44->13 y15->8. Maxgap41,439->41,840ms (sin mejoraT1),
+  61,397->33,014msT2. No60sostenidos ni eliminación de todos los tirones.
+
+BC5 UNORM/SNORM con el mismo guest size786432bytes: antesUNORM T1
+3,030/3,533ms,T2 3,110/3,141/3,261; candidatoT1 1,597ms,T2 1,475/2,220.
+SNORM antesT1 2,993/3,600,T2 3,182/3,339/3,342; candidatoT1 1,646,
+T2 1,543/2,415. Menor coste por conversión observado y coherente con benchmark
+aislado; pocas muestras/elapsed incluye preemption y condiciones no idénticas.
+TotalConvertT1 3,243ms/2spans vs13,156/4; T2 7,653/4 vs21,633/7: totales
+no comparables directamente por distinta cantidad de cargas. El backend permanece
+~2,0--2,5ms para estas BC5 (no se optimizó); repackT8,193/8,962ms anidado enbackend.
+
+JIT22/30Compile con2,357/3,087ms frente300/148 y32,649/12,450ms antes.
+Evictions331/342 ycreates379/341 vs435/437 y481/409. Trabajo/perfiles/escenas
+cambian: no atribuir todo el aumento FPS ni RAM al decoder. Mantener el candidato:
+bytes se validaron exhaustivamente, coste de conversión baja sin memoria extra;
+visual de gameplay y Series pendientes de confirmación específica.
+
+Readbacksqueued/ready4/4 y6/6, sync/stale0 enT. Headroommin90,039/116,656MiB
+frente54,855/89,590; máximo commitdiag5009MiB, conDRAMguest1704MiB alQ frente
+1733 antes (confunde comparación memoria). GCmax4,598/6,368ms,total30,143/45,628.
+RenderError/Critical0 yBufferQueueassert0. UnmappedDeviceReadBlock antesT(~66,65s)
+yabandoned/playtime alQ ya conocidos, no errores de renderer/asignación.
+
+Cuello siguiente: gapT1 38,023ms conupload0/GC0,hiloGPUesperando28,601ms y
+Binderguest83SVC36,841; T2gap31,526 conupload0/GC0,idle24,543 yBinder30,196.
+PeorT1 41,840 solo1,328upload/0,039GC,idle31,339. No decoder costoso suficiente
+para explicar estos casos. Investigar BufferQueue/VSync/composición/Acquire/Release
+ymomento de frame listo antesde cambiar pacing/sincronización. Backend BC5 todavía
+medible, pero cadena de presentación es siguiente prioridad para los gaps restantes.
+CPUflushT1 puntual9,971ms, no desaparece. No recortar sleeps/esperas a ciegas.
+
+Staging256MiB,prewarm115MiB/core,Job5120MiB,T8 intactos. Sin nuevo commit ni
+relanzamiento durante revisión. Series/60FPSsostenidos/A/B pendientes.

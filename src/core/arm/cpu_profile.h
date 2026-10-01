@@ -8,12 +8,13 @@
 #include <chrono>
 
 #include "common/common_types.h"
+#include "video_core/frame_trace.h"
 
 namespace Core::CpuProfile {
 
 enum class Counter : size_t {
     Runs, RunNs, CodeWords, Reads, Reads128, Writes, ClockReads,
-    ReadSamples, ReadSampleNs, FlushChecks, FlushCheckNs, Count
+    ReadSamples, ReadSampleNs, FlushChecks, FlushCheckNs, ClockNs, IcacheNs, Count
 };
 using Snapshot = std::array<u64, static_cast<size_t>(Counter::Count)>;
 struct alignas(64) CoreCounters {
@@ -22,11 +23,16 @@ struct alignas(64) CoreCounters {
 };
 inline std::array<CoreCounters, 4> cores;
 inline std::atomic_bool enabled{};
+inline thread_local u64 local_flush_ns{};
+inline thread_local Snapshot local_counters{};
+[[nodiscard]] inline Snapshot ReadLocalCounters() { return local_counters; }
+[[nodiscard]] inline u64 ReadLocalFlushNs() { return local_flush_ns; }
 
 inline void SetEnabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 [[nodiscard]] inline bool Enabled() { return enabled.load(std::memory_order_relaxed); }
 inline void Add(size_t core, Counter counter, u64 value = 1) {
     if (Enabled()) {
+        local_counters[static_cast<size_t>(counter)] += value;
         cores.at(core).values[static_cast<size_t>(counter)].fetch_add(value,
                                                                    std::memory_order_relaxed);
     }
@@ -41,6 +47,25 @@ inline void Add(size_t core, Counter counter, u64 value = 1) {
 [[nodiscard]] inline u64 Get(const Snapshot& snapshot, Counter counter) {
     return snapshot[static_cast<size_t>(counter)];
 }
+
+/// Exact elapsed for low-frequency callbacks during T only. Nested in Run/Compile/Flush.
+class TraceCallbackTimer {
+public:
+    TraceCallbackTimer(size_t core_, Counter counter_)
+        : core{core_}, counter{counter_}, active{Enabled() && VideoCore::FrameTrace::Active()} {
+        if (active) start = std::chrono::steady_clock::now();
+    }
+    ~TraceCallbackTimer() {
+        if (active) Add(core, counter, static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - start).count()));
+    }
+private:
+    size_t core;
+    Counter counter;
+    bool active;
+    std::chrono::steady_clock::time_point start;
+};
 
 /// Sample scalar reads once in 1024; time cache-area misses individually. Disabled profiling
 /// takes no timestamps. Samples identify expensive callbacks, not an exact sum of all reads.
@@ -58,6 +83,7 @@ public:
         if (!active) return;
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - start).count();
+        if (count == Counter::FlushChecks) local_flush_ns += static_cast<u64>(ns);
         Add(core, count);
         Add(core, elapsed, static_cast<u64>(ns));
     }

@@ -1063,9 +1063,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                 }
                 break;
             case VirtualKey::T:
-                // Frame chain timeline of the next four seconds, to the log (frame_trace.h).
+                // Frame chain timeline of the next eight seconds, to the log (frame_trace.h).
                 if (pressed) {
-                    VideoCore::FrameTrace::Start(240);
+                    VideoCore::FrameTrace::Start(480);
                 }
                 break;
             default: break;

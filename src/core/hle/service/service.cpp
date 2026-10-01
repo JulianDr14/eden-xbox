@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <fmt/ranges.h>
 #include <string_view>
@@ -14,6 +16,8 @@
 #include "core/core.h"
 #include "core/hle/ipc.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_thread.h"
+#include "video_core/frame_trace.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/service.h"
@@ -112,7 +116,30 @@ void ServiceFrameworkBase::InvokeRequestTipc(HLERequestContext& ctx) {
 
 Result ServiceFrameworkBase::HandleSyncRequest(Kernel::KServerSession& session,
                                                HLERequestContext& ctx) {
+    const bool tracing = VideoCore::FrameTrace::Active();
+    const u64 guest = tracing ? ctx.GetThread().GetThreadId() : 0;
+    if (tracing) {
+        const auto name = GetServiceName();
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestIpcCommand,
+            static_cast<u64>(ctx.GetCommand()) |
+                (static_cast<u64>(ctx.GetCommandType()) << 32) |
+                (static_cast<u64>(std::min<size_t>(name.size(), 65535)) << 48), guest);
+        constexpr std::array name_events{VideoCore::FrameTrace::Event::GuestIpcName0,
+            VideoCore::FrameTrace::Event::GuestIpcName1,
+            VideoCore::FrameTrace::Event::GuestIpcName2};
+        for (size_t part = 0; part < name_events.size() && part * 8 < name.size(); ++part) {
+            u64 bytes{};
+            for (size_t byte = 0; byte < 8 && part * 8 + byte < name.size(); ++byte) {
+                bytes |= static_cast<u64>(static_cast<unsigned char>(name[part * 8 + byte])) << (byte * 8);
+            }
+            VideoCore::FrameTrace::Mark(name_events[part], bytes, guest);
+        }
+    }
+    VideoCore::FrameTrace::ScopedSpan trace_lock{VideoCore::FrameTrace::Event::GuestIpcLock, guest};
     const auto guard = LockService();
+    trace_lock.Finish();
+    VideoCore::FrameTrace::ScopedSpan trace_handler{
+        VideoCore::FrameTrace::Event::GuestIpcHandler, guest};
 
     Result result = ResultSuccess;
 

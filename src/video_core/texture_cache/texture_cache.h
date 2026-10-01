@@ -21,6 +21,8 @@
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/perf_counters.h"
+#include "video_core/frame_trace.h"
+#include "video_core/texture_cache/gc_policy.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
@@ -116,18 +118,41 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
 
 template <class P>
 void TextureCache<P>::RunGarbageCollector() {
+    const VideoCore::FrameTrace::ScopedSpan trace_gc{
+        VideoCore::FrameTrace::Event::TextureGcLong, frame_tick};
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcPressure,
+                                total_used_memory, critical_memory);
     bool high_priority_mode = false;
     bool aggressive_mode = false;
     u64 ticks_to_destroy = 0;
     size_t num_iterations = 0;
+    size_t downloads_left = SIZE_MAX;
+    u64 time_budget_us = 0;
+    bool backend_policy = false;
+    auto gc_start = std::chrono::steady_clock::time_point{};
     const auto Configure = [&](bool allow_aggressive) {
         high_priority_mode = total_used_memory >= expected_memory;
         aggressive_mode = allow_aggressive && total_used_memory >= critical_memory;
         ticks_to_destroy = aggressive_mode ? 10ULL : high_priority_mode ? 25ULL : 50ULL;
         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
+        if constexpr (requires { runtime.GetTextureGcPolicy(allow_aggressive); }) {
+            if (const auto policy = runtime.GetTextureGcPolicy(allow_aggressive)) {
+                backend_policy = true;
+                high_priority_mode = policy->high_priority;
+                aggressive_mode = policy->aggressive;
+                ticks_to_destroy = policy->min_age;
+                num_iterations = policy->iterations;
+                time_budget_us = policy->time_budget_us;
+                if (time_budget_us != 0 && gc_start == std::chrono::steady_clock::time_point{})
+                    gc_start = std::chrono::steady_clock::now();
+                downloads_left = policy->max_downloads;
+            }
+        }
     };
-    const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode](ImageId image_id) {
-        if (num_iterations == 0) {
+    const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode,
+                          &downloads_left, &time_budget_us, &backend_policy, &gc_start](ImageId image_id) {
+        if (num_iterations == 0 || (time_budget_us != 0 &&
+            std::chrono::steady_clock::now() - gc_start >= std::chrono::microseconds{time_budget_us})) {
             return true;
         }
         --num_iterations;
@@ -139,32 +164,52 @@ void TextureCache<P>::RunGarbageCollector() {
         if ((!aggressive_mode && True(image.flags & ImageFlagBits::CostlyLoad)) || (!high_priority_mode && must_download)) {
             return false;
         }
+        if (must_download && downloads_left == 0) return false;
+        if (must_download) --downloads_left;
         if (must_download) {
-            auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
             const auto copies = FixSmallVectorADL(FullDownloadCopies(image.info));
-            image.DownloadMemory(map, copies);
-            runtime.Finish();
-            SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span, swizzle_data_buffer);
+            if constexpr (requires(typename P::AsyncBuffer& map) {
+                runtime.PrepareGcDownload(image, copies, map);
+                runtime.CompleteGcDownload(image);
+            }) {
+                typename P::AsyncBuffer map{};
+                if (!runtime.PrepareGcDownload(image, copies, map)) return false;
+                SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span,
+                             swizzle_data_buffer);
+                runtime.CompleteGcDownload(image);
+            } else {
+                auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
+                image.DownloadMemory(map, copies);
+                runtime.Finish();
+                SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span,
+                             swizzle_data_buffer);
+            }
         }
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureEvict,
+                                    image.gpu_addr,
+                                    static_cast<u64>(image.guest_size_bytes) |
+                                        (must_download ? (1ULL << 63) : 0));
         if (True(image.flags & ImageFlagBits::Tracked)) {
             UntrackImage(image, image_id);
         }
         UnregisterImage(image_id);
         DeleteImage(image_id, image.scale_tick > frame_tick + 5);
-        if (aggressive_mode && total_used_memory < critical_memory) {
+        if (!backend_policy && aggressive_mode && total_used_memory < critical_memory) {
             num_iterations >>= 2;
             aggressive_mode = false;
-        } else if (high_priority_mode && total_used_memory < expected_memory) {
+        } else if (!backend_policy && high_priority_mode && total_used_memory < expected_memory) {
             num_iterations >>= 1;
             high_priority_mode = false;
         }
         return false;
     };
     Configure(false);
-    lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, Cleanup);
-    if (total_used_memory >= critical_memory) {
-        Configure(true);
+    if (frame_tick >= ticks_to_destroy)
         lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, Cleanup);
+    if (backend_policy || total_used_memory >= critical_memory) {
+        Configure(true);
+        if (aggressive_mode && frame_tick >= ticks_to_destroy)
+            lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, Cleanup);
     }
 }
 
@@ -1120,6 +1165,12 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         return;
     }
 
+    const VideoCore::FrameTrace::ScopedSpan trace_upload{
+        VideoCore::FrameTrace::Event::TextureUploadLong, image.gpu_addr};
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureUploadInfo,
+                                image.guest_size_bytes, image.gpu_addr);
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureUploadFormat,
+                                static_cast<u64>(image.info.format), image.gpu_addr);
     image.flags &= ~ImageFlagBits::CpuModified;
 
     TrackImage(image, image_id);
@@ -1148,7 +1199,11 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         return;
     }
     VideoCore::Perf::LapTimer timer;
-    auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
+    auto staging = [&] {
+        const VideoCore::FrameTrace::ScopedSpan span{
+            VideoCore::FrameTrace::Event::TextureUploadStaging, image.gpu_addr};
+        return runtime.UploadStagingBuffer(MapSizeBytes(image));
+    }();
     timer.Lap(VideoCore::Perf::Counter::TextureCacheStagingNs);
     UploadImageContents(image, staging);
     runtime.InsertUploadMemoryBarrier();
@@ -1162,31 +1217,51 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
 
     if (True(image.flags & ImageFlagBits::AcceleratedUpload)) {
         VideoCore::Perf::LapTimer timer;
+        VideoCore::FrameTrace::ScopedSpan trace_read{
+            VideoCore::FrameTrace::Event::TextureUploadRead, gpu_addr};
         gpu_memory->ReadBlock(gpu_addr, mapped_span.data(), mapped_span.size_bytes(),
                               VideoCommon::CacheType::NoTextureCache);
+        trace_read.Finish();
         timer.Lap(VideoCore::Perf::Counter::TextureCacheUnswizzleNs);
         const auto uploads = FullUploadSwizzles(image.info);
+        VideoCore::FrameTrace::ScopedSpan trace_backend{
+            VideoCore::FrameTrace::Event::TextureUploadBackend, gpu_addr};
         runtime.AccelerateImageUpload(image, staging, FixSmallVectorADL(uploads), 0, 0);
         timer.Lap(VideoCore::Perf::Counter::TextureCacheBackendUploadNs);
         return;
     }
 
     VideoCore::Perf::LapTimer timer;
+    VideoCore::FrameTrace::ScopedSpan trace_read{
+        VideoCore::FrameTrace::Event::TextureUploadRead, gpu_addr};
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
+    trace_read.Finish();
     if (True(image.flags & ImageFlagBits::Converted)) {
+        VideoCore::FrameTrace::ScopedSpan trace_unswizzle{
+            VideoCore::FrameTrace::Event::TextureUploadUnswizzle, gpu_addr};
         unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
         auto copies = FixSmallVectorADL(UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, unswizzle_data_buffer));
+        trace_unswizzle.Finish();
         {
+            const VideoCore::FrameTrace::ScopedSpan trace_convert{
+                VideoCore::FrameTrace::Event::TextureUploadConvert, gpu_addr};
             VideoCore::Perf::ScopedTimer decode_timer{
                 VideoCore::Perf::Counter::TextureDecodeUs};
             ConvertImage(unswizzle_data_buffer, image.info, mapped_span, copies);
         }
         timer.Lap(VideoCore::Perf::Counter::TextureCacheUnswizzleNs);
+        const VideoCore::FrameTrace::ScopedSpan trace_backend{
+            VideoCore::FrameTrace::Event::TextureUploadBackend, gpu_addr};
         image.UploadMemory(staging, copies);
     } else {
+        VideoCore::FrameTrace::ScopedSpan trace_unswizzle{
+            VideoCore::FrameTrace::Event::TextureUploadUnswizzle, gpu_addr};
         const auto copies = FixSmallVectorADL(UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, mapped_span));
+        trace_unswizzle.Finish();
         timer.Lap(VideoCore::Perf::Counter::TextureCacheUnswizzleNs);
+        const VideoCore::FrameTrace::ScopedSpan trace_backend{
+            VideoCore::FrameTrace::Event::TextureUploadBackend, gpu_addr};
         image.UploadMemory(staging, copies);
     }
     timer.Lap(VideoCore::Perf::Counter::TextureCacheBackendUploadNs);
@@ -1658,6 +1733,8 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
     phase_timer.Lap(VideoCore::Perf::Counter::TextureCacheImageCreateNs);
     Image& new_image = slot_images[new_image_id];
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureCreate,
+                                new_image.gpu_addr, new_image.guest_size_bytes);
 
     new_image.allocation_tick = frame_tick;
 

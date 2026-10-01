@@ -6,7 +6,10 @@
 
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "common/thread_cpu_time.h"
 #include "core/core.h"
+#include "core/arm/cpu_profile.h"
+#include "dynarmic/interface/jit_profile.h"
 #include "core/debugger/debugger.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
@@ -101,7 +104,81 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
                     thread->SetStepState(StepState::StepPerformed);
                 }
             } else {
+                const u64 trace_context = (thread->GetThreadId() << 8) | static_cast<u64>(m_core_index);
+                const auto compile_begin = Dynarmic::JitProfile::ReadLocalCompileNs();
+                const auto flush_begin = Core::CpuProfile::ReadLocalFlushNs();
+                const bool tracing = VideoCore::FrameTrace::Active();
+                thread_local u32 cpu_sample_cursor{};
+                const bool sample_cpu = tracing && (++cpu_sample_cursor & 15) == 0;
+                // Windows CPU accounting may advance in ~15.6ms quanta. Aggregate 100ms
+                // windows instead of pretending an individual short Run has precise CPU time.
+                if (sample_cpu) {
+                    struct CpuWindow {
+                        u32 capture{};
+                        std::chrono::steady_clock::time_point wall;
+                        std::optional<u64> cpu;
+                    };
+                    thread_local CpuWindow window;
+                    const auto now = std::chrono::steady_clock::now();
+                    const auto capture = VideoCore::FrameTrace::GetCaptureStatus().id;
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                        now - window.wall).count();
+                    if (capture != window.capture || elapsed >= 100000) {
+                        const auto cpu = Common::CurrentThreadCpuTimeNs();
+                        if (capture == window.capture)
+                            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestHostCpuWindow,
+                                cpu && window.cpu && *cpu >= *window.cpu ?
+                                    (*cpu - *window.cpu) / 1000 : UINT64_MAX,
+                                (static_cast<u64>(m_core_index) << 56) | static_cast<u64>(elapsed));
+                        window = {capture, now, cpu};
+                    }
+                }
+                const auto callbacks_begin = tracing ? Core::CpuProfile::ReadLocalCounters() :
+                                                      Core::CpuProfile::Snapshot{};
+                VideoCore::FrameTrace::ScopedSpan trace_run{
+                    VideoCore::FrameTrace::Event::GuestRunLong, trace_context};
                 hr = interface->RunThread(thread);
+                if (trace_run.Finish() >= 200) {
+                    const u64 compile_us =
+                        (Dynarmic::JitProfile::ReadLocalCompileNs() - compile_begin) / 1000;
+                    const u64 flush_us =
+                        (Core::CpuProfile::ReadLocalFlushNs() - flush_begin) / 1000;
+                    if (compile_us != 0) {
+                        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestRunCompile,
+                                                    compile_us, trace_context);
+                    }
+                    if (flush_us != 0) {
+                        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestRunFlush,
+                                                    flush_us, trace_context);
+                    }
+                    Kernel::Svc::ThreadContext context{};
+                    interface->GetContext(context);
+                    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestRunPc,
+                                                context.pc, trace_context);
+                    const u64 svc = True(hr & Core::HaltReason::SupervisorCall) ?
+                                        interface->GetSvcNumber() : UINT32_MAX;
+                    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestRunStop,
+                        static_cast<u64>(hr) | (svc << 32), trace_context);
+                    const auto callbacks_end = Core::CpuProfile::ReadLocalCounters();
+                    const auto Delta = [&](Core::CpuProfile::Counter counter) {
+                        return Core::CpuProfile::Get(callbacks_end, counter) -
+                               Core::CpuProfile::Get(callbacks_begin, counter);
+                    };
+                    const u64 clock_us = Delta(Core::CpuProfile::Counter::ClockNs) / 1000;
+                    const u64 icache_us = Delta(Core::CpuProfile::Counter::IcacheNs) / 1000;
+                    if (clock_us != 0) {
+                        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestRunClock,
+                                                    clock_us, trace_context);
+                    }
+                    if (icache_us != 0) {
+                        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestRunIcache,
+                                                    icache_us, trace_context);
+                    }
+                    const u64 reads = std::min<u64>(Delta(Core::CpuProfile::Counter::Reads), UINT32_MAX);
+                    const u64 writes = std::min<u64>(Delta(Core::CpuProfile::Counter::Writes), UINT32_MAX);
+                    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestRunMemory,
+                                                reads | (writes << 32), trace_context);
+                }
             }
 
             ExitContext();
@@ -159,14 +236,23 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
                 (svc_number == static_cast<u32>(Svc::SvcId::WaitSynchronization) ||
                  svc_number == static_cast<u32>(Svc::SvcId::SendSyncRequest) ||
                  svc_number == static_cast<u32>(Svc::SvcId::SendSyncRequestWithUserBuffer));
-            // A blocking SVC may migrate the guest fiber to another host core. Capture the
-            // original guest ID, so begin/end remain pairable across host thread changes.
-            const u64 trace_thread = trace_wait ? thread->GetThreadId() : 0;
+            const bool trace_long_wait = VideoCore::FrameTrace::Active() &&
+                (svc_number == static_cast<u32>(Svc::SvcId::SleepThread) ||
+                 svc_number == static_cast<u32>(Svc::SvcId::ArbitrateLock) ||
+                 svc_number == static_cast<u32>(Svc::SvcId::WaitProcessWideKeyAtomic) ||
+                 svc_number == static_cast<u32>(Svc::SvcId::WaitForAddress));
+            // Keep IPC edges, but compact frequent sleep/lock calls into completed long spans.
+            // A blocking SVC may migrate its fiber: retain the original guest ID and capture.
+            const u64 trace_thread = trace_wait || trace_long_wait ? thread->GetThreadId() : 0;
+            VideoCore::FrameTrace::ScopedSpan wait_span{
+                VideoCore::FrameTrace::Event::GuestSvcLong,
+                (trace_thread << 8) | svc_number, trace_long_wait};
             if (trace_wait) {
                 VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestSvcBegin,
                                             trace_thread, svc_number);
             }
             Svc::Call(system, svc_number);
+            wait_span.Finish();
             if (trace_wait) {
                 VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestSvcEnd,
                                             trace_thread, svc_number);

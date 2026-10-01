@@ -456,6 +456,17 @@ void Device::LogCapabilities() const {
     }
 }
 
+CacheMemorySnapshot Device::QueryCacheMemoryPressure() const {
+    const auto local = QueryVideoMemory();
+    CacheMemorySnapshot result{.gpu_used = local.CurrentUsage, .gpu_budget = local.Budget};
+    if (const auto query = app_memory_query.load(std::memory_order_acquire)) {
+        if (!query(result.app_used, result.app_limit)) {
+            result.app_used = result.app_limit = 0;
+        }
+    }
+    return result;
+}
+
 u64 Device::CacheMemoryUsage() const {
     const DXGI_QUERY_VIDEO_MEMORY_INFO local = QueryVideoMemory();
     const AppMemoryQuery query = app_memory_query.load(std::memory_order_acquire);

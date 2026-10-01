@@ -151,6 +151,7 @@ bool DynarmicCallbacks64::MemoryWriteExclusive128(u64 vaddr, Dynarmic::A64::Vect
 }
 
 void DynarmicCallbacks64::InstructionCacheOperationRaised(Dynarmic::A64::InstructionCacheOperation op, u64 value) {
+    const CpuProfile::TraceCallbackTimer trace{m_parent.m_core_index, CpuProfile::Counter::IcacheNs};
     last_code_addr = u64(-1); //invalidate cached page
     switch (op) {
     case Dynarmic::A64::InstructionCacheOperation::InvalidateByVAToPoU: {
@@ -217,6 +218,7 @@ u64 DynarmicCallbacks64::GetTicksRemaining() {
 }
 
 u64 DynarmicCallbacks64::GetCNTPCT() {
+    const CpuProfile::TraceCallbackTimer trace{m_parent.m_core_index, CpuProfile::Counter::ClockNs};
     CpuProfile::Add(m_parent.m_core_index, CpuProfile::Counter::ClockReads);
     return m_parent.m_system.CoreTiming().GetClockTicks();
 }

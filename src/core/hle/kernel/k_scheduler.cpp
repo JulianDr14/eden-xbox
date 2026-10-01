@@ -372,6 +372,8 @@ void KScheduler::SwitchThread(KernelCore& kernel, KThread* next_thread) {
     // }
 
     // Set the new thread.
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestDispatch,
+                                next_thread->GetThreadId(), m_core_id);
     SetCurrentThread(kernel, next_thread);
     m_current_thread = next_thread;
 

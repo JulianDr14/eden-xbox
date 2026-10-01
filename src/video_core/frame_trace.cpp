@@ -27,9 +27,9 @@ struct Entry {
     u64 b;
 };
 
-// Stable 60-FPS gameplay reaches ~17k events/s; reserve headroom for four seconds.
-// Fixed storage (~4 MiB), with no allocations while recording.
-constexpr size_t CAPACITY = 131072;
+// Keep sleep/lock SVCs as completed spans >=200us to bound eight-second diagnostics.
+// Fixed storage (~16 MiB), with no allocations while recording.
+constexpr size_t CAPACITY = 524288;
 
 std::atomic_bool active{false};
 std::atomic<CaptureState> capture_state{CaptureState::Idle};
@@ -83,8 +83,78 @@ const char* Name(Event event) {
         return "guest-svc-begin";
     case Event::GuestSvcEnd:
         return "guest-svc-end";
+    case Event::GuestSvcLong:
+        return "guest-svc-long";
     case Event::GuestThreadReady:
         return "guest-thread-ready";
+    case Event::GuestDispatch:
+        return "guest-dispatch";
+    case Event::GuestRunCompile:
+        return "guest-run-compile";
+    case Event::GuestRunFlush:
+        return "guest-run-flush";
+    case Event::GuestRunLong:
+        return "guest-run-long";
+    case Event::GuestHostCpuWindow:
+        return "guest-host-cpu-window";
+    case Event::GuestRunPc:
+        return "guest-run-pc";
+    case Event::GuestRunStop:
+        return "guest-run-stop";
+    case Event::GuestRunClock:
+        return "guest-run-clock";
+    case Event::GuestRunIcache:
+        return "guest-run-icache";
+    case Event::GuestRunMemory:
+        return "guest-run-memory";
+    case Event::TextureGcBudget:
+        return "texture-gc-budget";
+    case Event::TextureGcPressure:
+        return "texture-gc-pressure";
+    case Event::TextureGcLong:
+        return "texture-gc-long";
+    case Event::TextureEvict:
+        return "texture-evict";
+    case Event::TextureCreate:
+        return "texture-create";
+    case Event::TextureHeapUsage:
+        return "texture-heap-usage";
+    case Event::TextureHeapFree:
+        return "texture-heap-free";
+    case Event::TextureHeapPending:
+        return "texture-heap-pending";
+    case Event::TextureGcReadback:
+        return "texture-gc-readback";
+    case Event::TextureUploadLong:
+        return "texture-upload-long";
+    case Event::TextureUploadStaging:
+        return "texture-upload-staging";
+    case Event::TextureUploadRead:
+        return "texture-upload-read";
+    case Event::TextureUploadUnswizzle:
+        return "texture-upload-unswizzle";
+    case Event::TextureUploadConvert:
+        return "texture-upload-convert";
+    case Event::TextureUploadBackend:
+        return "texture-upload-backend";
+    case Event::TextureUploadRepack:
+        return "texture-upload-repack";
+    case Event::TextureUploadInfo:
+        return "texture-upload-info";
+    case Event::TextureUploadFormat:
+        return "texture-upload-format";
+    case Event::GuestIpcCommand:
+        return "guest-ipc-command";
+    case Event::GuestIpcName0:
+        return "guest-ipc-name0";
+    case Event::GuestIpcName1:
+        return "guest-ipc-name1";
+    case Event::GuestIpcName2:
+        return "guest-ipc-name2";
+    case Event::GuestIpcLock:
+        return "guest-ipc-lock";
+    case Event::GuestIpcHandler:
+        return "guest-ipc-handler";
     case Event::VsyncSignal:
         return "guest-vsync-signal";
     }

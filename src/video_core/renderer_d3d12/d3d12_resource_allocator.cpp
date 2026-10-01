@@ -6,9 +6,11 @@
 #include "common/literals.h"
 #include "common/logging.h"
 #include "video_core/renderer_d3d12/d3d12_resource_allocator.h"
+#include "video_core/renderer_d3d12/d3d12_heap_packing.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <map>
 #include <mutex>
@@ -50,8 +52,11 @@ struct TextureResourceAllocator::State {
     u64 peak_bytes{};
     u64 placed_resources{};
     u64 committed_fallbacks{};
+    u64 trimmed_heaps{};
+    u64 trimmed_bytes{};
+    u64 pending_bytes{};
 
-    void Free(size_t block_index, u64 offset, u64 size) {
+    void Free(size_t block_index, u64 offset, u64 size, bool pending = false) {
         std::scoped_lock lock{mutex};
         if (block_index >= blocks.size()) {
             return;
@@ -75,6 +80,7 @@ struct TextureResourceAllocator::State {
         ranges.emplace(offset, size);
         ASSERT(live_bytes >= released_size);
         live_bytes -= released_size;
+        if (pending) pending_bytes -= released_size;
     }
 };
 
@@ -83,10 +89,11 @@ struct TextureResourceAllocator::Allocation {
     size_t block_index{};
     u64 offset{};
     u64 size{};
+    bool pending{}; // guarded by State::mutex
 
     ~Allocation() {
         if (state) {
-            state->Free(block_index, offset, size);
+            state->Free(block_index, offset, size, pending);
         }
     }
 };
@@ -106,29 +113,30 @@ TextureResourceAllocator::Resource TextureResourceAllocator::Create(
     const HeapClass heap_class = ClassOf(desc);
     size_t selected = SIZE_MAX;
     u64 selected_offset{};
+    u64 best_waste = UINT64_MAX;
 
     {
         std::scoped_lock lock{state->mutex};
-        for (size_t index = 0; index < state->blocks.size() && selected == SIZE_MAX; ++index) {
+        for (size_t index = 0; index < state->blocks.size() && best_waste != 0; ++index) {
             auto& block = state->blocks[index];
-            if (block.heap_class != heap_class) {
+            if (!block.heap || block.heap_class != heap_class) {
                 continue;
             }
             for (const auto& [offset, bytes] : block.free_ranges) {
-                const u64 aligned = Common::AlignUp(offset, info.Alignment);
-                if (aligned >= offset && aligned - offset <= bytes &&
-                    info.SizeInBytes <= bytes - (aligned - offset)) {
+                const auto fit = HeapPacking::Fit(offset, bytes, info.SizeInBytes, info.Alignment);
+                if (fit && fit->waste < best_waste) {
                     selected = index;
-                    selected_offset = aligned;
-                    break;
+                    selected_offset = fit->offset;
+                    best_waste = fit->waste;
+                    if (!best_waste) break;
                 }
             }
         }
 
         if (selected == SIZE_MAX) {
-            const u64 wanted = std::max(DEFAULT_BLOCK_SIZE,
-                                        std::bit_ceil(Common::AlignUp(info.SizeInBytes,
-                                                                     info.Alignment)));
+            const u64 wanted = HeapPacking::BlockSize(info.SizeInBytes, info.Alignment,
+                                                      DEFAULT_BLOCK_SIZE);
+            if (!wanted) return {};
             const D3D12_HEAP_DESC heap_desc{
                 .SizeInBytes = wanted,
                 .Properties = {.Type = D3D12_HEAP_TYPE_DEFAULT},
@@ -140,8 +148,17 @@ TextureResourceAllocator::Resource TextureResourceAllocator::Create(
             if (SUCCEEDED(heap_hr)) {
                 block.free_ranges.emplace(0, wanted);
                 state->heap_bytes += wanted;
-                state->blocks.emplace_back(std::move(block));
-                selected = state->blocks.size() - 1;
+                // Tombstones preserve outstanding Allocation indices. Reuse only slots with
+                // no heap: Trim proves there are no live or pending allocations in that slot.
+                const auto vacant = std::find_if(state->blocks.begin(), state->blocks.end(),
+                                                [](const auto& b) { return !b.heap; });
+                if (vacant == state->blocks.end()) {
+                    state->blocks.emplace_back(std::move(block));
+                    selected = state->blocks.size() - 1;
+                } else {
+                    selected = static_cast<size_t>(vacant - state->blocks.begin());
+                    *vacant = std::move(block);
+                }
                 selected_offset = 0;
                 LOG_INFO(Render, "D3D12: texture heap pool added {} MiB {} block ({} MiB total)",
                          wanted / 1_MiB,
@@ -212,16 +229,57 @@ void TextureResourceAllocator::DeferRelease(Resource&& resource) {
         return;
     }
     auto allocation = std::move(resource.allocation);
+    if (allocation) {
+        std::scoped_lock lock{allocation->state->mutex};
+        if (!allocation->pending) {
+            allocation->pending = true;
+            allocation->state->pending_bytes += allocation->size;
+        }
+    }
     scheduler.DeferRelease(std::move(resource.resource),
                            [allocation = std::move(allocation)]() mutable { allocation.reset(); });
 }
 
+void TextureResourceAllocator::TrimEmptyHeaps(bool under_pressure) {
+    std::scoped_lock lock{state->mutex};
+    std::array<bool, 2> warm{};
+    for (auto& block : state->blocks) {
+        if (!block.heap || block.free_ranges.size() != 1) continue;
+        const auto& [offset, size] = *block.free_ranges.begin();
+        if (offset != 0 || size != block.size) continue;
+        const size_t type = static_cast<size_t>(block.heap_class);
+        if (!under_pressure && !warm[type]) {
+            warm[type] = true;
+            continue;
+        }
+        state->heap_bytes -= block.size;
+        state->trimmed_bytes += block.size;
+        ++state->trimmed_heaps;
+        block.heap.Reset();
+        block.free_ranges.clear();
+        block.size = 0;
+    }
+}
+
 std::string TextureResourceAllocator::Report() const {
     std::scoped_lock lock{state->mutex};
-    return fmt::format("texture heaps {} MiB, live {} MiB, peak {} MiB, placed {}, fallback {}",
+    return fmt::format("texture heaps {} MiB, live {} MiB, peak {} MiB, placed {}, fallback {}, trimmed {} ({} MiB)",
                        state->heap_bytes / 1_MiB, state->live_bytes / 1_MiB,
                        state->peak_bytes / 1_MiB, state->placed_resources,
-                       state->committed_fallbacks);
+                       state->committed_fallbacks, state->trimmed_heaps, state->trimmed_bytes / 1_MiB);
+}
+
+TextureResourceAllocator::Stats TextureResourceAllocator::GetStats() const {
+    std::scoped_lock lock{state->mutex};
+    Stats result{.heap_bytes = state->heap_bytes, .reserved_bytes = state->live_bytes,
+                 .pending_bytes = state->pending_bytes};
+    for (const auto& block : state->blocks) {
+        for (const auto& [offset, bytes] : block.free_ranges) {
+            result.free_bytes += bytes;
+            result.largest_free_range = std::max(result.largest_free_range, bytes);
+        }
+    }
+    return result;
 }
 
 } // namespace D3D12

@@ -34,6 +34,9 @@ struct Counters {
 };
 inline std::array<Counters, static_cast<std::size_t>(Phase::Count)> counters;
 inline std::atomic_bool enabled{};
+// Monotonic on this host thread; sampled around one guest Run to exclude other cores.
+inline thread_local std::uint64_t local_compile_ns{};
+[[nodiscard]] inline std::uint64_t ReadLocalCompileNs() { return local_compile_ns; }
 
 inline void SetEnabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 
@@ -51,6 +54,7 @@ public:
         active = false;
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - start).count();
+        if (phase == Phase::Compile) local_compile_ns += static_cast<std::uint64_t>(ns);
         auto& counter = counters[static_cast<std::size_t>(phase)];
         counter.ns.fetch_add(static_cast<std::uint64_t>(ns), std::memory_order_relaxed);
         counter.calls.fetch_add(1, std::memory_order_relaxed);
