@@ -273,8 +273,12 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
     RecordCopy(upload, swapchain.Image(index));
     staging_pool.FreeDeferred(upload);
     Present(index);
-    buffer_cache_runtime.RunSelfTest();
-    texture_cache_runtime.RunSelfTest();
+    // Historical boot gates are opt-in during development, outside FPS trials.
+    constexpr bool run_boot_self_tests = false;
+    if constexpr (run_boot_self_tests) {
+        buffer_cache_runtime.RunSelfTest();
+        texture_cache_runtime.RunSelfTest();
+    }
     LOG_INFO(Render, "D3D12: presenting through the scheduler (tick {})", scheduler.CurrentTick());
 }
 

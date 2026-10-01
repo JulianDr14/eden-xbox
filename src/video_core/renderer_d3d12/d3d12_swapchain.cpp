@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "common/logging.h"
+#include "video_core/frame_trace.h"
 #include "video_core/renderer_d3d12/d3d12_swapchain.h"
 
 namespace D3D12 {
@@ -38,6 +39,8 @@ u32 Swapchain::CurrentIndex() const {
 }
 
 void Swapchain::Present() {
+    const VideoCore::FrameTrace::ScopedSpan trace_present{
+        VideoCore::FrameTrace::Event::HostPresentLong, 0};
     ThrowIfFailed(swapchain->Present(1, 0), "IDXGISwapChain::Present");
 }
 

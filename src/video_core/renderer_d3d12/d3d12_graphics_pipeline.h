@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <type_traits>
 #include <vector>
@@ -109,12 +110,13 @@ class GraphicsPipeline {
 public:
     static constexpr size_t NUM_STAGES = Maxwell::MaxShaderStage;
     using DxilStages = std::array<std::vector<u8>, NUM_STAGES>;
+    using SharedDxilStages = std::shared_ptr<const DxilStages>;
 
     /// compile_dxil (SPIR-V to DXIL, the costly part of a new pipeline) runs with the PSO build,
     /// on the worker when one is given; it throws std::exception when the pipeline cannot be made.
     GraphicsPipeline(const Device& device, const TextureCacheRuntime& texture_runtime,
                      VideoCore::ShaderNotify* shader_notify, Common::ThreadWorker* worker_thread,
-                     const GraphicsPipelineCacheKey& key, std::function<DxilStages()> compile_dxil,
+                     const GraphicsPipelineCacheKey& key, std::function<SharedDxilStages(u64)> compile_dxil,
                      const std::array<const Shader::Info*, NUM_STAGES>& infos,
                      const PipelineLayout& layout);
     ~GraphicsPipeline();
@@ -137,7 +139,7 @@ public:
     }
 
     [[nodiscard]] bool IsBuilt() const noexcept {
-        return is_built.load(std::memory_order::relaxed);
+        return is_built.load(std::memory_order::acquire);
     }
 
     /// Blocks until the worker finished the PSO.
@@ -176,7 +178,7 @@ private:
     const Device& device;
     const GraphicsPipelineCacheKey key;
     const PipelineLayout& layout;
-    DxilStages dxil; ///< Written by the build, before is_built.
+    SharedDxilStages dxil; ///< Immutable linked bytecode shared across fixed-state PSOs.
     std::array<bool, NUM_STAGES> has_stage{};
     std::array<Shader::Info, NUM_STAGES> stage_infos;
     std::array<u32, NUM_STAGES> enabled_uniform_buffer_masks{};

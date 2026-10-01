@@ -22,6 +22,7 @@
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/frame_trace.h"
 #include "video_core/memory_manager.h"
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
@@ -611,7 +612,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     // SPIR-V to DXIL goes with the PSO build, on a worker: done here it stalled the GPU thread for
     // 150-490 ms per 300 frames when entering new areas (0.2.59 profile). Translating the guest
     // shaders stays here, since it reads guest memory through the environments.
-    auto compile_dxil = [this, spirv = std::move(spirv), stage_indices]() {
+    auto compile_dxil = [this, spirv = std::move(spirv), stage_indices](u64 trace_pipeline) {
         boost::container::static_vector<ShaderCompiler::PipelineStage, Maxwell::MaxShaderStage>
             stages;
         for (const size_t stage_index : stage_indices) {
@@ -625,12 +626,32 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             .yz_flip = DXIL_SPIRV_YZ_FLIP_CONDITIONAL,
             .first_vertex_and_base_instance = DXIL_SPIRV_SYSVAL_TYPE_RUNTIME_DATA,
         };
-        auto compiled = compiler.CompilePipeline(std::span(stages.data(), stages.size()), options);
-        GraphicsPipeline::DxilStages dxil;
-        for (size_t i = 0; i < compiled.size(); ++i) {
-            dxil[stage_indices[i]] = std::move(compiled[i].dxil);
+        boost::container::static_vector<LinkedShaderStage, Maxwell::MaxShaderStage> key_stages;
+        for (const auto& stage : stages) {
+            key_stages.push_back({stage.spirv, static_cast<u32>(stage.stage)});
         }
-        return dxil;
+        const std::array<u32, 4> key_options{
+            static_cast<u32>(options.yz_flip), options.y_flip_mask, options.z_flip_mask,
+            static_cast<u32>(options.first_vertex_and_base_instance)};
+        auto key = MakeLinkedShaderKey(std::span(key_stages.data(), key_stages.size()), key_options);
+        const auto cached = linked_shaders.Get(std::move(key), [&] {
+            auto compiled = compiler.CompilePipeline(std::span(stages.data(), stages.size()), options,
+                                                      trace_pipeline);
+            GraphicsPipeline::DxilStages dxil;
+            for (size_t i = 0; i < compiled.size(); ++i) {
+                dxil[stage_indices[i]] = std::move(compiled[i].dxil);
+            }
+            return dxil;
+        }, [](const GraphicsPipeline::DxilStages& dxil) {
+            size_t bytes = sizeof(dxil);
+            for (const auto& stage : dxil) {
+                bytes += stage.capacity();
+            }
+            return bytes;
+        });
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::PipelineCacheResult,
+                                   static_cast<u64>(cached.outcome), trace_pipeline);
+        return cached.value;
     };
 
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
@@ -649,6 +670,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
+    VideoCore::FrameTrace::ScopedSpan frontend_span{
+        VideoCore::FrameTrace::Event::PipelineFrontendLong, graphics_key.Hash()};
     GraphicsEnvironments environments;
     GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
 

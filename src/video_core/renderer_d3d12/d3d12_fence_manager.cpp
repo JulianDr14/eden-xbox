@@ -12,6 +12,8 @@ InnerFence::InnerFence(Scheduler& scheduler_, bool is_stubbed_)
 void InnerFence::Queue() {
     if (is_stubbed) return;
     wait_tick = scheduler.CurrentTick();
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::FenceBackendTick,
+                               wait_tick, reinterpret_cast<uintptr_t>(this));
     scheduler.Flush();
 }
 

@@ -8,6 +8,9 @@
 #include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_memory_layout.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_scheduler.h"
+#include "core/hle/kernel/k_thread.h"
+#include "video_core/frame_trace.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/svc.h"
 #include "core/hle/kernel/svc_results.h"
@@ -82,8 +85,25 @@ Result SignalToAddress(Core::System& system, u64 address, SignalType signal_type
     R_UNLESS(Common::IsAligned(address, sizeof(s32)), ResultInvalidAddress);
     R_UNLESS(IsValidSignalType(signal_type), ResultInvalidEnumValue);
 
-    R_RETURN(GetCurrentProcess(system.Kernel())
-                 .SignalAddressArbiter(address, signal_type, value, count));
+    const u64 guest = GetCurrentThreadPointer(system.Kernel())->GetThreadId();
+    const bool tracing = VideoCore::FrameTrace::TracksGuest(guest) &&
+                         VideoCore::FrameTrace::Active();
+    const u32 capture = tracing ? VideoCore::FrameTrace::GetCaptureStatus().id : 0;
+    if (tracing) {
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressSignalRequest,
+                                   address, guest);
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressSignalArgs,
+            static_cast<u32>(value) | (static_cast<u64>(static_cast<u32>(count)) << 32),
+            guest | (static_cast<u64>(signal_type) << 32));
+    }
+    const auto result = GetCurrentProcess(system.Kernel())
+                            .SignalAddressArbiter(address, signal_type, value, count);
+    if (tracing && VideoCore::FrameTrace::Active() &&
+        VideoCore::FrameTrace::GetCaptureStatus().id == capture) {
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::AddressSignalEnd,
+                                   result.raw, guest);
+    }
+    R_RETURN(result);
 }
 
 Result WaitForAddress64(Core::System& system, u64 address, ArbitrationType arb_type, s32 value,

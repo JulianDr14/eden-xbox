@@ -372,8 +372,10 @@ void KScheduler::SwitchThread(KernelCore& kernel, KThread* next_thread) {
     // }
 
     // Set the new thread.
-    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestDispatch,
-                                next_thread->GetThreadId(), m_core_id);
+    if (VideoCore::FrameTrace::TracksGuest(next_thread->GetThreadId())) {
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestDispatch,
+                                   next_thread->GetThreadId(), m_core_id);
+    }
     SetCurrentThread(kernel, next_thread);
     m_current_thread = next_thread;
 
@@ -544,7 +546,8 @@ void KScheduler::OnThreadStateChanged(KernelCore& kernel, KThread* thread, Threa
                 kernel.GlobalSchedulerContext().UnregisterDummyThreadForWakeup(thread);
         } else if (cur_state == ThreadState::Runnable) {
             // If we're now runnable, then we weren't previously, and we should add.
-            if (thread->IsUserThread()) {
+            if (thread->IsUserThread() &&
+                VideoCore::FrameTrace::TracksGuest(thread->GetThreadId())) {
                 VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestThreadReady,
                                             thread->GetThreadId(), thread->GetPriority());
             }

@@ -6,6 +6,8 @@
 
 #include <optional>
 
+#include "video_core/frame_trace.h"
+
 #include <boost/container/small_vector.hpp>
 
 #include "core/hle/service/nvdrv/devices/nvdisp_disp0.h"
@@ -54,6 +56,8 @@ u32 HardwareComposer::ComposeLocked(f32* out_speed_scale, Display& display,
     std::vector<HwcLayer> composition_stack;
 #endif
 
+    const VideoCore::FrameTrace::ScopedSpan trace_compose{
+        VideoCore::FrameTrace::Event::DisplayComposeLong, m_frame_number};
     // Set default speed limit to 100%.
     *out_speed_scale = 1.0f;
 
@@ -167,9 +171,17 @@ void HardwareComposer::ReleaseFramebuffersLocked(Display& display) {
         }
 
         if (!layer->is_overlay && framebuffer.release_frame_number > m_frame_number) {
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::FrameLeaseHold,
+                framebuffer.item.frame_number,
+                (static_cast<u64>(static_cast<u32>(layer_id)) << 32) |
+                static_cast<u32>(framebuffer.release_frame_number - m_frame_number));
             continue;
         }
 
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::FrameLeaseRelease,
+            framebuffer.item.frame_number,
+            (static_cast<u64>(static_cast<u32>(layer_id)) << 32) |
+            static_cast<u32>(m_frame_number - framebuffer.last_acquire_frame));
         layer->buffer_item_consumer->ReleaseBuffer(framebuffer.item, android::Fence::NoFence());
         framebuffer.is_acquired = false;
     }
@@ -204,6 +216,10 @@ bool HardwareComposer::TryAcquireFramebufferLocked(Layer& layer, Framebuffer& fr
     framebuffer.release_frame_number = m_frame_number + swap_interval;
     framebuffer.last_acquire_frame = m_frame_number;
     framebuffer.is_acquired = true;
+    VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::FrameLeaseAcquire,
+        framebuffer.item.frame_number,
+        (static_cast<u64>(static_cast<u32>(layer.consumer_id)) << 32) |
+        static_cast<u32>(swap_interval));
 
     return true;
 }

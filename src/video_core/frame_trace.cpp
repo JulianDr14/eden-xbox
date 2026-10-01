@@ -155,6 +155,108 @@ const char* Name(Event event) {
         return "guest-ipc-lock";
     case Event::GuestIpcHandler:
         return "guest-ipc-handler";
+    case Event::VsyncTick:
+        return "vsync-tick";
+    case Event::FrameLeaseAcquire:
+        return "frame-lease-acquire";
+    case Event::FrameLeaseHold:
+        return "frame-lease-hold";
+    case Event::FrameLeaseRelease:
+        return "frame-lease-release";
+    case Event::DisplayComposeLock:
+        return "display-compose-lock";
+    case Event::DisplayComposeLong:
+        return "display-compose-long";
+    case Event::HostPresentLong:
+        return "host-present-long";
+    case Event::AddressWaitBegin:
+        return "address-wait-begin";
+    case Event::AddressWaitCondition:
+        return "address-wait-condition";
+    case Event::AddressWaitTimeout:
+        return "address-wait-timeout";
+    case Event::AddressWaitEnd:
+        return "address-wait-end";
+    case Event::AddressWake:
+        return "address-wake";
+    case Event::AddressCancel:
+        return "address-cancel";
+    case Event::GuestSvcPc:
+        return "guest-svc-live-pc";
+    case Event::GuestSvcLr:
+        return "guest-svc-live-lr";
+    case Event::AddressSignalRequest:
+        return "address-signal-request";
+    case Event::AddressSignalArgs:
+        return "address-signal-args";
+    case Event::AddressSignalEnd:
+        return "address-signal-end";
+    case Event::FenceQueued:
+        return "fence-queued";
+    case Event::FenceDequeued:
+        return "fence-dequeued";
+    case Event::FenceWaitLong:
+        return "fence-wait-long";
+    case Event::FenceFlushLong:
+        return "fence-flush-long";
+    case Event::FenceFlushLockLong:
+        return "fence-flush-lock-long";
+    case Event::FenceTextureFlushLong:
+        return "fence-texture-flush-long";
+    case Event::FenceBufferFlushLong:
+        return "fence-buffer-flush-long";
+    case Event::FenceQueryFlushLong:
+        return "fence-query-flush-long";
+    case Event::FenceCallbacksBegin:
+        return "fence-callbacks-begin";
+    case Event::FenceCallbacksLong:
+        return "fence-callbacks-long";
+    case Event::FenceDone:
+        return "fence-done";
+    case Event::FenceBackendTick:
+        return "fence-backend-tick";
+    case Event::FenceSubmitWaitLong:
+        return "fence-submit-wait-long";
+    case Event::FenceGpuWaitLong:
+        return "fence-gpu-wait-long";
+    case Event::SyncWaitBegin:
+        return "sync-wait-begin";
+    case Event::SyncWaitObject:
+        return "sync-wait-object";
+    case Event::SyncWakeObject:
+        return "sync-wake-object";
+    case Event::SyncWaitEnd:
+        return "sync-wait-end";
+    case Event::NvEventArmed:
+        return "nv-event-armed";
+    case Event::NvEventSignal:
+        return "nv-event-signal";
+    case Event::PipelineFrontendLong:
+        return "pipeline-frontend-long";
+    case Event::PipelineBuildRequested:
+        return "pipeline-build-requested";
+    case Event::PipelineWorkerBegin:
+        return "pipeline-worker-begin";
+    case Event::PipelineWorkerLong:
+        return "pipeline-worker-long";
+    case Event::PipelineDxilLong:
+        return "pipeline-dxil-long";
+    case Event::PipelineTranslateLong:
+        return "pipeline-translate-long";
+    case Event::PipelineValidatorLockLong:
+        return "pipeline-validator-lock-long";
+    case Event::PipelineSignLong:
+        return "pipeline-sign-long";
+    case Event::PipelinePsoLong:
+        return "pipeline-pso-long";
+    case Event::PipelineWaitLong:
+        return "pipeline-wait-long";
+    case Event::PipelineCacheResult:
+        return "pipeline-cache-result";
+    case Event::PipelineBuildDone:
+        return "pipeline-build-done";
+    case Event::NvEventSignalLong:
+        return "nv-event-signal-long";
     case Event::VsyncSignal:
         return "guest-vsync-signal";
     }
@@ -186,7 +288,7 @@ void Start(u32 vsyncs) {
     Core::JitPrewarm::capture_active.store(true, std::memory_order_relaxed);
     start_time = std::chrono::steady_clock::now();
     const u32 id = capture_id.fetch_add(1) + 1;
-    LOG_INFO(Render, "Frame trace: recording {} vsyncs (capture {})", vsyncs, id);
+    LOG_INFO(Render, "Frame trace: recording {} vsyncs (capture {}), focused address chain guests79/83", vsyncs, id);
     capture_state.store(CaptureState::Recording);
     active.store(true);
 }
@@ -202,7 +304,7 @@ CaptureStatus GetCaptureStatus() {
 }
 
 void Mark(Event event, u64 a, u64 b) {
-    if (!active.load(std::memory_order_relaxed)) {
+    if (!Enabled(event, a, b) || !active.load(std::memory_order_relaxed)) {
         return;
     }
     writers.fetch_add(1);
