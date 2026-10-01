@@ -96,6 +96,7 @@ void Conductor::ProcessVsync() {
 
     for (auto& [display_id, manager] : m_vsync_managers) {
         m_container.ComposeOnDisplay(&m_swap_interval, &m_compose_speed_scale, display_id);
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::VsyncSignal);
         manager.SignalVsync(m_system.Kernel());
     }
 }

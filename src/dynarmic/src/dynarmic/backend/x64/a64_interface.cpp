@@ -24,6 +24,7 @@
 #include "dynarmic/common/atomic.h"
 #include "dynarmic/frontend/A64/translate/a64_translate.h"
 #include "dynarmic/interface/A64/a64.h"
+#include "dynarmic/interface/jit_profile.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/opt_passes.h"
 
@@ -59,6 +60,7 @@ static Optimization::PolyfillOptions GenPolyfillOptions(const BlockOfCode& code)
 }
 
 struct Jit::Impl final {
+    friend class Jit;
 public:
     Impl(Jit* jit, UserConfig conf)
         : conf(conf)
@@ -241,10 +243,16 @@ private:
         return GetBlock(A64::LocationDescriptor{GetCurrentLocation()}.SetSingleStepping(true));
     }
 
-    CodePtr GetBlock(IR::LocationDescriptor descriptor) {
-        if (auto block = emitter.GetBasicBlock(descriptor))
+    CodePtr GetBlock(IR::LocationDescriptor descriptor, const BlockProfile* expected = nullptr) {
+        const auto existing = emitter.GetBasicBlock(descriptor);
+        // Prewarm is for a stopped, cold cache. Never reuse an existing entry
+        // against a new profile: its compiled guest bytes may differ.
+        if (existing && expected)
+            return nullptr;
+        if (auto block = existing; block && !expected)
             return block->entrypoint;
 
+        const JitProfile::Timer compile_timer{JitProfile::Phase::Compile};
         constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
             // Immediately evacuate cache
@@ -254,13 +262,46 @@ private:
         block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
 
         // JIT Compile
-        const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
+        BlockProfile profile{descriptor.Value()};
+        const bool capture = expected || bool(block_profile_callback);
+        bool valid_profile = true;
+        const auto get_code = [&](u64 vaddr) -> std::optional<u32> {
+            if (expected && profile.code_bytes >= expected->code_bytes) {
+                valid_profile = false;
+                return std::nullopt;
+            }
+            const auto word = conf.callbacks->MemoryReadCode(vaddr);
+            if (capture) {
+                if (!word || profile.code_bytes >= BlockProfile::MaxCodeBytes) {
+                    valid_profile = false;
+                } else {
+                    profile.AddWord(*word);
+                }
+            }
+            return word;
+        };
         // LocationDescriptor ctor() does important ops (like tflags) do not skip
         auto const arch_descriptor = A64::LocationDescriptor{descriptor};
         ir_block.Reset(arch_descriptor);
-        A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
-        Optimization::Optimize(ir_block, conf, polyfill_options);
-        return emitter.Emit(ir_block).entrypoint;
+        {
+            const JitProfile::Timer timer{JitProfile::Phase::Translate};
+            A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
+        }
+        if (expected && (!valid_profile || profile.code_bytes != expected->code_bytes ||
+                         profile.code_hash != expected->code_hash)) {
+            return nullptr;
+        }
+        {
+            const JitProfile::Timer timer{JitProfile::Phase::Optimize};
+            Optimization::Optimize(ir_block, conf, polyfill_options);
+        }
+        const JitProfile::Timer emit_timer{JitProfile::Phase::Emit};
+        const auto entrypoint = emitter.Emit(ir_block).entrypoint;
+        if (block_profile_callback && valid_profile && profile.code_bytes != 0 &&
+            !arch_descriptor.SingleStepping()) {
+            block_profile_callback(profile);
+        }
+        return entrypoint;
     }
 
     void PerformRequestedCacheInvalidation(HaltReason hr) {
@@ -273,6 +314,7 @@ private:
                 return;
             }
 
+            const JitProfile::Timer invalidate_timer{JitProfile::Phase::Invalidate};
             jit_state.ResetRSB();
             if (invalidate_entire_cache) {
                 block_of_code.ClearCache();
@@ -292,6 +334,7 @@ private:
     A64EmitX64 emitter;
     Optimization::PolyfillOptions polyfill_options;
     bool is_executing = false;
+    std::function<void(const BlockProfile&)> block_profile_callback;
     bool invalidate_entire_cache = false;
     boost::icl::interval_set<u64> invalid_cache_ranges;
     std::mutex invalidation_mutex;
@@ -301,6 +344,29 @@ Jit::Jit(UserConfig conf)
         : impl(std::make_unique<Jit::Impl>(this, conf)) {}
 
 Jit::~Jit() = default;
+
+void Jit::SetBlockProfileCallback(std::function<void(const BlockProfile&)> callback) {
+    ASSERT(!impl->is_executing);
+    impl->block_profile_callback = std::move(callback);
+}
+
+bool Jit::PrecompileBlock(const BlockProfile& block) {
+    ASSERT(!impl->is_executing);
+    const LocationDescriptor descriptor{IR::LocationDescriptor{block.descriptor}};
+    // Do not evacuate already warmed code if a profile exceeds the cache budget.
+    if (descriptor.SingleStepping() || (descriptor.PC() & 3) ||
+        descriptor.UniqueHash() != block.descriptor || block.code_bytes == 0 ||
+        block.code_bytes > BlockProfile::MaxCodeBytes || (block.code_bytes & 3) ||
+        impl->block_of_code.SpaceRemaining() < 1024 * 1024) {
+        return false;
+    }
+    return impl->GetBlock(descriptor, &block) != nullptr;
+}
+
+std::size_t Jit::GetCodeCacheSpaceRemaining() const {
+    ASSERT(!impl->is_executing);
+    return impl->block_of_code.SpaceRemaining();
+}
 
 HaltReason Jit::Run() {
     return impl->Run();

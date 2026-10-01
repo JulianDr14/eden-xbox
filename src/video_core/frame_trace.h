@@ -25,12 +25,25 @@ enum class Event : u8 {
     GpuFenceSignal,  ///< that wait was signalled; a = syncpoint, b = microseconds waited
     GpuSubmit,       ///< the GPU thread submitted a D3D12 command list
     GpuIdleEnd,      ///< the GPU thread got work after 200 us or more; a = microseconds idle
+    GuestSvcBegin,   ///< a = guest thread ID, b = blocking SVC ID (IPC or WaitSynchronization)
+    GuestSvcEnd,     ///< a = original guest thread ID, b = SVC ID; includes blocked elapsed time
+    GuestThreadReady, ///< a = guest thread ID, b = priority; raw state became Runnable
+    VsyncSignal,     ///< immediately before signalling the display's guest VSync event
 };
 
 /// Records the next `vsyncs` vsyncs (ignored while a trace is running).
 void Start(u32 vsyncs);
 
 [[nodiscard]] bool Active();
+
+enum class CaptureState : u8 { Idle, Recording, Saving, Saved, Truncated };
+struct CaptureStatus {
+    CaptureState state;
+    u32 id;
+    u32 vsyncs_remaining;
+};
+/// UI-only snapshot. Does not read the clock, wait for writers, or consume trace events.
+[[nodiscard]] CaptureStatus GetCaptureStatus();
 
 void Mark(Event event, u64 a = 0, u64 b = 0);
 

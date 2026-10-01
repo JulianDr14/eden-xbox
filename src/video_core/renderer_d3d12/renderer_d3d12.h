@@ -68,12 +68,16 @@ public:
     /// Presents a progress bar and "done/total" on a black screen while the disk shader cache
     /// builds its pipelines. For the boot thread, before the guest runs (nothing else presents
     /// then); updates at most every 33 ms.
-    void ShowLoadProgress(size_t done, size_t total);
+    void ShowLoadProgress(size_t done, size_t total, std::string_view phase = {});
 
 private:
     /// While pipelines build (VideoCore::ShaderNotify), a small panel in the bottom-right corner
     /// of back buffer rtv (in RENDER_TARGET state): three dots that cycle and the shader count.
     void DrawShaderIndicator(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
+    /// Cached performance panel; samples process CPU and completed queue timestamps at 2 Hz.
+    void DrawPerformanceOverlay(ID3D12GraphicsCommandList* cmd,
+                                D3D12_CPU_DESCRIPTOR_HANDLE rtv);
+    void DrawTraceIndicator(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
     /// Builds the blit root signature and PSO from translated SPIR-V; false (logged) on failure.
     bool CreateBlitPipeline();
     /// (Re)creates the guest texture and its SRV for a new size.
@@ -152,11 +156,28 @@ private:
     bool logged_fallback{};
     u32 indicator_frames{}; ///< frames the shader indicator has been drawn, for its animation
     std::chrono::steady_clock::time_point last_load_present{};
+    struct PerformanceOverlay {
+        std::chrono::steady_clock::time_point sample_time{};
+        u64 cpu_ticks{};
+        u64 gpu_us{};
+        u32 frames{};
+        bool cpu_valid{};
+        double last_frame_ms{};
+        double max_frame_ms{};
+        std::vector<D3D12_RECT> text;
+        D3D12_RECT panel{};
+        u64 trace_key{};
+        LONG trace_top{};
+        std::vector<D3D12_RECT> trace_text;
+        D3D12_RECT trace_panel{};
+    } performance_overlay;
 
     /// Frame pacing statistics, logged every PACING_WINDOW frames: the interval between
     /// Composite calls and the time the GPU thread spends blocked on frame pacing and Present.
     struct PacingStats {
+        static constexpr u32 WINDOW = 300;
         std::chrono::steady_clock::time_point last_composite{};
+        std::array<double, WINDOW> intervals_ms{};
         u32 frames{};
         u32 hitches{}; ///< intervals over 1.5 vblanks
         double total_ms{};

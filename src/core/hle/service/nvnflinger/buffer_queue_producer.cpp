@@ -145,7 +145,13 @@ Status BufferQueueProducer::WaitForFreeSlotThenRelock(bool async, s32* found, St
 
         // Free up any buffers that are in slots beyond the max buffer count
         for (s32 s = max_buffer_count; s < BufferQueueDefs::NUM_BUFFER_SLOTS; ++s) {
-            ASSERT(slots[s].buffer_state == BufferState::Free);
+            ASSERT_MSG(slots[s].buffer_state == BufferState::Free,
+                       "BufferQueue slot {} outside max {}: state {}, preallocated {}, "
+                       "has buffer {}, override {}, default {}, queued {}",
+                       s, max_buffer_count, static_cast<u32>(slots[s].buffer_state),
+                       slots[s].is_preallocated, slots[s].graphic_buffer != nullptr,
+                       core->override_max_buffer_count, core->default_max_buffer_count,
+                       core->queue.size());
             if (slots[s].graphic_buffer != nullptr && slots[s].buffer_state == BufferState::Free &&
                 !slots[s].is_preallocated) {
                 core->FreeBufferLocked(s);

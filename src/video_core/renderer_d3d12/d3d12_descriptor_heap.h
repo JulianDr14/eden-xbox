@@ -154,7 +154,12 @@ public:
 
 private:
     struct KeyHash {
-        size_t operator()(const std::vector<u64>& key) const noexcept;
+        using is_transparent = void;
+        size_t operator()(std::span<const u64> key) const noexcept;
+    };
+    struct KeyEqual {
+        using is_transparent = void;
+        bool operator()(std::span<const u64> lhs, std::span<const u64> rhs) const noexcept;
     };
 
     ID3D12Device* device;
@@ -164,7 +169,7 @@ private:
     D3D12_GPU_DESCRIPTOR_HANDLE gpu_base;
     u32 stride;
     u32 used{};
-    std::unordered_map<std::vector<u64>, u32, KeyHash> tables; ///< keys -> first slot
+    std::unordered_map<std::vector<u64>, u32, KeyHash, KeyEqual> tables; ///< keys -> first slot
     bool logged_cache{};
     bool logged_reuse{};
 };

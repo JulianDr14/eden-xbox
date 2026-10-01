@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 
@@ -320,9 +321,14 @@ void GuestDescriptorQueue::AddCopy(D3D12_CPU_DESCRIPTOR_HANDLE descriptor) {
 
 // --- SamplerHeap ------------------------------------------------------------------------------
 
-size_t SamplerHeap::KeyHash::operator()(const std::vector<u64>& key) const noexcept {
+size_t SamplerHeap::KeyHash::operator()(std::span<const u64> key) const noexcept {
     return static_cast<size_t>(Common::CityHash64(reinterpret_cast<const char*>(key.data()),
                                                   key.size() * sizeof(u64)));
+}
+
+bool SamplerHeap::KeyEqual::operator()(std::span<const u64> lhs,
+                                      std::span<const u64> rhs) const noexcept {
+    return std::equal(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
 }
 
 SamplerHeap::SamplerHeap(ID3D12Device* device_, Scheduler& scheduler_)
@@ -343,8 +349,9 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
     if (count == 0 || count > CAPACITY || keys.size() != samplers.size()) {
         throw std::runtime_error(fmt::format("D3D12: bad sampler table request ({})", count));
     }
-    std::vector<u64> key(keys.begin(), keys.end());
-    if (const auto it = tables.find(key); it != tables.end()) {
+    // Heterogeneous lookup avoids allocating/copying a vector on every draw. Only a new
+    // table owns a key; hits compare the caller's span against that stored vector.
+    if (const auto it = tables.find(keys); it != tables.end()) {
         if (!logged_reuse) {
             LOG_INFO(Render, "D3D12: sampler table deduplication active ({} samplers)", count);
             logged_reuse = true;
@@ -368,7 +375,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
         return fmt::format("copying {} sampler descriptors", samplers.size());
     });
     used += count;
-    tables.emplace(std::move(key), first);
+    tables.emplace(std::vector<u64>(keys.begin(), keys.end()), first);
     if (!logged_cache) {
         LOG_INFO(Render, "D3D12: sampler table cached ({} samplers, {} of {} slots used)", count,
                  used, CAPACITY);

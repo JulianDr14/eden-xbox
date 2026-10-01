@@ -2410,3 +2410,12 @@ los buffers nuevos y lotes aun no ligados permanecen en COPY_DEST hasta su prime
 Esto mantiene el IA cacheado valido sin forzar todos los streams dirty ni duplicar uploads.
 La barrera se agrega solo al upload de un destino previamente legible. La prueba con este
 fallo queda preservada como pc-depth-loads-late-upload-{debug,diag}.txt.
+
+### Rendimiento sostenido tras depth y cargas
+
+El objetivo 60 FPS, las capturas manuales, las limitaciones de comparacion PC/Series y los
+cambios del emisor JIT se documentan en [xbox_performance.md](xbox_performance.md).
+El perfil descarta los callbacks de lectura como explicacion unica del retraso y mide
+costes importantes de emision/proteccion. SamplerHeap evita construir claves en hits;
+el candidato CPU mantiene W^X e invalidaciones. Build y regresion hash correctos,
+gate gameplay del candidato, A/B y Series pendientes; no afirmar 60 FPS sostenidos.

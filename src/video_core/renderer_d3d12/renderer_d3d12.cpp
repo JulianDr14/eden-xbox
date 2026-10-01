@@ -22,10 +22,12 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/arm/cpu_profile.h"
+#include "dynarmic/interface/jit_profile.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
 #include "video_core/capture.h"
 #include "video_core/framebuffer_config.h"
+#include "video_core/frame_trace.h"
 #include "video_core/gpu.h"
 #include "video_core/host_shaders/blit_color_float_frag_spv.h"
 #include "video_core/host_shaders/full_screen_triangle_vert_spv.h"
@@ -130,29 +132,61 @@ D3D12_TEXTURE_COPY_LOCATION StagingSource(const StagingBufferRef& ref,
     };
 }
 
-/// 3x5 cell glyphs of the on-screen overlays, drawn as ClearRenderTargetView rects: digits 0-9,
-/// then '/'. Rows top to bottom; bit 2 is the left column.
+/// Shared 3x5 overlay font, drawn as batched ClearRenderTargetView rects.
+/// Digits 0-9 then '/'; rows top to bottom, bit 2 is the left column.
 constexpr std::array<std::array<u8, 5>, 11> GLYPHS{{
     {7, 5, 5, 5, 7}, {2, 6, 2, 2, 7}, {7, 1, 7, 4, 7}, {7, 1, 7, 1, 7}, {5, 5, 7, 1, 1},
     {7, 4, 7, 1, 7}, {7, 4, 7, 5, 7}, {7, 1, 1, 1, 1}, {7, 5, 7, 5, 7}, {7, 5, 7, 1, 7},
     {1, 1, 2, 4, 4},
 }};
 
+constexpr std::array<std::array<u8, 5>, 26> LETTER_GLYPHS{{
+    {2,5,7,5,5}, {6,5,6,5,6}, {3,4,4,4,3}, {6,5,5,5,6}, {7,4,6,4,7},
+    {7,4,6,4,4}, {3,4,5,5,3}, {5,5,7,5,5}, {7,2,2,2,7}, {1,1,1,5,2},
+    {5,5,6,5,5}, {4,4,4,4,7}, {5,7,7,5,5}, {5,7,7,7,5}, {2,5,5,5,2},
+    {6,5,6,4,4}, {2,5,5,3,1}, {6,5,6,5,5}, {3,4,2,1,6}, {7,2,2,2,2},
+    {5,5,5,5,7}, {5,5,5,5,2}, {5,5,7,7,5}, {5,5,2,5,5}, {5,5,2,2,2},
+    {7,1,2,4,7},
+}};
+
+std::array<u8, 5> Glyph(char c) {
+    if (c >= '0' && c <= '9') {
+        return GLYPHS[c - '0'];
+    }
+    if (c >= 'A' && c <= 'Z') {
+        return LETTER_GLYPHS[c - 'A'];
+    }
+    switch (c) {
+    case '/': return GLYPHS[10];
+    case '.': return {0,0,0,0,2};
+    case '%': return {5,1,2,4,5};
+    case '-': return {0,0,7,0,0};
+    default: return {};
+    }
+}
+
 /// Width of `chars` glyphs of `cell` pixels, with a one-cell gap between them.
 LONG TextWidth(size_t chars, LONG cell) {
     return chars == 0 ? 0 : static_cast<LONG>(chars) * 4 * cell - cell;
 }
 
-/// Appends the rects of text (digits and '/') with its top-left corner at x, y.
+/// Shared bitmap text for shader progress and performance panels. Spaces advance normally.
 void AppendText(std::vector<D3D12_RECT>& rects, std::string_view text, LONG x, LONG y, LONG cell) {
     for (const char c : text) {
-        const size_t glyph = c == '/' ? 10 : static_cast<size_t>(c - '0');
-        for (LONG row = 0; glyph < GLYPHS.size() && row < 5; ++row) {
-            for (LONG column = 0; column < 3; ++column) {
-                if ((GLYPHS[glyph][row] >> (2 - column)) & 1) {
-                    rects.push_back({x + column * cell, y + row * cell, x + (column + 1) * cell,
-                                     y + (row + 1) * cell});
+        const auto glyph = Glyph(c);
+        for (LONG row = 0; row < 5; ++row) {
+            LONG column = 0;
+            while (column < 3) {
+                if (((glyph[row] >> (2 - column)) & 1) == 0) {
+                    ++column;
+                    continue;
                 }
+                const LONG start = column++;
+                while (column < 3 && ((glyph[row] >> (2 - column)) & 1)) {
+                    ++column;
+                }
+                rects.push_back({x + start * cell, y + row * cell, x + column * cell,
+                                 y + (row + 1) * cell});
             }
         }
         x += 4 * cell;
@@ -485,13 +519,16 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
 
 void RendererD3D12::RecordPacing(double wait_ms, double present_ms) {
     device.LogDebugMessages();
-    constexpr u32 PACING_WINDOW = 300;
+    constexpr u32 PACING_WINDOW = PacingStats::WINDOW;
     constexpr double HITCH_MS = 1000.0 / 60.0 * 1.5;
     const auto now = std::chrono::steady_clock::now();
     if (pacing.last_composite != std::chrono::steady_clock::time_point{}) {
         const double interval =
             std::chrono::duration<double, std::milli>(now - pacing.last_composite).count();
-        ++pacing.frames;
+        pacing.intervals_ms[pacing.frames++] = interval;
+        ++performance_overlay.frames;
+        performance_overlay.last_frame_ms = interval;
+        performance_overlay.max_frame_ms = std::max(performance_overlay.max_frame_ms, interval);
         pacing.total_ms += interval;
         pacing.max_interval_ms = std::max(pacing.max_interval_ms, interval);
         pacing.hitches += interval > HITCH_MS ? 1 : 0;
@@ -504,11 +541,22 @@ void RendererD3D12::RecordPacing(double wait_ms, double present_ms) {
     }
     pacing.last_composite = now;
     if (pacing.frames == PACING_WINDOW) {
+        // Nearest-rank percentiles over presented intervals. Sort once per window, with no
+        // allocation or extra clocks per frame. p99 exposes hitches hidden by the mean.
+        auto sorted = pacing.intervals_ms;
+        std::sort(sorted.begin(), sorted.end());
+        const auto percentile = [&](u32 percent) {
+            return sorted[(PACING_WINDOW * percent + 99) / 100 - 1];
+        };
         LOG_INFO(Render,
                  "D3D12 pacing: {} frames, avg {:.2f} ms, max {:.2f} ms, {} hitches; max wait "
                  "{:.2f} ms, max record+present {:.2f} ms",
                  pacing.frames, pacing.total_ms / pacing.frames, pacing.max_interval_ms,
                  pacing.hitches, pacing.max_wait_ms, pacing.max_present_ms);
+        LOG_INFO(Render, "D3D12 frame times: {:.2f} FPS, p50 {:.2f} ms, p95 {:.2f} ms, "
+                         "p99 {:.2f} ms ({} presented intervals)",
+                 1000.0 * pacing.frames / pacing.total_ms, percentile(50), percentile(95),
+                 percentile(99), pacing.frames);
         ReportPerfWindow(pacing.frames, pacing.total_ms);
         pacing = PacingStats{.last_composite = now};
     }
@@ -781,6 +829,25 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
     LOG_INFO(Render, "D3D12 depth feedback: {} GPU copies in total",
              texture_cache_runtime.DepthFeedbackCopies());
     if (Core::CpuProfile::Enabled()) {
+        const auto jit = Dynarmic::JitProfile::Take();
+        const auto measurement = [&](Dynarmic::JitProfile::Phase phase) -> const auto& {
+            return jit[static_cast<size_t>(phase)];
+        };
+        using Phase = Dynarmic::JitProfile::Phase;
+        LOG_INFO(Render, "D3D12 guest JIT compilation: {} blocks, {:.1f} ms total; "
+                         "translate {:.1f} ms, optimize {:.1f} ms, emit {:.1f} ms; "
+                         "{} page protection calls, {:.1f} ms; {} invalidations, {:.1f} ms "
+                         "(elapsed across cores; phases/protection overlap)",
+                 measurement(Phase::Compile).calls, measurement(Phase::Compile).ns / 1.0e6,
+                 measurement(Phase::Translate).ns / 1.0e6,
+                 measurement(Phase::Optimize).ns / 1.0e6,
+                 measurement(Phase::Emit).ns / 1.0e6,
+                 measurement(Phase::Protect).calls, measurement(Phase::Protect).ns / 1.0e6,
+                 measurement(Phase::Invalidate).calls, measurement(Phase::Invalidate).ns / 1.0e6);
+        for (size_t i = static_cast<size_t>(Phase::WriteOpen); i < jit.size(); ++i) {
+            LOG_INFO(Render, "D3D12 JIT emission {}: {} calls, {:.3f} ms (nested elapsed)",
+                     Dynarmic::JitProfile::names[i], jit[i].calls, jit[i].ns / 1.0e6);
+        }
         using Core::CpuProfile::Counter;
         for (size_t core = 0; core < Core::CpuProfile::cores.size(); ++core) {
             const auto cpu = Core::CpuProfile::Take(core);
@@ -791,6 +858,13 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
                      Get(cpu, Counter::CodeWords), Get(cpu, Counter::Reads),
                      Get(cpu, Counter::Reads128),
                      Get(cpu, Counter::Writes), Get(cpu, Counter::ClockReads));
+            const u64 samples = Get(cpu, Counter::ReadSamples);
+            LOG_INFO(Render, "D3D12 guest CPU core {} callbacks: {} read samples, {:.0f} ns "
+                             "mean sampled read; {} flush-area misses, {:.1f} ms "
+                             "(cache locks and possible GPU downloads included)",
+                     core, samples, samples ? static_cast<double>(Get(cpu, Counter::ReadSampleNs)) /
+                                                 samples : 0.0,
+                     Get(cpu, Counter::FlushChecks), Get(cpu, Counter::FlushCheckNs) / 1.0e6);
         }
     }
     LOG_INFO(Render, "D3D12 guest GPU wait sites: {}", DescribeGuestWaitSites());
@@ -989,6 +1063,7 @@ void RendererD3D12::RecordBlit(ID3D12Resource* image, u32 image_index,
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->DrawInstanced(3, 1, 0, 0);
     DrawShaderIndicator(cmd, rtv);
+    DrawPerformanceOverlay(cmd, rtv);
 
     barrier = Transition(image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     cmd->ResourceBarrier(1, &barrier);
@@ -1006,8 +1081,112 @@ void RendererD3D12::RecordCopy(const StagingBufferRef& upload, ID3D12Resource* i
     };
     const D3D12_TEXTURE_COPY_LOCATION src = StagingSource(upload, footprint);
     cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+    barrier = Transition(image, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
     cmd->ResourceBarrier(1, &barrier);
+    DrawPerformanceOverlay(cmd, back_buffer_rtvs[swapchain.CurrentIndex()]);
+    barrier = Transition(image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    cmd->ResourceBarrier(1, &barrier);
+}
+
+void RendererD3D12::DrawPerformanceOverlay(ID3D12GraphicsCommandList* cmd,
+                                          D3D12_CPU_DESCRIPTOR_HANDLE rtv) {
+    auto& hud = performance_overlay;
+    const auto now = std::chrono::steady_clock::now();
+    const bool first = hud.sample_time == std::chrono::steady_clock::time_point{};
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(now - hud.sample_time).count();
+    if (first || elapsed_ms >= 500.0) {
+        FILETIME created{}, exited{}, kernel{}, user{};
+        const bool cpu_valid = GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+        const auto ticks = [](FILETIME time) {
+            return (static_cast<u64>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+        };
+        const u64 cpu_ticks = ticks(kernel) + ticks(user);
+        const u64 gpu_us = VideoCore::Perf::counters[
+            static_cast<size_t>(VideoCore::Perf::Counter::GpuBusyUs)].load(std::memory_order_relaxed);
+        std::array<std::string, 4> lines{"FPS --", "FRAME -- MS MAX --", "CPU --", "GPUQ --"};
+        if (!first && hud.frames != 0) {
+            const double frames = static_cast<double>(hud.frames);
+            lines[0] = fmt::format("FPS {:.1f}", frames * 1000.0 / elapsed_ms);
+            lines[1] = fmt::format("FRAME {:.1f} MS MAX {:.1f}", hud.last_frame_ms, hud.max_frame_ms);
+            // Process CPU includes all threads; show equivalent cores rather than an ambiguous %.
+            if (cpu_valid && hud.cpu_valid && cpu_ticks >= hud.cpu_ticks) {
+                const double cpu_ms = static_cast<double>(cpu_ticks - hud.cpu_ticks) / 10000.0;
+                lines[2] = fmt::format("CPU {:.2f} CORES {:.1f} MS/F", cpu_ms / elapsed_ms,
+                                       cpu_ms / frames);
+            }
+            if (scheduler.HasGpuTimestamps()) {
+                const double gpu_ms = static_cast<double>(gpu_us - hud.gpu_us) / 1000.0;
+                // Completed direct-queue time, delayed by frames in flight; not whole-GPU utilization.
+                lines[3] = fmt::format("GPUQ {:.0f}% {:.1f} MS/F", gpu_ms * 100.0 / elapsed_ms,
+                                       gpu_ms / frames);
+            }
+        }
+        const LONG cell = std::max<LONG>(2, static_cast<LONG>(swapchain.Height()) / 360);
+        const LONG pad = 3 * cell;
+        const LONG right = static_cast<LONG>(swapchain.Width()) - 8 * cell;
+        const LONG top = 8 * cell;
+        size_t chars = 0;
+        for (const auto& line : lines) {
+            chars = std::max(chars, line.size());
+        }
+        const LONG left = right - TextWidth(chars, cell) - 2 * pad;
+        hud.panel = {left, top, right, top + 2 * pad + 4 * 7 * cell - 2 * cell};
+        hud.text.clear();
+        hud.text.reserve(1536);
+        for (size_t row = 0; row < lines.size(); ++row) {
+            AppendText(hud.text, lines[row], left + pad,
+                       top + pad + static_cast<LONG>(row) * 7 * cell, cell);
+        }
+        hud.sample_time = now;
+        hud.cpu_ticks = cpu_ticks;
+        hud.cpu_valid = cpu_valid;
+        hud.gpu_us = gpu_us;
+        hud.frames = 0;
+        hud.max_frame_ms = 0;
+    }
+    ClearRects(cmd, rtv, OVERLAY_PANEL, {&hud.panel, 1});
+    ClearRects(cmd, rtv, OVERLAY_TEXT, hud.text);
+    DrawTraceIndicator(cmd, rtv);
+}
+
+void RendererD3D12::DrawTraceIndicator(ID3D12GraphicsCommandList* cmd,
+                                      D3D12_CPU_DESCRIPTOR_HANDLE rtv) {
+    using VideoCore::FrameTrace::CaptureState;
+    const auto status = VideoCore::FrameTrace::GetCaptureStatus();
+    if (status.state == CaptureState::Idle) {
+        return;
+    }
+    auto& hud = performance_overlay;
+    const u32 tenths = (status.vsyncs_remaining + 5) / 6;
+    const u64 key = (static_cast<u64>(status.id) << 32) |
+                    (static_cast<u64>(status.state) << 24) | tenths;
+    const LONG cell = std::max<LONG>(2, static_cast<LONG>(swapchain.Height()) / 360);
+    const LONG top = hud.panel.bottom + 2 * cell;
+    if (key != hud.trace_key || top != hud.trace_top) {
+        std::string label;
+        switch (status.state) {
+        case CaptureState::Recording:
+            label = fmt::format("T {} CAPTURANDO {:.1f} S", status.id, tenths / 10.0);
+            break;
+        case CaptureState::Saving: label = fmt::format("T {} GUARDANDO", status.id); break;
+        case CaptureState::Saved: label = fmt::format("T {} GUARDADA", status.id); break;
+        case CaptureState::Truncated: label = fmt::format("T {} TRUNCADA", status.id); break;
+        default: return;
+        }
+        const LONG pad = 3 * cell;
+        const LONG right = hud.panel.right;
+        const LONG left = right - TextWidth(label.size(), cell) - 2 * pad;
+        hud.trace_panel = {left, top, right, top + 2 * pad + 5 * cell};
+        hud.trace_text.clear();
+        hud.trace_text.reserve(256);
+        AppendText(hud.trace_text, label, left + pad, top + pad, cell);
+        hud.trace_key = key;
+        hud.trace_top = top;
+    }
+    constexpr std::array<float, 4> saved_color{0.3f, 1.0f, 0.45f, 1.0f};
+    ClearRects(cmd, rtv, OVERLAY_PANEL, {&hud.trace_panel, 1});
+    ClearRects(cmd, rtv, status.state == CaptureState::Saved ? saved_color : OVERLAY_ACCENT,
+               hud.trace_text);
 }
 
 void RendererD3D12::DrawShaderIndicator(ID3D12GraphicsCommandList* cmd,
@@ -1049,7 +1228,13 @@ void RendererD3D12::DrawShaderIndicator(ID3D12GraphicsCommandList* cmd,
     ClearRects(cmd, rtv, OVERLAY_TEXT, text);
 }
 
-void RendererD3D12::ShowLoadProgress(size_t done, size_t total) {
+void ShowCpuLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total) {
+    if (Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Direct3D12) {
+        static_cast<RendererD3D12&>(renderer).ShowLoadProgress(done, total, "CPU JIT");
+    }
+}
+
+void RendererD3D12::ShowLoadProgress(size_t done, size_t total, std::string_view phase) {
     if (present_failed || total == 0) {
         return;
     }
@@ -1086,7 +1271,7 @@ void RendererD3D12::ShowLoadProgress(size_t done, size_t total) {
         if (filled > 0) {
             ClearRects(cmd, rtv, OVERLAY_ACCENT, {&fill, 1});
         }
-        const std::string label = fmt::format("{}/{}", done, total);
+        const std::string label = fmt::format("{} {}/{}", phase, done, total);
         std::vector<D3D12_RECT> text;
         AppendText(text, label, (screen_width - TextWidth(label.size(), cell)) / 2,
                    bar_top + 6 * cell, cell);

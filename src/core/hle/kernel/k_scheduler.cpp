@@ -21,6 +21,7 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
+#include "video_core/frame_trace.h"
 
 namespace Kernel {
 
@@ -541,6 +542,10 @@ void KScheduler::OnThreadStateChanged(KernelCore& kernel, KThread* thread, Threa
                 kernel.GlobalSchedulerContext().UnregisterDummyThreadForWakeup(thread);
         } else if (cur_state == ThreadState::Runnable) {
             // If we're now runnable, then we weren't previously, and we should add.
+            if (thread->IsUserThread()) {
+                VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GuestThreadReady,
+                                            thread->GetThreadId(), thread->GetPriority());
+            }
             GetPriorityQueue(kernel).PushBack(thread);
             IncrementScheduledCount(thread);
             SetSchedulerUpdateNeeded(kernel);

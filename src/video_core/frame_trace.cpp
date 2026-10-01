@@ -12,6 +12,8 @@
 #endif
 
 #include "common/logging.h"
+#include "core/arm/jit_prewarm_stats.h"
+#include "dynarmic/interface/jit_profile.h"
 #include "video_core/frame_trace.h"
 
 namespace VideoCore::FrameTrace {
@@ -25,14 +27,21 @@ struct Entry {
     u64 b;
 };
 
-constexpr size_t CAPACITY = 16384;
+// Stable 60-FPS gameplay reaches ~17k events/s; reserve headroom for four seconds.
+// Fixed storage (~4 MiB), with no allocations while recording.
+constexpr size_t CAPACITY = 131072;
 
 std::atomic_bool active{false};
+std::atomic<CaptureState> capture_state{CaptureState::Idle};
+std::atomic<u32> capture_id{0};
 std::atomic<u32> vsyncs_left{0};
 std::atomic<u32> next_entry{0};
 std::atomic<u32> writers{0};
 std::chrono::steady_clock::time_point start_time;
 std::array<Entry, CAPACITY> entries;
+Dynarmic::JitProfile::Snapshot jit_begin{};
+bool jit_profiled{};
+Core::JitPrewarm::MissSnapshot misses_begin{};
 
 u32 CurrentThread() {
 #ifdef _WIN32
@@ -70,6 +79,14 @@ const char* Name(Event event) {
         return "gpu-submit";
     case Event::GpuIdleEnd:
         return "gpu-thread-got-work";
+    case Event::GuestSvcBegin:
+        return "guest-svc-begin";
+    case Event::GuestSvcEnd:
+        return "guest-svc-end";
+    case Event::GuestThreadReady:
+        return "guest-thread-ready";
+    case Event::VsyncSignal:
+        return "guest-vsync-signal";
     }
     return "?";
 }
@@ -88,18 +105,30 @@ void Dump(u32 count) {
 } // Anonymous namespace
 
 void Start(u32 vsyncs) {
-    if (active.load() || vsyncs == 0) {
+    if (active.load() || capture_state.load() == CaptureState::Saving || vsyncs == 0) {
         return;
     }
     next_entry.store(0);
     vsyncs_left.store(vsyncs);
+    jit_profiled = Dynarmic::JitProfile::enabled.load(std::memory_order_relaxed);
+    jit_begin = Dynarmic::JitProfile::Read();
+    misses_begin = Core::JitPrewarm::ReadMisses();
+    Core::JitPrewarm::capture_active.store(true, std::memory_order_relaxed);
     start_time = std::chrono::steady_clock::now();
-    LOG_INFO(Render, "Frame trace: recording {} vsyncs", vsyncs);
+    const u32 id = capture_id.fetch_add(1) + 1;
+    LOG_INFO(Render, "Frame trace: recording {} vsyncs (capture {})", vsyncs, id);
+    capture_state.store(CaptureState::Recording);
     active.store(true);
 }
 
 bool Active() {
     return active.load(std::memory_order_relaxed);
+}
+
+CaptureStatus GetCaptureStatus() {
+    return {capture_state.load(std::memory_order_relaxed),
+            capture_id.load(std::memory_order_relaxed),
+            vsyncs_left.load(std::memory_order_relaxed)};
 }
 
 void Mark(Event event, u64 a, u64 b) {
@@ -120,20 +149,49 @@ void Mark(Event event, u64 a, u64 b) {
         };
     }
     writers.fetch_sub(1);
-    const bool full = index + 1 == CAPACITY;
     const bool last_vsync = event == Event::Vsync && vsyncs_left.fetch_sub(1) == 1;
-    if (!full && !last_vsync) {
+    // Guest state events can be recorded with the kernel scheduler lock held. Defer the
+    // dump to VSync even when full: formatting thousands of lines under that lock would
+    // stall the threads whose wakeup latency we are measuring. Entries stay bounded.
+    const bool full_at_vsync = event == Event::Vsync && index + 1 >= CAPACITY;
+    if (!full_at_vsync && !last_vsync) {
         return;
     }
-    bool expected = true;
-    if (!active.compare_exchange_strong(expected, false)) {
+    auto expected = CaptureState::Recording;
+    if (!capture_state.compare_exchange_strong(expected, CaptureState::Saving)) {
         return;
     }
+    // Publish Saving before disabling marks: T must not reset entries while Dump reads them.
+    active.store(false);
+    Core::JitPrewarm::capture_active.store(false, std::memory_order_relaxed);
     // Let marks already past the active check finish writing.
     while (writers.load() != 0) {
         std::this_thread::yield();
     }
+    // Sample before Dump: writing thousands of trace lines is outside the measured capture.
+    const auto misses_end = Core::JitPrewarm::ReadMisses();
+    const auto jit_end = Dynarmic::JitProfile::Read();
+    for (size_t core = 0; core < misses_end.size(); ++core) {
+        for (size_t reason = 0; reason < Core::JitPrewarm::MissNames.size(); ++reason) {
+            const auto count = misses_end[core][reason] - misses_begin[core][reason];
+            if (count != 0) {
+                LOG_INFO(Render, "Frame trace JIT misses capture {} core {} {}: {} blocks",
+                         capture_id.load(), core, Core::JitPrewarm::MissNames[reason], count);
+            }
+        }
+    }
+    if (jit_profiled) {
+        const u32 id = capture_id.load();
+        LOG_INFO(Render, "Frame trace JIT capture {}: elapsed sums across cores; phases overlap; "
+                         "calls crossing borders are included at completion", id);
+        for (size_t i = 0; i < jit_end.size(); ++i) {
+            LOG_INFO(Render, "Frame trace JIT capture {} {}: {} calls, {:.3f} ms", id,
+                     Dynarmic::JitProfile::names[i], jit_end[i].calls - jit_begin[i].calls,
+                     (jit_end[i].ns - jit_begin[i].ns) / 1.0e6);
+        }
+    }
     Dump(std::min<u32>(next_entry.load(), static_cast<u32>(CAPACITY)));
+    capture_state.store(full_at_vsync && !last_vsync ? CaptureState::Truncated : CaptureState::Saved);
 }
 
 } // namespace VideoCore::FrameTrace
