@@ -85,6 +85,12 @@ public:
     void CompleteGcDownload(Image& image);
     void ReleaseGcReadback(StagingBufferRef& map);
     void TickFrame();
+    [[nodiscard]] CacheMemorySnapshot BeginMemoryGuardFrame() {
+        pressure_snapshot = device.QueryCacheMemoryPressure();
+        pressure_level = cache_pressure.Update(pressure_snapshot);
+        pressure_sampled = true;
+        return pressure_snapshot;
+    }
     u64 GetDeviceLocalMemory() const;
     u64 GetDeviceMemoryUsage() const;
     std::optional<VideoCommon::TextureGcPolicy> GetTextureGcPolicy(bool second_pass);

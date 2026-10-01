@@ -99,7 +99,8 @@ StagingBufferRef StagingBufferPool::Request(size_t size, MemoryUsage usage, bool
         }
         pending_upload_bytes += size;
     }
-    if (!deferred && usage == MemoryUsage::Upload && size <= MAX_STREAM_REQUEST) {
+    if (!deferred && usage == MemoryUsage::Upload && size <= MAX_STREAM_REQUEST &&
+        stream_buffer && !stream_retiring && size <= stream_buffer_size) {
         return GetStreamBuffer(size);
     }
     return GetStagingBuffer(size, usage, deferred);
@@ -120,6 +121,70 @@ void StagingBufferPool::TickFrame() {
     current_delete_level = (current_delete_level + 1) % NUM_LEVELS;
     ReleaseLevel(upload_cache, current_delete_level);
     ReleaseLevel(download_cache, current_delete_level);
+}
+
+bool StagingBufferPool::GuardMemory(const CacheMemorySnapshot& snapshot) {
+    bool released_ring = false;
+    if (ring_retry_frames) {
+        --ring_retry_frames;
+    }
+    const auto decision = memory_guard.Update(snapshot.app_used, snapshot.app_limit);
+    if (decision.stream_bytes != stream_target) {
+        LOG_INFO(Render, "D3D12: memory guard headroom={} KiB, staging target {} -> {} MiB",
+                 snapshot.AppFree() / 1024, stream_target / 1_MiB,
+                 decision.stream_bytes / 1_MiB);
+        stream_target = decision.stream_bytes;
+        stream_retiring = stream_buffer && stream_target != stream_buffer_size;
+    }
+    // Only the last-resort branch waits. Ordinary reclamation never flushes or waits for the GPU.
+    // Stop issuing ring references before retiring it, including references to unsubmitted work.
+    if (decision.emergency && stream_buffer && !emergency_finished) {
+        scheduler.Finish();
+        emergency_finished = true;
+    }
+    if (!decision.emergency) {
+        emergency_finished = false;
+    }
+    if (stream_retiring &&
+        *std::max_element(sync_ticks.begin(), sync_ticks.end()) <= scheduler.KnownGpuTick()) {
+        const u64 released = stream_buffer_size;
+        stream_buffer.Reset();
+        released_ring = true;
+        stream_pointer = {};
+        stream_buffer_size = region_size = iterator = 0;
+        sync_ticks.fill(0);
+        stream_retiring = false;
+        LOG_INFO(Render, "D3D12: memory guard retired staging ring ({} MiB released)",
+                 released / 1_MiB);
+    }
+    // Never overlap old/new rings, or allocate a replacement on the emergency path. Freed bytes
+    // may still be reflected in the OS snapshot until the next frame, so retry without forcing GC.
+    if (!stream_buffer && stream_target && !ring_retry_frames && snapshot.app_limit &&
+        snapshot.AppFree() >= stream_target + 64_MiB) {
+        try {
+            stream_buffer = CreateMappedBuffer(device.Get(), stream_target,
+                                                D3D12_HEAP_TYPE_UPLOAD, stream_pointer);
+            stream_buffer_size = stream_target;
+            region_size = stream_target / NUM_SYNCS;
+            logged_stream_use = false;
+            LOG_INFO(Render, "D3D12: memory guard staging restored at {} MiB",
+                     stream_target / 1_MiB);
+        } catch (const std::exception& e) {
+            // Dedicated uploads remain available; avoid repeatedly attempting optional growth.
+            ring_retry_frames = 120;
+            LOG_WARNING(Render, "D3D12: memory guard ring allocation deferred: {}", e.what());
+        }
+    }
+    if (decision.trim) {
+        // Bounded sweep: at most 16 entries in each of four buckets per frame. ReleaseLevel also
+        // checks fence completion and pinned ownership. It does not allocate scratch containers.
+        for (unsigned i = 0; i < (decision.emergency ? NUM_LEVELS : 4); ++i) {
+            const auto level = NUM_LEVELS - 1 - guard_trim_cursor++ % NUM_LEVELS;
+            ReleaseLevel(upload_cache, level);
+            ReleaseLevel(download_cache, level);
+        }
+    }
+    return released_ring;
 }
 
 StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
@@ -259,24 +324,15 @@ StagingBufferPool::StagingBuffersCache& StagingBufferPool::GetCache(MemoryUsage 
 }
 
 void StagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2) {
-    constexpr size_t deletions_per_tick = 16;
     auto& staging = cache[log2];
-    auto& entries = staging.entries;
-    const size_t begin_offset = staging.delete_index;
-    const size_t end_offset = std::min(begin_offset + deletions_per_tick, entries.size());
-    const auto begin = entries.begin() + begin_offset;
-    const auto end = entries.begin() + end_offset;
-    entries.erase(std::remove_if(begin, end,
-                                 [this](const StagingBuffer& entry) {
-                                     return !entry.deferred && scheduler.IsFree(entry.tick);
-                                 }),
-                  end);
-    const size_t new_size = entries.size();
-    staging.delete_index += deletions_per_tick;
-    if (staging.delete_index >= new_size) {
-        staging.delete_index = 0;
+    if (staging.entries.empty()) {
+        return;
     }
-    if (staging.iterate_index > new_size) {
+    const u64 completed = scheduler.KnownGpuTick();
+    if (ReclaimRetiredStaging(staging.entries, staging.delete_index,
+                             [completed](const StagingBuffer& entry) {
+                                 return !entry.deferred && entry.tick <= completed;
+                             })) {
         staging.iterate_index = 0;
     }
 }

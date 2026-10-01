@@ -194,6 +194,7 @@ private:
     Scheduler& scheduler;
     StagingBufferPool& staging;
     BufferCacheRuntime& buffer_runtime;
+    TextureCacheRuntime& texture_runtime;
     DescriptorRing& descriptor_ring;
     SamplerHeap& sampler_heap;
     BlitImageHelper& blit_helper;

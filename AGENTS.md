@@ -535,3 +535,15 @@ Gate final candidato shaders: DXIL immutable compartido por shared_ptr entre PSO
 
 
 GatePC DXILcompartido: Q76s/retorno0; T480completas182760/175587events,FPS56,5/55,p9939,721->41,761 y32,416->40,624,max56,828/48,932ms. Sinmejorageneral.1718PSOsprecargados; cero creacion/WaitBuilt/cacheoutcome enT, ahorroDXIL/hits no medidos. Margen25,918/61,996MiB,GCmax19,251/23,958ms; gapT2GC18,653 conappfree62,070<64MiB compatible recoverysincrono (contadorreadbackoff, no conteo confirmado). OtragapT1WaitD3D12async43,212ms. RenderError0,5BQassert/8unmappedantesT. Parser corrigeforegroundwaitmismotick: host/dequeue necesarios parafaseanidada, fixturepasa. Siguiente margen/GCsync, despuesD3D12/CPUworkers.256/115/5120/T8 intactos, sincommit/Series/60pendientes; detalle enrendimiento.
+
+
+Candidato guard memoria1oct: app-free<=128/64/10MiB reduce staging128/64/0; Finish solo emergencia con ring vivo, fence retirement sin solapar rings. Recupera64 tras120 frames>=256MiB; presupuestos reducidos no regrow256. DXILtrim0/pinned readbacks preservados; staging sweep acotado yswap/pop porIDs estables, heaps vacios/GC existentes. Reutiliza muestra memoriaframe, sinthread/reloj normal; JIT115/core yJob5120 intactos. Harnesspolicy1Mframes/10000buffers yDXILinflight pasan; buildfinal/gate manual pendientes,sincommit. Detalle/fuentes/limites enrendimiento.
+
+
+Gate guard memoria1oct: build incremental UWP final pasa15 operaciones, gitdiffcheck limpio. Harness policy/bounded staging yDXIL trimming pasan. Prueba manual lanzadaPID11496, Job5120MiB verificado,play1/fastmem0/jit_prewarm1/CPUprofile0,T480 yJIT115core. No limite de gameplay; usuarioT/Q. Reclamacionreal/coste/FPS/Series pendientes, sincommit.
+
+
+GatePC memoryguard: Q231s/retorno0,T480 completas181034/186029. Guardactua127,969MiBfree antesT: ring256 retiradoy128 repuesto, capacidad-128MiB real. MargenT93,344/136,520 vs25,918/61,996; FPS56,5/58,25 vs56,5/55,p9938,598/30,355, max63,871/40,592. T1GC43,977ms empeora peortiron, noestabilidadgeneral ni causalidadFPS. Commitmuestreado4986MiBmax,RenderError0,1BQassert+4unmappedantesT. Rama10MiB/Finish/recovery64/overhead/Series pendientes. SiguienteGC largo yD3D12waits;115core/5120/T8conservados,sincommit. Evidencia enrendimiento.
+
+
+Cierre autorizado usuario1oct: pendientes porprioridad documentados en xbox_performance.md: GC/readback43,977ms; cadena D3D12/CPUworkers fueraGC; overhead/ramas64/10/recovery delguard; gateSeries/admissioncontrol/eventoslimite/JITdecommit real. No iniciar nuevo candidato hasta siguiente indicacion.

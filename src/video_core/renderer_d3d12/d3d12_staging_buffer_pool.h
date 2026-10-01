@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "video_core/renderer_d3d12/d3d12_device.h"
+#include "video_core/renderer_d3d12/d3d12_memory_guard.h"
 
 namespace D3D12 {
 
@@ -55,6 +56,10 @@ public:
     }
 
     void TickFrame();
+
+    /// Frame boundary only, with both texture and buffer cache mutexes held.
+    /// Reclaims retired resources; deferred readbacks remain pinned until their owner releases them.
+    [[nodiscard]] bool GuardMemory(const CacheMemorySnapshot& snapshot);
 
     /// Upload bytes requested for the command list being recorded (stream and dedicated).
     [[nodiscard]] u64 PendingUploadBytes() const noexcept;
@@ -115,6 +120,12 @@ private:
     std::array<u64, NUM_SYNCS> sync_ticks{};
 
     bool logged_stream_use = false;
+    MemoryGuardPolicy memory_guard;
+    u64 stream_target = 256ULL * 1024 * 1024;
+    bool stream_retiring{};
+    bool emergency_finished{};
+    unsigned guard_trim_cursor{};
+    unsigned ring_retry_frames{};
 
     StagingBuffersCache upload_cache;
     StagingBuffersCache download_cache;

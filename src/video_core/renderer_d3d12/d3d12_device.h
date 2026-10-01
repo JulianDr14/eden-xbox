@@ -111,6 +111,7 @@ public:
     /// Series ran out at 4.8 of 5 GiB with DXGI still reporting room, 0.2.56). Otherwise the GPU
     /// usage DXGI reports.
     [[nodiscard]] u64 CacheMemoryUsage() const;
+    [[nodiscard]] u64 CacheMemoryUsage(const CacheMemorySnapshot& snapshot) const;
     [[nodiscard]] CacheMemorySnapshot QueryCacheMemoryPressure() const;
 
     /// Signals the queue and returns the value that marks this point.

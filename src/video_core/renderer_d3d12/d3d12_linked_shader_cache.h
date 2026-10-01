@@ -133,6 +133,13 @@ public:
         return retained_bytes;
     }
 
+    /// Compiling entries remain alive. Live PSOs retain their own immutable DXIL references.
+    void SetBudget(size_t budget) {
+        std::scoped_lock lock{mutex};
+        budget_bytes = budget;
+        MakeRoom(0, 0);
+    }
+
 private:
     struct Entry {
         Entry(std::vector<std::uint32_t> key_, size_t bytes_, std::uint64_t used_)
@@ -146,7 +153,8 @@ private:
     };
 
     bool MakeRoom(size_t bytes, size_t count) {
-        while (bytes > budget_bytes - retained_bytes || entries.size() + count > max_entries) {
+        while (retained_bytes > budget_bytes || bytes > budget_bytes - retained_bytes ||
+               entries.size() + count > max_entries) {
             auto oldest = entries.end();
             for (auto it = entries.begin(); it != entries.end(); ++it) {
                 if (it->second->ready &&
@@ -178,7 +186,7 @@ private:
     std::unordered_multimap<std::uint64_t, std::shared_ptr<Entry>> entries;
     size_t retained_bytes{};
     std::uint64_t sequence{};
-    const size_t budget_bytes;
+    size_t budget_bytes;
     const size_t max_entries;
 };
 

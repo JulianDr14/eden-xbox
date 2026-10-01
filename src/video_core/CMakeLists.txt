@@ -509,6 +509,7 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_shader_compiler.h
         renderer_d3d12/d3d12_staging_buffer_pool.cpp
         renderer_d3d12/d3d12_staging_buffer_pool.h
+        renderer_d3d12/d3d12_memory_guard.h
         renderer_d3d12/d3d12_swapchain.cpp
         renderer_d3d12/d3d12_swapchain.h
         renderer_d3d12/d3d12_texture_cache.cpp
