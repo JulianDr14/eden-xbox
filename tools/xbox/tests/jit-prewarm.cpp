@@ -10,6 +10,7 @@
 #include "common/logging.h"
 #include "core/arm/dynarmic/jit_prewarm_profile.h"
 #include "dynarmic/interface/A64/a64.h"
+#include "dynarmic/interface/jit_profile.h"
 
 // Standalone harness links the production UWP Dynarmic library. Fail assertions
 // hard; it does not need the frontend logging service or a kernel instance.
@@ -206,17 +207,25 @@ int main() {
         parallel_jit[n]->SetPC(0x8888); parallel_jit[n]->SetRegister(0, 99);
     }
     parallel_cb[2].code[0] ^= 0x20;
+    Dynarmic::JitProfile::SetEnabled(true);
+    const auto coordinator_compile_ns = Dynarmic::JitProfile::ReadLocalCompileNs();
+    std::array<std::uint64_t, 3> worker_compile_ns{};
     std::atomic<unsigned> entered{}, accepted_parallel{};
     const auto coordinator = std::this_thread::get_id();
     RunOwners({1, 1, 1, 0}, [&](auto core, const Progress& update) {
         entered.fetch_add(1);
         while (entered.load() != 3) std::this_thread::yield();
+        const auto before_compile = Dynarmic::JitProfile::ReadLocalCompileNs();
         if (parallel_jit[core]->PrecompileBlock(learned)) accepted_parallel.fetch_add(1);
+        worker_compile_ns[core] = Dynarmic::JitProfile::ReadLocalCompileNs() - before_compile;
         update(1, 1);
     }, [&](auto done, auto total) {
         assert(std::this_thread::get_id() == coordinator && done <= total && total == 3);
     });
     assert(accepted_parallel.load() == 2);
+    assert(Dynarmic::JitProfile::ReadLocalCompileNs() == coordinator_compile_ns);
+    assert(worker_compile_ns[0] > 0 && worker_compile_ns[1] > 0);
+    Dynarmic::JitProfile::SetEnabled(false);
     for (size_t n = 0; n < parallel_jit.size(); ++n) {
         assert(parallel_jit[n]->GetPC() == 0x8888 && parallel_jit[n]->GetRegister(0) == 99);
         assert(parallel_cb[n].svcs == 0 && parallel_cb[n].writes == 0);

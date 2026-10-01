@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "shader_recompiler/shader_info.h"
+#include "video_core/renderer_d3d12/d3d12_cache_policy.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_resource_allocator.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
@@ -77,9 +78,16 @@ public:
     StagingBufferRef UploadStagingBuffer(size_t size, bool deferred = false);
     StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
+    /// Maintenance readback: false keeps the image until its copy fence completes. CPU-demand
+    /// downloads retain their synchronous path. The returned map is pinned until CompleteGcDownload.
+    bool PrepareGcDownload(Image& image, std::span<const VideoCommon::BufferImageCopy> copies,
+                           StagingBufferRef& map);
+    void CompleteGcDownload(Image& image);
+    void ReleaseGcReadback(StagingBufferRef& map);
     void TickFrame();
     u64 GetDeviceLocalMemory() const;
     u64 GetDeviceMemoryUsage() const;
+    std::optional<VideoCommon::TextureGcPolicy> GetTextureGcPolicy(bool second_pass);
     [[nodiscard]] u64 DepthFeedbackCopies() const noexcept { return depth_feedback_copies; }
     bool CanReportMemoryUsage() const { return true; }
     std::optional<size_t> GetSamplerHeapBudget() const { return SamplerHeap::CAPACITY; }
@@ -133,6 +141,13 @@ private:
     CpuDescriptorAllocator& rtv_descriptors;
     CpuDescriptorAllocator& dsv_descriptors;
     TextureResourceAllocator texture_allocator;
+    CachePressureController cache_pressure;
+    CachePressure pressure_level{};
+    CacheMemorySnapshot pressure_snapshot{};
+    bool pressure_sampled{};
+    u64 gc_pending_bytes{};
+    u64 gc_peak_pending_bytes{};
+    u64 gc_queued{}, gc_ready{}, gc_stale{}, gc_sync{};
     D3D12_CPU_DESCRIPTOR_HANDLE null_rtv{};
     BlitImageHelper* blit_helper{};
     /// Reused by single-layer ASTC uploads. Bands cap the live decode/encode workspace at 40 MiB.
@@ -153,6 +168,7 @@ private:
 };
 
 class Image : public VideoCommon::ImageBase {
+    friend TextureCacheRuntime;
 public:
     Image(TextureCacheRuntime& runtime, const VideoCommon::ImageInfo& info, GPUVAddr gpu_addr,
           VAddr cpu_addr);
@@ -162,7 +178,7 @@ public:
 
     Image(const Image&) = delete;
     Image& operator=(const Image&) = delete;
-    Image(Image&&) noexcept = default;
+    Image(Image&&) noexcept;
     Image& operator=(Image&& other) noexcept;
 
     void UploadMemory(ID3D12Resource* buffer, size_t offset,
@@ -238,6 +254,13 @@ public:
     u64 allocation_tick{};
 
 private:
+    struct GcReadback {
+        TextureCacheRuntime* runtime{};
+        StagingBufferRef map{};
+        u64 tick{}, modification_tick{}, write_version{};
+        ~GcReadback();
+    };
+    std::unique_ptr<GcReadback> gc_readback;
     /// Shared upload implementation. mapped_at_base points at base_offset in a persistently
     /// mapped staging allocation; null asks the implementation to inspect and map the resource.
     void UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* mapped_at_base,

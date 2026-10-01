@@ -20,12 +20,14 @@ namespace {
 
 using namespace Common::Literals;
 
-constexpr u64 STREAM_BUFFER_SIZE = 128_MiB;
+constexpr u64 STREAM_BUFFER_SIZE = 256_MiB;
 /// Largest upload the stream serves; it may span several regions. Larger ones (and deferred ones)
 /// get dedicated buffers. Up to 0.2.50 only one region (8 MiB) was served: a 2048x2048 texture
 /// with mips decoded to RGBA8 (22 MB) then took a new 32 MiB buffer, and a loading screen in
 /// Mario Wonder created a dozen of them in three seconds on top of a nearly full memory budget.
-constexpr u64 MAX_STREAM_REQUEST = STREAM_BUFFER_SIZE / 4;
+// Keep the request cutoff independent of ring capacity so capacity experiments do not also
+// change which uploads use dedicated buffers.
+constexpr u64 MAX_STREAM_REQUEST = 32_MiB;
 /// Uploads at least this large wait for the GPU to release submitted regions instead of
 /// allocating a dedicated buffer; smaller ones never stall the CPU.
 constexpr u64 WAIT_FOR_STREAM_SIZE = 1_MiB;

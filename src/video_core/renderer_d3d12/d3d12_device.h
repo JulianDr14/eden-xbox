@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "video_core/renderer_d3d12/d3d12_cache_policy.h"
+
 #include <atomic>
 #include <string>
 #include <utility>
@@ -109,6 +111,7 @@ public:
     /// Series ran out at 4.8 of 5 GiB with DXGI still reporting room, 0.2.56). Otherwise the GPU
     /// usage DXGI reports.
     [[nodiscard]] u64 CacheMemoryUsage() const;
+    [[nodiscard]] CacheMemorySnapshot QueryCacheMemoryPressure() const;
 
     /// Signals the queue and returns the value that marks this point.
     u64 Signal();

@@ -11,6 +11,7 @@
 
 #include "common/common_types.h"
 #include "video_core/texture_cache/decode_bc.h"
+#include "video_core/texture_cache/bc45_decode.h"
 
 namespace VideoCommon {
 
@@ -73,6 +74,28 @@ void DecompressBlocks(std::span<const u8> input, std::span<u8> output, BufferIma
     const u32 block_width = (std::min)(width, BLOCK_SIZE);
     const u32 block_height = (std::min)(height, BLOCK_SIZE);
     const u32 pitch = width * out_bpp;
+    if constexpr (pixel_format == PixelFormat::BC4_UNORM || pixel_format == PixelFormat::BC5_UNORM) {
+        // Preserve the original cropped-block path for small/odd mip levels. Layers must
+        // each have full block rows; do not merge partial last rows across array layers.
+        if (width != 0 && copy.image_extent.height != 0 && width % 4 == 0 &&
+            copy.image_extent.height % 4 == 0 && copy.buffer_row_length >= width &&
+            copy.buffer_row_length % 4 == 0) {
+            const auto Decode = [&]<bool Signed>() {
+                constexpr unsigned channels = pixel_format == PixelFormat::BC4_UNORM ? 1 : 2;
+                const size_t input_slice = static_cast<size_t>(copy.buffer_row_length) / 4 *
+                                           channels * 8 * (height / 4);
+                const size_t output_slice = static_cast<size_t>(width) * height * channels;
+                for (u32 slice = 0; slice < depth; ++slice) {
+                    Bc45::DecodeFullBlocks<channels, Signed>(input.data() + slice * input_slice,
+                        output.data() + slice * output_slice, width, height, copy.buffer_row_length);
+                }
+            };
+            if (is_signed) Decode.template operator()<true>();
+            else Decode.template operator()<false>();
+            return;
+        }
+    }
+
     size_t input_offset = 0;
     size_t output_offset = 0;
     for (u32 slice = 0; slice < depth; ++slice) {

@@ -30,7 +30,7 @@ struct StagingBufferRef {
 };
 
 /// CPU-visible memory for uploads and downloads, a port of the Vulkan backend's pool:
-///  - small uploads come from a persistently mapped 128 MiB stream ring split in NUM_SYNCS regions,
+///  - small uploads come from a persistently mapped stream ring split in NUM_SYNCS regions,
 ///    each retired by the tick that last used it;
 ///  - larger or deferred requests get dedicated buffers, bucketed by power-of-two size and reused
 ///    once their tick is done.
