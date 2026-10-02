@@ -66,13 +66,13 @@ int main() {
 
     // Menu model.
     GameMenu menu{{ConsoleControllerStyle::Auto, false, 0.12f}};
-    check(menu.Lines().size() == GameMenu::Count && menu.Selected() == GameMenu::Continue);
+    check(menu.Lines().size() == 5 && menu.SelectedItem() == GameMenu::Continue);
     check(menu.Apply(MenuAction::Confirm) == GameMenuResult::Resume);
     check(menu.Apply(MenuAction::Back) == GameMenuResult::Resume);
     check(menu.Apply(MenuAction::Toggle) == GameMenuResult::Resume);
-    check(menu.Apply(MenuAction::Up) == GameMenuResult::None && menu.Selected() == GameMenu::Library);
+    check(menu.Apply(MenuAction::Up) == GameMenuResult::None && menu.SelectedItem() == GameMenu::Library);
     check(menu.Apply(MenuAction::Confirm) == GameMenuResult::Library);
-    check(menu.Apply(MenuAction::Down) == GameMenuResult::None && menu.Selected() == GameMenu::Continue);
+    check(menu.Apply(MenuAction::Down) == GameMenuResult::None && menu.SelectedItem() == GameMenu::Continue);
     menu.Apply(MenuAction::Down);
     check(menu.Apply(MenuAction::Right) == GameMenuResult::SettingsChanged);
     check(menu.Settings().style == ConsoleControllerStyle::Pro);
@@ -91,5 +91,15 @@ int main() {
         for (const char c : line)
             check((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
                   std::string_view{" <>%-./"}.find(c) != std::string_view::npos);
+
+    // PC: full screen sits above "back to the library"; the Series menu never shows it.
+    GameMenu pc{{ConsoleControllerStyle::Auto, false, 0.12f, true, false}};
+    check(pc.Lines().size() == 6 && pc.Lines()[4].find("PANTALLA COMPLETA  < NO >") == 0);
+    pc.Apply(MenuAction::Up);
+    pc.Apply(MenuAction::Up);
+    check(pc.SelectedItem() == GameMenu::FullScreen && pc.Selected() == 4);
+    check(pc.Apply(MenuAction::Confirm) == GameMenuResult::FullScreen && pc.Settings().fullscreen);
+    check(pc.Apply(MenuAction::Right) == GameMenuResult::FullScreen && !pc.Settings().fullscreen);
+    for (const auto& line : menu.Lines()) check(line.find("PANTALLA") == std::string::npos);
     std::puts("game menu: combo hold/stagger/tap/held passthrough, navigation and settings PASS");
 }

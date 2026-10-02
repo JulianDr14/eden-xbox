@@ -85,16 +85,23 @@ struct GameMenuSettings {
     ConsoleControllerStyle style{ConsoleControllerStyle::Auto};
     bool swap_face_buttons{};
     float deadzone{0.12f};
+    /// PC only: the window can switch to full screen from the menu (the Series always is).
+    bool can_fullscreen{};
+    bool fullscreen{};
 };
 
-enum class GameMenuResult : std::uint8_t { None, Resume, Library, SettingsChanged };
+enum class GameMenuResult : std::uint8_t { None, Resume, Library, SettingsChanged, FullScreen };
 
 /// The menu's items and cursor. Text is upper-case ASCII: the renderer's overlay font.
 class GameMenu {
 public:
-    enum Item : std::size_t { Continue, Style, FaceButtons, Deadzone, Library, Count };
+    enum Item : std::size_t { Continue, Style, FaceButtons, Deadzone, FullScreen, Library };
 
-    explicit GameMenu(GameMenuSettings settings_) : settings{settings_} {}
+    explicit GameMenu(GameMenuSettings settings_) : settings{settings_} {
+        items = {Continue, Style, FaceButtons, Deadzone};
+        if (settings.can_fullscreen) items.push_back(FullScreen);
+        items.push_back(Library);
+    }
 
     GameMenuResult Apply(MenuAction action) {
         switch (action) {
@@ -102,10 +109,10 @@ public:
         case MenuAction::Back:
             return GameMenuResult::Resume;
         case MenuAction::Up:
-            selected = (selected + Count - 1) % Count;
+            selected = (selected + items.size() - 1) % items.size();
             return GameMenuResult::None;
         case MenuAction::Down:
-            selected = (selected + 1) % Count;
+            selected = (selected + 1) % items.size();
             return GameMenuResult::None;
         case MenuAction::Left:
         case MenuAction::Right:
@@ -116,16 +123,14 @@ public:
     }
 
     [[nodiscard]] std::vector<std::string> Lines() const {
-        return {"CONTINUAR",
-                "LA CONSOLA LO VE COMO  < " + StyleName(settings.style) + " >",
-                std::string{"BOTONES A B X Y  < "} +
-                    (settings.swap_face_buttons ? "POR POSICION" : "POR LETRA") + " >",
-                "ZONA MUERTA  < " + std::to_string(static_cast<int>(settings.deadzone * 100 + 0.5f)) +
-                    "% >",
-                "VOLVER AL INICIO"};
+        std::vector<std::string> lines;
+        for (const Item item : items) lines.push_back(Line(item));
+        return lines;
     }
 
+    /// Row of the cursor, as drawn.
     [[nodiscard]] std::size_t Selected() const { return selected; }
+    [[nodiscard]] Item SelectedItem() const { return items[selected]; }
     [[nodiscard]] const GameMenuSettings& Settings() const { return settings; }
 
     static std::string StyleName(ConsoleControllerStyle style) {
@@ -140,9 +145,29 @@ public:
     }
 
 private:
+    std::string Line(Item item) const {
+        switch (item) {
+        case Continue:
+            return "CONTINUAR";
+        case Style:
+            return "LA CONSOLA LO VE COMO  < " + StyleName(settings.style) + " >";
+        case FaceButtons:
+            return std::string{"BOTONES A B X Y  < "} +
+                   (settings.swap_face_buttons ? "POR POSICION" : "POR LETRA") + " >";
+        case Deadzone:
+            return "ZONA MUERTA  < " +
+                   std::to_string(static_cast<int>(settings.deadzone * 100 + 0.5f)) + "% >";
+        case FullScreen:
+            return std::string{"PANTALLA COMPLETA  < "} + (settings.fullscreen ? "SI" : "NO") + " >";
+        case Library:
+            return "VOLVER AL INICIO";
+        }
+        return {};
+    }
+
     GameMenuResult Change(MenuAction action) {
         const bool back = action == MenuAction::Left;
-        switch (selected) {
+        switch (SelectedItem()) {
         case Continue:
             return action == MenuAction::Confirm ? GameMenuResult::Resume : GameMenuResult::None;
         case Library:
@@ -161,12 +186,15 @@ private:
             settings.deadzone = steps[i];
             return GameMenuResult::SettingsChanged;
         }
-        default:
-            return GameMenuResult::None;
+        case FullScreen:
+            settings.fullscreen = !settings.fullscreen;
+            return GameMenuResult::FullScreen;
         }
+        return GameMenuResult::None;
     }
 
     GameMenuSettings settings;
-    std::size_t selected{Continue};
+    std::vector<Item> items;
+    std::size_t selected{};
 };
 } // namespace EdenXbox
