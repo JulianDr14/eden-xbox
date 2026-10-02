@@ -15,6 +15,7 @@
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_d3d12/d3d12_cache_policy.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
+#include "video_core/renderer_d3d12/d3d12_gc_readback.h"
 #include "video_core/renderer_d3d12/d3d12_resource_allocator.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
 #include "video_core/texture_cache/image_view_base.h"
@@ -260,10 +261,18 @@ public:
     u64 allocation_tick{};
 
 private:
+    struct GcCopy {
+        GcReadbackRegion rows;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+        u32 subresource;
+    };
     struct GcReadback {
         TextureCacheRuntime* runtime{};
         StagingBufferRef map{};
         u64 tick{}, modification_tick{}, write_version{};
+        std::vector<GcCopy> copies;
+        u64 footprint_bytes{};
+        bool compacted{};
         ~GcReadback();
     };
     std::unique_ptr<GcReadback> gc_readback;
@@ -278,6 +287,9 @@ private:
     [[nodiscard]] u64 TransferBytes(std::span<const VideoCommon::BufferImageCopy> copies) const;
     /// False (logged once) when this image's data cannot be transferred yet.
     [[nodiscard]] bool CanTransfer() const;
+    [[nodiscard]] u64 PlanGcDownload(std::span<const VideoCommon::BufferImageCopy> copies,
+                                     std::vector<GcCopy>& plan) const;
+    void RecordGcDownload(const StagingBufferRef& map, std::span<const GcCopy> plan);
     /// Copies the texels between the image and its reinterpreted copy through a buffer.
     void RefreshReinterpreted();
     void WriteBackReinterpreted();

@@ -609,6 +609,8 @@ void TextureCacheRuntime::ReleaseGcReadback(StagingBufferRef& map) {
 bool TextureCacheRuntime::PrepareGcDownload(Image& image,
                                            std::span<const BufferImageCopy> copies,
                                            StagingBufferRef& map) {
+    const VideoCore::FrameTrace::ScopedSpan trace_prepare{
+        VideoCore::FrameTrace::Event::TextureGcPrepare, image.gpu_addr};
     constexpr u64 PendingBudget = 8ULL * 1024 * 1024;
     constexpr u64 RecoveryHeadroom = 64ULL * 1024 * 1024;
     const bool recover_now = pressure_snapshot.app_limit != 0 &&
@@ -625,11 +627,34 @@ bool TextureCacheRuntime::PrepareGcDownload(Image& image,
     if (pending) {
         if (!scheduler.IsFree(pending->tick)) {
             if (!recover_now) return false;
-            scheduler.Wait(pending->tick);
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcSyncReason, 0, image.gpu_addr);
+            {
+                const VideoCore::FrameTrace::ScopedSpan trace_wait{
+                    VideoCore::FrameTrace::Event::TextureGcWait, image.gpu_addr};
+                scheduler.Wait(pending->tick);
+            }
             ++gc_sync;
             VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 3, image.gpu_addr);
         }
+        if (!pending->copies.empty() && !pending->compacted) {
+            const VideoCore::FrameTrace::ScopedSpan trace_compact{
+                VideoCore::FrameTrace::Event::TextureGcCompact, image.gpu_addr};
+            // Map again after the fence to invalidate CPU caches where needed.
+            // The pool's persistent map keeps the pointer alive after this nested Unmap.
+            const D3D12_RANGE read_range{pending->map.offset,
+                                        pending->map.offset + pending->footprint_bytes};
+            void* data{};
+            ThrowIfFailed(pending->map.buffer->Map(0, &read_range, &data), "Map GC footprint readback");
+            const std::span<u8> bytes{static_cast<u8*>(data) + pending->map.offset,
+                                      pending->map.mapped_span.size()};
+            for (const auto& copy : pending->copies) CompactGcReadback(bytes, copy.rows);
+            const D3D12_RANGE written{pending->map.offset,
+                                       pending->map.offset + image.unswizzled_size_bytes};
+            pending->map.buffer->Unmap(0, &written);
+            pending->compacted = true;
+        }
         map = pending->map;
+        map.mapped_span = map.mapped_span.first(image.unswizzled_size_bytes);
         ++gc_ready;
         VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 1, image.gpu_addr);
         return true;
@@ -638,24 +663,54 @@ bool TextureCacheRuntime::PrepareGcDownload(Image& image,
     // Large/unsupported transfers and real allocation emergencies preserve the original
     // recovery path. Bound pinned readback memory by the dedicated pool's actual power-of-two size.
     if (recover_now || size > PendingBudget || !image.CanTransfer()) {
-        map = DownloadStagingBuffer(size);
-        image.DownloadMemory(map, copies);
-        Finish();
+        VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcSyncReason,
+                                    recover_now ? 1 : size > PendingBudget ? 2 : 3, image.gpu_addr);
+        {
+            const VideoCore::FrameTrace::ScopedSpan trace_staging{
+                VideoCore::FrameTrace::Event::TextureGcStaging, image.gpu_addr};
+            map = DownloadStagingBuffer(size);
+        }
+        {
+            const VideoCore::FrameTrace::ScopedSpan trace_copy{
+                VideoCore::FrameTrace::Event::TextureGcCopy, image.gpu_addr};
+            image.DownloadMemory(map, copies);
+        }
+        {
+            const VideoCore::FrameTrace::ScopedSpan trace_wait{
+                VideoCore::FrameTrace::Event::TextureGcWait, image.gpu_addr};
+            Finish();
+        }
         ++gc_sync;
         VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 3, image.gpu_addr);
         return true;
     }
-    const u64 reserved = std::bit_ceil(std::max<u64>(size, 1));
+    auto readback = std::make_unique<Image::GcReadback>();
+    readback->footprint_bytes = image.PlanGcDownload(copies, readback->copies);
+    const u64 allocation_size = std::max(size, readback->footprint_bytes);
+    const u64 reserved = std::bit_ceil(std::max<u64>(allocation_size, 1));
     if (reserved > PendingBudget - gc_pending_bytes) {
         VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 4, image.gpu_addr);
         return false;
     }
-    auto readback = std::make_unique<Image::GcReadback>();
     readback->runtime = this;
-    readback->map = DownloadStagingBuffer(size, true);
+    {
+        const VideoCore::FrameTrace::ScopedSpan trace_staging{
+            VideoCore::FrameTrace::Event::TextureGcStaging, image.gpu_addr};
+        readback->map = DownloadStagingBuffer(allocation_size, true);
+    }
     gc_pending_bytes += 1ULL << readback->map.log2_level;
     gc_peak_pending_bytes = std::max(gc_peak_pending_bytes, gc_pending_bytes);
-    image.DownloadMemory(readback->map, copies);
+    {
+        const VideoCore::FrameTrace::ScopedSpan trace_copy{
+            VideoCore::FrameTrace::Event::TextureGcCopy, image.gpu_addr};
+        if (readback->copies.empty()) {
+            image.DownloadMemory(readback->map, copies);
+        } else {
+            image.RecordGcDownload(readback->map, readback->copies);
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcFootprint,
+                                        readback->footprint_bytes, image.gpu_addr);
+        }
+    }
     // DownloadMemory can write back a reinterpreted view; capture the version AFTER recording.
     readback->write_version = image.write_version;
     readback->modification_tick = image.modification_tick;
@@ -699,7 +754,8 @@ std::optional<VideoCommon::TextureGcPolicy> TextureCacheRuntime::GetTextureGcPol
                                     static_cast<u64>(pressure_level));
     }
     if (!pressure_snapshot.Known()) return std::nullopt;
-    return CachePressureController::Policy(pressure_level, second_pass);
+    return CachePressureController::Policy(pressure_level, second_pass,
+        CachePressureController::RequiresImmediateRecovery(pressure_snapshot));
 }
 u64 TextureCacheRuntime::GetDeviceLocalMemory() const { return device.CacheMemoryBudget(); }
 u64 TextureCacheRuntime::GetDeviceMemoryUsage() const {
@@ -1741,6 +1797,64 @@ void Image::DownloadMemory(std::span<ID3D12Resource*> buffers, std::span<size_t>
         if (promoted) {
             DecayIfDefault(commands, buffer, D3D12_RESOURCE_STATE_COPY_DEST);
         }
+    }
+}
+
+u64 Image::PlanGcDownload(std::span<const BufferImageCopy> copies,
+                           std::vector<GcCopy>& plan) const {
+    constexpr u64 Budget = 8ULL * 1024 * 1024;
+    constexpr size_t MaxRegions = 256;
+    const auto fallback = [&plan]() -> u64 { plan.clear(); return 0; };
+    if (!CanTransfer() || IsDepthStencilPlanar() || info.num_samples > 1 ||
+        format.copy_format != info.format || copies.empty()) return fallback();
+    const auto desc = resource->GetDesc();
+    u64 source_end = 0, tight_end = 0;
+    for (const auto& copy : copies) {
+        if (copy.buffer_offset != tight_end || copy.image_offset.x != 0 ||
+            copy.image_offset.y != 0 || copy.image_offset.z != 0) return fallback();
+        const auto layout = Layout(copy);
+        if (layout.tight_slice != u64{layout.row_bytes} * layout.rows) return fallback();
+        const u32 layers = static_cast<u32>(std::max(1, copy.image_subresource.num_layers));
+        if (layers > MaxRegions - plan.size()) return fallback();
+        for (u32 layer = 0; layer < layers; ++layer) {
+            const u32 subresource = Subresource(copy.image_subresource.base_level,
+                copy.image_subresource.base_layer + static_cast<s32>(layer));
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+            u32 rows{};
+            u64 row_bytes{};
+            runtime->device.Get()->GetCopyableFootprints(&desc, subresource, 1,
+                                                         Common::AlignUp(source_end, u64{512}),
+                                                         &footprint, &rows, &row_bytes, nullptr);
+            if (footprint.Footprint.Width != layout.width ||
+                footprint.Footprint.Height != layout.height ||
+                footprint.Footprint.Depth != layout.depth || rows != layout.rows ||
+                row_bytes != layout.row_bytes) return fallback();
+            const auto region = PlanGcReadbackRegion(source_end, tight_end, layout.row_bytes,
+                footprint.Footprint.RowPitch, rows, layout.depth, Budget);
+            if (!region || region->source_offset != footprint.Offset ||
+                region->tight_bytes > unswizzled_size_bytes) return fallback();
+            plan.push_back({*region, footprint, subresource});
+            source_end = region->source_offset + region->source_bytes;
+            tight_end += region->tight_bytes;
+            if (tight_end > unswizzled_size_bytes) return fallback();
+        }
+        if (tight_end - copy.buffer_offset != copy.buffer_size) return fallback();
+    }
+    return source_end;
+}
+
+void Image::RecordGcDownload(const StagingBufferRef& map, std::span<const GcCopy> plan) {
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureDownloads, 1);
+    Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    auto* const commands = runtime->scheduler.CommandList();
+    for (const auto& copy : plan) {
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::TextureDownloadBytes, copy.rows.tight_bytes);
+        const D3D12_TEXTURE_COPY_LOCATION src{.pResource = resource.Get(),
+            .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, .SubresourceIndex = copy.subresource};
+        D3D12_TEXTURE_COPY_LOCATION dst{.pResource = map.buffer,
+            .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, .PlacedFootprint = copy.footprint};
+        dst.PlacedFootprint.Offset += map.offset;
+        commands->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     }
 }
 
@@ -3075,6 +3189,56 @@ void TextureCacheRuntime::RunSelfTest() {
             throw std::runtime_error{"GC deferred readback/move mismatch"};
         CompleteGcDownload(image);
         if (gc_pending_bytes != 0) throw std::runtime_error{"GC move leaked staging"};
+        const auto gate_footprints = [this](VideoCommon::ImageInfo test_info) {
+            Image test_image{*this, test_info, 0, 0};
+            const auto copies = FullDownloadCopies(test_info);
+            const size_t size = test_image.unswizzled_size_bytes;
+            auto input = UploadStagingBuffer(size);
+            for (size_t i = 0; i < size; ++i) input.mapped_span[i] = static_cast<u8>(i * 37 + 11);
+            test_image.UploadMemory(input, copies);
+            test_image.flags &= ~VideoCommon::ImageFlagBits::CpuModified;
+            StagingBufferRef output{};
+            if (PrepareGcDownload(test_image, copies, output) || !test_image.gc_readback ||
+                test_image.gc_readback->copies.empty())
+                throw std::runtime_error{"GC full-subresource footprint plan was not used"};
+            Finish();
+            if (!PrepareGcDownload(test_image, copies, output) || output.mapped_span.size() != size ||
+                !std::equal(input.mapped_span.begin(), input.mapped_span.begin() + size,
+                            output.mapped_span.begin()))
+                throw std::runtime_error{"GC array/mip/volume footprint bytes mismatch"};
+            // Consumption is idempotent while the same token remains valid.
+            if (!PrepareGcDownload(test_image, copies, output) ||
+                !std::equal(input.mapped_span.begin(), input.mapped_span.begin() + size,
+                            output.mapped_span.begin()))
+                throw std::runtime_error{"GC footprint compacted twice"};
+            CompleteGcDownload(test_image);
+        };
+        auto array_info = info;
+        array_info.format = PixelFormat::B10G11R11_FLOAT;
+        array_info.size = {127, 63, 1};
+        array_info.resources = {.levels = 5, .layers = 3};
+        gate_footprints(array_info);
+        auto volume_info = info;
+        volume_info.type = ImageType::e3D;
+        volume_info.size = {13, 7, 3};
+        volume_info.resources = {.levels = 3, .layers = 1};
+        gate_footprints(volume_info);
+        auto bc_info = info;
+        bc_info.format = PixelFormat::BC1_RGBA_UNORM;
+        bc_info.size = {64, 32, 1};
+        bc_info.resources = {.levels = 3, .layers = 1};
+        gate_footprints(bc_info);
+        // Xbox BC arrays are CPU decoded before UploadMemory. Their readback
+        // representation differs from guest BC bytes and must retain the fallback.
+        bc_info.resources.layers = 2;
+        Image decoded_bc_array{*this, bc_info, 0, 0};
+        if (decoded_bc_array.format.copy_format != bc_info.format) {
+            std::vector<Image::GcCopy> rejected;
+            if (decoded_bc_array.PlanGcDownload(FullDownloadCopies(bc_info), rejected) != 0 ||
+                !rejected.empty())
+                throw std::runtime_error{"GC accepted decoded BC array as raw footprints"};
+        }
+        LOG_INFO(Render, "D3D12: GC direct footprint gate passed (B10 arrays/mips, RGBA8 volume, BC1, idempotent in-place compact)");
 
         if (PrepareGcDownload(image, std::span{&copy, 1}, gc_map))
             throw std::runtime_error{"GC stale test was not deferred"};

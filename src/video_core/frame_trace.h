@@ -51,6 +51,17 @@ enum class Event : u8 {
     TextureHeapFree, ///< a = total reusable free bytes, b = largest free range across heap classes
     TextureHeapPending, ///< a = bytes pending fence retirement, b = pinned GC readback bytes
     TextureGcReadback, ///< a = 0 queued, 1 ready, 2 stale, 3 sync fallback, 4 budget deferred; b = address
+    TextureGcPrepare, ///< a = prepare elapsed us>=200, b = address; contains staging/copy/wait
+    TextureGcStaging, ///< a = staging allocation elapsed us>=200, b = address
+    TextureGcCopy, ///< a = copy recording elapsed us>=200, b = address; not GPU duration
+    TextureGcWait, ///< a = submission + GPU fence wait us>=200, b = address
+    TextureGcSwizzle, ///< a = swizzle + guest memory write elapsed us>=200, b = address
+    TextureGcRelease, ///< a = untrack/unregister/delete elapsed us>=200, b = address
+    TextureGcCompact, ///< a = post-fence CPU footprint compaction us>=200, b = address
+    TextureGcFootprint, ///< a = padded readback bytes; fast path copied one region per subresource
+    TextureGcSyncReason, ///< a =0 pending recovery/1 new recovery/2 >8MiB/3 unsupported, b = address
+    TextureGcImageInfo, ///< a = readback bytes, b = address
+    TextureGcImageFormat, ///< a = PixelFormat, b = address
     TextureUploadStaging, ///< a = elapsed us >=200, b = guest GPU address
     TextureUploadRead, ///< guest-memory read/map elapsed; same payload as staging
     TextureUploadUnswizzle, ///< CPU unswizzle elapsed, may contain memory access
@@ -151,12 +162,7 @@ inline constexpr u64 SignallingGuest = 79;
     case Event::GuestHostCpuWindow:
     case Event::GuestIpcLock:
     case Event::TextureCreate:
-    case Event::TextureEvict:
-    case Event::TextureHeapUsage:
-    case Event::TextureHeapFree:
-    case Event::TextureHeapPending:
     case Event::TextureGcPressure:
-    case Event::TextureGcReadback:
     case Event::TextureUploadInfo:
     case Event::TextureUploadFormat:
     case Event::TextureUploadStaging:

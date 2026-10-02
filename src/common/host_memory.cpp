@@ -189,6 +189,25 @@ static void GetFuncAddress(Common::DynamicLibrary& dll, const char* name, T& pfn
     }
 }
 
+// Map/MapView also compile on desktop Windows. Their accounting must share the
+// same platform scope even though hybrid fastmem is initialized only in UWP.
+namespace {
+std::atomic<u64> g_fastmem_canonical_bytes{0};
+std::atomic<u64> g_fastmem_alias_bytes{0};
+std::atomic<u64> g_fastmem_alias_budget{0};
+std::atomic<u64> g_fastmem_guest_bytes{0};
+std::atomic<u64> g_fastmem_skipped_bytes{0};
+std::atomic<u64> g_fastmem_map_failures{0};
+std::atomic<u64> g_fastmem_hot_offset{0};
+std::atomic<u64> g_fastmem_hot_size_actual{0};
+std::atomic<u64> g_fastmem_request_bytes{0};
+std::atomic<u64> g_fastmem_request_min{~u64{0}};
+std::atomic<u64> g_fastmem_request_max{0};
+constexpr size_t FastmemHistogramShift = 26;
+constexpr size_t FastmemHistogramBuckets = 64;
+std::array<std::atomic<u64>, FastmemHistogramBuckets> g_fastmem_request_histogram{};
+} // namespace
+
 #ifdef HOST_MEMORY_USE_FROM_APP
 // Demand-commit for the Xbox/UWP backing. The backing is PRIVATE memory reserved (MEM_RESERVE) but
 // not eagerly committed — an eager 4 GiB commit busts the Series-S dev-app commit budget, and only
@@ -228,21 +247,6 @@ std::atomic<u64> g_page_retry_saves{0};
 std::atomic<u32> g_last_commit_error{0};
 std::atomic<uintptr_t> g_last_failed_address{0};
 std::atomic<u64> g_last_failed_length{0};
-std::atomic<u64> g_fastmem_canonical_bytes{0};
-std::atomic<u64> g_fastmem_alias_bytes{0};
-std::atomic<u64> g_fastmem_alias_budget{0};
-std::atomic<u64> g_fastmem_guest_bytes{0};
-std::atomic<u64> g_fastmem_skipped_bytes{0};
-std::atomic<u64> g_fastmem_map_failures{0};
-std::atomic<u64> g_fastmem_hot_offset{0};
-std::atomic<u64> g_fastmem_hot_size_actual{0};
-std::atomic<u64> g_fastmem_request_bytes{0};
-std::atomic<u64> g_fastmem_request_min{~u64{0}};
-std::atomic<u64> g_fastmem_request_max{0};
-constexpr size_t FastmemHistogramShift = 26;
-constexpr size_t FastmemHistogramBuckets = 64;
-std::array<std::atomic<u64>, FastmemHistogramBuckets> g_fastmem_request_histogram{};
-
 bool CommitSectionRange(uintptr_t begin, uintptr_t end) {
     if (g_pfn_virtual_alloc_from_app(reinterpret_cast<void*>(begin), end - begin, MEM_COMMIT,
                                      PAGE_READWRITE)) {

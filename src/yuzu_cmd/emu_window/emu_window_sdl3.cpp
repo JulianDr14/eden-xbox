@@ -6,6 +6,11 @@
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_timer.h>
+#include <cstdlib>
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#endif
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -15,6 +20,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/perf_stats.h"
+#include "video_core/frame_trace.h"
 #include "hid_core/hid_core.h"
 #include "input_common/drivers/keyboard.h"
 #include "input_common/drivers/mouse.h"
@@ -33,7 +39,30 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
     titlebar_timer = SDL_AddTimer(2000, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {
         auto* this_ = (EmuWindow_SDL3*)userdata;
         auto const results = this_->system.GetAndResetPerfStats();
-        auto const title = fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname, Common::g_scm_branch, Common::g_scm_desc, results.average_game_fps, results.emulation_speed * 100.0f);
+#ifdef _WIN32
+        static const bool comparison = std::getenv("EDEN_VULKAN_COMPARE_USER_DIR") != nullptr;
+        if (comparison) {
+            PROCESS_MEMORY_COUNTERS_EX memory{};
+            memory.cb = sizeof(memory);
+            if (GetProcessMemoryInfo(GetCurrentProcess(),
+                                     reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),
+                                     sizeof(memory))) {
+                LOG_INFO(Frontend, "Vulkan comparison: FPS {:.2f}, speed {:.2f}%, commit {} MiB",
+                         results.average_game_fps, results.emulation_speed * 100.0f,
+                         memory.PrivateUsage >> 20);
+            }
+        }
+#endif
+        auto title = fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname, Common::g_scm_branch, Common::g_scm_desc, results.average_game_fps, results.emulation_speed * 100.0f);
+        const auto capture = VideoCore::FrameTrace::GetCaptureStatus();
+        using State = VideoCore::FrameTrace::CaptureState;
+        if (capture.id) {
+            const char* status = capture.state == State::Recording ? "CAPTURANDO"
+                               : capture.state == State::Saving ? "GUARDANDO"
+                               : capture.state == State::Truncated ? "TRUNCADA" : "GUARDADA";
+            title += fmt::format(" | T{} {} ({:.1f}s restantes)", capture.id, status,
+                                 capture.vsyncs_remaining / 60.0f);
+        }
         SDL_SetWindowTitle(this_->render_window, title.c_str());
         return 2000;
     }, this);
