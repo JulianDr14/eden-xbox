@@ -38,9 +38,18 @@ public:
         }
         return std::max(app, gpu);
     }
-    [[nodiscard]] static VideoCommon::TextureGcPolicy Policy(CachePressure level, bool second_pass) {
-        if (second_pass && level == CachePressure::Emergency)
-            return {true, true, 10, 40, 0, 40};
+    [[nodiscard]] static bool RequiresImmediateRecovery(const CacheMemorySnapshot& s) {
+        return (s.app_limit != 0 && s.AppFree() < 64ULL * 1024 * 1024) ||
+               (s.gpu_budget != 0 && s.gpu_used >= s.gpu_budget);
+    }
+    [[nodiscard]] static VideoCommon::TextureGcPolicy Policy(CachePressure level, bool second_pass,
+                                                            bool immediate_recovery = false) {
+        if (second_pass && level == CachePressure::Emergency) {
+            // Hysteresis may retain Emergency with ample headroom. Only actual
+            // exhaustion justifies unbounded recovery on the gameplay thread.
+            return immediate_recovery ? VideoCommon::TextureGcPolicy{true, true, 10, 40, 0, 40}
+                                      : VideoCommon::TextureGcPolicy{true, true, 10, 40, 1000, 1};
+        }
         if (second_pass && level == CachePressure::Critical)
             return {true, true, 60, 16, 1000, 1};
         if (level != CachePressure::Normal)

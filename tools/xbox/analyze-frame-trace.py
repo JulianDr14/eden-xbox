@@ -153,6 +153,41 @@ def completion_chains(events):
     return waits, completed, len(pending)
 
 
+def gc_breakdown(events):
+    """Same-host nested phases; residual includes selection and unreported <200us work."""
+    phases, metadata, reasons, rows = [], {}, [], []
+    leaf_kinds = {"staging", "copy", "wait", "swizzle", "release", "compact"}
+    phase_kinds = {"texture-gc-" + name for name in leaf_kinds | {"prepare"}}
+    for t, host, kind, a, b in events:
+        if kind == "texture-gc-image-info":
+            metadata[host, b] = {"bytes": a}
+        elif kind == "texture-gc-image-format":
+            metadata.setdefault((host, b), {})["format_enum"] = a
+        elif kind == "texture-gc-sync-reason":
+            reasons.append({"at_ms": t, "host": host, "address": hex(b), "reason": a})
+        elif kind in phase_kinds:
+            phases.append({"phase": kind.removeprefix("texture-gc-"), "host": host,
+                           "address": hex(b), "start_ms": t-a/1000, "end_ms": t,
+                           "elapsed_ms": a/1000, **metadata.get((host, b), {})})
+        elif kind == "texture-gc-long":
+            start = t-a/1000
+            nested = [p for p in phases if p["host"] == host and
+                      p["end_ms"] > start and p["start_ms"] < t]
+            unions = {name: covered_ms([(p["start_ms"], p["end_ms"]) for p in nested
+                                       if p["phase"] == name], start, t)
+                      for name in leaf_kinds | {"prepare"}}
+            leaf_union = covered_ms([(p["start_ms"], p["end_ms"]) for p in nested
+                                     if p["phase"] in leaf_kinds], start, t)
+            rows.append({"start_ms": start, "end_ms": t, "elapsed_ms": a/1000,
+                         "host": host, "frame_tick": b, "phase_union_ms": unions,
+                         "unattributed_ms": max(0., a/1000-leaf_union), "phases": nested,
+                         "sync_reasons": [r for r in reasons if r["host"] == host and
+                                          start <= r["at_ms"] <= t]})
+            phases = [p for p in phases if p["host"] != host or p["end_ms"] > t]
+            reasons = [r for r in reasons if r["host"] != host or r["at_ms"] > t]
+    return rows
+
+
 def pipeline_chains(events):
     """Lifetime-local build identity; DXIL/translation/sign/PSO spans are nested elapsed."""
     current, rows, frontend = {}, [], []
@@ -425,6 +460,10 @@ def analyze(events, expected_vsyncs=480):
         "counts": dict(counts), "recreates_after_gc_same_address": recreated,
         "actual_app_headroom_min_mib": min(headroom) if headroom else None,
         "gc_pressure_levels": dict(pressure_levels),
+        "gc_breakdown_longest": sorted(gc_breakdown(events),
+                                       key=lambda row: row["elapsed_ms"], reverse=True)[:16],
+        "gc_sync_reasons": dict(collections.Counter(
+            e[3] for e in events if e[2] == "texture-gc-sync-reason")),
         "gc_readback_states": dict(collections.Counter(
             e[3] for e in events if e[2] == "texture-gc-readback")),
         "texture_heap_samples_mib": [

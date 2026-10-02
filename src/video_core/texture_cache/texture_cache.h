@@ -167,6 +167,10 @@ void TextureCache<P>::RunGarbageCollector() {
         if (must_download && downloads_left == 0) return false;
         if (must_download) --downloads_left;
         if (must_download) {
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcImageInfo,
+                                        image.unswizzled_size_bytes, image.gpu_addr);
+            VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcImageFormat,
+                                        static_cast<u64>(image.info.format), image.gpu_addr);
             const auto copies = FixSmallVectorADL(FullDownloadCopies(image.info));
             if constexpr (requires(typename P::AsyncBuffer& map) {
                 runtime.PrepareGcDownload(image, copies, map);
@@ -174,8 +178,12 @@ void TextureCache<P>::RunGarbageCollector() {
             }) {
                 typename P::AsyncBuffer map{};
                 if (!runtime.PrepareGcDownload(image, copies, map)) return false;
-                SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span,
-                             swizzle_data_buffer);
+                {
+                    const VideoCore::FrameTrace::ScopedSpan trace_swizzle{
+                        VideoCore::FrameTrace::Event::TextureGcSwizzle, image.gpu_addr};
+                    SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span,
+                                 swizzle_data_buffer);
+                }
                 runtime.CompleteGcDownload(image);
             } else {
                 auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
@@ -189,6 +197,8 @@ void TextureCache<P>::RunGarbageCollector() {
                                     image.gpu_addr,
                                     static_cast<u64>(image.guest_size_bytes) |
                                         (must_download ? (1ULL << 63) : 0));
+        const VideoCore::FrameTrace::ScopedSpan trace_release{
+            VideoCore::FrameTrace::Event::TextureGcRelease, image.gpu_addr};
         if (True(image.flags & ImageFlagBits::Tracked)) {
             UntrackImage(image, image_id);
         }

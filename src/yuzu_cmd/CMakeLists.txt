@@ -54,12 +54,9 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(WIN32)
-    # compile as a win32 gui application instead of a console application
-    if(MSVC)
-        set_target_properties(yuzu-cmd PROPERTIES LINK_FLAGS_RELEASE "/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup")
-    elseif(MINGW)
-        set_target_properties(yuzu-cmd PROPERTIES LINK_FLAGS_RELEASE "-Wl,--subsystem,windows")
-    endif()
+    # SDL_main.h provides WinMain for the callback frontend. Let the linker
+    # select its matching CRT startup rather than forcing a nonexistent main.
+    set_target_properties(yuzu-cmd PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 
 create_target_directory_groups(yuzu-cmd)

@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <iostream>
+#include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <regex>
@@ -20,10 +22,12 @@
 #include <fmt/ostream.h>
 
 #include "common/logging.h"
+#include "common/fs/path_util.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/arm/jit_prewarm.h"
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/crypto/key_manager.h"
@@ -37,6 +41,7 @@
 #include "network/network.h"
 #include "sdl_config.h"
 #include "video_core/gpu.h"
+#include "video_core/frame_trace.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3.h"
@@ -158,12 +163,36 @@ static void OnStatusMessageReceived(const Network::StatusMessageEntry& msg) {
 }
 
 struct SdlState {
+    FileSys::ManualContentProvider comparison_content;
     Core::System system{};
+    InputCommon::InputSubsystem input_subsystem;
     std::unique_ptr<EmuWindow_SDL3> emu_window;
+    bool vulkan_comparison{};
 };
 
 extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
+    // Opt-in comparison uses the existing Xbox user data and JIT profiles, but separate logs.
+    // Resolve paths before constructing System/ProfileManager or starting the log backend.
+    const char* comparison_dir = std::getenv("EDEN_VULKAN_COMPARE_USER_DIR");
+    if (comparison_dir && *comparison_dir) {
+        // SetAppDirectory currently ignores its argument on Windows. Set individual paths instead.
+        using P = Common::FS::EdenPath;
+        const auto root = std::filesystem::path{comparison_dir};
+        for (const auto& [kind, suffix] : std::initializer_list<std::pair<P, const char*>>{
+                 {P::EdenDir, ""}, {P::KeysDir, "keys"}, {P::NANDDir, "nand"},
+                 {P::SaveDir, "nand"}, {P::SDMCDir, "sdmc"}, {P::LoadDir, "load"},
+                 {P::CacheDir, "cache"}, {P::ShaderDir, "cache/shader"},
+                 {P::ConfigDir, "config"}, {P::PlayTimeDir, "play_time"}}) {
+            std::filesystem::create_directories(root / suffix);
+            Common::FS::SetEdenPath(kind, root / suffix);
+        }
+        const auto logs = root / "log-vulkan-compare";
+        std::filesystem::create_directories(logs);
+        Common::FS::SetEdenPath(Common::FS::EdenPath::LogDir, logs);
+    }
     SdlState* state = new SdlState();
+    *appstate = state;
+    state->vulkan_comparison = comparison_dir && *comparison_dir;
 
 #ifdef _WIN32
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
@@ -194,6 +223,19 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     SdlConfig config{lp.config_path};
 
     Core::ApplyLaunchParams(lp);
+    if (state->vulkan_comparison) {
+        Settings::values.renderer_backend = Settings::RendererBackend::Vulkan;
+        Settings::values.cpuopt_fastmem = false;
+        Settings::values.cpuopt_fastmem_exclusives = false;
+        Settings::values.use_asynchronous_shaders.SetValue(true);
+        Settings::values.resolution_setup.SetValue(Settings::ResolutionSetup::Res1X);
+        Settings::TranslateResolutionInfo(Settings::ResolutionSetup::Res1X,
+                                          Settings::values.resolution_info);
+        Settings::values.vsync_mode.SetValue(Settings::VSyncMode::Fifo);
+        Settings::values.log_flush_line = true;
+        LOG_INFO(Frontend, "Vulkan comparison: same fork, fastmem off, prewarm 115 MiB/core, "
+                           "T captures 480 vsyncs, Q exits; desktop frontend differs from UWP");
+    }
 
     if (lp.filepath.empty()) {
         LOG_CRITICAL(Frontend, "Failed to load ROM: No ROM specified");
@@ -202,7 +244,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 
     state->system.Initialize();
 
-    InputCommon::InputSubsystem input_subsystem{};
+    auto& input_subsystem = state->input_subsystem;
 
     // Apply the command line arguments
     state->system.ApplySettings();
@@ -233,6 +275,13 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 
     state->system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
     state->system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
+    if (state->vulkan_comparison) {
+        state->system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,
+                                              &state->comparison_content);
+        if (const auto file = state->system.GetFilesystem()->OpenFile(lp.filepath, FileSys::OpenMode::Read)) {
+            state->comparison_content.AddEntriesFromContainer(file);
+        }
+    }
     state->system.GetFileSystemController().CreateFactories(*state->system.GetFilesystem());
     state->system.GetUserChannel().clear();
 
@@ -295,7 +344,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 
     // QLaunch launched applications (should) now reload shader cache.
     static std::mutex shader_cache_reload_mutex;
-    state->system.RegisterApplicationChangedCallback([&state](u64 changed_program_id) {
+    state->system.RegisterApplicationChangedCallback([state](u64 changed_program_id) {
         if (!Settings::values.use_disk_shader_cache.GetValue()) {
             return;
         }
@@ -316,10 +365,13 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         state->system.Run();
     });
 
+    if (state->vulkan_comparison) {
+        Core::ConfigureApplicationPrewarm(state->system, true, {});
+    }
     void(state->system.Run());
     if (state->system.DebuggerEnabled())
         state->system.InitializeDebugger();
-    return SDL_APP_SUCCESS;
+    return SDL_APP_CONTINUE;
 }
 extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
     SdlState *state = (SdlState *)appstate;
@@ -327,11 +379,24 @@ extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
 }
 extern "C" SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     SdlState *state = (SdlState *)appstate;
+    if (state->vulkan_comparison && event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat) {
+        if (event->key.scancode == SDL_SCANCODE_Q) {
+            LOG_INFO(Frontend, "Vulkan comparison: Q pressed, shutting down");
+            return SDL_APP_SUCCESS;
+        }
+        if (event->key.scancode == SDL_SCANCODE_T) {
+            VideoCore::FrameTrace::Start(480);
+            return SDL_APP_CONTINUE;
+        }
+    }
     state->emu_window->OnEvent(*event);
-    return SDL_APP_SUCCESS;
+    return SDL_APP_CONTINUE;
 }
 extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     SdlState *state = (SdlState *)appstate;
+    if (!state) {
+        return;
+    }
     state->system.DetachDebugger();
     void(state->system.Pause());
     state->system.ShutdownMainProcess();

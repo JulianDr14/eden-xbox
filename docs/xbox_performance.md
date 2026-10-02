@@ -2677,3 +2677,308 @@ Criterio final de rendimiento: dosT completas, recorrido nuevo/repetido comparab
 60FPS sostenidos y cola de gaps reducida sin empeorar margen ni coherencia visual.
 Estas corridas manuales no son un A/B determinista. Guardado debug sigue fuera del
 alcance por decision del usuario. No se inicia otro candidato hasta su siguiente indicacion.
+## Preparacion de comparacion Vulkan PC (1 oct 2026)
+
+Usuario autoriza lanzar mismo fork con Vulkan para contrastar GC/stalls/FPS. El repo tiene
+backend Vulkan completo y compila parte de el en UWP, pero el unico ejecutable disponible
+es eden-uwp. HeadlessEmuWindow entrega WindowSystemType::CoreWindow; CreateSurface Vulkan
+solo implementa Win32 HWND en Windows. No basta boot.cfg renderer=vulkan. No se cambia
+el backend de Xbox (sin Vulkan); se prepara frontend SDL desktop de este mismo checkout.
+
+Comando usuario, desde raiz y PowerShell:
+& "$env:SystemRoot\System32\cmd.exe" /c tools\xbox\build-vulkan-pc.bat
+
+Script configura build-vulkan-pc, Release/Ninja, sin Qt/OpenGL/D3D12/ReShade, JIT W^X
+activo (DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT), AppContainer off, compila yuzu-cmd con4jobs
+ymuestra progreso. El primer build es completo; corresponde al usuario segun AGENTS.
+Solo si termina correctamente ejecuta vulkan-run.ps1, que aplica Job5120MiB y lanza
+sin timeout gameplay. No se ejecuto build completo ni se afirma Vulkan lanzado aun.
+Repetir corrida ya compilada: powershell -ExecutionPolicy Bypass -File tools\xbox\vulkan-run.ps1
+
+Opt-in EDEN_VULKAN_COMPARE_USER_DIR usa datos existentes fuera del repo (keys/firmware/
+saves/JIT profiles), con config vulkan-compare.ini y log-vulkan-compare/eden_log.txt
+separados del log D3D12. No se copian keys/firmware/juego al repo. Solo una corrida
+simultanea; launcher no mata pruebas existentes. Config fuerza Vulkan/1x/FIFO/fastmem0/
+asyncshaders, prewarm115MiB/core antesRun ytimer resolution existente desktop. Window
+solicita2048x1536 como corridaUWP; comprobar resolucionfisica por DPI/resize. Controles:
+T captura480vsyncs/8s, Q cierra, Xcierra. T status/FPS en titulo, commit muestreado cada2s
+porGetProcessMemoryInfo; no perfilCPUglobal. Muestras fueraT no prueban pico absoluto.
+
+Frontend SDL original tenia lifecycle roto: *appstate nunca asignado, AppInit/AppEvent
+retornaban SDL_APP_SUCCESS (termina), InputSubsystem enstack expiraba al salir AppInit,
+applicationchanged callback capturaba variablelocal state porreferencia. Se corrige
+estado/entrada persistentes, captura porvalor, CONTINUE yguardnull enAppQuit; content
+provider manual agregado para comparación NACP/juego directo, propiedad sobrevive System.
+SetAppDirectory Windows ignoraba su argumento; comparación fija rutas individuales antes
+System/logging, sin modificar gestor global. Fuentes oficiales de lifecycle:
+https://wiki.libsdl.org/SDL3/SDL_AppInit
+https://wiki.libsdl.org/SDL3/SDL_AppEvent
+
+Gate de preparacion: parserPowerShell ygitdiffcheck pasan, /ZsMSVCdesktop para main ySDL
+window pasa conincludescached; warningpreexistente C4244floatmousepos no bloquea. El
+chequeo no sustituye configure/link/runtime. Build completo/driver/entrada/gameplay/
+T completas y cierreQ aunpendientes. LoaderVulkanPC system32/vulkan-1.dll presente.
+
+Comparacion: mismazona nueva/recorrida, T8, limite5120 y115/core. Primer Vulkan shadercache
+puedeestarfrio: precalentar yrepetir antes atribuir diferencias albackend. CompararFPS/p99/
+maxgaps/GC largo, waits delguest79/83 ymemoria, marcando metricasnoinstrumentadas como
+no disponibles. Vulkan conservaGC/politicaoriginal yBCn nativo cuandoGPUpermite; D3D12
+usa guard propio/deferredreadbacks/formatfallbacksSeries. DesktopCRT/AppContainer/audio/
+VRAM son diferencias conocidas: si mejora orienta eldiagnostico, no demuestra por si
+solo queCPUguest/backend es la unica causa. Despues contrastarcodigoVulkan directamente;
+no es necesario decompilarbinarios. Sincommit; no modificacion de optimizacionrenderer.
+Correccion build Vulkan PC (1 oct 2026): primer configure fallo antes de compilar
+el proyecto porque PATH resolvio CMake de devkitPro/MSYS2 (/opt, /home, /c) junto
+con MSVC y Ninja nativos. build-vulkan-pc.bat ahora fija ejecutables CMake/Ninja
+incluidos en Visual Studio, antepone sus directorios para subprocesses y pasa
+CMAKE_MAKE_PROGRAM explicito. Si la cache existente contiene rutas MSYS, usa
+--fresh para regenerar CMakeCache/CMakeFiles; no borra objetos ni build UWP.
+Gate aislado con el mismo entorno: ABI C/C++ MSVC correcto, configure/generate,
+compilacion/link y ejecucion de probe nativo retorno 0 (CMake 4.3.1-msvc1).
+Build completo Vulkan y gameplay siguen pendientes; usuario repite el mismo
+comando build-vulkan-pc.bat. No certificar el emulador con este probe.
+Segundo bloqueo configure Vulkan PC (1 oct 2026): CPMUtil.cpm_find_program
+seleccionaba GIT_EXECUTABLE de devkitPro; alli no existe patch.exe y los hints
+no alcanzaban Git for Windows. Script fija GIT_EXECUTABLE y PATCH_EXE al Git
+for Windows instalado (Program Files, fallback LocalAppData), comprueba ambos
+antes del configure y antepone Git/cmd. Perl Strawberry, NASM y glslang se
+seleccionan como en build-env; CMake/Ninja VS conservan precedencia.
+Gate ligero con el prefijo real del script: Git 2.55.0.windows.5 y GNU patch
+aplican un diff y contenido verificado; where confirma Perl/NASM/CMake correctos.
+No ejecutado build completo ni descarga pesada; usuario repite mismo comando.
+Bloqueo compilacion desktop host_memory (1 oct 2026): g_fastmem_* y constantes
+histograma estaban bajo HOST_MEMORY_USE_FROM_APP, pero Map/MapView/UnmapView se
+compilan en todo Windows y las referencian incluso si hybrid nunca se activa.
+Contadores movidos a namespace anonimo Windows comun; demanda de commit, VEH e
+inicializacion hybrid conservan guard UWP. Sin cambio de asignacion/presupuestos.
+Gate: objeto real host_memory.cpp compila con Ninja/MSVC desktop Vulkan y tambien
+con Store CRT UWP; git diff --check limpio. Build completo/link/gameplay pendientes.
+El log adjunto paraba por C2065 (simbolos no declarados); C2672 min/max era derivado.
+Gate enlace y arranque Vulkan PC (1 oct 2026): link fallaba LNK2019 main porque
+SDL3 con UNICODE genera wmain/wWinMain y el CMake heredado forzaba
+/ENTRY:mainCRTStartup. WIN32_EXECUTABLE TRUE deja al CRT/linker elegir arranque
+Windows adecuado. Modelo SDL: https://wiki.libsdl.org/SDL3/README-main-functions
+Launcher corregido a bin/eden-cli.exe (OUTPUT_NAME de src/CMakeLists.txt), incluye
+eden-cli al detectar otra corrida. Batch detiene cualquier retorno distinto de0,
+incluso -1/4294967295 del linker (if errorlevel1 no atrapaba ese retorno negativo).
+Incremental desktop pasa (regenerate, objetos frontend/scm y link, 7 operaciones),
+parserPS y gitdiffcheck correctos. LanzadoPID18060, Job5120MiB verificado; log
+Render.Vulkan y carga perfiles JIT cores0/1/2 confirmados, proceso vivo al revisar.
+Usuario T8/manual/Q, sin timeout; precarga/gameplay/FPS/margen pendientes.
+Warnings conversion/PDB sirit no eran el bloqueo. No cambio rendererXbox, sincommit.
+## Candidato GC acotado y desglose (1 oct 2026)
+
+Foco autorizado: GC43,977ms del gate memoryguard. Ambas T tenian margen minimo
+93,344/136,520MiB; no prueba de recovery<64MiB. Inspeccion revela que Emergency
+entra a128MiB y persiste hasta192MiB por histeresis, mientras Policy autorizaba40
+candidatos descargables sin limite de tiempo en segunda pasada. Por tanto presion
+preventiva podia ejecutar varias operaciones costosas de mantenimiento en un frame.
+No asumir que esto explica por si solo los44ms: faltaban fases/readback outcomes.
+
+Ahora Emergency con margen real conserva edad10/40 candidatos pero comparte el
+presupuesto1ms entre ambas pasadas y permite1 intento descargable en la segunda.
+Con app-free<64MiB o GPUusage>=budget conserva40 descargas/sin limite como recuperacion
+urgente. La decision usa snapshot de memoria ya obtenido, sin query/hilo nuevo.
+No ampliar pinned8MiB, JIT115/core ni staging256 normal/128-64-0 guard. No alterar
+contenido dirty, fences/versiones ni lectura CPU coherente. El limite1ms impide
+iniciar otra operacion: NO interrumpe swizzle/copia/espera individual ni garantiza
+GCmax1ms. Memoria/progreso de reclamacion y estabilidad requieren gate manual.
+
+T8 registra prepare (anidado), asignacion staging, grabacion copias, espera
+submission+GPU, swizzle+write guest y untrack/unregister/delete; spans>=200us,
+misma captureID, fueraT sin relojes de diagnostico. Metadatos bytes/formato para
+candidatos dirty y motivo sync0=pending recovery,1=nuevo recovery,2=>8MiB,
+3=no transferible. Reactiva solo outcomes readback, evictions y tres muestras de
+heap porframe; conserva resto de CPU/upload debug desactivado. NoRAMextra fija.
+Analizador une/recorta fases al GC del mismohost; prepare contiene staging/copy/wait,
+no sumar anidados. Residual incluye seleccion, bookkeeping y spans<200us omitidos;
+no llamarloCPUbusy. Logs antiguos conservan metricas y residual sin atribucion.
+
+Contraste Vulkan: GC comun sigue DownloadMemory+Finish sin diferido; nuestro
+PrepareGcDownload mantiene token/fence/version y cap8MiB. No cambiar Vulkan ni
+copiar una espera global como optimizacion. Microsoft exige sincronizacion explicita:
+Map no esperaGPU. Por eso se conserva Finish/Wait para datos sincronicos y se consume
+readback diferido solo despues de fence completo.
+Fuentes: https://learn.microsoft.com/en-us/windows/win32/direct3d12/readback-data-using-heaps
+https://learn.microsoft.com/en-us/windows/win32/direct3d12/porting-from-direct3d-11-to-direct3d-12
+https://gpuopen-librariesandsdks.github.io/D3D12MemoryAllocator/html/optimal_allocation.html
+La recomendacion de presupuestos y vida util apoya recuperar antes del agotamiento;
+no valida estos umbrales ni certificaSeries. Sin nuevasAPI/enhancedbarriers/SDK.
+
+Gates: harnessMSVC policy pasa fronteras64MiB/GPUbudget, overflow, histeresis y
+recuperacion; fixtureGC pasa unionanidada, aislamiento host, clipping, metadata y
+compatibilidad vieja; fixturesaddress/pipeline pasan. Buildincremental/link y
+manualT/Q/headroom/GCmax/churn pendientes al preparar esta nota. Sincommit.
+Gate final candidatoGC1oct: incremental UWP completo correcto51 pasos planeados
+(incluye runtimeD3D12 y cache comunVulkan), harnesspolicy/fixtureGC ycompatibilidad
+logmemoryguard antiguo pasan, gitdiffcheck limpio. Relanzado D3D12 PID2920,
+Job5120MiB verificado, play1/fastmem0/prewarm1/CPUprofile0 (default),115/core,
+T480. Loadstatus0/shadercache y carga perfiles JIT confirmados; precarga/gameplay
+manual enprogreso. UsuarioT nueva/recorrida yQ, sin timeout de gameplay. Mejora
+GC/FPS/margen/coherencia/capacidadT ySeries siguen pendientes; sincommit.
+Trampa launcher: Appx no carga desdePowerShell7 (0x80131539); local-run invocado
+con WindowsPowerShell5.1 de System32 como en gatesprevios. No hubo app lanzada por
+el primer intento7; no matar procesos manuales para reintentar.
+## Gate PC GC acotado (1 oct 2026)
+
+Evidencia archivada pc-gc-bounded.txt, pc-gc-bounded-diag.txt y
+pc-gc-bounded-analysis.jsonl (build-uwp/log-review-2026-09-30). Proceso cerrado,
+Q tras632s segun diag y retorno0; logwall1261s no equivale a CPUbusy. Precarga
+20,8s (7,234->28,031s). DosT480 completas188588/183709eventos, sin truncar.
+
+|Metrica|memoryguard previo T1/T2|GC acotado T1/T2|
+|---|---|---|
+|FPS|56,5 /58,25|58,25 /57|
+|p99 gap ms|38,598 /30,355|34,332 /35,337|
+|max gap ms|63,871 /40,592|51,005 /41,884|
+|GC max ms|43,977 /24,235|5,588 /17,390|
+|min app-free MiB|93,344 /136,520|91,797 /126,406|
+
+GC max cae87,29% y28,24% observado. NoA/Bcausal: recorridos/perfiles y duracion
+son distintos; T1 mejoraFPS/p99, T2 empeora. No60 sostenidos ni estabilidadgeneral.
+Guard funciona antesT:1227,274s ring256->128 conheadroom127,922MiB, retire1227,298
+restore1227,351. Diag maxmuestreado5028MiB/margen91, no certificapicoabsoluto.
+
+Desglose: T1 GC5,588ms tiene copyrecord5,580ms para256bytes formato21
+(B10G11R11_FLOAT). T2 GC17,390ms tienecopyrecord16,703ms+staging0,677ms para
+130944bytes mismoformato. OtroGC6,647ms=copy5,171+staging1,328; otro5,936ms
+incluyestaging5,912ms para4096bytes R16G16B16A16_FLOAT. Sinspans dewait/sync
+reason; T1readbackqueued197/ready198 (uno venia de antesT), T2queued9/ready9.
+Cierrequeued391/ready390/stale0/sync0/pending0/peak8MiB: la ultima copia pudo
+serdescartada alshutdown, no dataconsumida sinfence. No fallbacksincrono en toda
+corrida. Evictions365/463; TextureCreate sigueoff, recreacion0delparser NO es
+medida valida dechurn ni prueba de ausencia derecreaciones.
+
+Lectura: costos restantes estan en hostPrepare/DownloadMemory y staging, no en
+espera explicita de GC alGPU. Copyrecord puede incluirtransicion, writeback de
+vista reinterpretada, CreateCommittedResource temporal DEFAULT y comandos porfila;
+no prueba16,703ms de CPUbusy ni identifica una llamada individual. Inspeccion
+DownloadMemory confirma tempnuevo pormip/layer cuando offset/pitch no cumplen
+footprint yCopyBufferRegion porfila para obtenerlayouttight. Siguiente candidato:
+eliminar creaciones temporales reiteradas/reutilizar buffers protegidos porfence,
+o readback footprints alineados+repack trascompletion, manteniendo capreal8MiB,
+versiones y coherencia. Medir separados CreateTransfer/transition/record antes
+atribuircoste aallocator/driver; no subirRAM para ocultarlo.
+
+PeorframeT1 gap51,005ms soloGC0,207ms, upload10,349 yGPUthreadidle33,175; fence
+completado enmismo tramoesperaGPU32,574ms. T2max41,884ms soloGC0,231 yidle34,149.
+Gaps restantes no los explica GCsolo; cadenaD3D12/fence sigueprioridadposterior.
+RenderError0, cincoBQassert y8unmapped antesT; BufferQueueabandoned alQ esperado.
+Visual ySeries pendientes. Fuente/codigo sin cambios adicionales, sincommit.
+## Candidato GC footprints directos (1 oct 2026)
+
+Usuario autoriza atacar copyrecord16,703ms del GCacotado. Se elimina del fastpath
+la cadena texture->DEFAULTtemporal->CopyBufferRegion porfila: cada subresource
+completo se copia directamente a footprint alineado en READBACK. Tras fence se
+compactan filas in-place con memmove, en orden ascendente y destinos siempre por
+debajo de las fuentes; no scratchCPU ni compute/shader nuevo. Plan valida layout
+contiguo/tight, mip/layer/depth completos, rowbytes/extentGetCopyableFootprints,
+cap8MiB/overflow/max256regiones. Layouts convertidos, planosDS, parciales, escalados
+o footprint>8MiB siguen ruta previa, sin fallbacksync nuevo. Recuperacion<64MiB
+mantiene ruta sincronica original. No cambia upload ni lectura CPU demandada.
+
+TokenRAII guarda plan/compacted; valida versiones/CpuModified antes del fence y
+consumo como antes. Compact solo una vez trascompletion; Map nested con readrange
+actual invalida CPUcache donde haga falta, Unmap informa writes tight y conserva
+map persistente delpool. Retiro/move/stale/descartes siguen liberando porfence.
+Cap pinned se contabiliza con bitceil(max(tightsize,footprintsize)), no con texels:
+padding puede aumentar cada asignacion pero cabe en el mismo cupo8MiB. Los buffers
+libres cacheados delpool son adicionales al pinned y siguen guard/trim existentes;
+no certificar consumo total ni Series solo por cap.
+
+Fuentes Microsoft:
+https://learn.microsoft.com/en-us/windows/win32/direct3d12/readback-data-using-heaps
+https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12resource-map
+https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-getcopyablefootprints
+Fences antesCPU yMap/Unmap anidados/coherencia son requisitos aplicados; alineacion
+256pitch/512placement es baseline, sin Agility/enhancedbarriers/unalignedfeature.
+Vulkan copia image->buffer con layouts propios sin repack temporal porfila; D3D12
+requiere padding que su buffer tight previo no cumplia. Se conserva cache comun.
+
+T registra footprintbytes para confirmar fastpath y compact>=200us (incluyeMap
+coherencia), nested dentroprepare; parser agrega compact a unionleaf sin sumar
+prepare. GateCPU20000 casos random byteidenticos, mips/layers/depth, overlap,
+alineacion/cap/overflow pasa. FixturesGC/address/pipeline pasan. GPUselftest ampliado
+B10array127x63 levels5/layers3, RGBA8volume13x7x3/3mips, BC1 64x32/3mips/2layers,
+consumo idempotente; gateGPU ybuild/manualFPS pendientes al escribir esta nota.
+JIT115/core,Job5120,T480 yGCbudget1ms/1intento preventivo conservados,sincommit.
+Gate GPU footprints1oct: AppContainer+debug homebrew termina16,3s/retorno0; logs
+GC direct footprint yGC deferred gate pasan, RenderError/Critical0. Bytes reales
+B10 127x63/5mips/3capas, RGBA8volume13x7x3/3mips, BC1native64x32/3mips,
+idempotenciaCompact; gatesprevios move/GPUstale/CPUstale/cap8MiB/discard/emergency
+siguenpasando. Evidencia gc-footprint-gate{,-diag}.txt. Bootselftest activado solo
+paraeste gate y restauradofalse antesbinario de gameplay. Primer gate fallo por
+fixtureBCarray crudo con decode_bc_arrays activo (creo formatoRGBA8 pero elfixture
+pasabaBCraw): UploadMemory esperaba bytes ya convertidos. Fixture corregido a
+BC1native1capa y rechazo explicitodeplanBCarray convertido; no tocarfallbackSeries.
+Se archivaprimerfallo gc-footprint-gate-first.txt. No afirmar fallo del fastpath ni
+corregir descompresion fueraalcance. Buildnormal final/manual/Series pendientes.
+Gate final candidatefootprints1oct: buildnormal4ops/link correcto trasrestaurar
+bootselftestsfalse. CPU20000cases/parser fixtures pasan; gateGPUdebug completo
+retorno0/RenderError0. TrialD3D12lanzadoPID24052,Job5120MiB verificado,
+play1/fastmem0/jitprewarm1/CPUprofile0,115/core,T480,stagingnormal256+guard.
+Sinlimitegameplay, usuarioTnueva/recorrida yQ. Precargaenprogreso; confirmar
+fastpathcounts/compact/copyrecord/GCmax/FPS/margen ySeries queda pendiente.
+Sincommit, no cambios gameplayVulkan/FSR. Detalle yfuentes en rendimiento.
+
+### Gate PC footprints directos (1 oct 2026)
+
+Trial PID24052 cerrado con Q tras82s de gameplay, retorno0. Las dos T480 son
+completas:180353/189541 eventos. Evidencia archivada en
+`build-uwp/log-review-2026-09-30/pc-gc-footprint{,-diag}.txt` y
+`pc-gc-footprint-analysis.jsonl`. Comparación con `pc-gc-bounded`:
+
+| Medida | T1 anterior → actual | T2 anterior → actual |
+|---|---|---|
+| FPS | 58,25 → 55,5 | 57 → 59 |
+| p99 gap, ms | 34,332 → 35,360 | 35,337 → 30,013 |
+| Máximo gap, ms | 51,005 → 48,509 | 41,884 → 39,626 |
+| Máximo GC, ms | 5,588 → 3,041 | 17,390 → 1,111 |
+| Mínimo margen app, MiB | 91,797 → 116,121 | 126,406 → 155,723 |
+
+Fastpath confirmado210/5 veces. Readbacks queued/ready210/211 y5/5 (ready puede
+corresponder a un token anterior aT); toda corrida425/424, pending0 al cierre,
+sync0/stale0. Último token descartado durante shutdown. Pinnedpeak8MiB T1/1MiB T2.
+No texture-gc-copy >=200us en ambasT: no equivale a coste cero. Compaction máxima
+0,947ms; peor GC3,041ms procesa8294400bytes B10G11R11_FLOAT, compact0,947 y
+swizzle1,891ms. Prepare contiene compact y no se suma dos veces. T2 peor1,111ms
+incluye staging0,504ms. Evictions429/362; create tracing desactivado, no inferir
+recreaciones de su contador cero.
+
+GC máximo baja45,58%/93,61% observado frente al candidato anterior, con FPS mixtos:
+escenas/perfiles y duración distintos impiden atribución causal o certificar60FPS.
+Peor gapT1 48,509ms contiene GC0,572ms, hiloGPU esperando trabajo18,534ms y una
+lease interval2 legal. PeorT2 39,626ms contiene GC0, hiloGPU esperando32,424ms,
+Binder guest83 solapado38,256ms y lease interval2. Correlación no prueba causa.
+Fences backend de otras ventanas alcanzan18,601/20,503ms; T1 flushlock6,408ms
+tras uno de esos waits. Siguiente prioridad: cadena D3D12 fence/flush/worker y
+entrega de frames, preservando sincronización; no concluir GPU saturada por waits.
+
+Commit máximo muestreado4978MiB; guard redujo staging256→128 antesT. RenderError0,
+cinco asserts BufferQueue y31 Unmapped Device ReadBlock antesT (últimos95,835s;
+T1 empieza102,278s). Cierre limpio no convierte esos avisos en resueltos. Job5120,
+JIT115/core yT8 conservados. Validación Series/visual y60sostenidos pendientes;
+sincommit. Guardado debug sigue fuera del alcance.
+
+### Prioridades pendientes después del GC directo (1 oct 2026)
+
+Estado de referencia: GC directo validado en PC con capa de debug y gameplay;
+GC máximo3,041/1,111ms, FPS55,5/59. No hay60FPS sostenidos certificados. Este
+orden separa fallos de estabilidad de oportunidades de rendimiento:
+
+| Prioridad | Trabajo pendiente | Evidencia y criterio de cierre |
+|---|---|---|
+| P0: estabilidad | Investigar los asserts BufferQueue y lecturas no mapeadas anteriores aT. | Última corrida:5 asserts y31 ReadBlock. Capturar origen/estado y reproducir; cerrar con corrección de causa y prueba sin pérdida de datos ni alteración del orden de buffers. No asumir que explican las T posteriores. |
+| P1: frames/fences | Seguir la cadena submit→tick completado→worker de fences→callback→wake guest→QueueBuffer. Separar espera de GPU, espera de mutex y trabajo CPU de flush. | Fences backend18,601/20,503ms y flushlock6,408ms; peor gapT2 incluye32,424ms de espera de trabajo del hiloGPU y GC0. Identificar dependencia concreta del mismo frame; optimizar después, sin callbacks antes de completar fence ni release anticipado. |
+| P2: memoria/texturas | Medir conjunto de trabajo, expulsiones/recreaciones y fragmentación real con diagnóstico selectivo; reducir churn y estudiar swizzle de readback. | Evictions429/362, recreaciones actualmente no medidas. Peor GC actual:swizzle1,891ms y compact0,947ms. Reservar mejora adicional para casos demostrados; preservar cap8MiB incluyendo padding y recuperación ante agotamiento real. |
+| P3: CPU/JIT | Desglosar Run largos restantes tras separar SVC, fence y flush; revisar cobertura de precarga y tiempo de arranque. | Precarga actual32,094s; perfiles/escenas diferentes. Mantener115MiB/core hasta evidencia comparable. PPTC host sigue alternativa condicionada a demostrar que compilar continúa siendo dominante, no siguiente cambio automático. |
+| Validación transversal | Repetir zonas nueva/recorrida comparables y prueba prolongada en Series con memoria unificada. | PC Job5120 no reproduce VRAM compartida. Validar visual, readbacks, fallbacks de formatos, guard128/64/0, recuperación y margen; informar FPS/p99/máximo, no solo promedio. Usuario cierra conQ, sin timeout. |
+
+Comparación Vulkan: herramientas y frontend de este fork ya compilan y arrancan;
+faltan capturas comparables de gameplay. Usarla para separar costes comunes del
+core de costes D3D12, sin trasladar conclusiones sobre memoria dedicada PC aSeries.
+FSR/4K queda después del diagnóstico de GPU: escalar no resuelve esperas guest o
+fences por sí solo. No ampliar presupuestos de memoria para esconder presión.
+Guardado de trazas debug sigue excluido por decisión del usuario. No volver a
+activar diagnósticos amplios por defecto; cada investigación debe usar solo los
+eventos necesarios y comprobar capacidad/overhead deT8.

@@ -547,3 +547,36 @@ GatePC memoryguard: Q231s/retorno0,T480 completas181034/186029. Guardactua127,96
 
 
 Cierre autorizado usuario1oct: pendientes porprioridad documentados en xbox_performance.md: GC/readback43,977ms; cadena D3D12/CPUworkers fueraGC; overhead/ramas64/10/recovery delguard; gateSeries/admissioncontrol/eventoslimite/JITdecommit real. No iniciar nuevo candidato hasta siguiente indicacion.
+
+
+ComparacionVulkanPC autorizada1oct: UWPsoloCoreWindow, VulkanWindows requiereHWND; no exe desktop existente. Preparados build-vulkan-pc.bat (buildcompleto usuario yautolaunch) yvulkan-run.ps1 (Job5120/T8/Q/fastmem0/prewarm115/mismosdatos, logsseparados). FrontendSDLcorrigeestado/AppResult/entrada lifetime/callback dangling, agregaManualContentProvider ystatusT/FPS/commit. /ZsMSVC yparserPowerShell pasan; configure/link/gameplay pendientes. LoaderPCpresente; diferenciasAppContainer/GC/audio/VRAM documentadas, noA/Bcausalcertificado. Sincommit;detalle rendimiento.
+
+
+BuildVulkanPC: corregido PATH devkitPro/MSYS2, CMake/Ninja nativos VS explicitos y --fresh solo cacheMSYS. Probe ABI C/C++/link/ejecucion pasa; fullbuild/manual pendientes, sincommit. Detalle cuaderno/rendimiento.
+
+
+VulkanPC enlace corregido SDL3Unicode/CRT, launcher eden-cli yerrornegativo delbatch. Incremental7ops pasa; lanzadoPID18060 Job5120,Render.Vulkan/cargaperfiles confirmados. T8/manual/Q/FPS pendientes,sincommit. Detalle rendimiento.
+
+
+CandidatoGC44ms1oct: Emergencypreventivo1ms/1intento; recovery<64MiB/GPUbudget agotado conservaunbounded. Tfases/readbackreason/headroom, pinned8MiB/115JIT/guardstaging intactos. IncrementalUWP/harnesspolicy/parserpasan; lanzadoPID2920 Job5120 play1/prewarm1/cpuprofile0/T480,Qmanual. FPS/GC/margen/Seriespendientes,sincommit;detalle rendimiento.
+
+
+GateGCacotadoPC: Q632s/retorno0,T480completas188588/183709;FPS58,25/57,p9934,332/35,337,GCmax5,588/17,390vs43,977/24,235. Sinmejorageneral. T2copyrecord16,703ms/staging0,677,formats21 B10G11R11_FLOAT; GCwait0/sync0toda corrida, pinnedpeak8MiB. Margen91,797/126,406,RenderError0,5BQassert/8unmappedantesT. Siguiente temporalesDEFAULT/footprints/record, despuesD3D12fences. Churn no medido(createoff),Series/60 pendientes,sincommit; evidencia rendimiento.
+
+
+CandidatoGCfootprints1oct: directtexture->READBACK porfullsubresource, compactionin-placepostfence/Mapcoherencia, sinDEFAULTtemporal/rowGPUcopies enfastpath. Capreal8MiB incluyepadding/bitceil, formatos/layouts noaptosfallback. CPU20kcasos yGPUdebugB10arrays/mips/RGBA8volume/BC1native/stale/move/cap/discard/emergency pasan,RenderError0/retorno0. Bootselftestsfalse/buildnormal4ops correcto. TrialPID24052 Job5120 play1/115JIT/prewarm1/CPUprofile0/T480/Qmanual; FPS/GC/margen/Seriespendientes,sincommit.
+
+GatefootprintsPC: Q82s/retorno0,T480completas180353/189541. Fastpath210/5,
+GCmax3,041/1,111ms(-45,58/-93,61% vsanterior), compactmax0,947ms, copyrecord
+sin eventos>=200us. FPS55,5/59 vs58,25/57, mejora general no validada. Margen
+116,121/155,723MiB; guard staging256→128, commitmaxmuestreado4978MiB. RenderError0,
+5BQassert/31unmapped antesT; sync/stale0,pending0 al cierre. Peoresgaps48,509/
+39,626ms conGC0,572/0ms: siguiente fence/flush/worker yentregaframes. 115/5120/T8
+conservados,Series/60sostenidospendientes,sincommit;detalle rendimiento.
+
+Plan pendiente1oct documentado: P0 BQassert/unmapped previosT; P1 fences/flush/
+worker yentrega frames con dependencia concreta; P2 churn/fragmentación/swizzle;
+P3 CPU residual/coberturaJIT/precarga. SeriesUMA/visual/guard/fallbacks y60FPS
+sostenidos pendientes; Vulkan compila/arranca, comparación gameplay pendiente.
+Mantener115/core/Job5120/T8 ydiagnóstico selectivo. Criterios de cierre y evidencia
+en docs/xbox_performance.md, Prioridades pendientes después del GC directo.

@@ -125,6 +125,17 @@ const char* Name(Event event) {
         return "texture-heap-pending";
     case Event::TextureGcReadback:
         return "texture-gc-readback";
+    case Event::TextureGcPrepare: return "texture-gc-prepare";
+    case Event::TextureGcStaging: return "texture-gc-staging";
+    case Event::TextureGcCopy: return "texture-gc-copy";
+    case Event::TextureGcWait: return "texture-gc-wait";
+    case Event::TextureGcSwizzle: return "texture-gc-swizzle";
+    case Event::TextureGcRelease: return "texture-gc-release";
+    case Event::TextureGcCompact: return "texture-gc-compact";
+    case Event::TextureGcFootprint: return "texture-gc-footprint";
+    case Event::TextureGcSyncReason: return "texture-gc-sync-reason";
+    case Event::TextureGcImageInfo: return "texture-gc-image-info";
+    case Event::TextureGcImageFormat: return "texture-gc-image-format";
     case Event::TextureUploadLong:
         return "texture-upload-long";
     case Event::TextureUploadStaging:
