@@ -91,8 +91,9 @@ de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
    - `legacy` (`JulianDr14/eden-xbox-legacy`) es el repo anterior, que queda como archivo.
    - **Nunca abras PRs ni issues contra Eden.** En un fork, GitHub y `gh pr create` proponen por
      defecto el repo padre: indica siempre `--repo JulianDr14/eden-xbox` y comprueba el destino.
-2. **Commit solo cuando el usuario lo pida.** Nunca por iniciativa propia. Ciérralo con la línea
-   `Co-Authored-By` que indique el sistema.
+2. **Commit solo cuando el usuario lo pida.** Nunca por iniciativa propia. Nunca añadir a Codex, OpenAI
+   ni al asistente como autor/coautor o mediante un trailer `Co-Authored-By`.
+   Los commits del usuario conservan únicamente su identidad; preferencia global explícita.
 3. **Nada de keys, firmware, juegos ni binarios de Mesa** (`spirv_to_dxil.dll`) en el repo.
 4. **GPLv3:** el código queda abierto y se mantienen las cabeceras SPDX y las atribuciones.
 
