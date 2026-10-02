@@ -19,7 +19,7 @@
 
 param([int] $TimeoutSec = 75, [switch] $NoBuild, [string] $BootNro, [int] $RunSeconds = 0,
       [switch] $DebugLayer, [string] $Keys, [string] $Firmware, [string] $Game, [string[]] $BootCfg = @(),
-      [ValidateRange(0, 1048576)] [int] $MemoryLimitMiB = 5120)
+      [ValidateRange(0, 1048576)] [int] $MemoryLimitMiB = 5120, [switch] $Library)
 $ErrorActionPreference = 'Stop'
 if ($MemoryLimitMiB -gt 0) {
     . (Join-Path $PSScriptRoot 'process-memory-limit.ps1')
@@ -27,6 +27,9 @@ if ($MemoryLimitMiB -gt 0) {
 # Keep cache policy consistent with the external commit cap. A zero cap opts out.
 $BootCfg = @($BootCfg | Where-Object { $_ -notmatch '^memory_limit_mib=' })
 $BootCfg += "memory_limit_mib=$MemoryLimitMiB"
+if ($Library) { $BootCfg += 'library=1'; $BootCfg += 'play=1' }
+# Direct performance trials retain development Q/T; library uses normal bindings.
+if (-not $Library -and -not ($BootCfg -match '^developer_hotkeys=')) { $BootCfg += 'developer_hotkeys=1' }
 $r = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $BootNro) { $BootNro = "$r\tools\xbox\boot_nro\boot.nro" }
 $BootNro = (Resolve-Path $BootNro).Path

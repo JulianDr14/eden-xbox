@@ -1852,3 +1852,173 @@ swizzle GC; P3 CPU residual/coberturaJIT/precarga. Gates transversales: escenas
 comparables, prueba prolongadaSeriesUMA, fallbacks/guard y60sostenidos. Vulkan
 compila/arranca pero comparación manual pendiente. Plan y criterios completos en
 `xbox_performance.md`, sección Prioridades pendientes después del GC directo.
+
+Frontend1oct: biblioteca opt-in `library=1` / scripts `-Library`, raízLocalState/games,
+NSP/XCI/NRO ysubcarpetas, scanner cancelable/cap10000/depth5 sin abrir contenedores.
+UI Direct2D/DWrite+D3D11 temporal/CoreWindow, liberada antesD3D12. Mando/teclado
+navegan; ajustes básicos letra/posición ydeadzone8/12/18% guardadosLocalSettings.
+BuildUWP yscanner desktop pasan; harnessStoreCRT fueraAppContainer falla0xc0000135:
+compilarharness con vcvarsall desktop. PCPID8952/Job5120 biblioteca visible confirmado,
+commitreposo36MiB; usuario sinmando. Transición/gameplay/persistencia/manual ySeries
+pendientes. Diseño, comandos, fuentes yreciclajeEden en docs/xbox_frontend.md.
+
+Rediseño biblioteca tras rechazo visual: carátula/título destacados, tarjetas,
+foco menta, márgenesTV, panelMando F1/View yratón. Loaders deqt_common ReadTitle/
+ReadIcon/ReadControlData, metadata solo página5 enworker sinInitialize/Load/Run,
+iconosretenidos<=1MiB/entrada yWIC256x256/cacheGPU12. Buildincremental4ops/harness
+pasan. PCPID20692 Job5120: títuloWonder real+icon93583bytes, commit44MiBreposo;
+selecciónmanual→D3D12→Load0 confirmado. Proceso ausente durantecache sinQ/retorno:
+cierre/gameplay no certificados. Evidencia pc-library-cards{,-diag}.txt;
+visualrediseño/panel/mando/Series pendientes. Fuente/diseño docs/xbox_frontend.md.
+
+Usuario confirma carátula/título ymejora visual. Ajuste posterior: logo original
+EdenPNG deltema Qt copiado Assets/EdenLogo.png al empaquetar, cover rounded12 real
+con máscara D2D antialias/cachegeom. Build3ops/diffcheck/scriptparser pasan;
+gatevisual delajuste/panel/Series pendientes,sincommit.
+
+ImportaciónPikachuPC: Move-Item desdeDownloads conservaACL si mismo volumen;
+enumeraciónlista funciona pero ReadIcon/ReadTitle falla permission denied. Corregido
+archivo con icacls/grant:R alSIDespecíficoEden obtenidoACLgames. No conceder a todas
+lasapps. ValidarpermisosAppContainer además del tamaño al importar dumps; refrescar
+biblioteca. Detalle docs/xbox_frontend.md.
+
+UIprompts porplataforma: DeviceFamilyWindows.Xbox muestra soloA/B/cruceta/View/Menu;
+Desktop Enter/Esc/F1/flechas/R/Q, incluso header/CTA/empty/panel. Subset11PNG Kenney
+InputPrompts1.5A CC0(4695bytes), license/README enAssets/InputPrompts, cachelocal
+porcanvas sinred. Build3ops/diffcheck pasan, visualPC/Seriespendiente,sincommit.
+Fuentes ycriterios docs/xbox_frontend.md.
+
+SelectorPC jugador1: automático/teclado/mando porID persistido; catálogo Windows
+raw+Gamepad estándar compartido con gameplay, hotplug500ms. Series conservaauto.
+Raw sinmapeo aparece deshabilitado; no soporte arbitrarioBluetooth ni multijugador
+certificado. Frontend separado navegación/canvas/entrada, metadata porpágina sin
+recorrerbiblioteca cada16ms, assetshelper/caches. Harnessselección pasa ybuild
+incremental pasa; últimoajuste/visual/hardware/Series pendientes. Sincommit;
+detalle yfuentes en docs/xbox_frontend.md.
+
+Gate selectorPC: build finalincremental3ops/harness selección ybiblioteca PASS,
+diffcheck limpio. Biblioteca abiertaPID15052 Job5120 verificado, sin cierre
+observado. Panelvisual/mandofísico/Series pendientes. First-chance0x6d9 a8s,
+procesoactivo; causasinconfirmar. C++/WinRT Path requiereincludeStorageexplícito.
+Sincommit; fuentes/diseño/evidencia en xbox_frontend.md.
+
+TecladoPC implementado: editor click/captura4s/Esc/borrar/restaurar, guardado
+ParamPackage v1 poracción. Reutiliza Keyboard/InputFactory/GenerateKeyboardParam;
+callbacks->máscaraatómica->virtualpad, no polling28bindings. Ambossticks/cruceta/
+triggers/clicks/home/captura, foco reset. Q/T defaultlibres, developer_hotkeys1opt-in;
+local-run directo conservaopt-in/Qmanual, Library/release no. GateAppContainer
+selftestreal PASS PID13988 ydesktopbinding PASS/build7ops. Usuario rechazódibujo
+inicial; rediseño usa contornos/posicionesoriginales QtPro, pathsD2Dcached,
+3grupos/2columnas/keycaps/centrado. Build7ops/harness3pagescorrectos; linkfinal,
+visual/persistenciareinicio/gameplay/Series pendientes. Sincommit; xbox_frontend.md.
+
+Gate rediseño final: linkincremental3ops correcto trascorregir cachealign/font.
+RelanzadoPID12596 Job5120verificado ykeyboardselftestAppContainer PASS; no inputs
+programados nigameplaypor tiempo. Previewvisual final ypersistencia/manual
+pendientes delusuario, appse dejaabierta. Sincommit.
+
+Usuario confirma que cerró manualmentePID12596; no atribuir ausencia de proceso
+acrash. Reporta aviso de guardadoMando encimaJugar: bugestado compartido notice.
+Corregido separando avisos biblioteca/controller/keyboard; confirmaciones controles
+solo en panelrespectivo, caducan3s; errorespersisten mientraspanelabierto, limpieza
+al cerrar/cambiarcaptura. Sin recorrido/alloc adicional porframe salvoclearalexpirar.
+No crear tests que reflejen solo etiquetas; buildincremental yvisual son gate.
+RediseñoPro permanece, sincommit.
+
+Gateavisos: incremental7ops correcto, diffchecklimpio. Relanzado biblioteca
+PID23500, Job5120verificado ykeyboardselftestPASS. Avisos fuera delpanel ycaducidad
+visual pendientes; se dejaappabierta, cierremanualusuario. Sincommit.
+
+
+## Pro Controller original por USB (1 oct 2026)
+
+El mando del usuario es Nintendo `057e:2009`, conectado por USB. Windows lo
+publica como RawGameController (18 botones, 4 ejes, 1 hat), pero
+Gamepad.FromGameController devuelve null. Sus lecturas normalizadas interpretan
+mal el paquete completo: botones variables en reposo y ejes incoherentes. No
+habilitar esa fila mediante índices arbitrarios.
+
+La prueba real en AppContainer establece `DeviceAccessStatus::Allowed`, pero
+HidDevice.FromIdAsync(ReadWrite) devuelve null. **Read sí funciona**: 200 informes
+0x30 de 64 bytes en dos segundos. El permiso `humanInterfaceDevice` se declara
+en el manifiesto; cambiar el manifiesto de un paquete registrado exigió subir
+versión (0x80073CFB). Versión final de la prueba PC: 0.2.70.0. No borrar LocalState
+ni los juegos para resolver una reinstalación.
+
+`uwp_pro_controller.cpp` usa eventos HID solo en PC, enumera asincrónicamente
+cada 2 segundos en el hilo UI y conserva objetos por ID de interfaz. Biblioteca
+y gameplay comparten la misma lectura. Un informe debe ser 0x30, contener el ID
+al principio y tener al menos sizeof(InputReportActive), máximo 64 bytes; el
+poller original hace memcpy y requiere esta validación previa. Se reutiliza
+JoyconPoller (botones/sticks), con calibración nominal de Eden (centro 0x800,
+rango 0x6cc), zona muerta existente y estado protegido por mutex. El buffer se
+lee directamente mediante IBuffer.data(), sin DataReader/alloc propio por
+informe. Los callbacks capturan weak_ptr; desuscripción/Close al retirar el
+objeto. Sin datos durante 250 ms, la lectura vuelve a neutro. El catálogo guarda
+availability como snapshot para detectar cambios en UI; reconexión reabre objetos
+sin informes válidos. Nintendo tiene disposición/letras originales de Switch:
+el intercambio letra/posición Xbox solo se aplica a dispositivos Gamepad.
+
+No hay escrituras USB, calibración SPI real, vibración ni motion en esta ruta;
+Bluetooth/otros clones no están certificados. La lectura 0x30 está demostrada en
+esta conexión; si tras reconectar solo llega otro modo, no se declara compatible
+hasta implementar y validar el cambio de modo. No se inicializa SDL desktop en
+UWP; SDL3 solo aporta headers requeridos por los tipos del poller existente.
+Xbox conserva su entrada Windows.Gaming.Input.Gamepad y no enumera HID Nintendo.
+
+Gates: build incremental y selección auto/manual/reordenar/reconectar/teclado
+PASS. Self-test **dentro del AppContainer**, con JoyconPoller real: 14 botones
+normalizados individualmente, ZL/ZR/Home/Captura, release a neutro, sticks centrados,
+paquetes truncados y modo incorrecto PASS. Hardware PC: decoder ready=1,
+botones=0 y los cuatro ejes≈0.001724; zona muerta elimina ese pequeño offset.
+Biblioteca lanzada PID17396 con Job5120MiB; selección/navegación manual,
+transición a gameplay, reconexión real y Series pendientes. Diagnóstico de
+transporte/self-test únicamente con pro_hid_probe=1; no logging de informes en
+release. Sin commit.
+
+Fuentes: [Microsoft HID y capacidades](https://learn.microsoft.com/en-us/uwp/api/windows.devices.humaninterfacedevice),
+[Microsoft RawGameController](https://learn.microsoft.com/en-us/windows/uwp/gaming/raw-game-controller),
+[protocolo Nintendo en SDL](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_switch.c).
+El rechazo ReadWrite se midió localmente; no se atribuye a bloqueo exclusivo,
+filtros o permisos sin evidencia. PnP no muestra upper/lower filters ni device
+internal en el mando conectado.
+
+
+Gate manual Pro USB: usuario confirma que puede seleccionarlo y navegar con
+cruceta/A/B. Reporta ayudas todavía de teclado: el canvas elegía iconos por
+plataforma PC/Series. Corregido para usar el mismo SelectController que entrada:
+Teclado o sin mando→teclado; Gamepad→Xbox; ProUSB→Nintendo A/B monocromos, -/+
+y cruceta. En Series se conserva Xbox. Cambia al seleccionar y al actualizar
+catálogo por hotplug. Los glyphs Nintendo son D2D propios (círculos/letras y
+líneas), formatos reutilizados, sin descarga/assets ni paths porframe; cruceta
+usa el glyph neutral de navegación existente. Editor de teclado mantiene
+instrucciones de teclado, porque esa captura requiere teclas.
+
+Build incremental final PASS, git diff --check limpio. Ajuste de swap por
+posición restringido al Gamepad Xbox (el Pro ya tiene disposición Switch).
+Relanzada biblioteca PID16884, Job5120 confirmado, sin pro_hid_probe ni captura
+de informes debug. Validación visual de ayudas, gameplay/replug y Series
+pendientes; selección/navegación Pro USB sí confirmadas. Sin commit.
+
+
+Corrección editor1oct: lectura de mando continúa en modal teclado, actualizando
+edges; solo B produce Volver mientras está abierto, incluso durante captura.
+La misma rama de cierre cancela captura y consume Quit, evitando cerrar biblioteca
+con ese mismo edge. A/cruceta/otros botones no se traducen a teclas ni acciones
+de biblioteca dentro del editor. Ayuda B/Volver visible cuando hay mando activo.
+Cruceta roja era el PNG Kenney de color, no indicador de error: reemplazada por
+glyph D2D blanco compartido para Nintendo/Xbox, sin assets/alloc nuevos.
+Buildincremental pasa; comprobación manual B/abierto/captura y visual pendientes.
+Sincommit.
+
+
+Stick navegación1oct: biblioteca y menús aceptan stick izquierdo del mando
+seleccionado (Pro USB/Gamepad PC/Series). Helper puro StickNavigation, sinalloc:
+entrada>=0.55/salida<0.35, eje dominante con histéresis diagonal, primer paso
+inmediato, repetición tras350ms ycada120ms; no catch-up trasstall. Cruceta tiene
+prioridad. Cambio de dispositivo/contexto/errores requieren recentrar antes
+de nuevo movimiento; editor teclado mantiene solo B/Volver y no captura mando.
+AyudaExplorar/Elegir muestra cruceta ystick L monocromos. Gameplay no cambiado.
+Harnessdesktop drift/histéresis/diagonal/repetición/inversión/modal/stall/NaN PASS,
+buildincremental4ops/diffcheckcorrectos. Usuario cerró anterior, relanzado
+PID14084 biblioteca/Job5120; gate navegaciónmanual ySeries pendientes,sincommit.

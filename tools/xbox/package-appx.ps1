@@ -30,6 +30,8 @@ param(
     [string] $Keys,
     [string] $Firmware,
     [string] $Game,
+    # Folder library for PC/Series; game files live under the app's LocalState\games.
+    [switch] $Library,
     # Extra boot.cfg lines for diagnosis: "log_filter=*:Info HW.GPU:Debug", "renderer=null".
     [string[]] $BootCfg = @(),
     # Must match Identity/@Publisher in dist/uwp/AppxManifest.xml, character for character.
@@ -41,6 +43,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($Library) { $BootCfg += 'library=1'; $BootCfg += 'play=1' }
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $repo
 
@@ -75,6 +78,9 @@ New-Item -ItemType Directory -Path $layout -Force | Out-Null
 Copy-Item $exe $layout
 Copy-Item (Join-Path $repo "dist\uwp\AppxManifest.xml") $layout
 Copy-Item (Join-Path $repo "dist\uwp\Assets") $layout -Recurse
+# Use Eden's existing artwork in the launcher, preserving the upstream asset.
+Copy-Item -LiteralPath (Join-Path $repo 'dist\qt_themes\default\icons\256x256\eden.png') `
+    -Destination (Join-Path $layout 'Assets\EdenLogo.png')
 
 # Any runtime DLLs the link produced land next to the exe; carry them along.
 Get-ChildItem (Split-Path $exe) -Filter *.dll -ErrorAction SilentlyContinue |

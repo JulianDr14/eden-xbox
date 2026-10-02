@@ -8,13 +8,21 @@
 #include <cmath>
 #include <cstdlib>
 #include <utility>
+#include <mutex>
+#include <winrt/Windows.System.h>
+#include "eden_uwp/keyboard_bindings.h"
+#include "input_common/drivers/keyboard.h"
+#include "input_common/main.h"
 
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Gaming.Input.h>
+#include <winrt/Windows.Storage.h>
+#include <winrt/Windows.System.Profile.h>
 
 #include "common/input.h"
 #include "common/logging.h"
 #include "eden_uwp/uwp_input.h"
+#include "eden_uwp/uwp_controllers.h"
 #include "input_common/drivers/virtual_gamepad.h"
 #include "input_common/input_poller.h"
 
@@ -29,11 +37,11 @@ using winrt::Windows::Gaming::Input::GamepadButtons;
 
 constexpr std::string_view ENGINE = "virtual_gamepad";
 constexpr std::size_t PLAYER = 0;
+static_assert(static_cast<size_t>(VirtualButton::ButtonCapture) + 1 == KeyboardButtonCount);
 constexpr u32 NUM_BUTTONS = static_cast<u32>(VirtualButton::ButtonCapture) + 1;
 constexpr u32 DEFAULT_STEP_MS = 200;
 constexpr auto POLL_INTERVAL = std::chrono::milliseconds(4);
 /// Below this the stick reads as centered; the rest of the range is rescaled to 0..1.
-constexpr float STICK_DEADZONE = 0.12f;
 /// Analog triggers count as ZL/ZR pressed past this.
 constexpr double TRIGGER_THRESHOLD = 0.5;
 
@@ -86,13 +94,13 @@ struct PadState {
     bool operator==(const PadState&) const = default;
 };
 
-void ApplyDeadzone(double x, double y, float& out_x, float& out_y) {
+void ApplyDeadzone(double x, double y, float deadzone, float& out_x, float& out_y) {
     const double length = std::hypot(x, y);
-    if (length < STICK_DEADZONE) {
+    if (length <= deadzone) {
         out_x = out_y = 0.0f;
         return;
     }
-    const double scale = std::min(1.0, (length - STICK_DEADZONE) / (1.0 - STICK_DEADZONE)) / length;
+    const double scale = std::min(1.0, (length - deadzone) / (1.0 - deadzone)) / length;
     out_x = static_cast<float>(x * scale);
     out_y = static_cast<float>(y * scale);
 }
@@ -100,69 +108,196 @@ void ApplyDeadzone(double x, double y, float& out_x, float& out_y) {
 std::atomic<u32> pressed_keys{0};
 std::atomic<bool> quit_requested{false};
 
-constexpr u32 KeyBit(Key key) {
-    return 1U << static_cast<u32>(key);
-}
+struct KeyboardRuntime {
+    std::mutex mutex;
+    std::shared_ptr<InputCommon::Keyboard> engine{std::make_shared<InputCommon::Keyboard>("keyboard")};
+    std::vector<std::unique_ptr<Common::Input::InputDevice>> devices;
+};
+KeyboardRuntime& KeyboardInput() { static KeyboardRuntime runtime; return runtime; }
 
-/// The keyboard's buttons and stick; the stick only where the gamepad leaves it centered.
 void ApplyKeyboard(PadState& state) {
     const u32 keys = pressed_keys.load(std::memory_order_relaxed);
-    if (keys == 0) {
-        return;
-    }
-    constexpr std::array<std::pair<Key, VirtualButton>, 8> KEY_BUTTONS{{
-        {Key::L, VirtualButton::TriggerL},
-        {Key::R, VirtualButton::TriggerR},
-        {Key::A, VirtualButton::ButtonA},
-        {Key::B, VirtualButton::ButtonB},
-        {Key::Plus, VirtualButton::ButtonPlus},
-        {Key::Minus, VirtualButton::ButtonMinus},
-        {Key::X, VirtualButton::ButtonX},
-        {Key::Y, VirtualButton::ButtonY},
-    }};
-    for (const auto& [key, button] : KEY_BUTTONS) {
-        if (keys & KeyBit(key)) {
-            state.buttons |= Bit(button);
+    state.buttons |= keys & ((1U << KeyboardButtonCount) - 1);
+    auto stick = [&](size_t first, float& x, float& y) {
+        const float dx = ((keys >> (first + 3)) & 1) - static_cast<float>((keys >> (first + 2)) & 1);
+        const float dy = ((keys >> first) & 1) - static_cast<float>((keys >> (first + 1)) & 1);
+        if ((dx || dy) && x == 0 && y == 0) {
+            const float scale = dx && dy ? 0.70710678f : 1.0f;
+            x = dx * scale; y = dy * scale;
         }
-    }
-    const float x = ((keys & KeyBit(Key::StickRight)) ? 1.0f : 0.0f) -
-                    ((keys & KeyBit(Key::StickLeft)) ? 1.0f : 0.0f);
-    const float y = ((keys & KeyBit(Key::StickUp)) ? 1.0f : 0.0f) -
-                    ((keys & KeyBit(Key::StickDown)) ? 1.0f : 0.0f);
-    if ((x != 0.0f || y != 0.0f) && state.left_x == 0.0f && state.left_y == 0.0f) {
-        state.left_x = x;
-        state.left_y = y;
-    }
+    };
+    stick(20, state.left_x, state.left_y);
+    stick(24, state.right_x, state.right_y);
 }
 
-PadState ReadGamepad(const Gamepad& pad) {
-    const auto reading = pad.GetCurrentReading();
+PadState ReadGamepad(const ControllerDevice& pad, const ControllerOptions& options) {
+    const auto full = ReadController(pad);
+    const auto& reading = full.gamepad;
     PadState state{};
     for (const GamepadMapping& mapping : GAMEPAD_MAPPINGS) {
         if ((reading.Buttons & mapping.xbox) == mapping.xbox) {
-            state.buttons |= Bit(mapping.button);
+            auto button = mapping.button;
+            if (options.swap_face_buttons && pad.pad) {
+                switch (button) {
+                case VirtualButton::ButtonA: button = VirtualButton::ButtonB; break;
+                case VirtualButton::ButtonB: button = VirtualButton::ButtonA; break;
+                case VirtualButton::ButtonX: button = VirtualButton::ButtonY; break;
+                case VirtualButton::ButtonY: button = VirtualButton::ButtonX; break;
+                default: break;
+                }
+            }
+            state.buttons |= Bit(button);
         }
     }
+    if (full.home) state.buttons |= Bit(VirtualButton::ButtonHome);
+    if (full.capture) state.buttons |= Bit(VirtualButton::ButtonCapture);
     if (reading.LeftTrigger > TRIGGER_THRESHOLD) {
         state.buttons |= Bit(VirtualButton::TriggerZL);
     }
     if (reading.RightTrigger > TRIGGER_THRESHOLD) {
         state.buttons |= Bit(VirtualButton::TriggerZR);
     }
-    ApplyDeadzone(reading.LeftThumbstickX, reading.LeftThumbstickY, state.left_x, state.left_y);
-    ApplyDeadzone(reading.RightThumbstickX, reading.RightThumbstickY, state.right_x,
+    ApplyDeadzone(reading.LeftThumbstickX, reading.LeftThumbstickY, options.deadzone, state.left_x, state.left_y);
+    ApplyDeadzone(reading.RightThumbstickX, reading.RightThumbstickY, options.deadzone, state.right_x,
                   state.right_y);
     return state;
 }
 
 } // namespace
 
-void SetKeyPressed(Key key, bool pressed) {
-    if (pressed) {
-        pressed_keys.fetch_or(KeyBit(key), std::memory_order_relaxed);
-    } else {
-        pressed_keys.fetch_and(~KeyBit(key), std::memory_order_relaxed);
+ControllerOptions LoadControllerOptions() {
+    ControllerOptions options;
+    try {
+        const auto values = winrt::Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+        if (values.HasKey(L"controller_device"))
+            options.controller_id = winrt::unbox_value<winrt::hstring>(values.Lookup(L"controller_device")).c_str();
+        if (values.HasKey(L"controller_swap_face"))
+            options.swap_face_buttons = winrt::unbox_value<bool>(values.Lookup(L"controller_swap_face"));
+        if (values.HasKey(L"controller_deadzone")) {
+            const float zone = static_cast<float>(winrt::unbox_value<double>(values.Lookup(L"controller_deadzone")));
+            if (std::isfinite(zone) && zone >= 0.01f && zone <= 0.5f) options.deadzone = zone;
+        }
+    } catch (...) { /* Missing or invalid settings retain safe defaults. */ }
+    // Xbox always uses its default controller, even if settings originated on PC.
+    try {
+        if (winrt::Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily() == L"Windows.Xbox")
+            options.controller_id.clear();
+    } catch (const winrt::hresult_error&) {}
+    return options;
+}
+
+bool SaveControllerOptions(const ControllerOptions& options) {
+    try {
+        const auto values = winrt::Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+        values.Insert(L"controller_swap_face", winrt::box_value(options.swap_face_buttons));
+        values.Insert(L"controller_device", winrt::box_value(winrt::hstring{options.controller_id}));
+        values.Insert(L"controller_deadzone", winrt::box_value(static_cast<double>(options.deadzone)));
+        return true;
+    } catch (...) { return false; }
+}
+
+KeyboardBindings LoadKeyboardBindings() {
+    auto bindings = DefaultKeyboardBindings;
+    try {
+        const auto values = winrt::Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+        if (!values.HasKey(L"keyboard_bindings_v1")) return bindings;
+        const auto stored = winrt::to_string(winrt::unbox_value<winrt::hstring>(values.Lookup(L"keyboard_bindings_v1")));
+        const Common::ParamPackage package{stored};
+        KeyboardBindings parsed{};
+        for (size_t i = 0; i < parsed.size(); ++i) {
+            const Common::ParamPackage key{package.Get(std::to_string(i), "")};
+            const int code = key.Get("code", -1);
+            if (key.Get("engine", "") != "keyboard" || code < 0 || code > 254 || code == 27)
+                return bindings;
+            if (!AssignKeyboardKey(parsed, i, static_cast<unsigned>(code))) return bindings;
+        }
+        return parsed;
+    } catch (const winrt::hresult_error&) { return bindings; }
+}
+bool SaveKeyboardBindings(const KeyboardBindings& bindings) {
+    try {
+        Common::ParamPackage package;
+        for (size_t i = 0; i < bindings.size(); ++i)
+            package.Set(std::to_string(i), InputCommon::GenerateKeyboardParam(static_cast<int>(bindings[i])));
+        winrt::Windows::Storage::ApplicationData::Current().LocalSettings().Values().Insert(
+            L"keyboard_bindings_v1", winrt::box_value(winrt::to_hstring(package.Serialize())));
+        return true;
+    } catch (const winrt::hresult_error&) { return false; }
+}
+std::wstring KeyboardKeyName(unsigned key) {
+    if (!key) return L"Sin asignar";
+    if ((key >= 'A' && key <= 'Z') || (key >= '0' && key <= '9')) return std::wstring(1, static_cast<wchar_t>(key));
+    if (key >= 112 && key <= 135) return L"F" + std::to_wstring(key - 111);
+    if (key >= 96 && key <= 105) return L"Num " + std::to_wstring(key - 96);
+    switch (key) {
+    case 8: return L"Retroceso"; case 9: return L"Tab"; case 13: return L"Enter";
+    case 16: return L"Shift"; case 17: return L"Ctrl"; case 18: return L"Alt";
+    case 32: return L"Espacio"; case 33: return L"Re Pag"; case 34: return L"Av Pag";
+    case 35: return L"Fin"; case 36: return L"Inicio"; case 37: return L"Izquierda";
+    case 38: return L"Arriba"; case 39: return L"Derecha"; case 40: return L"Abajo";
+    case 45: return L"Insert"; case 46: return L"Supr"; case 106: return L"Num *";
+    case 107: return L"Num +"; case 109: return L"Num -"; case 110: return L"Num .";
+    case 111: return L"Num /"; default: return L"Tecla " + std::to_wstring(key);
     }
+}
+void InitializeKeyboardBindings() {
+    auto& runtime = KeyboardInput();
+    std::scoped_lock lock{runtime.mutex};
+    runtime.devices.clear();
+    runtime.engine->ReleaseAllKeys();
+    pressed_keys.store(0, std::memory_order_relaxed);
+    const auto bindings = LoadKeyboardBindings();
+    InputCommon::InputFactory factory{runtime.engine};
+    for (size_t i = 0; i < bindings.size(); ++i) {
+        if (!bindings[i]) continue;
+        auto device = factory.Create(Common::ParamPackage{InputCommon::GenerateKeyboardParam(static_cast<int>(bindings[i]))});
+        device->SetCallback({[i](const Common::Input::CallbackStatus& status) {
+            const u32 bit = 1U << i;
+            if (status.button_status.value) pressed_keys.fetch_or(bit, std::memory_order_relaxed);
+            else pressed_keys.fetch_and(~bit, std::memory_order_relaxed);
+        }});
+        runtime.devices.push_back(std::move(device));
+    }
+}
+bool RunKeyboardInputSelfTest() {
+    auto engine = std::make_shared<InputCommon::Keyboard>("keyboard");
+    InputCommon::InputFactory factory{engine};
+    bool down = false;
+    unsigned edges = 0;
+    const auto serialized = InputCommon::GenerateKeyboardParam('Q');
+    const Common::ParamPackage params{serialized};
+    if (params.Get("engine", "") != "keyboard" || params.Get("code", 0) != 'Q') return false;
+    auto device = factory.Create(params);
+    device->SetCallback({[&](const Common::Input::CallbackStatus& status) {
+        down = status.button_status.value; ++edges;
+    }});
+    engine->PressKey('Q');
+    if (!down || edges != 1) return false;
+    engine->PressKey('Q');
+    if (edges != 1) return false;
+    engine->ReleaseKey('Q');
+    if (down || edges != 2) return false;
+    engine->PressKey('Q');
+    engine->ReleaseAllKeys();
+    if (down || edges != 4) return false;
+    const u32 previous = pressed_keys.exchange((1U << 20) | (1U << 23) | (1U << 24));
+    PadState state{};
+    ApplyKeyboard(state);
+    pressed_keys.store(previous);
+    return state.left_x > 0.70f && state.left_x < 0.71f &&
+           state.left_y == state.left_x && state.right_y == 1.0f;
+}
+void SetKeyboardKey(unsigned key, bool pressed) {
+    auto& runtime = KeyboardInput();
+    std::scoped_lock lock{runtime.mutex};
+    if (pressed) runtime.engine->PressKey(static_cast<int>(key));
+    else runtime.engine->ReleaseKey(static_cast<int>(key));
+}
+void ResetKeyboardKeys() {
+    auto& runtime = KeyboardInput();
+    std::scoped_lock lock{runtime.mutex};
+    runtime.engine->ReleaseAllKeys();
+    pressed_keys.store(0, std::memory_order_relaxed);
 }
 
 void RequestQuit() {
@@ -224,7 +359,8 @@ std::optional<InputStep> ParseInputStep(std::string_view spec) {
 
 GamepadInput::GamepadInput(std::vector<InputStep> script_)
     : gamepad{std::make_shared<InputCommon::VirtualGamepad>(std::string{ENGINE})},
-      script{std::move(script_)} {
+      script{std::move(script_)}, options{LoadControllerOptions()} {
+    InitializeKeyboardBindings();
     Common::Input::RegisterInputFactory(std::string{ENGINE},
                                         std::make_shared<InputCommon::InputFactory>(gamepad));
     Common::Input::RegisterOutputFactory(std::string{ENGINE},
@@ -249,24 +385,37 @@ void GamepadInput::Stop() {
         thread.join();
     }
     gamepad->ResetControllers();
+    ResetKeyboardKeys();
 }
 
 void GamepadInput::Run(std::stop_token stop) {
+    struct Apartment {
+        Apartment() { winrt::init_apartment(winrt::apartment_type::multi_threaded); }
+        ~Apartment() { winrt::uninit_apartment(); }
+    };
+    std::optional<Apartment> apartment;
+    bool controller_api_ready = true;
+    try { apartment.emplace(); }
+    catch (const winrt::hresult_error&) {
+        LOG_ERROR(Input, "UWP input: cannot initialize controller apartment");
+        controller_api_ready = false;
+    }
     const auto start = std::chrono::steady_clock::now();
-    std::optional<Gamepad> pad;
+    std::optional<ControllerDevice> pad;
     PadState applied{};
     std::vector<bool> announced(script.size());
     u32 polls = 0;
     while (!stop.stop_requested()) {
         // The gamepad list is cheap to query but changes rarely: look again twice a second.
-        if (polls++ % 125 == 0) {
+        if (controller_api_ready && polls++ % 125 == 0) {
             try {
-                const auto pads = Gamepad::Gamepads();
+                const auto devices = EnumerateControllers();
                 const bool had_pad = pad.has_value();
-                pad = pads.Size() > 0 ? std::optional<Gamepad>{pads.GetAt(0)} : std::nullopt;
+                const auto selected = SelectController(devices, options.controller_id);
+                pad = selected ? std::optional<ControllerDevice>{devices[*selected]} : std::nullopt;
                 if (pad.has_value() != had_pad) {
-                    LOG_INFO(Input, "UWP input: Xbox gamepad {} ({} connected)",
-                             pad ? "in use as player 1" : "disconnected", pads.Size());
+                    LOG_INFO(Input, "UWP input: controller {} ({} connected)",
+                             pad ? "in use as player 1" : "disconnected", devices.size());
                 }
             } catch (...) {
                 pad.reset();
@@ -275,7 +424,7 @@ void GamepadInput::Run(std::stop_token stop) {
         PadState state{};
         if (pad) {
             try {
-                state = ReadGamepad(*pad);
+                state = ReadGamepad(*pad, options);
             } catch (...) {
                 pad.reset();
             }

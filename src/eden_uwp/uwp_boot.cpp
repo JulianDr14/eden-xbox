@@ -53,6 +53,9 @@
 
 #include "eden_uwp/headless_emu_window.h"
 #include "eden_uwp/uwp_input.h"
+#include "eden_uwp/uwp_controllers.h"
+#include "eden_uwp/keyboard_bindings.h"
+#include "eden_uwp/uwp_library.h"
 
 namespace D3D12 {
 // renderer_d3d12.h; its includes need Mesa's headers, which only video_core sees.
@@ -1036,43 +1039,41 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         // app to the background. B is a game button here (uwp_input.h).
         SystemNavigationManager::GetForCurrentView().BackRequested(
             [](auto&&, BackRequestedEventArgs const& args) { args.Handled(true); });
-        // Keyboard play on the PC (uwp_input.h): C/V = L/R, B/N = A/B, M or numpad + = Plus,
-        // K or numpad - = Minus, X/Y = X/Y, WASD = left stick, Q quits, T traces two seconds of
-        // the frame chain.
-        const auto on_key = [](Windows::System::VirtualKey key, bool pressed) {
+        bool library_active = false;
+        bool developer_hotkeys = false;
+        try {
+            const auto install = std::filesystem::path{
+                Windows::ApplicationModel::Package::Current().InstalledLocation().Path().c_str()};
+            std::ifstream cfg{install / L"boot.cfg"};
+            for (std::string line; std::getline(cfg, line);)
+                if (line == "developer_hotkeys=1") developer_hotkeys = true;
+                else if (line == "pro_hid_probe=1") {
+                    WriteDiag(EdenXbox::RunProControllerDecoderSelfTest() ? "Pro HID decoder self-test PASS" : "Pro HID decoder self-test FAIL");
+                    EdenXbox::ProbeProControllerHid([](std::string message) { WriteDiag(message); });
+                }
+                else if (line == "keyboard_self_test=1") {
+                    WriteDiag(EdenXbox::RunKeyboardInputSelfTest() ? "keyboard self-test PASS" : "keyboard self-test FAIL");
+                }
+        } catch (...) {}
+        const auto on_key = [&library_active, developer_hotkeys](Windows::System::VirtualKey key, bool pressed) {
+            if (library_active) return;
             using Windows::System::VirtualKey;
-            using EdenXbox::Key;
-            switch (key) {
-            case VirtualKey::C: EdenXbox::SetKeyPressed(Key::L, pressed); break;
-            case VirtualKey::V: EdenXbox::SetKeyPressed(Key::R, pressed); break;
-            case VirtualKey::B: EdenXbox::SetKeyPressed(Key::A, pressed); break;
-            case VirtualKey::N: EdenXbox::SetKeyPressed(Key::B, pressed); break;
-            case VirtualKey::W: EdenXbox::SetKeyPressed(Key::StickUp, pressed); break;
-            case VirtualKey::S: EdenXbox::SetKeyPressed(Key::StickDown, pressed); break;
-            case VirtualKey::A: EdenXbox::SetKeyPressed(Key::StickLeft, pressed); break;
-            case VirtualKey::D: EdenXbox::SetKeyPressed(Key::StickRight, pressed); break;
-            case VirtualKey::M:
-            case VirtualKey::Add: EdenXbox::SetKeyPressed(Key::Plus, pressed); break;
-            case VirtualKey::K:
-            case VirtualKey::Subtract: EdenXbox::SetKeyPressed(Key::Minus, pressed); break;
-            case VirtualKey::X: EdenXbox::SetKeyPressed(Key::X, pressed); break;
-            case VirtualKey::Y: EdenXbox::SetKeyPressed(Key::Y, pressed); break;
-            case VirtualKey::Q:
-                if (pressed) {
-                    EdenXbox::RequestQuit();
-                }
-                break;
-            case VirtualKey::T:
-                // Frame chain timeline of the next eight seconds, to the log (frame_trace.h).
-                if (pressed) {
-                    VideoCore::FrameTrace::Start(480);
-                }
-                break;
-            default: break;
+            if (developer_hotkeys && key == VirtualKey::Q) {
+                if (pressed) EdenXbox::RequestQuit();
+                return;
             }
+            if (developer_hotkeys && key == VirtualKey::T) {
+                if (pressed) VideoCore::FrameTrace::Start(480);
+                return;
+            }
+            EdenXbox::SetKeyboardKey(static_cast<unsigned>(key), pressed);
         };
+        auto focus = window.Activated(winrt::auto_revoke, [](auto&&, WindowActivatedEventArgs const& args) {
+            if (args.WindowActivationState() == CoreWindowActivationState::Deactivated)
+                EdenXbox::ResetKeyboardKeys();
+        });
         window.KeyDown([on_key](auto&&, KeyEventArgs const& args) {
-            on_key(args.VirtualKey(), true);
+            if (!args.KeyStatus().WasKeyDown) on_key(args.VirtualKey(), true);
             args.Handled(true);
         });
         window.KeyUp([on_key](auto&&, KeyEventArgs const& args) {
@@ -1096,8 +1097,40 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
             }
         }
 
+        std::optional<std::string> library_game;
+        try {
+            const auto install = std::filesystem::path{
+                Windows::ApplicationModel::Package::Current().InstalledLocation().Path().c_str()};
+            bool show_library = false;
+            std::ifstream cfg{install / L"boot.cfg"};
+            for (std::string line; std::getline(cfg, line);) {
+                if (line == "library=1") show_library = true;
+            }
+            if (show_library) {
+                library_active = true;
+                const auto local = std::filesystem::path{
+                    Windows::Storage::ApplicationData::Current().LocalFolder().Path().c_str()};
+                WriteDiag("library: scanning LocalState/games; waiting for user selection");
+                library_game = EdenXbox::ShowGameLibrary(surface.core_window, surface.width,
+                    surface.height, local / L"games", [install, local] { SeedUserData(install, local); });
+                library_active = false;
+                if (!library_game) {
+                    WriteDiag("library: closed by user");
+                    return;
+                }
+                WriteDiag("library: selected " + *library_game);
+            }
+        } catch (const std::exception& e) {
+            WriteDiag(std::string("library: failed: ") + e.what());
+            return;
+        } catch (const winrt::hresult_error& e) {
+            WriteDiag("library: failed: " + winrt::to_string(e.message()));
+            return;
+        }
+
         std::atomic<bool> done{false};
-        std::thread worker([&done, surface]() {
+        std::thread worker([&done, surface, library_game]() {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
             std::set_terminate(OnTerminate); // per-thread in the MSVC runtime
             std::string nro_path;
             EdenXbox::BootConfig config{};
@@ -1229,6 +1262,11 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     Windows::Storage::ApplicationData::Current().LocalFolder().Path());
                 SeedUserData(std::filesystem::path{winrt::to_hstring(install_path).c_str()},
                              std::filesystem::path{winrt::to_hstring(local_path).c_str()});
+                if (library_game) {
+                    config.game = *library_game;
+                    config.play = true;
+                    config.run_seconds = 0;
+                }
                 if (!config.game.empty()) {
                     nro_path = local_path + "\\games\\" + config.game;
                     if (config.run_seconds == 0 && !config.play) {
@@ -1261,6 +1299,7 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         CoreDispatcher dispatcher = window.Dispatcher();
         ULONGLONG next_heartbeat = GetTickCount64() + 10'000;
         while (!done.load()) {
+            EdenXbox::RefreshProControllers();
             dispatcher.ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
             ::Sleep(50);
             if (GetTickCount64() >= next_heartbeat) {

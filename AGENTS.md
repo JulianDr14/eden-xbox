@@ -580,3 +580,107 @@ P3 CPU residual/coberturaJIT/precarga. SeriesUMA/visual/guard/fallbacks y60FPS
 sostenidos pendientes; Vulkan compila/arranca, comparación gameplay pendiente.
 Mantener115/core/Job5120/T8 ydiagnóstico selectivo. Criterios de cierre y evidencia
 en docs/xbox_performance.md, Prioridades pendientes después del GC directo.
+
+Frontend biblioteca1oct: `-Library` en local-run/package o`library=1`, raízLocalState/games
+compartidaPC/Series; scannerNSP/XCI/NRO/nesting sinabrir contenedores, cap10000/depth5.
+UI temporalD3D11/D2D/DWrite destruida antesguestD3D12, inputGamepad+teclado.
+Ajustesbásicos letra/posición ydeadzone persistidosLocalSettings. Buildincremental/
+harnessscanner correctos; PCPID8952 Job5120 UIvisible confirmada(36MiBreposo),
+usuario sinmando. Gate transición/gameplay/persistencia/mando/Series pendientes,
+juego pesado aún en dump. Doc docs/xbox_frontend.md, sincommit.
+
+Rediseño frontend: usuario rechazó lista básica; carátulas/títulos con loadersEden,
+tarjetadestacada+fila5/focoTV/panelF1-View/ratón. Metadataworker sinDRAM/JITguest,
+cacheartacotada/WIC256. Build4ops/scanner pasan; PCPID20692 títuloWonder/icon93583B,
+44MiBreposo/Job5120, selecciónmanual→D3D12→Load0. Proceso luegoausente durante
+cache sinQ/retorno confirmado; visualrediseño/persistencia/mando/gameplay/Series
+pendientes. Docs/xbox_frontend.md ypc-library-cards evidencia; sincommit.
+
+Usuario confirma UIrediseñada/carátula/título. LogoEden originalPNG ahoraincluido
+enAssets/EdenLogo.png porpackager; carátulasrounded12 conmaskD2D antialiascacheada.
+Build3ops/parserPS/diffcheckpasan; visualajuste/panel/mando/Series pendientes.
+Sincommit; docs/xbox_frontend.md conservaestado yfuentes.
+
+UIprompts1oct: detecciónWindows.Xbox víaAnalyticsInfo, ayudas exclusivasmandoSeries;
+PC ayudas teclado, sinleyendas mezcladas. KenneyInputPrompts1.5A CC0/subset11PNG
+enAssets/InputPrompts conlicense/README, cached porcanvas. Build3ops/diffcheck pasan,
+visualPC ySeries pendientes,sincommit; fuentes docs/xbox_frontend.md.
+
+SelectorPC jugador1: automático/teclado/mando porID persistido; catálogo Windows
+raw+Gamepad estándar compartido con gameplay, hotplug500ms. Series conservaauto.
+Raw sinmapeo aparece deshabilitado; no soporte arbitrarioBluetooth ni multijugador
+certificado. Frontend separado navegación/canvas/entrada, metadata porpágina sin
+recorrerbiblioteca cada16ms, assetshelper/caches. Harnessselección pasa ybuild
+incremental pasa; últimoajuste/visual/hardware/Series pendientes. Sincommit;
+detalle yfuentes en docs/xbox_frontend.md.
+
+Gate selectorPC: build finalincremental3ops/harness selección ybiblioteca PASS,
+diffcheck limpio. Biblioteca abiertaPID15052 Job5120 verificado, sin cierre
+observado. Panelvisual/mandofísico/Series pendientes. First-chance0x6d9 a8s,
+procesoactivo; causasinconfirmar. C++/WinRT Path requiereincludeStorageexplícito.
+Sincommit; fuentes/diseño/evidencia en xbox_frontend.md.
+
+TecladoPC implementado: editor click/captura4s/Esc/borrar/restaurar, guardado
+ParamPackage v1 poracción. Reutiliza Keyboard/InputFactory/GenerateKeyboardParam;
+callbacks->máscaraatómica->virtualpad, no polling28bindings. Ambossticks/cruceta/
+triggers/clicks/home/captura, foco reset. Q/T defaultlibres, developer_hotkeys1opt-in;
+local-run directo conservaopt-in/Qmanual, Library/release no. GateAppContainer
+selftestreal PASS PID13988 ydesktopbinding PASS/build7ops. Usuario rechazódibujo
+inicial; rediseño usa contornos/posicionesoriginales QtPro, pathsD2Dcached,
+3grupos/2columnas/keycaps/centrado. Build7ops/harness3pagescorrectos; linkfinal,
+visual/persistenciareinicio/gameplay/Series pendientes. Sincommit; xbox_frontend.md.
+
+Gate rediseño final: linkincremental3ops correcto trascorregir cachealign/font.
+RelanzadoPID12596 Job5120verificado ykeyboardselftestAppContainer PASS; no inputs
+programados nigameplaypor tiempo. Previewvisual final ypersistencia/manual
+pendientes delusuario, appse dejaabierta. Sincommit.
+
+Usuario confirma que cerró manualmentePID12596; no atribuir ausencia de proceso
+acrash. Reporta aviso de guardadoMando encimaJugar: bugestado compartido notice.
+Corregido separando avisos biblioteca/controller/keyboard; confirmaciones controles
+solo en panelrespectivo, caducan3s; errorespersisten mientraspanelabierto, limpieza
+al cerrar/cambiarcaptura. Sin recorrido/alloc adicional porframe salvoclearalexpirar.
+No crear tests que reflejen solo etiquetas; buildincremental yvisual son gate.
+RediseñoPro permanece, sincommit.
+
+Gateavisos: incremental7ops correcto, diffchecklimpio. Relanzado biblioteca
+PID23500, Job5120verificado ykeyboardselftestPASS. Avisos fuera delpanel ycaducidad
+visual pendientes; se dejaappabierta, cierremanualusuario. Sincommit.
+
+ProUSB1oct: Nintendo057e2009 RawGameController no mapea correctamente informes30.
+HidDevice ReadWrite=null peseAllowed, Read abre/200report64B por2s confirmado.
+AdapterPC asíncrono/eventos reutilizaJoyconPoller, límitespaquete ytimeoutneutro250ms,
+IDHID compartidoUI/gameplay, XboxGamepad intacto. Nominalcalibration, sinoutput/gyro/
+Bluetooth certificado. Build/selección/selftestAppContainer PASS; hardwaredecoder
+ready1/buttons0/axes~0.001724. PID17396 biblioteca/Job5120, selección/navegación
+manual/gameplay/replug/Series pendientes; manifiesto0.2.70.0/HIDcap. Sincommit;
+detalle/fuentes ytrampaReadWrite en docs/xbox_frontend.md.
+
+GateProUSB: usuario confirma selección y navegación cruceta/A/B. Prompts ahora
+siguen dispositivo elegido (Nintendo A/B/-/+/cruceta, XboxGamepad oTeclado),
+Series siempreXbox; formatosD2Dcached/noassets nuevos. Buildfinal3ops/diffcheck
+pasan, PID16884 bibliotecaJob5120 sinpro_hid_probe. Visualprompts/gameplay/replug/
+Series pendientes,sincommit; detalle xbox_frontend.md.
+
+
+Corrección editor1oct: lectura de mando continúa en modal teclado, actualizando
+edges; solo B produce Volver mientras está abierto, incluso durante captura.
+La misma rama de cierre cancela captura y consume Quit, evitando cerrar biblioteca
+con ese mismo edge. A/cruceta/otros botones no se traducen a teclas ni acciones
+de biblioteca dentro del editor. Ayuda B/Volver visible cuando hay mando activo.
+Cruceta roja era el PNG Kenney de color, no indicador de error: reemplazada por
+glyph D2D blanco compartido para Nintendo/Xbox, sin assets/alloc nuevos.
+Buildincremental pasa; comprobación manual B/abierto/captura y visual pendientes.
+Sincommit.
+
+
+Stick navegación1oct: biblioteca y menús aceptan stick izquierdo del mando
+seleccionado (Pro USB/Gamepad PC/Series). Helper puro StickNavigation, sinalloc:
+entrada>=0.55/salida<0.35, eje dominante con histéresis diagonal, primer paso
+inmediato, repetición tras350ms ycada120ms; no catch-up trasstall. Cruceta tiene
+prioridad. Cambio de dispositivo/contexto/errores requieren recentrar antes
+de nuevo movimiento; editor teclado mantiene solo B/Volver y no captura mando.
+AyudaExplorar/Elegir muestra cruceta ystick L monocromos. Gameplay no cambiado.
+Harnessdesktop drift/histéresis/diagonal/repetición/inversión/modal/stall/NaN PASS,
+buildincremental4ops/diffcheckcorrectos. Usuario cerró anterior, relanzado
+PID14084 biblioteca/Job5120; gate navegaciónmanual ySeries pendientes,sincommit.

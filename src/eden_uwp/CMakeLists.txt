@@ -10,6 +10,16 @@ add_executable(eden-uwp WIN32
     uwp_boot.cpp
     uwp_input.cpp
     uwp_input.h
+    uwp_library.cpp
+    uwp_library_canvas.cpp
+    uwp_library_canvas.h
+    uwp_library.h
+    game_library.h
+    uwp_library_metadata.cpp
+    uwp_library_metadata.h
+    uwp_pro_controller.cpp
+    uwp_controllers.cpp
+    uwp_controllers.h
     vma_impl.cpp
 )
 
@@ -17,10 +27,11 @@ add_executable(eden-uwp WIN32
 # directly so the dependency graph is explicit. frontend_common provides PlayTimeManager (pulled by
 # core's NS query service); input_common the virtual_gamepad engine that uwp_input.cpp feeds.
 target_link_libraries(eden-uwp PRIVATE common core video_core audio_core frontend_common hid_core
-                                        input_common)
+                                        input_common SDL3::SDL3)
 
 # WinRT (CoreApplication, IFrameworkView, ApplicationData) comes from the Store umbrella import lib.
 target_link_libraries(eden-uwp PRIVATE WindowsApp.lib)
+target_link_libraries(eden-uwp PRIVATE d3d11 d2d1 dwrite dxgi windowscodecs)
 
 # Win32 networking used by core's network_interface (ConvertLengthToIpv4Mask etc.), plus crypt32 +
 # user32 which the from-source OpenSSL pulls (cert store + its fatal-error/service-detection code).
