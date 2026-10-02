@@ -21,6 +21,10 @@
 #include "core/hle/kernel/k_typed_address.h"
 #include "core/hle/kernel/svc_common.h"
 
+namespace Common {
+class Fiber;
+} // namespace Common
+
 namespace Core {
 class ExclusiveMonitor;
 class System;
@@ -182,6 +186,10 @@ public:
     /// Registers all kernel objects with the global emulation state, this is purely for tracking
     /// leaks after emulation has been shutdown.
     void RegisterKernelObject(KAutoObject* object);
+
+    /// Tracks a guest thread's host fiber. A thread left dangling at shutdown keeps its fiber;
+    /// Shutdown then frees the fiber's stacks.
+    void RegisterHostFiber(const std::shared_ptr<Common::Fiber>& fiber);
 
     /// Unregisters a kernel object previously registered with RegisterKernelObject when it was
     /// destroyed during the current emulation session.

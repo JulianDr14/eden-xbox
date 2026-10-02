@@ -25,9 +25,11 @@
 #include <fstream>
 #include <mutex>
 #include <cstring>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "common/host_memory.h"
@@ -38,12 +40,14 @@
 #include "core/arm/jit_prewarm.h"
 #include "core/core.h"
 #include "core/cpu_manager.h"
+#include "core/file_sys/control_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/kernel/svc/svc_debug_string.h" // Kernel::Svc::SetDebugStringObserver
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/loader/loader.h"
 #include "hid_core/hid_core.h"
 #include "video_core/frame_trace.h"
 #include "video_core/gpu.h"
@@ -63,6 +67,9 @@ void SetTracedFrame(u32 frame);
 void SetFrameDiagnostics(bool enabled);
 void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
 void ShowCpuLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
+void ShowGameMenu(VideoCore::RendererBase& renderer, std::string_view title,
+                  std::span<const std::string> items, size_t selected, std::string_view hint);
+void HideGameMenu(VideoCore::RendererBase& renderer);
 void SetBcArrayDecode(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuVerify(bool enabled); // d3d12_texture_cache.h
@@ -88,6 +95,7 @@ std::atomic<u64> g_test_memory_limit{};
 void WriteDiag(const std::string& msg); // defined with the UWP entry point below
 std::string MemoryReport();             // likewise
 std::string LargestAllocations();       // likewise
+std::string HeapReport();               // likewise
 bool QueryAppMemory(u64& used, u64& limit);  // likewise
 } // namespace
 
@@ -96,6 +104,8 @@ namespace EdenXbox {
 constexpr const char* JIT_LIVENESS_SENTINEL = "EDEN_XBOX_JIT_ALIVE";
 // Emitted by the payload after its framebuffer loop, so the boot keeps presenting until then.
 constexpr const char* GFX_DONE_SENTINEL = "EDEN_XBOX_GFX_DONE";
+/// RunHeadlessBoot's status when the player chose "back to the library" in the in-game menu.
+constexpr int RETURN_TO_LIBRARY = 10;
 
 /// Where the renderer presents: the CoreWindow (as IUnknown*) and its size in physical pixels.
 /// A null window selects the Null renderer.
@@ -114,12 +124,38 @@ static void ApplyHeadlessBootSettings(const BootSurface& surface) {
     // The on-console failure mode is a hard crash with no eden_log.txt; the default 4 KiB write
     // buffering loses exactly the lines that say where it died. Flush every line instead.
     Settings::values.log_flush_line = true;
-    // Player 1 is a connected Pro Controller bound to the virtual_gamepad engine (uwp_input.h).
-    auto& player = Settings::values.players.GetValue()[0];
-    player.connected = true;
-    player.controller_type = Settings::ControllerType::ProController;
+    // Player 1 is bound to the virtual_gamepad engine (uwp_input.h) and presented to the game as
+    // the controller chosen in the library (a Pro Controller unless told otherwise).
+    ApplyControllerStyleSettings(LoadControllerOptions().style);
+    // Latin American Spanish (es-419, the Switch's only variant for Mexico and the US) on the
+    // American region; once the game is loaded, ApplyGameLanguage narrows it to what it ships.
+    Settings::values.language_index = Settings::Language::SpanishLatin;
+    Settings::values.region_index = Settings::Region::Usa;
     // memory_layout_mode stays at its default until the Series-S budget is measured on-console; the
     // DRAM clamp is a separate reservation follow-up, not here.
+}
+
+/// Many games read the system language directly and fall back to English on their own when they
+/// lack it (Pokemon: Let's Go has Spain's Spanish but not es-419). Pick from the languages the
+/// game declares: Latin American Spanish, else Spain's Spanish, else American English.
+static void ApplyGameLanguage(Core::System& system) {
+    FileSys::NACP nacp;
+    if (system.GetAppLoader().ReadControlData(nacp) != Loader::ResultStatus::Success) {
+        return;
+    }
+    const u32 supported = nacp.GetSupportedLanguages();
+    const auto has = [supported](FileSys::SupportedLanguage language) {
+        return (supported & static_cast<u32>(language)) != 0;
+    };
+    // An empty mask declares nothing; keep es-419 and let the game decide.
+    const auto language =
+        supported == 0 || has(FileSys::SupportedLanguage::LatinAmericanSpanish)
+            ? Settings::Language::SpanishLatin
+        : has(FileSys::SupportedLanguage::Spanish) ? Settings::Language::Spanish
+                                                   : Settings::Language::EnglishAmerican;
+    Settings::values.language_index = language;
+    LOG_INFO(Frontend, "Headless boot: game languages {:08X}, system language {}", supported,
+             Settings::CanonicalizeEnum(language));
 }
 
 /// Optional boot.cfg next to boot.nro (written by package-appx.ps1 -RunSeconds).
@@ -314,6 +350,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         shutdown();
         return 2;
     }
+    ApplyGameLanguage(system);
 
     // Install the JIT-liveness observer BEFORE running any guest code: it watches every guest
     // svcOutputDebugString chunk for the sentinel and signals the wait below. Cheap no-op for any
@@ -368,7 +405,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
 
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
     void(system.Run());
-    input.Start();
+    input.Start(system.HIDCore());
 
     if (config.play) {
         // Played by hand: the guest runs until the app is closed from the console, which ends the
@@ -376,19 +413,67 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         // Q on a keyboard (the PC) ends the session cleanly instead, so the run can be told apart
         // from a crash.
         WriteDiag("step: system.Run() issued, playing until the app is closed | " + MemoryReport());
-        constexpr auto TICK = std::chrono::milliseconds(100);
+        // In-game menu (game_menu.h): the guest pauses while it is open, and the renderer draws it
+        // over the last frame from its own thread.
+        std::optional<GameMenu> menu;
+        const auto draw_menu = [&] {
+            const std::vector<std::string> lines = menu->Lines();
+            const size_t selected = menu->Selected();
+            system.GPU().RunOnGpuThread([&] {
+                D3D12::ShowGameMenu(system.Renderer(), "MENU", lines, selected,
+                                    "A ELEGIR   B VOLVER   < > CAMBIAR");
+            });
+        };
+        constexpr auto TICK = std::chrono::milliseconds(20);
+        constexpr u32 TICKS_PER_MINUTE = 3000;
         for (u32 tick = 1;; ++tick) {
             std::this_thread::sleep_for(TICK);
             if (EdenXbox::QuitRequested()) {
-                WriteDiag("step: Q pressed after " + std::to_string(tick / 10) +
+                WriteDiag("step: Q pressed after " + std::to_string(tick / 50) +
                           " s, shutting down | " + MemoryReport());
                 shutdown();
                 LOG_INFO(Frontend, "Headless boot: session closed with Q.");
                 return 0;
             }
-            if (tick % 600 == 0) {
-                WriteDiag("step: playing, " + std::to_string(tick / 600) + " min | " +
-                          MemoryReport());
+            for (const MenuAction action : input.TakeMenuActions()) {
+                if (!menu) {
+                    if (action != MenuAction::Toggle) continue;
+                    void(system.Pause());
+                    input.SetMenuOpen(true);
+                    const ControllerOptions options = input.Options();
+                    menu.emplace(GameMenuSettings{options.style, options.swap_face_buttons,
+                                                  options.deadzone});
+                    WriteDiag("menu: opened, guest paused | " + MemoryReport());
+                    draw_menu();
+                    continue;
+                }
+                const GameMenuResult result = menu->Apply(action);
+                if (result == GameMenuResult::Library) {
+                    WriteDiag("menu: back to the library, shutting the game down | " +
+                              MemoryReport());
+                    shutdown();
+                    return RETURN_TO_LIBRARY;
+                }
+                if (result == GameMenuResult::Resume) {
+                    menu.reset();
+                    system.GPU().RunOnGpuThread([&] { D3D12::HideGameMenu(system.Renderer()); });
+                    input.SetMenuOpen(false);
+                    void(system.Run());
+                    WriteDiag("menu: closed, guest running");
+                    break;
+                }
+                if (result == GameMenuResult::SettingsChanged) {
+                    ControllerOptions options = input.Options();
+                    options.style = menu->Settings().style;
+                    options.swap_face_buttons = menu->Settings().swap_face_buttons;
+                    options.deadzone = menu->Settings().deadzone;
+                    input.SetOptions(options);
+                }
+                draw_menu();
+            }
+            if (tick % (10 * TICKS_PER_MINUTE) == 0) {
+                WriteDiag("step: playing, " + std::to_string(tick / TICKS_PER_MINUTE) +
+                          " min | " + MemoryReport());
                 WriteDiag("memory map: " + LargestAllocations());
             }
         }
@@ -553,6 +638,7 @@ std::string LargestAllocations() {
         uintptr_t base;
         u64 committed;
         DWORD type;
+        DWORD protect; // As allocated: write-combined pages are GPU upload memory, executable JIT.
     };
     std::vector<Allocation> allocations;
     u64 by_type[3]{}; // private, mapped, image
@@ -564,7 +650,7 @@ std::string LargestAllocations() {
             by_type[info.Type == MEM_PRIVATE ? 0 : info.Type == MEM_MAPPED ? 1 : 2] +=
                 info.RegionSize;
             if (allocations.empty() || allocations.back().base != base) {
-                allocations.push_back({base, 0, info.Type});
+                allocations.push_back({base, 0, info.Type, info.AllocationProtect});
             }
             allocations.back().committed += info.RegionSize;
         }
@@ -605,14 +691,74 @@ std::string LargestAllocations() {
                        std::to_string(bucket_count[4]) + "x=" +
                        std::to_string(bucket_bytes[4] >> 20) + "M; largest:";
     for (size_t i = 0; i < allocations.size() && i < 12; ++i) {
+        const DWORD protect = allocations[i].protect;
         char entry[64];
-        std::snprintf(entry, sizeof(entry), " %llx=%lluM%s",
+        std::snprintf(entry, sizeof(entry), " %llx=%lluM%s%s",
                       static_cast<unsigned long long>(allocations[i].base),
                       static_cast<unsigned long long>(allocations[i].committed >> 20),
                       allocations[i].type == MEM_PRIVATE  ? ""
                       : allocations[i].type == MEM_MAPPED ? "(map)"
-                                                          : "(img)");
+                                                          : "(img)",
+                      (protect & PAGE_WRITECOMBINE) ? "(wc)"
+                      : (protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE))
+                          ? "(x)"
+                          : "");
         text += entry;
+    }
+    // Write-combined and executable private memory in total: GPU upload heaps and JIT code.
+    u64 write_combined = 0;
+    u64 executable = 0;
+    for (const Allocation& allocation : allocations) {
+        if (allocation.type != MEM_PRIVATE) continue;
+        if (allocation.protect & PAGE_WRITECOMBINE) write_combined += allocation.committed;
+        else if (allocation.protect &
+                 (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE))
+            executable += allocation.committed;
+    }
+    text += "; write-combined " + std::to_string(write_combined >> 20) + " MiB, executable " +
+            std::to_string(executable >> 20) + " MiB";
+    return text;
+}
+
+// The process heaps: allocations still live (busy) against what they keep committed, after
+// returning their free pages to the system. Live bytes left after a game are leaked objects; a
+// committed figure far above them is fragmentation.
+std::string HeapReport() {
+    std::vector<HANDLE> heaps(64);
+    const DWORD count = GetProcessHeaps(static_cast<DWORD>(heaps.size()), heaps.data());
+    heaps.resize(std::min<DWORD>(count, static_cast<DWORD>(heaps.size())));
+    u64 busy = 0;
+    u64 committed = 0;
+    // Live bytes by block size: many blocks of one size are one kind of object.
+    std::unordered_map<u64, std::pair<u64, u64>> by_size; // size -> count, bytes
+    for (const HANDLE heap : heaps) {
+        HeapCompact(heap, 0);
+        if (!HeapLock(heap)) {
+            continue;
+        }
+        PROCESS_HEAP_ENTRY entry{};
+        while (HeapWalk(heap, &entry)) {
+            if (entry.wFlags & PROCESS_HEAP_ENTRY_BUSY) {
+                busy += entry.cbData;
+                auto& [blocks, bytes] = by_size[entry.cbData];
+                ++blocks;
+                bytes += entry.cbData;
+            } else if (entry.wFlags & PROCESS_HEAP_REGION) {
+                committed += entry.Region.dwCommittedSize;
+            }
+        }
+        HeapUnlock(heap);
+    }
+    std::vector<std::pair<u64, std::pair<u64, u64>>> sizes(by_size.begin(), by_size.end());
+    std::sort(sizes.begin(), sizes.end(),
+              [](const auto& a, const auto& b) { return a.second.second > b.second.second; });
+    std::string text = std::to_string(heaps.size()) + " heaps, live " +
+                       std::to_string(busy >> 20) + " MiB, region commit " +
+                       std::to_string(committed >> 20) + " MiB; live by block size:";
+    for (size_t i = 0; i < sizes.size() && i < 10; ++i) {
+        text += " " + std::to_string(sizes[i].first) + "B x" +
+                std::to_string(sizes[i].second.first) + "=" +
+                std::to_string(sizes[i].second.second >> 10) + "K";
     }
     return text;
 }
@@ -1066,6 +1212,10 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                 if (pressed) VideoCore::FrameTrace::Start(480);
                 return;
             }
+            if (key == VirtualKey::Escape) {
+                if (pressed) EdenXbox::RequestGameMenu();
+                return;
+            }
             EdenXbox::SetKeyboardKey(static_cast<unsigned>(key), pressed);
         };
         auto focus = window.Activated(winrt::auto_revoke, [](auto&&, WindowActivatedEventArgs const& args) {
@@ -1097,218 +1247,237 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
             }
         }
 
-        std::optional<std::string> library_game;
-        try {
-            const auto install = std::filesystem::path{
-                Windows::ApplicationModel::Package::Current().InstalledLocation().Path().c_str()};
+        // "Back to the library" in the in-game menu shuts the game down inside this process and
+        // comes back here: restarting the app is slow and awkward on the console.
+        for (u32 session = 1;; ++session) {
+            std::optional<std::string> library_game;
             bool show_library = false;
-            std::ifstream cfg{install / L"boot.cfg"};
-            for (std::string line; std::getline(cfg, line);) {
-                if (line == "library=1") show_library = true;
-            }
-            if (show_library) {
-                library_active = true;
-                const auto local = std::filesystem::path{
-                    Windows::Storage::ApplicationData::Current().LocalFolder().Path().c_str()};
-                WriteDiag("library: scanning LocalState/games; waiting for user selection");
-                library_game = EdenXbox::ShowGameLibrary(surface.core_window, surface.width,
-                    surface.height, local / L"games", [install, local] { SeedUserData(install, local); });
-                library_active = false;
-                if (!library_game) {
-                    WriteDiag("library: closed by user");
-                    return;
-                }
-                WriteDiag("library: selected " + *library_game);
-            }
-        } catch (const std::exception& e) {
-            WriteDiag(std::string("library: failed: ") + e.what());
-            return;
-        } catch (const winrt::hresult_error& e) {
-            WriteDiag("library: failed: " + winrt::to_string(e.message()));
-            return;
-        }
-
-        std::atomic<bool> done{false};
-        std::thread worker([&done, surface, library_game]() {
-            winrt::init_apartment(winrt::apartment_type::multi_threaded);
-            std::set_terminate(OnTerminate); // per-thread in the MSVC runtime
-            std::string nro_path;
-            EdenXbox::BootConfig config{};
+            std::string library_pick;
             try {
-                // Bundled NRO from the read-only package install location.
-                const std::string install_path = winrt::to_string(
-                    Windows::ApplicationModel::Package::Current().InstalledLocation().Path());
-                nro_path = install_path + "\\boot.nro";
-                WriteDiag("resolved NRO path: " + nro_path);
-                std::ifstream cfg{install_path + "\\boot.cfg"};
+                const auto install = std::filesystem::path{
+                    Windows::ApplicationModel::Package::Current().InstalledLocation().Path().c_str()};
+                std::ifstream cfg{install / L"boot.cfg"};
                 for (std::string line; std::getline(cfg, line);) {
-                    constexpr std::string_view key = "run_seconds=";
-                    if (line.starts_with(key)) {
-                        config.run_seconds =
-                            static_cast<u32>(std::strtoul(line.c_str() + key.size(), nullptr, 10));
-                        WriteDiag("boot.cfg: run " + std::to_string(config.run_seconds) + " s");
-                    } else if (line == "descriptor_checks=1") {
-                        config.descriptor_checks = true;
-                        WriteDiag("boot.cfg: device removal checks after every draw descriptor");
-                    } else if (line == "dred=1") {
-                        config.dred = true;
-                        WriteDiag("boot.cfg: DRED breadcrumbs and page-fault tracking enabled");
-                    } else if (line == "gpu_profile=1") {
-                        config.gpu_profile = true;
-                        WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
-                    } else if (line == "cpu_profile=1") {
-                        config.cpu_profile = true;
-                    } else if (line.starts_with("memory_limit_mib=")) {
-                        const auto value = line.substr(17);
-                        unsigned long parsed{};
-                        const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
-                        if (result.ec == std::errc{} && result.ptr == value.data() + value.size() && parsed <= 1048576) {
-                            config.memory_limit_mib = static_cast<u32>(parsed);
-                        } else {
-                            WriteDiag("boot.cfg: invalid memory_limit_mib, ignored");
-                        }
-                    } else if (line == "jit_prewarm=record") {
-                        config.jit_prewarm = EdenXbox::BootConfig::JitPrewarm::Record;
-                    } else if (line == "jit_prewarm=1") {
-                        config.jit_prewarm = EdenXbox::BootConfig::JitPrewarm::Warm;
-                    } else if (line == "jit_prewarm=0") {
-                        config.jit_prewarm = EdenXbox::BootConfig::JitPrewarm::Off;
-                        WriteDiag("boot.cfg: per-core guest CPU profiling enabled");
-                    } else if (line == "audio_profile=1") {
-                        config.audio_profile = true;
-                        WriteDiag("boot.cfg: XAudio2 profiling enabled");
-                    } else if (line == "audio=null") {
-                        config.null_audio = true;
-                        WriteDiag("boot.cfg: timed Null audio");
-                    } else if (line == "audio=xaudio2") {
-                        config.null_audio = false;
-                        WriteDiag("boot.cfg: XAudio2 audio");
-                    } else if (line.starts_with("audio=")) {
-                        config.null_audio = false;
-                        WriteDiag("boot.cfg: unknown audio backend '" + line.substr(6) +
-                                  "', using XAudio2");
-                    } else if (line == "force_swap_interval=1") {
-                        config.force_swap_interval_one = true;
-                        WriteDiag("boot.cfg: forcing guest swap intervals above one to one");
-                    } else if (line == "debug_layer=1" || line == "debug_layer=gbv") {
-                        config.debug_layer = true;
-                        config.gpu_validation = line == "debug_layer=gbv";
-                        WriteDiag(config.gpu_validation
-                                      ? "boot.cfg: D3D12 debug layer with GPU-based validation"
-                                      : "boot.cfg: D3D12 debug layer");
-                    } else if (line.starts_with("log_filter=")) {
-                        config.log_filter = line.substr(11);
-                        WriteDiag("boot.cfg: log filter " + config.log_filter);
-                    } else if (line.starts_with("trace_frame=")) {
-                        config.traced_frame =
-                            static_cast<u32>(std::strtoul(line.c_str() + 12, nullptr, 10));
-                        WriteDiag("boot.cfg: trace frame " + std::to_string(config.traced_frame));
-                    } else if (line == "bc_arrays=native") {
-                        config.bc_arrays_native = true;
-                        WriteDiag("boot.cfg: D3D12 block-compressed arrays stay compressed");
-                    } else if (line == "astc=gpu" || line == "astc=gpu-rgba" ||
-                               line == "astc=cpu" || line == "astc=bc3") {
-                        using Astc = decltype(config.astc);
-                        config.astc = line == "astc=gpu"        ? Astc::Gpu
-                                      : line == "astc=gpu-rgba" ? Astc::GpuRgba
-                                      : line == "astc=cpu"      ? Astc::Cpu
-                                                               : Astc::Bc3;
-                        WriteDiag("boot.cfg: ASTC " + line.substr(5));
-                    } else if (line == "astc_fresh=1") {
-                        config.astc_fresh = true;
-                        WriteDiag("boot.cfg: new ASTC scratch resources for every GPU upload");
-                    } else if (line == "astc_sync=1") {
-                        config.astc_sync = true;
-                        WriteDiag("boot.cfg: wait for the GPU after every GPU ASTC upload");
-                    } else if (line == "astc_verify=1") {
-                        config.astc_verify = true;
-                        WriteDiag("boot.cfg: verify first GPU BC3 upload against CPU");
-                    } else if (line == "fastmem=0" || line == "fastmem=1" ||
-                               line == "fastmem=hybrid" || line == "fastmem=full") {
-                        using Fastmem = decltype(config.fastmem);
-                        config.fastmem = line == "fastmem=0"      ? Fastmem::Off
-                                         : line == "fastmem=full" ? Fastmem::Full
-                                         : line == "fastmem=hybrid" ? Fastmem::Hybrid
-                                                                   : Fastmem::Auto;
-                        WriteDiag("boot.cfg: " + line);
-                    } else if (line.starts_with("fastmem_hot_mib=")) {
-                        const auto requested = static_cast<u32>(
-                            std::strtoul(line.c_str() + 16, nullptr, 10));
-                        config.fastmem_hot_mib = std::clamp(requested, 128U, 448U);
-                        WriteDiag("boot.cfg: fastmem hot " +
-                                  std::to_string(config.fastmem_hot_mib) + " MiB");
-                    } else if (line == "async_shaders=0") {
-                        config.async_shaders = false;
-                        WriteDiag("boot.cfg: asynchronous shaders off");
-                    } else if (line == "play=1") {
-                        config.play = true;
-                        WriteDiag("boot.cfg: played by hand, no time limit or frame dumps");
-                    } else if (line == "renderer=null") {
-                        config.null_renderer = true;
-                        WriteDiag("boot.cfg: Null renderer");
-                    } else if (line.starts_with("input=")) {
-                        if (auto step = EdenXbox::ParseInputStep(line.substr(6))) {
-                            config.input_script.push_back(std::move(*step));
-                            WriteDiag("boot.cfg: input " + line.substr(6));
-                        } else {
-                            WriteDiag("boot.cfg: IGNORED bad input line " + line.substr(6));
-                        }
-                    } else if (line.starts_with("game=")) {
-                        config.game = line.substr(5);
-                        WriteDiag("boot.cfg: game " + config.game);
+                    if (line == "library=1") show_library = true;
+                    else if (line.starts_with("library_pick=")) library_pick = line.substr(13);
+                }
+                if (show_library) {
+                    if (session > 1) {
+                        WriteDiag("library: back from the game | " + MemoryReport());
+                        WriteDiag("heaps: " + HeapReport() + " | " + MemoryReport());
+                        WriteDiag("memory map: " + LargestAllocations());
                     }
-                }
-                const std::string local_path = winrt::to_string(
-                    Windows::Storage::ApplicationData::Current().LocalFolder().Path());
-                SeedUserData(std::filesystem::path{winrt::to_hstring(install_path).c_str()},
-                             std::filesystem::path{winrt::to_hstring(local_path).c_str()});
-                if (library_game) {
-                    config.game = *library_game;
-                    config.play = true;
-                    config.run_seconds = 0;
-                }
-                if (!config.game.empty()) {
-                    nro_path = local_path + "\\games\\" + config.game;
-                    if (config.run_seconds == 0 && !config.play) {
-                        config.run_seconds = EdenXbox::DEFAULT_GAME_RUN_SECONDS;
+                    library_active = true;
+                    const auto local = std::filesystem::path{
+                        Windows::Storage::ApplicationData::Current().LocalFolder().Path().c_str()};
+                    WriteDiag("library: scanning LocalState/games; waiting for user selection");
+                    library_game = EdenXbox::ShowGameLibrary(surface.core_window, surface.width,
+                        surface.height, local / L"games", [install, local] { SeedUserData(install, local); },
+                        session <= 2 ? std::string_view{library_pick} : std::string_view{});
+                    library_active = false;
+                    if (!library_game) {
+                        WriteDiag("library: closed by user");
+                        return;
                     }
-                    WriteDiag("resolved game path: " + nro_path + ", running " +
-                              (config.play ? std::string("until closed")
-                                           : std::to_string(config.run_seconds) + " s"));
+                    WriteDiag("library: selected " + *library_game);
                 }
-            } catch (...) {
-                WriteDiag("FAILED resolving Package.InstalledLocation");
+            } catch (const std::exception& e) {
+                WriteDiag(std::string("library: failed: ") + e.what());
+                return;
+            } catch (const winrt::hresult_error& e) {
+                WriteDiag("library: failed: " + winrt::to_string(e.message()));
+                return;
             }
-            // Capture any early throw to the diag file instead of a silent exit.
-            try {
-                WriteDiag("calling RunHeadlessBoot");
-                const int rc = EdenXbox::RunHeadlessBoot(nro_path, surface, config);
-                WriteDiag("RunHeadlessBoot returned " + std::to_string(rc));
-            } catch (winrt::hresult_error const& e) {
-                WriteDiag("winrt::hresult_error: " + winrt::to_string(e.message()));
-            } catch (std::exception const& e) {
-                WriteDiag(std::string("std::exception: ") + e.what());
-            } catch (...) {
-                WriteDiag("unknown exception in RunHeadlessBoot");
-            }
-            done.store(true);
-        });
 
-        // Heartbeat every 10 s: if steps stop but heartbeats continue, the boot hung rather than
-        // crashed, and the last step names where.
-        CoreDispatcher dispatcher = window.Dispatcher();
-        ULONGLONG next_heartbeat = GetTickCount64() + 10'000;
-        while (!done.load()) {
-            EdenXbox::RefreshProControllers();
-            dispatcher.ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
-            ::Sleep(50);
-            if (GetTickCount64() >= next_heartbeat) {
-                WriteDiag("heartbeat: boot worker still running | " + MemoryReport());
-                next_heartbeat += 10'000;
+            std::atomic<bool> done{false};
+            std::atomic<int> boot_status{0};
+            std::thread worker([&done, &boot_status, surface, library_game]() {
+                winrt::init_apartment(winrt::apartment_type::multi_threaded);
+                std::set_terminate(OnTerminate); // per-thread in the MSVC runtime
+                std::string nro_path;
+                EdenXbox::BootConfig config{};
+                try {
+                    // Bundled NRO from the read-only package install location.
+                    const std::string install_path = winrt::to_string(
+                        Windows::ApplicationModel::Package::Current().InstalledLocation().Path());
+                    nro_path = install_path + "\\boot.nro";
+                    WriteDiag("resolved NRO path: " + nro_path);
+                    std::ifstream cfg{install_path + "\\boot.cfg"};
+                    for (std::string line; std::getline(cfg, line);) {
+                        constexpr std::string_view key = "run_seconds=";
+                        if (line.starts_with(key)) {
+                            config.run_seconds =
+                                static_cast<u32>(std::strtoul(line.c_str() + key.size(), nullptr, 10));
+                            WriteDiag("boot.cfg: run " + std::to_string(config.run_seconds) + " s");
+                        } else if (line == "descriptor_checks=1") {
+                            config.descriptor_checks = true;
+                            WriteDiag("boot.cfg: device removal checks after every draw descriptor");
+                        } else if (line == "dred=1") {
+                            config.dred = true;
+                            WriteDiag("boot.cfg: DRED breadcrumbs and page-fault tracking enabled");
+                        } else if (line == "gpu_profile=1") {
+                            config.gpu_profile = true;
+                            WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
+                        } else if (line == "cpu_profile=1") {
+                            config.cpu_profile = true;
+                        } else if (line.starts_with("memory_limit_mib=")) {
+                            const auto value = line.substr(17);
+                            unsigned long parsed{};
+                            const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+                            if (result.ec == std::errc{} && result.ptr == value.data() + value.size() && parsed <= 1048576) {
+                                config.memory_limit_mib = static_cast<u32>(parsed);
+                            } else {
+                                WriteDiag("boot.cfg: invalid memory_limit_mib, ignored");
+                            }
+                        } else if (line == "jit_prewarm=record") {
+                            config.jit_prewarm = EdenXbox::BootConfig::JitPrewarm::Record;
+                        } else if (line == "jit_prewarm=1") {
+                            config.jit_prewarm = EdenXbox::BootConfig::JitPrewarm::Warm;
+                        } else if (line == "jit_prewarm=0") {
+                            config.jit_prewarm = EdenXbox::BootConfig::JitPrewarm::Off;
+                            WriteDiag("boot.cfg: per-core guest CPU profiling enabled");
+                        } else if (line == "audio_profile=1") {
+                            config.audio_profile = true;
+                            WriteDiag("boot.cfg: XAudio2 profiling enabled");
+                        } else if (line == "audio=null") {
+                            config.null_audio = true;
+                            WriteDiag("boot.cfg: timed Null audio");
+                        } else if (line == "audio=xaudio2") {
+                            config.null_audio = false;
+                            WriteDiag("boot.cfg: XAudio2 audio");
+                        } else if (line.starts_with("audio=")) {
+                            config.null_audio = false;
+                            WriteDiag("boot.cfg: unknown audio backend '" + line.substr(6) +
+                                      "', using XAudio2");
+                        } else if (line == "force_swap_interval=1") {
+                            config.force_swap_interval_one = true;
+                            WriteDiag("boot.cfg: forcing guest swap intervals above one to one");
+                        } else if (line == "debug_layer=1" || line == "debug_layer=gbv") {
+                            config.debug_layer = true;
+                            config.gpu_validation = line == "debug_layer=gbv";
+                            WriteDiag(config.gpu_validation
+                                          ? "boot.cfg: D3D12 debug layer with GPU-based validation"
+                                          : "boot.cfg: D3D12 debug layer");
+                        } else if (line.starts_with("log_filter=")) {
+                            config.log_filter = line.substr(11);
+                            WriteDiag("boot.cfg: log filter " + config.log_filter);
+                        } else if (line.starts_with("trace_frame=")) {
+                            config.traced_frame =
+                                static_cast<u32>(std::strtoul(line.c_str() + 12, nullptr, 10));
+                            WriteDiag("boot.cfg: trace frame " + std::to_string(config.traced_frame));
+                        } else if (line == "bc_arrays=native") {
+                            config.bc_arrays_native = true;
+                            WriteDiag("boot.cfg: D3D12 block-compressed arrays stay compressed");
+                        } else if (line == "astc=gpu" || line == "astc=gpu-rgba" ||
+                                   line == "astc=cpu" || line == "astc=bc3") {
+                            using Astc = decltype(config.astc);
+                            config.astc = line == "astc=gpu"        ? Astc::Gpu
+                                          : line == "astc=gpu-rgba" ? Astc::GpuRgba
+                                          : line == "astc=cpu"      ? Astc::Cpu
+                                                                   : Astc::Bc3;
+                            WriteDiag("boot.cfg: ASTC " + line.substr(5));
+                        } else if (line == "astc_fresh=1") {
+                            config.astc_fresh = true;
+                            WriteDiag("boot.cfg: new ASTC scratch resources for every GPU upload");
+                        } else if (line == "astc_sync=1") {
+                            config.astc_sync = true;
+                            WriteDiag("boot.cfg: wait for the GPU after every GPU ASTC upload");
+                        } else if (line == "astc_verify=1") {
+                            config.astc_verify = true;
+                            WriteDiag("boot.cfg: verify first GPU BC3 upload against CPU");
+                        } else if (line == "fastmem=0" || line == "fastmem=1" ||
+                                   line == "fastmem=hybrid" || line == "fastmem=full") {
+                            using Fastmem = decltype(config.fastmem);
+                            config.fastmem = line == "fastmem=0"      ? Fastmem::Off
+                                             : line == "fastmem=full" ? Fastmem::Full
+                                             : line == "fastmem=hybrid" ? Fastmem::Hybrid
+                                                                       : Fastmem::Auto;
+                            WriteDiag("boot.cfg: " + line);
+                        } else if (line.starts_with("fastmem_hot_mib=")) {
+                            const auto requested = static_cast<u32>(
+                                std::strtoul(line.c_str() + 16, nullptr, 10));
+                            config.fastmem_hot_mib = std::clamp(requested, 128U, 448U);
+                            WriteDiag("boot.cfg: fastmem hot " +
+                                      std::to_string(config.fastmem_hot_mib) + " MiB");
+                        } else if (line == "async_shaders=0") {
+                            config.async_shaders = false;
+                            WriteDiag("boot.cfg: asynchronous shaders off");
+                        } else if (line == "play=1") {
+                            config.play = true;
+                            WriteDiag("boot.cfg: played by hand, no time limit or frame dumps");
+                        } else if (line == "renderer=null") {
+                            config.null_renderer = true;
+                            WriteDiag("boot.cfg: Null renderer");
+                        } else if (line.starts_with("input=")) {
+                            if (auto step = EdenXbox::ParseInputStep(line.substr(6))) {
+                                config.input_script.push_back(std::move(*step));
+                                WriteDiag("boot.cfg: input " + line.substr(6));
+                            } else {
+                                WriteDiag("boot.cfg: IGNORED bad input line " + line.substr(6));
+                            }
+                        } else if (line.starts_with("game=")) {
+                            config.game = line.substr(5);
+                            WriteDiag("boot.cfg: game " + config.game);
+                        }
+                    }
+                    const std::string local_path = winrt::to_string(
+                        Windows::Storage::ApplicationData::Current().LocalFolder().Path());
+                    SeedUserData(std::filesystem::path{winrt::to_hstring(install_path).c_str()},
+                                 std::filesystem::path{winrt::to_hstring(local_path).c_str()});
+                    if (library_game) {
+                        config.game = *library_game;
+                        config.play = true;
+                        config.run_seconds = 0;
+                    }
+                    if (!config.game.empty()) {
+                        nro_path = local_path + "\\games\\" + config.game;
+                        if (config.run_seconds == 0 && !config.play) {
+                            config.run_seconds = EdenXbox::DEFAULT_GAME_RUN_SECONDS;
+                        }
+                        WriteDiag("resolved game path: " + nro_path + ", running " +
+                                  (config.play ? std::string("until closed")
+                                               : std::to_string(config.run_seconds) + " s"));
+                    }
+                } catch (...) {
+                    WriteDiag("FAILED resolving Package.InstalledLocation");
+                }
+                // Capture any early throw to the diag file instead of a silent exit.
+                try {
+                    WriteDiag("calling RunHeadlessBoot");
+                    const int rc = EdenXbox::RunHeadlessBoot(nro_path, surface, config);
+                    boot_status.store(rc);
+                    WriteDiag("RunHeadlessBoot returned " + std::to_string(rc) + " | " + MemoryReport());
+                } catch (winrt::hresult_error const& e) {
+                    WriteDiag("winrt::hresult_error: " + winrt::to_string(e.message()));
+                } catch (std::exception const& e) {
+                    WriteDiag(std::string("std::exception: ") + e.what());
+                } catch (...) {
+                    WriteDiag("unknown exception in RunHeadlessBoot");
+                }
+                done.store(true);
+            });
+
+            // Heartbeat every 10 s: if steps stop but heartbeats continue, the boot hung rather than
+            // crashed, and the last step names where.
+            CoreDispatcher dispatcher = window.Dispatcher();
+            ULONGLONG next_heartbeat = GetTickCount64() + 10'000;
+            while (!done.load()) {
+                EdenXbox::RefreshProControllers();
+                dispatcher.ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
+                ::Sleep(50);
+                if (GetTickCount64() >= next_heartbeat) {
+                    WriteDiag("heartbeat: boot worker still running | " + MemoryReport());
+                    next_heartbeat += 10'000;
+                }
             }
+            worker.join();
+            if (show_library && boot_status.load() == EdenXbox::RETURN_TO_LIBRARY) {
+                WriteDiag("boot worker joined; back to the library");
+                continue;
+            }
+            WriteDiag("boot worker joined; exiting");
+            break;
         }
-        worker.join();
-        WriteDiag("boot worker joined; exiting");
     }
 
 private:

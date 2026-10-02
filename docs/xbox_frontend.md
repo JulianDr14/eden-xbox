@@ -465,3 +465,39 @@ AyudaExplorar/Elegir muestra cruceta ystick L monocromos. Gameplay no cambiado.
 Harnessdesktop drift/histéresis/diagonal/repetición/inversión/modal/stall/NaN PASS,
 buildincremental4ops/diffcheckcorrectos. Usuario cerró anterior, relanzado
 PID14084 biblioteca/Job5120; gate navegaciónmanual ySeries pendientes,sincommit.
+
+## Tipo de mando que ve la consola
+
+Igual que "Controller type" de Eden: el dispositivo físico solo aporta entradas y
+`NpadStyleIndex` decide qué ve el juego. Fila "La consola lo ve como" (A / izq. / der.),
+guardada en `controller_style` y aplicada al arrancar el juego:
+- Automatico (defecto): empieza como Pro; cada 0,5 s compara con el `NpadStyleTag` que
+  declara el juego. Respeta el fallback propio de Eden (Pro -> Joy-Con dobles) y, si el juego
+  rechaza ambos (Pokémon Let's Go), reconecta como portátil o Joy-Con suelto.
+- Pro / Joy-Con dobles / Joy-Con izq. / der.: `players[0].controller_type`.
+- Portátil: conecta el controlador handheld de Eden (`players[8]`, puerto virtual 8) y
+  desconecta jugador 1; fuerza modo no acoplado como Eden.
+Las entradas se envían a los puertos 0 y 8. Joy-Con suelto se sostiene en horizontal:
+`controller_style.h` gira stick y botones (posición física), L/ZL->SL y R/ZR->SR.
+Harness `tools/xbox/tests/controller-style.cpp` PASS; build incremental UWP limpio.
+Pendiente: validar en Series con Let's Go y un juego Pro-only.
+
+## Menú en juego y volver a la biblioteca
+
+Atajo: View + Menú (− y +) mantenidos 1 s; Esc en teclado. El botón Guía es del sistema.
+`MenuComboFilter` (`game_menu.h`) retiene − / + sueltos 100 ms para que el combo nunca llegue
+al juego; un toque sí llega. Con el menú abierto el juego se pausa (`System::Pause`), recibe
+todo suelto y el renderer redibuja el último frame con el menú encima desde su propio hilo
+(`GPU::RunOnGpuThread` -> `D3D12::ShowGameMenu`). Opciones: Continuar, tipo de mando (se
+aplica al momento), botones A/B/X/Y, zona muerta y Volver al inicio.
+
+Volver al inicio apaga el juego dentro del proceso (sin reiniciar la app) y regresa al bucle
+de la biblioteca. Medido en PC con Pokémon Let's Go, dos ciclos: tras cada juego la app queda
+en 120-128 MiB. Antes de corregirlo quedaban +300 MiB por juego: el kernel de Eden olvida los
+hilos colgantes al apagar y cada uno retenía su fiber de 4 MiB (66 por sesión). El kernel ahora
+guarda `weak_ptr` de las fibers y libera las pilas de las que siguen vivas tras detener los
+núcleos (`Fiber::Abandon`). `heaps:` en el diag muestra memoria viva por tamaño de bloque.
+
+Prueba desatendida: `library_pick=<archivo>` en boot.cfg elige el juego en las dos primeras
+visitas a la biblioteca; con `input=40:PLUS+MINUS:1500`, `input=44:UP`, `input=46:A` vuelve sola.
+Harness `tools/xbox/tests/game-menu.cpp` PASS. Pendiente: validar en Series.

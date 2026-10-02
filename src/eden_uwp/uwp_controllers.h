@@ -50,7 +50,7 @@ struct ControllerPanel {
     std::vector<ControllerDevice> devices;
 };
 inline constexpr float ControllerRowTop = 258;
-inline constexpr float ControllerRowHeight = 82;
+inline constexpr float ControllerRowHeight = 62;
 inline constexpr float ControllerChoiceTop = 303;
 inline constexpr float ControllerChoiceHeight = 42;
 inline constexpr size_t ControllerVisibleChoices = 6;

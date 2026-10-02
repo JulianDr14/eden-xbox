@@ -140,22 +140,25 @@ public:
             Text(L"Tu mando", 658, 168, 34, 0xf4f7fa, 490, 55, true);
             Text(L"Jugador 1 · Ajustes para todos tus juegos", 658, 227, 21, 0x9ba9ba, 490);
             const unsigned offset = panel.xbox ? 0 : 1;
-            for (unsigned row = 0; row < 2 + offset; ++row) {
+            for (unsigned row = 0; row < 3 + offset; ++row) {
                 const float y = ControllerRowTop + row * ControllerRowHeight;
-                Round(648, y, 530, 72, 14, row == setting_row ? 0x304c4b : 0x151e2b);
+                Round(648, y, 530, 56, 14, row == setting_row ? 0x304c4b : 0x151e2b);
                 const bool device = offset && row == 0;
-                const bool face = row == offset;
+                const bool type = row == offset;
+                const bool face = row == offset + 1;
                 Text(device ? L"Dispositivo                         v" :
+                     type ? L"La consola lo ve como          < >" :
                      face ? L"Botones A / B / X / Y" : L"Zona muerta de sticks",
-                     669, y + 7, 20, 0xf4f7fa, 460, 30, true);
+                     669, y + 2, 19, 0xf4f7fa, 460, 28, true);
                 Text(device ? (options.controller_id.empty() ? L"Automatico · " : L"") +
                          ControllerLabel(panel.devices, options.controller_id) :
+                     type ? std::wstring{ConsoleControllerStyleLabel(options.style)} :
                      face ? (options.swap_face_buttons ? L"Por posicion" : L"Por letra") :
                          std::to_wstring(static_cast<int>(options.deadzone * 100)) + L"%",
-                     669, y + 37, 19, 0x77e3bd, 460, 30);
+                     669, y + 28, 18, 0x77e3bd, 460, 26);
             }
             if (!panel.xbox) {
-                Round(648, 510, 530, 34, 10, setting_row == 3 ? 0x304c4b : 0x151e2b);
+                Round(648, 510, 530, 34, 10, setting_row == 4 ? 0x304c4b : 0x151e2b);
                 Text(L"Configurar teclado   >", 669, 512, 19, 0x77e3bd, 460, 30, true);
             }
             ControlPrompt(Navigation::Explore, L"Elegir", 658, 551, 90);

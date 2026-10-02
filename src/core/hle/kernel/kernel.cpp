@@ -195,6 +195,26 @@ struct KernelCore::Impl {
             }
         }
 
+        // eden-xbox: a dangling thread keeps its 4 MiB host fiber (two stacks) alive. A frontend
+        // that returns to its game list without restarting (the Xbox one) lost ~300 MiB per game
+        // that way. The cores and the CPU manager are stopped, so no fiber runs again: free the
+        // stacks of every one still alive. Weak references, as the dangling objects themselves
+        // may be stale.
+        {
+            std::scoped_lock lk{host_fibers_lock};
+            size_t abandoned = 0;
+            for (const auto& weak : host_fibers) {
+                if (const auto fiber = weak.lock()) {
+                    fiber->Abandon();
+                    ++abandoned;
+                }
+            }
+            host_fibers.clear();
+            if (abandoned != 0) {
+                LOG_INFO(Kernel, "Freed the host fibers of {} dangling threads", abandoned);
+            }
+        }
+
         object_name_global_data.reset();
 
         // Ensure that the object list container is finalized and properly shutdown.
@@ -794,6 +814,8 @@ struct KernelCore::Impl {
     std::optional<KObjectNameGlobalData> object_name_global_data;
 
     ::Common::unordered_set<KAutoObject*> registered_objects;
+    std::mutex host_fibers_lock;
+    std::vector<std::weak_ptr<Common::Fiber>> host_fibers;
     ::Common::unordered_set<KAutoObject*> registered_in_use_objects;
 
     std::mutex server_lock;
@@ -977,6 +999,15 @@ const KAutoObjectWithListContainer& KernelCore::ObjectListContainer() const {
 
 void KernelCore::PrepareReschedule(std::size_t id) {
     // TODO: Reimplement, this
+}
+
+void KernelCore::RegisterHostFiber(const std::shared_ptr<Common::Fiber>& fiber) {
+    std::scoped_lock lk{impl->host_fibers_lock};
+    // Games create threads all along: drop the finished ones whenever the list doubles.
+    if (impl->host_fibers.size() >= 64 && impl->host_fibers.size() == impl->host_fibers.capacity()) {
+        std::erase_if(impl->host_fibers, [](const auto& weak) { return weak.expired(); });
+    }
+    impl->host_fibers.push_back(fiber);
 }
 
 void KernelCore::RegisterKernelObject(KAutoObject* object) {

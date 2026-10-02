@@ -161,6 +161,9 @@ std::array<u8, 5> Glyph(char c) {
     case '.': return {0,0,0,0,2};
     case '%': return {5,1,2,4,5};
     case '-': return {0,0,7,0,0};
+    case ':': return {0,2,0,2,0};
+    case '<': return {1,2,4,2,1};
+    case '>': return {4,2,1,2,4};
     default: return {};
     }
 }
@@ -434,6 +437,7 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
     if (framebuffers.empty()) {
         return;
     }
+    last_framebuffer = framebuffers.front();
     if (!present_failed) {
         try {
             const Tegra::FramebufferConfig& framebuffer = framebuffers.front();
@@ -1068,6 +1072,7 @@ void RendererD3D12::RecordBlit(ID3D12Resource* image, u32 image_index,
     cmd->DrawInstanced(3, 1, 0, 0);
     DrawShaderIndicator(cmd, rtv);
     DrawPerformanceOverlay(cmd, rtv);
+    DrawGameMenu(cmd, rtv);
 
     barrier = Transition(image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     cmd->ResourceBarrier(1, &barrier);
@@ -1232,6 +1237,20 @@ void RendererD3D12::DrawShaderIndicator(ID3D12GraphicsCommandList* cmd,
     ClearRects(cmd, rtv, OVERLAY_TEXT, text);
 }
 
+void ShowGameMenu(VideoCore::RendererBase& renderer, std::string_view title,
+                  std::span<const std::string> items, size_t selected, std::string_view hint) {
+    if (Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Direct3D12) {
+        static_cast<RendererD3D12&>(renderer).ShowGameMenu(RendererD3D12::GameMenuOverlay{
+            std::string{title}, {items.begin(), items.end()}, selected, std::string{hint}});
+    }
+}
+
+void HideGameMenu(VideoCore::RendererBase& renderer) {
+    if (Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Direct3D12) {
+        static_cast<RendererD3D12&>(renderer).ShowGameMenu(std::nullopt);
+    }
+}
+
 void ShowCpuLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total) {
     if (Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Direct3D12) {
         static_cast<RendererD3D12&>(renderer).ShowLoadProgress(done, total, "CPU JIT");
@@ -1288,6 +1307,84 @@ void RendererD3D12::ShowLoadProgress(size_t done, size_t total, std::string_view
     } catch (const std::exception& e) {
         LOG_ERROR(Render, "D3D12: shader cache progress not shown: {}", e.what());
     }
+}
+
+void RendererD3D12::ShowGameMenu(std::optional<GameMenuOverlay> menu) {
+    game_menu = std::move(menu);
+    if (present_failed) {
+        return;
+    }
+    try {
+        const u32 index = swapchain.CurrentIndex();
+        scheduler.Wait(present_ticks[index]);
+        // The guest is paused: blit its last frame again (the menu is drawn with it), or show the
+        // menu on black when that frame is not a GPU image.
+        if (!blit_ready || !last_framebuffer || !CompositeAccelerated(*last_framebuffer, index)) {
+            ID3D12Resource* const image = swapchain.Image(index);
+            ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+            D3D12_RESOURCE_BARRIER barrier =
+                Transition(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmd->ResourceBarrier(1, &barrier);
+            constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            cmd->ClearRenderTargetView(back_buffer_rtvs[index], black, 0, nullptr);
+            DrawGameMenu(cmd, back_buffer_rtvs[index]);
+            barrier = Transition(image, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                 D3D12_RESOURCE_STATE_PRESENT);
+            cmd->ResourceBarrier(1, &barrier);
+        }
+        Present(index);
+    } catch (const std::exception& e) {
+        LOG_ERROR(Render, "D3D12: game menu not shown: {}", e.what());
+    }
+}
+
+void RendererD3D12::DrawGameMenu(ID3D12GraphicsCommandList* cmd,
+                                 D3D12_CPU_DESCRIPTOR_HANDLE rtv) {
+    if (!game_menu) {
+        return;
+    }
+    const LONG screen_width = static_cast<LONG>(swapchain.Width());
+    const LONG screen_height = static_cast<LONG>(swapchain.Height());
+    size_t longest = std::max(game_menu->title.size(), game_menu->hint.size());
+    for (const std::string& item : game_menu->items) {
+        longest = std::max(longest, item.size());
+    }
+    // Glyphs 5 cells high on rows of 10; shrink the cell until the longest line fits.
+    LONG cell = std::max<LONG>(2, screen_height / 200);
+    while (cell > 2 && TextWidth(longest, cell) + 16 * cell > screen_width * 9 / 10) {
+        --cell;
+    }
+    const LONG row = 10 * cell;
+    const LONG pad = 4 * cell;
+    const LONG width = TextWidth(longest, cell) + 2 * pad;
+    const LONG height = static_cast<LONG>(game_menu->items.size() + 4) * row + 2 * pad;
+    const LONG left = (screen_width - width) / 2;
+    const LONG top = (screen_height - height) / 2;
+    const D3D12_RECT border{left - cell, top - cell, left + width + cell, top + height + cell};
+    const D3D12_RECT panel{left, top, left + width, top + height};
+    ClearRects(cmd, rtv, OVERLAY_ACCENT, {&border, 1});
+    ClearRects(cmd, rtv, OVERLAY_PANEL, {&panel, 1});
+
+    std::vector<D3D12_RECT> title;
+    AppendText(title, game_menu->title, left + pad, top + pad + 2 * cell, cell);
+    ClearRects(cmd, rtv, OVERLAY_ACCENT, title);
+    std::vector<D3D12_RECT> text;
+    std::vector<D3D12_RECT> lit;
+    for (size_t i = 0; i < game_menu->items.size(); ++i) {
+        const LONG y = top + pad + static_cast<LONG>(i + 2) * row;
+        if (i == game_menu->selected) {
+            const D3D12_RECT bar{left + cell, y - 2 * cell, left + width - cell, y + 7 * cell};
+            ClearRects(cmd, rtv, OVERLAY_DIM, {&bar, 1});
+        }
+        AppendText(i == game_menu->selected ? lit : text, game_menu->items[i], left + pad, y,
+                   cell);
+    }
+    std::vector<D3D12_RECT> hint;
+    AppendText(hint, game_menu->hint, left + pad,
+               top + pad + static_cast<LONG>(game_menu->items.size() + 3) * row, cell);
+    ClearRects(cmd, rtv, OVERLAY_TEXT, text);
+    ClearRects(cmd, rtv, OVERLAY_ACCENT, lit);
+    ClearRects(cmd, rtv, OVERLAY_TEXT, hint);
 }
 
 void RendererD3D12::Present(u32 image_index) {

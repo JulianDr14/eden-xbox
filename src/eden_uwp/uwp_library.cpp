@@ -30,13 +30,15 @@ using winrt::Windows::System::VirtualKey;
 
 std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, unsigned height,
                                          const std::filesystem::path& root,
-                                         const std::function<void()>& seed) {
+                                         const std::function<void()>& seed,
+                                         std::string_view auto_pick) {
     using namespace winrt::Windows::UI::Core;
     auto window = CoreWindow::GetForCurrentThread();
     auto canvas = std::make_unique<LibraryCanvas>(core_window, width, height);
     LibraryScan scan;
     size_t selected = 0;
     bool dirty = true, loading = true, settings = false;
+    std::chrono::steady_clock::time_point auto_pick_at{};
     unsigned setting_row = 0;
     ControllerPanel panel;
     panel.xbox = winrt::Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily() == L"Windows.Xbox";
@@ -176,7 +178,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 panel.keyboard.open = true; panel.keyboard.capturing = false; dirty = true;
             } else if (x < 620 || x > 1206 || y < 133 || y > 620) actions |= Panel;
             else if (x >= 648 && x < 1178 && y >= ControllerRowTop &&
-                     y < ControllerRowTop + (panel.xbox ? 2 : 3) * ControllerRowHeight) {
+                     y < ControllerRowTop + (panel.xbox ? 3 : 4) * ControllerRowHeight) {
                 setting_row = static_cast<unsigned>((y - ControllerRowTop) / ControllerRowHeight);
                 actions |= Play;
             }
@@ -319,6 +321,18 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             if (scan.limited) notice = L"Limite de exploracion alcanzado: 10000 entradas, 5 niveles.";
             dirty = true;
         }
+        if (!auto_pick.empty() && !loading) {
+            if (auto_pick_at == std::chrono::steady_clock::time_point{})
+                auto_pick_at = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+            if (std::chrono::steady_clock::now() >= auto_pick_at) {
+                for (size_t i = 0; i < scan.entries.size(); ++i) {
+                    const auto path = scan.entries[i].relative_path.u8string();
+                    if (std::string_view{reinterpret_cast<const char*>(path.data()), path.size()} == auto_pick) {
+                        selected = i; settings = false; actions |= Play;
+                    }
+                }
+            }
+        }
         if (actions & Play && !settings && !panel.keyboard.open && !loading && !scan.entries.empty()) {
             const auto path = scan.entries[selected].relative_path.u8string();
             return std::string{reinterpret_cast<const char*>(path.data()), path.size()};
@@ -343,12 +357,14 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 }
                 actions &= ~(Swap | Zone);
             } else {
-                const unsigned rows = panel.xbox ? 2 : 4;
+                // Rows: [device (PC)], controller type, A/B/X/Y, deadzone, [keyboard (PC)].
+                const unsigned offset = panel.xbox ? 0 : 1;
+                const unsigned rows = panel.xbox ? 3 : 5;
                 if (actions & Up) setting_row = (setting_row + rows - 1) % rows;
                 if (actions & Down) setting_row = (setting_row + 1) % rows;
                 if (actions & (Up | Down)) dirty = true;
                 if (actions & (Play | Left | Right)) {
-                    if (!panel.xbox && setting_row == 3) {
+                    if (!panel.xbox && setting_row == 4) {
                         panel.keyboard.open = true; panel.keyboard.capturing = false; dirty = true;
                     } else if (!panel.xbox && setting_row == 0) {
                         panel.expanded = true;
@@ -356,7 +372,10 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                         for (size_t i = 0; i < panel.devices.size(); ++i)
                             if (panel.devices[i].id == options.controller_id) panel.choice = i + 2;
                         dirty = true;
-                    } else actions |= setting_row == (panel.xbox ? 0U : 1U) ? Swap : Zone;
+                    } else if (setting_row == offset) {
+                        options.style = StepConsoleControllerStyle(options.style, (actions & Left) != 0);
+                        device_changed = true; dirty = true;
+                    } else actions |= setting_row == offset + 1 ? Swap : Zone;
                 }
             }
         } else {

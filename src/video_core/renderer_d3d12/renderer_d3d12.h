@@ -6,7 +6,10 @@
 #include <array>
 #include <chrono>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "video_core/host1x/gpu_device_memory_manager.h"
@@ -36,6 +39,13 @@ void SetFrameDiagnostics(bool enabled);
 /// Shows the progress of the disk shader cache build on screen, if renderer is the D3D12 one
 /// (see RendererD3D12::ShowLoadProgress). A LoadDiskResources callback for the frontend.
 void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
+
+/// Frontend menu over the last guest frame, if renderer is the D3D12 one. GPU thread only
+/// (Tegra::GPU::RunOnGpuThread), with the guest paused; presents at once. Upper-case text.
+void ShowGameMenu(VideoCore::RendererBase& renderer, std::string_view title,
+                  std::span<const std::string> items, size_t selected, std::string_view hint);
+/// Removes the menu and presents the guest frame again. GPU thread only.
+void HideGameMenu(VideoCore::RendererBase& renderer);
 
 /// Direct3D 12 renderer: a device and swapchain on the UWP CoreWindow, presenting the guest's
 /// display framebuffer. The framebuffer is deswizzled on the CPU and drawn to the window with
@@ -70,7 +80,19 @@ public:
     /// then); updates at most every 33 ms.
     void ShowLoadProgress(size_t done, size_t total, std::string_view phase = {});
 
+    struct GameMenuOverlay {
+        std::string title;
+        std::vector<std::string> items;
+        size_t selected{};
+        std::string hint;
+    };
+    /// Shows (or with nullopt removes) the frontend menu and presents the last guest frame with
+    /// it. GPU thread only, while the guest is paused.
+    void ShowGameMenu(std::optional<GameMenuOverlay> menu);
+
 private:
+    /// The frontend menu, centered over back buffer rtv (in RENDER_TARGET state), if open.
+    void DrawGameMenu(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
     /// While pipelines build (VideoCore::ShaderNotify), a small panel in the bottom-right corner
     /// of back buffer rtv (in RENDER_TARGET state): three dots that cycle and the shader count.
     void DrawShaderIndicator(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
@@ -151,6 +173,9 @@ private:
     int crop_width{};
     int crop_height{};
     bool present_failed{};
+    /// The frontend menu while open, and the last framebuffer composited, to redraw it paused.
+    std::optional<GameMenuOverlay> game_menu;
+    std::optional<Tegra::FramebufferConfig> last_framebuffer;
     bool logged_accelerated{};
     u32 accelerated_frames{};
     bool logged_fallback{};

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 
 #include "common/bit_field.h"
@@ -169,6 +170,10 @@ public:
     void WaitForSyncOperation(u64 fence);
 
     void WaitForIdle();
+
+    /// Runs `action` on the GPU thread between its commands and waits for it. For frontends that
+    /// draw on the renderer while the guest is paused (it is the renderer's only safe thread).
+    void RunOnGpuThread(std::function<void()> action);
 
     /// Tick pending requests within the GPU.
     void TickWork();

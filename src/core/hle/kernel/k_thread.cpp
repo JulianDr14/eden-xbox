@@ -272,6 +272,7 @@ namespace Kernel {
 
         // Initialize emulation parameters.
         thread->m_host_context = std::make_shared<Common::Fiber>(std::move(init_func));
+        kernel.RegisterHostFiber(thread->m_host_context);
 
         R_SUCCEED();
     }
