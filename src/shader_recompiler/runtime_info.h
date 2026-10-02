@@ -26,8 +26,6 @@ enum class AttributeType : u8 {
     /// Packed SNORM 10:10:10:2 fetched as four uints and normalized in the shader, for hosts
     /// without the vertex format (D3D12).
     SignedNormA2B10G10R10,
-    /// D3D12: four normalized bytes fetched as two aligned pairs at locations N and N+32.
-    SplitNormalized8x4,
 };
 
 enum class InputTopology {
@@ -89,6 +87,14 @@ struct TransformFeedbackVarying {
 
 struct RuntimeInfo {
     std::array<AttributeType, 32> generic_input_types{};
+    /// D3D12: vertex inputs fetched in aligned parts because their bytes sit where the whole
+    /// format cannot be fetched: part k at location N + 32k, each of
+    /// generic_input_part_components components. 0 or 1 parts: fetched whole.
+    std::array<u8, 32> generic_input_parts{};
+    std::array<u8, 32> generic_input_part_components{};
+    /// D3D12: components the guest format has, when the host fetches more (three 8- or 16-bit
+    /// components widen to four). The rest read as 0, 0, 0, 1, like on Maxwell. 0: all four.
+    std::array<u8, 32> generic_input_components{};
     VaryingState previous_stage_stores;
     std::map<IR::Attribute, IR::Attribute> previous_stage_legacy_stores_mapping;
 

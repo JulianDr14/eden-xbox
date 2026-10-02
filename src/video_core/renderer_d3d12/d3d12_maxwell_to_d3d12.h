@@ -42,13 +42,28 @@ D3D12_FILL_MODE FillMode(Maxwell::PolygonMode mode);
 /// recompiler reads them as integers and converts in the shader.
 DXGI_FORMAT VertexFormat(Maxwell::VertexAttribute::Type type, Maxwell::VertexAttribute::Size size);
 
-/// Four normalized bytes at a half-word offset cannot use a four-byte IA format. Fetch two
-/// aligned pairs instead; the shader joins them without copying/repacking vertex buffers.
-constexpr bool SplitNormalized8x4(Maxwell::VertexAttribute::Type type,
-                                 Maxwell::VertexAttribute::Size size, u32 offset) noexcept {
-    return (type == Maxwell::VertexAttribute::Type::UNorm ||
-            type == Maxwell::VertexAttribute::Type::SNorm) &&
-           size == Maxwell::VertexAttribute::Size::Size_R8_G8_B8_A8 && (offset & 3U) == 2U;
+/// How an 8- or 16-bit attribute is fetched when its host format may not sit where it is. D3D12
+/// fetches a format at addresses aligned to min(4, its size); offset and stride decide which
+/// addresses an attribute takes. Elsewhere it is fetched in aligned parts of part_components
+/// components, part k as generic N + 32k, and the shader joins them without copying or repacking
+/// vertex buffers. Tears of the Kingdom packs RGBA8 at offsets 3, 6, 9 and 15, and RGBA16F
+/// positions at a stride of 6 (every other vertex half-word aligned).
+struct AttributeFetch {
+    u32 parts{1};           ///< 1: fetched whole with VertexFormat
+    u32 part_components{4}; ///< components in each part
+    u32 part_bytes{};
+    DXGI_FORMAT part_format{DXGI_FORMAT_UNKNOWN};
+};
+AttributeFetch SplitAttributeFetch(Maxwell::VertexAttribute::Type type,
+                                   Maxwell::VertexAttribute::Size size, u32 offset, u32 stride);
+
+/// Components of a guest vertex format whose host format has more (three 8- or 16-bit components
+/// widen to four, as DXGI has no such three-component formats). 0: the host format matches.
+constexpr u32 WidenedAttributeComponents(Maxwell::VertexAttribute::Size size) noexcept {
+    return size == Maxwell::VertexAttribute::Size::Size_R8_G8_B8 ||
+                   size == Maxwell::VertexAttribute::Size::Size_R16_G16_B16
+               ? 3
+               : 0;
 }
 
 /// Index buffer format; UnsignedByte has none (the draw widens it to 16 bits).

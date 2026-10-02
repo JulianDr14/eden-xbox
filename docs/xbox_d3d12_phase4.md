@@ -2298,6 +2298,68 @@ puedan divergir. No hay staging, repack ni copia adicional del buffer en cada dr
 Es una correccion para este formato y alineacion; no implementa vertex pulling general
 para cualquier formato desalineado ni elimina el limite de entradas del IA.
 
+Ampliado con Tears of the Kingdom, donde toda la geometria salia en picos.
+
+- **PSO rechazados:** habia 16, con `E_INVALIDARG`. Venian de RGBA8 UINT en el offset 6 y de
+  RGBA8 UNORM en los offsets 3, 9 y 15.
+- **Geometria rota sin error:** las posiciones son RGBA16F con un stride de 6. Uno de cada dos
+  vertices empieza a media palabra, y D3D12 no garantiza leer un formato de 8 bytes ahi. El PSO
+  se crea bien, pero esos vertices llegan con basura.
+
+`SplitAttributeFetch` (d3d12_maxwell_to_d3d12.cpp) decide la lectura de cualquier atributo de 8
+o 16 bits. La alineacion de cada vertice sale del offset **y del stride**; si es menor que
+min(4, tamano del formato), el atributo se lee en partes alineadas:
+
+- pares `R8G8` o bytes sueltos `R8` para RGB8/RGBA8/RG8;
+- componentes `R16` sueltos para RG16/RGB16/RGBA16.
+
+La parte k va en N + 32k. `RuntimeInfo::generic_input_parts` y
+`generic_input_part_components` sustituyen a `AttributeType::SplitNormalized8x4`. El SPIR-V une
+las partes y conserva la conversion propia del tipo (bitcast, UToF, SToF).
+
+Los formatos de 3 componentes de 8 o 16 bits se amplian a 4, porque DXGI no los tiene.
+`RuntimeInfo::generic_input_components` hace que la componente sobrante se lea como en Maxwell
+(w = 1, o el entero 1), y no como los bytes siguientes del buffer.
+
+PC con TotK: 0 PSO rechazados (antes 16), y la cueva se ve bien (Link, suelo y paredes).
+Validacion visual en Series pendiente.
+
+#### TotK: puntos blancos y neblina por derivadas manuales (helper lanes)
+
+Con la geometria ya bien, la cueva salia llena de manchas blancas que seguian los contornos,
+con un resplandor lechoso encima. El trace lo localizo asi:
+
+- **Origen visible:** la iluminacion diferida (cuadros x240 sobre el HDR R11G11B10) mete unos
+  34 000 texels NaN en la imagen. El bloom los extiende en neblina.
+- **De donde vienen:** la iluminacion lee un cubemap de reflejos de 64x64x6 que ya tenia NaN
+  en todas las caras (entre 280 y 1 700 por cara).
+- **Quien los genera:** el PS del terreno que pinta las caras del cubemap. Sus entradas son
+  finitas, pero calcula derivadas a mano con SHFL BFLY de cuad + FSWZADD, que en el IR son
+  `QuadSwap` y `FSwizzleAdd`. Despues hace sqrt, log2 y rsqrt sobre ellas.
+
+`QuadSwap` se emitia como `OpGroupNonUniformShuffleXor`, que en DXIL es `WaveReadLaneAt`.
+Antes de SM 6.7 las helper lanes no participan en las operaciones de onda, asi que leer a un
+vecino helper da basura. Las operaciones de cuad (`QuadReadLaneAt`, `QuadReadAcross*`) si las
+incluyen. En el cubemap, con triangulos de un pixel, casi todos los cuads tienen helpers, y de
+ahi el NaN repartido. En la vista normal solo falla en los bordes, de ahi los contornos.
+
+- El perfil D3D12 pone `support_quad_shuffles = caps.wave_ops`. Con eso, `QuadBroadcast` ya
+  emite `OpGroupNonUniformQuadBroadcast`.
+- `EmitQuadSwap` usa cuatro `QuadBroadcast`, una por lane del cuad, y elige la de
+  `(lane & 3) ^ (direccion + 1)`. Sirit no tiene `OpGroupNonUniformQuadSwap`.
+
+Ademas, el trace corrige dos cosas de diagnostico:
+
+- Decodificaba D16/R16_UNORM (recursos `R16_TYPELESS`) como half float, y marcaba NaN falsos.
+- Ahora el recuento de NaN del rt0 usa el mip y la capa de la vista (`Framebuffer::ColorBase`).
+  Antes siempre media la cara 0.
+
+Sigue sin arreglar: un rt R32F que el juego lee como RGBA8 (vista copiada en `reinterpreted`)
+sale en el volcado como NaN, pero es un artefacto del volcado, no del render.
+
+PC con TotK: 0 texels NaN en el cubemap, el HDR y las texturas del frame trazado (antes 5 600 y
+34 000). Wonder sin cambios ni fallos de PSO. Validacion en Series pendiente.
+
 El sampler que Wonder avisaba en Series es MAX con min/mag/mip puntuales, sin anisotropia
 (`0x180`). El footprint tiene un unico texel: MIN(x) = MAX(x) = x. Se canoniza a point
 normal antes de comprobar capacidades, tambien en PC: equivalencia exacta, sin operaciones

@@ -502,6 +502,10 @@ public:
         return index < NUM_RT ? color_formats[index] : DXGI_FORMAT_UNKNOWN;
     }
     [[nodiscard]] DXGI_FORMAT DepthFormat() const noexcept { return depth_format; }
+    /// Mip level and array layer a render target's view starts at (draw trace).
+    [[nodiscard]] VideoCommon::SubresourceBase ColorBase(size_t index) const noexcept {
+        return index < NUM_RT ? color_bases[index] : VideoCommon::SubresourceBase{};
+    }
     /// Texture cache image of a render target / the depth buffer; null when absent (draw trace).
     [[nodiscard]] const Image* ColorImage(size_t index) const noexcept;
     [[nodiscard]] const Image* DepthImage() const noexcept;
@@ -520,6 +524,7 @@ private:
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, NUM_RT> colors{};
     std::array<ImageId, NUM_RT> color_images{};
     std::array<DXGI_FORMAT, NUM_RT> color_formats{};
+    std::array<VideoCommon::SubresourceBase, NUM_RT> color_bases{};
     ImageId depth_image{};
     DXGI_FORMAT depth_format{DXGI_FORMAT_UNKNOWN};
     u32 samples{1};

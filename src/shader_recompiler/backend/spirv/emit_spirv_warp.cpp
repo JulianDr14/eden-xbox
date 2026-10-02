@@ -272,6 +272,22 @@ Id EmitQuadBroadcast(EmitContext& ctx, Id value, Id lane) {
 
 Id EmitQuadSwap(EmitContext& ctx, Id value, Id direction) {
     const Id xor_mask{ctx.OpIAdd(ctx.U32[1], direction, ctx.Const(1u))};
+    if (ctx.profile.support_quad_shuffles) {
+        // Quad broadcasts include helper lanes; a shuffle may not (D3D12 before SM 6.7), and
+        // manual derivatives then read garbage at triangle edges. Sirit has no OpGroupNonUniform-
+        // QuadSwap, so broadcast every quad lane and pick the one across.
+        const Id source{ctx.OpBitwiseXor(
+            ctx.U32[1], ctx.OpBitwiseAnd(ctx.U32[1], GetThreadId(ctx), ctx.Const(3u)), xor_mask)};
+        Id result{ctx.OpGroupNonUniformQuadBroadcast(ctx.U32[1], SubgroupScope(ctx), value,
+                                                     ctx.Const(3u))};
+        for (u32 lane = 3; lane-- > 0;) {
+            const Id lane_value{ctx.OpGroupNonUniformQuadBroadcast(
+                ctx.U32[1], SubgroupScope(ctx), value, ctx.Const(lane))};
+            result = ctx.OpSelect(ctx.U32[1], ctx.OpIEqual(ctx.U1, source, ctx.Const(lane)),
+                                  lane_value, result);
+        }
+        return result;
+    }
     return ctx.OpGroupNonUniformShuffleXor(ctx.U32[1], SubgroupScope(ctx), value, xor_mask);
 }
 

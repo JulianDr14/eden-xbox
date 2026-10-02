@@ -148,7 +148,6 @@ enum class InputGenericLoadOp {
     SToF,
     UToF,
     SNormA2B10G10R10, ///< sign-extend the field, then normalize (see UnpackSNormA2B10G10R10)
-    SplitNormalized8x4,
 };
 
 struct InputGenericInfo {
@@ -156,7 +155,14 @@ struct InputGenericInfo {
     Id pointer_type;
     Id component_type;
     InputGenericLoadOp load_op;
-    Id second_pair{};
+    /// Inputs fetched in parts (RuntimeInfo::generic_input_parts): parts after the first (id),
+    /// each holding part_components components.
+    std::array<Id, 3> more_parts{};
+    u32 parts{1};
+    u32 part_components{4};
+    /// Components the guest format has (RuntimeInfo::generic_input_components); the others read
+    /// as their defaults.
+    u32 components{4};
 };
 
 struct GenericElementInfo {

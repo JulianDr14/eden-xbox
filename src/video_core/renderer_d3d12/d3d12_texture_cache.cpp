@@ -3093,6 +3093,7 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
             copy_colors |= 1U << index;
         }
         color_formats[index] = runtime.Format(view->format).view;
+        color_bases[index] = view->range.base;
         images = view->slot_images ? view->slot_images : images;
         num_colors = static_cast<u32>(index) + 1;
         if (const Image* const image = view->SourceImage()) {
