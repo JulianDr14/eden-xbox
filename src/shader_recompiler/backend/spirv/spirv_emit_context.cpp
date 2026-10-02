@@ -201,7 +201,6 @@ void DefineGenericOutput(EmitContext& ctx, size_t index, std::optional<u32> invo
 Id GetAttributeType(EmitContext& ctx, AttributeType type) {
     switch (type) {
     case AttributeType::Float:
-    case AttributeType::SplitNormalized8x4:
         return ctx.F32[4];
     case AttributeType::SignedInt:
         return ctx.TypeVector(ctx.TypeInt(32, true), 4);
@@ -224,9 +223,6 @@ InputGenericInfo GetAttributeInfo(EmitContext& ctx, AttributeType type, Id id) {
     switch (type) {
     case AttributeType::Float:
         return InputGenericInfo{id, ctx.input_f32, ctx.F32[1], InputGenericLoadOp::None};
-    case AttributeType::SplitNormalized8x4:
-        return InputGenericInfo{id, ctx.input_f32, ctx.F32[1],
-                                InputGenericLoadOp::SplitNormalized8x4};
     case AttributeType::UnsignedInt:
         return InputGenericInfo{id, ctx.input_u32, ctx.U32[1], InputGenericLoadOp::Bitcast};
     case AttributeType::SignedInt:
@@ -793,27 +789,42 @@ void EmitContext::DefineAttributeMemAccess(const Info& info) {
                 ++label_index;
                 continue;
             }
-            if (generic.load_op == InputGenericLoadOp::SplitNormalized8x4) {
-                // Only a vertex input uses this host format. Dynamic component reads assemble
-                // the same vector as the ordinary input; constant reads load just one pair.
-                const Id lo{OpLoad(F32[4], generic.id)};
-                const Id hi{OpLoad(F32[4], generic.second_pair)};
-                const Id joined{OpCompositeConstruct(
-                    F32[4], OpCompositeExtract(F32[1], lo, 0),
-                    OpCompositeExtract(F32[1], lo, 1), OpCompositeExtract(F32[1], hi, 0),
-                    OpCompositeExtract(F32[1], hi, 1))};
-                OpReturnValue(OpVectorExtractDynamic(F32[1], joined, masked_index));
-                ++label_index;
-                continue;
-            }
-            // Packed SNORM 10:10:10:2 keeps all four fields in the first component.
-            const Id load_index{generic.load_op == InputGenericLoadOp::SNormA2B10G10R10
-                                    ? u32_zero_value
-                                    : masked_index};
-            const Id pointer{
-                is_array ? OpAccessChain(generic.pointer_type, generic_id, vertex, load_index)
-                         : OpAccessChain(generic.pointer_type, generic_id, load_index)};
-            const Id value{OpLoad(generic.component_type, pointer)};
+            const Id value{[&] {
+                if (generic.parts > 1) {
+                    // Only a vertex input is fetched in parts. Dynamic component reads assemble
+                    // the same vector as the ordinary input; constant reads load just one part.
+                    const u32 per_part{generic.part_components};
+                    const Id vec4{TypeVector(generic.component_type, 4)};
+                    std::array<Id, 4> parts{};
+                    std::array<Id, 4> components{};
+                    for (u32 i = 0; i < 4; ++i) {
+                        const u32 part = i / per_part;
+                        if (part >= generic.parts) {
+                            // Past the host format: what the first part has there (its default).
+                            components[i] =
+                                OpCompositeExtract(generic.component_type, parts[0], i);
+                            continue;
+                        }
+                        if (i % per_part == 0) {
+                            parts[part] = OpLoad(
+                                vec4, part == 0 ? generic.id : generic.more_parts[part - 1]);
+                        }
+                        components[i] =
+                            OpCompositeExtract(generic.component_type, parts[part], i % per_part);
+                    }
+                    const Id joined{OpCompositeConstruct(vec4, components[0], components[1],
+                                                         components[2], components[3])};
+                    return OpVectorExtractDynamic(generic.component_type, joined, masked_index);
+                }
+                // Packed SNORM 10:10:10:2 keeps all four fields in the first component.
+                const Id load_index{generic.load_op == InputGenericLoadOp::SNormA2B10G10R10
+                                        ? u32_zero_value
+                                        : masked_index};
+                const Id pointer{
+                    is_array ? OpAccessChain(generic.pointer_type, generic_id, vertex, load_index)
+                             : OpAccessChain(generic.pointer_type, generic_id, load_index)};
+                return OpLoad(generic.component_type, pointer);
+            }()};
             const Id result{[this, generic, value, masked_index]() {
                 switch (generic.load_op) {
                 case InputGenericLoadOp::SNormA2B10G10R10:
@@ -828,7 +839,18 @@ void EmitContext::DefineAttributeMemAccess(const Info& info) {
                     return value;
                 };
             }()};
-            OpReturnValue(result);
+            if (generic.components < 4) {
+                // Components past the guest format's read as 0, 0, 0, 1 (see EmitGetAttribute).
+                const Id one{generic.load_op == InputGenericLoadOp::Bitcast
+                                 ? OpBitcast(F32[1], Const(1U))
+                                 : Const(1.0f)};
+                const Id fallback{OpSelect(F32[1], OpIEqual(U1, masked_index, Const(3U)), one,
+                                           Const(0.0f))};
+                const Id missing{OpUGreaterThanEqual(U1, masked_index, Const(generic.components))};
+                OpReturnValue(OpSelect(F32[1], missing, fallback, result));
+            } else {
+                OpReturnValue(result);
+            }
             ++label_index;
         }
         AddLabel(end_block);
@@ -1670,11 +1692,22 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         Decorate(id, spv::Decoration::Location, static_cast<u32>(index));
         Name(id, fmt::format("in_attr{}", index));
         input_generics[index] = GetAttributeInfo(*this, input_type, id);
-        if (input_type == AttributeType::SplitNormalized8x4) {
-            const Id second{DefineInput(*this, F32[4], true)};
-            Decorate(second, spv::Decoration::Location, static_cast<u32>(index + IR::NUM_GENERICS));
-            Name(second, fmt::format("in_attr{}_zw", index));
-            input_generics[index].second_pair = second;
+        if (const u32 components = runtime_info.generic_input_components[index];
+            stage == Stage::VertexB && components != 0) {
+            input_generics[index].components = components;
+        }
+        if (const u32 parts = runtime_info.generic_input_parts[index];
+            stage == Stage::VertexB && parts > 1 && parts <= 4) {
+            input_generics[index].parts = parts;
+            input_generics[index].part_components =
+                runtime_info.generic_input_part_components[index];
+            for (u32 part = 1; part < parts; ++part) {
+                const Id more{DefineInput(*this, type, true)};
+                Decorate(more, spv::Decoration::Location,
+                         static_cast<u32>(index + part * IR::NUM_GENERICS));
+                Name(more, fmt::format("in_attr{}_part{}", index, part));
+                input_generics[index].more_parts[part - 1] = more;
+            }
         }
 
         if (info.passthrough.Generic(index) && profile.support_geometry_shader_passthrough) {

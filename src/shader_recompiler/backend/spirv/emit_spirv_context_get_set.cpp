@@ -312,17 +312,27 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, Id vertex) {
             // Attribute is disabled or varying component is not written
             return ctx.Const(element == 3 ? 1.0f : 0.0f);
         }
-        if (generic.load_op == InputGenericLoadOp::SplitNormalized8x4) {
-            const Id pair{element < 2 ? generic.id : generic.second_pair};
-            const Id pointer{AttrPointer(ctx, generic.pointer_type, vertex, pair,
-                                         ctx.Const(element & 1U))};
-            return ctx.OpLoad(ctx.F32[1], pointer);
+        if (element >= generic.components) {
+            // The host fetches more components than the guest format has (three widen to four):
+            // the rest read as 0, 0, 0, 1 like on Maxwell, not as the next bytes in the buffer.
+            if (element != 3) {
+                return ctx.Const(0.0f);
+            }
+            return generic.load_op == InputGenericLoadOp::Bitcast
+                       ? ctx.OpBitcast(ctx.F32[1], ctx.Const(1U))
+                       : ctx.Const(1.0f);
         }
-        // Packed SNORM 10:10:10:2 keeps all four fields in the first component.
-        const u32 load_element{
-            generic.load_op == InputGenericLoadOp::SNormA2B10G10R10 ? 0U : element};
+        // An input fetched in parts keeps part_components components in each. Packed SNORM
+        // 10:10:10:2 keeps all four fields in the first component.
+        // Components past the host format read from the first part, like an ordinary input.
+        const u32 part{generic.parts > 1 ? element / generic.part_components : 0U};
+        const bool in_part{part != 0 && part < generic.parts};
+        const Id source{in_part ? generic.more_parts[part - 1] : generic.id};
+        const u32 load_element{generic.load_op == InputGenericLoadOp::SNormA2B10G10R10 ? 0U
+                               : in_part ? element % generic.part_components
+                                         : element};
         const Id pointer{
-            AttrPointer(ctx, generic.pointer_type, vertex, generic.id, ctx.Const(load_element))};
+            AttrPointer(ctx, generic.pointer_type, vertex, source, ctx.Const(load_element))};
         const Id value{ctx.OpLoad(generic.component_type, pointer)};
         return [&ctx, generic, value, element]() {
             switch (generic.load_op) {

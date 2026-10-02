@@ -119,6 +119,11 @@ bool ReadTexel(DXGI_FORMAT format, const u8* src, std::array<float, 4>& rgba) {
         rgba = {value, value, value, 1.0f};
         return true;
     }
+    case DXGI_FORMAT_R16_UNORM: {
+        const float value = static_cast<float>(word & 0xFFFF) / 65535.0f;
+        rgba = {value, value, value, 1.0f};
+        return true;
+    }
     case DXGI_FORMAT_R32_TYPELESS:
     case DXGI_FORMAT_R32_FLOAT: {
         const float value = std::bit_cast<float>(word);
@@ -151,6 +156,7 @@ u32 DumpTexelBytes(DXGI_FORMAT format) {
         return 8;
     case DXGI_FORMAT_R16_TYPELESS:
     case DXGI_FORMAT_R16_FLOAT:
+    case DXGI_FORMAT_R16_UNORM:
     case DXGI_FORMAT_R8G8_TYPELESS:
     case DXGI_FORMAT_R8G8_UNORM:
         return 2;
@@ -1684,10 +1690,16 @@ std::optional<u64> RasterizerD3D12::DumpTarget(const Image& target, const std::s
     device->GetCopyableFootprints(&desc, subresource, 1, 0, &footprint, nullptr, nullptr,
                                   &total_bytes);
     device->Release();
-    // The depth plane of D24S8 copies as R32 with the depth in its low 24 bits.
-    const DXGI_FORMAT format = desc.Format == DXGI_FORMAT_R24G8_TYPELESS
-                                   ? DXGI_FORMAT_R24G8_TYPELESS
-                                   : footprint.Footprint.Format;
+    // The depth plane of D24S8 copies as R32 with the depth in its low 24 bits. R16_TYPELESS
+    // holds halves or, for D16 and R16 images, normalized integers.
+    const bool unorm16 = target.info.format == VideoCore::Surface::PixelFormat::D16_UNORM ||
+                         target.info.format == VideoCore::Surface::PixelFormat::R16_UNORM;
+    DXGI_FORMAT format = footprint.Footprint.Format;
+    if (desc.Format == DXGI_FORMAT_R24G8_TYPELESS) {
+        format = DXGI_FORMAT_R24G8_TYPELESS;
+    } else if (unorm16) {
+        format = DXGI_FORMAT_R16_UNORM;
+    }
     std::array<float, 4> probe{};
     const std::array<u8, 8> zeros{};
     if (!ReadTexel(format, zeros.data(), probe)) {
@@ -1879,8 +1891,11 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
         }
         // Where NaN/Inf enter the frame: rt0 after every traced draw.
         if (const Image* const image = framebuffer->ColorImage(0); image && pipeline && trace_dumps) {
-            if (const std::optional<u64> non_finite = DumpTarget(*image, nullptr)) {
-                line += fmt::format(" | rt0 non-finite {}", *non_finite);
+            const VideoCommon::SubresourceBase base = framebuffer->ColorBase(0);
+            if (const std::optional<u64> non_finite =
+                    DumpTarget(*image, nullptr, image->Subresource(base.level, base.layer))) {
+                line += fmt::format(" | rt0 L{}/{} non-finite {}", base.level, base.layer,
+                                    *non_finite);
                 u64& previous = traced_non_finite[image->gpu_addr];
                 trace_non_finite_grew = *non_finite > previous;
                 previous = *non_finite;

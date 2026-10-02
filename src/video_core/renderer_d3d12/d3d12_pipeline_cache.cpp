@@ -104,9 +104,6 @@ Shader::AttributeType CastAttributeType(const FixedPipelineState::VertexAttribut
     if (attr.enabled == 0) {
         return Shader::AttributeType::Disabled;
     }
-    if (MaxwellToD3D12::SplitNormalized8x4(attr.Type(), attr.Size(), attr.offset)) {
-        return Shader::AttributeType::SplitNormalized8x4;
-    }
     if (attr.Type() == Maxwell::VertexAttribute::Type::SNorm &&
         attr.Size() == Maxwell::VertexAttribute::Size::Size_A2_B10_G10_R10) {
         // DXGI has no signed 10:10:10:2: fetched as R10G10B10A2_UINT (VertexFormat) and normalized
@@ -160,6 +157,18 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
         }
         std::ranges::transform(key.state.attributes, info.generic_input_types.begin(),
                                &CastAttributeType);
+        for (size_t index = 0; index < key.state.attributes.size(); ++index) {
+            const auto& attr = key.state.attributes[index];
+            if (attr.enabled != 0) {
+                const MaxwellToD3D12::AttributeFetch fetch = MaxwellToD3D12::SplitAttributeFetch(
+                    attr.Type(), attr.Size(), attr.offset, key.state.vertex_strides[attr.buffer]);
+                info.generic_input_parts[index] = static_cast<u8>(fetch.parts);
+                info.generic_input_part_components[index] =
+                    static_cast<u8>(fetch.part_components);
+                info.generic_input_components[index] =
+                    static_cast<u8>(MaxwellToD3D12::WidenedAttributeComponents(attr.Size()));
+            }
+        }
         break;
     case Shader::Stage::TessellationEval:
         info.tess_clockwise = key.state.tessellation_clockwise != 0;
@@ -303,7 +312,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .force_fp32_denorm_flush = true,
         .support_explicit_workgroup_layout = false,
         .support_shader_quad_control = false,
-        .support_quad_shuffles = false,
+        // Quad ops (QuadReadAcross*, QuadReadLaneAt) include helper lanes; wave shuffles do not
+        // before SM 6.7, so manual derivatives (SHFL + FSWZADD) read garbage at triangle edges.
+        .support_quad_shuffles = caps.wave_ops,
         .support_vote = caps.wave_ops,
         .supported_subgroup_stages = caps.wave_ops ? 0x7Fu : 0u,
         .support_viewport_index_layer_non_geometry = caps.vp_and_rt_index_from_any_stage,

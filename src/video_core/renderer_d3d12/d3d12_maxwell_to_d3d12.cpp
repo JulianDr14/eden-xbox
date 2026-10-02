@@ -359,6 +359,46 @@ DXGI_FORMAT VertexFormat(Type type, Size size) {
     }
 }
 
+AttributeFetch SplitAttributeFetch(Type type, Size size, u32 offset, u32 stride) {
+    const FormatRow* row = nullptr;
+    u32 component_bytes = 0;
+    u32 components = 0;
+    switch (size) {
+    case Size::Size_R8_G8:
+    case Size::Size_G8_R8:
+        row = &ROW_8, component_bytes = 1, components = 2;
+        break;
+    case Size::Size_R8_G8_B8:
+    case Size::Size_R8_G8_B8_A8:
+    case Size::Size_X8_B8_G8_R8:
+        row = &ROW_8, component_bytes = 1, components = 4;
+        break;
+    case Size::Size_R16_G16:
+        row = &ROW_16, component_bytes = 2, components = 2;
+        break;
+    case Size::Size_R16_G16_B16:
+    case Size::Size_R16_G16_B16_A16:
+        row = &ROW_16, component_bytes = 2, components = 4;
+        break;
+    default:
+        return {}; // one component, or 32-bit ones (4-aligned in practice)
+    }
+    // Largest power of two (up to 4) every vertex's address is aligned to.
+    const u32 bits = offset | stride | 4U;
+    const u32 alignment = bits & (~bits + 1U);
+    const u32 required = std::min(4U, component_bytes * components);
+    if (alignment >= required || alignment < component_bytes) {
+        return {};
+    }
+    const u32 part_components = alignment / component_bytes;
+    return {
+        .parts = components / part_components,
+        .part_components = part_components,
+        .part_bytes = alignment,
+        .part_format = Pick(*row, type, part_components),
+    };
+}
+
 DXGI_FORMAT IndexFormat(Maxwell::IndexFormat format) {
     switch (format) {
     case Maxwell::IndexFormat::UnsignedShort:
