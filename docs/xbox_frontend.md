@@ -491,6 +491,11 @@ todo suelto y el renderer redibuja el último frame con el menú encima desde su
 (`GPU::RunOnGpuThread` -> `D3D12::ShowGameMenu`). Opciones: Continuar, tipo de mando (se
 aplica al momento), botones A/B/X/Y, zona muerta y Volver al inicio.
 
+Solo en PC aparece además "Pantalla completa < SI/NO >". El hilo de UI aplica el cambio
+(`ApplicationView` le pertenece) y lo guarda como modo de arranque
+(`PreferredLaunchWindowingMode`). El swapchain conserva su tamaño y se estira. Probado en PC
+con script: ventana -> completa -> ventana y vuelta, juego reanudado.
+
 Volver al inicio apaga el juego dentro del proceso (sin reiniciar la app) y regresa al bucle
 de la biblioteca. Medido en PC con Pokémon Let's Go, dos ciclos: tras cada juego la app queda
 en 120-128 MiB. Antes de corregirlo quedaban +300 MiB por juego: el kernel de Eden olvida los

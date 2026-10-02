@@ -92,6 +92,11 @@ void SetAstcArrayRecompression(bool enabled) noexcept; // texture_cache/util.h
 
 namespace {
 std::atomic<u64> g_test_memory_limit{};
+/// The PC window's mode. ApplicationView belongs to the UI thread: it publishes the state here and
+/// applies the changes the in-game menu asks for (1 full screen, 0 windowed, -1 none).
+std::atomic<bool> g_can_fullscreen{};
+std::atomic<bool> g_fullscreen{};
+std::atomic<int> g_fullscreen_request{-1};
 void WriteDiag(const std::string& msg); // defined with the UWP entry point below
 std::string MemoryReport();             // likewise
 std::string LargestAllocations();       // likewise
@@ -442,12 +447,15 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     input.SetMenuOpen(true);
                     const ControllerOptions options = input.Options();
                     menu.emplace(GameMenuSettings{options.style, options.swap_face_buttons,
-                                                  options.deadzone});
+                                                  options.deadzone, g_can_fullscreen.load(),
+                                                  g_fullscreen.load()});
                     WriteDiag("menu: opened, guest paused | " + MemoryReport());
                     draw_menu();
                     continue;
                 }
                 const GameMenuResult result = menu->Apply(action);
+                WriteDiag("menu: action " + std::to_string(static_cast<int>(action)) + ", row " +
+                          std::to_string(menu->Selected()));
                 if (result == GameMenuResult::Library) {
                     WriteDiag("menu: back to the library, shutting the game down | " +
                               MemoryReport());
@@ -468,6 +476,9 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     options.swap_face_buttons = menu->Settings().swap_face_buttons;
                     options.deadzone = menu->Settings().deadzone;
                     input.SetOptions(options);
+                }
+                if (result == GameMenuResult::FullScreen) {
+                    g_fullscreen_request.store(menu->Settings().fullscreen ? 1 : 0);
                 }
                 draw_menu();
             }
@@ -566,7 +577,9 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.System.h>
+#include <winrt/Windows.System.Profile.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.ViewManagement.h>
 
 using namespace winrt;
 using namespace Windows::ApplicationModel::Core;
@@ -1463,6 +1476,7 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
             ULONGLONG next_heartbeat = GetTickCount64() + 10'000;
             while (!done.load()) {
                 EdenXbox::RefreshProControllers();
+                ApplyWindowMode();
                 dispatcher.ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
                 ::Sleep(50);
                 if (GetTickCount64() >= next_heartbeat) {
@@ -1481,6 +1495,35 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
     }
 
 private:
+    /// PC: publishes the window mode for the in-game menu and applies the one it asked for. The
+    /// choice is also kept as the launch mode. The swapchain keeps its size and is stretched.
+    static void ApplyWindowMode() {
+        using Windows::UI::ViewManagement::ApplicationView;
+        using Windows::UI::ViewManagement::ApplicationViewWindowingMode;
+        static const bool xbox = Windows::System::Profile::AnalyticsInfo::VersionInfo()
+                                     .DeviceFamily() == L"Windows.Xbox";
+        if (xbox) return;
+        try {
+            const auto view = ApplicationView::GetForCurrentView();
+            if (const int request = g_fullscreen_request.exchange(-1); request >= 0) {
+                if (request == 1) {
+                    const bool entered = view.TryEnterFullScreenMode();
+                    WriteDiag(entered ? "window: full screen" : "window: full screen refused");
+                } else {
+                    view.ExitFullScreenMode();
+                    WriteDiag("window: windowed");
+                }
+                ApplicationView::PreferredLaunchWindowingMode(
+                    request == 1 ? ApplicationViewWindowingMode::FullScreen
+                                 : ApplicationViewWindowingMode::Auto);
+            }
+            g_fullscreen.store(view.IsFullScreenMode());
+            g_can_fullscreen.store(true);
+        } catch (...) {
+            g_can_fullscreen.store(false);
+        }
+    }
+
     CoreWindow m_window{nullptr};
 };
 
