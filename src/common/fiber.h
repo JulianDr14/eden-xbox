@@ -48,6 +48,9 @@ public:
     void SetRewindPoint(std::function<void()>&& rewind_func);
     /// Only call from main thread's fiber
     void Exit();
+    /// Frees the stacks and entry point of a fiber that will never run again because its owner
+    /// leaked (a guest thread left dangling at shutdown). Only the destructor may follow.
+    void Abandon();
 private:
     Fiber();
     void Start(boost::context::detail::transfer_t& transfer);

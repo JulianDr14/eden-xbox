@@ -68,7 +68,7 @@ Fiber::Fiber(std::function<void()>&& entry_point_func) : impl{std::make_unique<F
 Fiber::Fiber() : impl{std::make_unique<FiberImpl>()} {}
 
 Fiber::~Fiber() {
-    if (!impl->released) {
+    if (impl && !impl->released) {
         // Make sure the Fiber is not being used
         const bool locked = impl->guard.try_lock();
         ASSERT_MSG(locked, "Destroying a fiber that's still running");
@@ -76,6 +76,10 @@ Fiber::~Fiber() {
             impl->guard.unlock();
         }
     }
+}
+
+void Fiber::Abandon() {
+    impl.reset();
 }
 
 void Fiber::Exit() {
