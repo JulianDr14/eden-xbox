@@ -16,7 +16,7 @@
 
   <Identity Name="EdenEmuProject.EdenXbox"
             Publisher="CN=EdenXboxDev"
-            Version="0.2.68.0"
+            Version="0.2.70.0"
             ProcessorArchitecture="x64" />
 
   <Properties>
@@ -68,5 +68,7 @@
     <Capability Name="codeGeneration" />
     <!-- core/network_interface + the NS services touch sockets on startup. -->
     <Capability Name="internetClient" />
+    <!-- PC Nintendo Pro USB transport; joystick usage is allowed by UWP HID. -->
+    <DeviceCapability Name="humanInterfaceDevice" />
   </Capabilities>
 </Package>
