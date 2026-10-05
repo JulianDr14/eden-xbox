@@ -190,7 +190,9 @@ struct BootConfig {
     bool gpu_profile{};
     /// Per-core JIT elapsed time and slow callback counts ("cpu_profile=1"). Diagnostic only.
     bool cpu_profile{};
-    enum class JitPrewarm { Off, Record, Warm } jit_prewarm{JitPrewarm::Off};
+    /// Per-game JIT profile, compiled before the guest runs ("jit_prewarm=1", the default),
+    /// only learned ("jit_prewarm=record") or disabled ("jit_prewarm=0").
+    enum class JitPrewarm { Off, Record, Warm } jit_prewarm{JitPrewarm::Warm};
     /// XAudio2 performance samples and queue counters ("audio_profile=1").
     bool audio_profile{};
     /// Timed silent output for comparison and audio-device diagnosis ("audio=null").

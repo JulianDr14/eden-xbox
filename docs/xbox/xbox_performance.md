@@ -757,8 +757,8 @@ no un cambio de backend inmediato; dificultad alta, duracion no estimada sin ese
 Implementado para x64, habilitado explicitamente en UWP con boot.cfg:
 
 - `jit_prewarm=record`: aprende mientras se juega, sin precompilar al arrancar.
-- `jit_prewarm=1`: carga el perfil, valida/precompila antes de System::Run y sigue aprendiendo.
-- `jit_prewarm=0` (default): ruta anterior, sin hashes ni perfil persistente.
+- `jit_prewarm=1` (predeterminado desde el 5 oct 2026): carga el perfil, valida/precompila antes de System::Run y sigue aprendiendo.
+- `jit_prewarm=0`: ruta anterior, sin hashes ni perfil persistente.
 
 No es aun una cache de bytes host como PPTC. El perfil guarda descriptor A64
 relativo al entrypoint del proceso (incluye FPCR), hash FNV64 de las instrucciones
