@@ -62,6 +62,8 @@ public:
                            Tegra::MaxwellDeviceMemoryManager& device_memory, Tegra::GPU& gpu,
                            std::unique_ptr<Core::Frontend::GraphicsContext> context);
     ~RendererD3D12() override;
+    /// Explicit diagnostic gate only, never called by normal gameplay.
+    void RemoveDeviceForProbe();
 
     void Composite(std::span<const Tegra::FramebufferConfig> framebuffers) override;
 

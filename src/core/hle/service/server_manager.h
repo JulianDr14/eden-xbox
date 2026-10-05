@@ -48,6 +48,7 @@ public:
     Result ManageDeferral(Kernel::KEvent** out_event);
 
     Result LoopProcess();
+    void RequestStop();
     void StartAdditionalHostThreads(const char* name, size_t num_threads);
 
     static void RunServer(std::unique_ptr<ServerManager>&& server);

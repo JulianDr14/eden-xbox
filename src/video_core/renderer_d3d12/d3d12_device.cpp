@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <mutex>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -47,10 +48,11 @@ namespace removal_tripwire {
 std::atomic_bool removal_tripped{false};
 std::atomic_bool check_descriptors{false};
 
-void ReportRemovedAfter(HRESULT reason, const std::string& what) {
+void ReportRemovedAfter(ID3D12Device* device, HRESULT reason, const std::string& what) {
     if (!removal_tripped.exchange(true)) {
         LOG_CRITICAL(Render, "D3D12: device removed (reason 0x{:08X}) right after {}",
                      static_cast<u32>(reason), what);
+        DumpDeviceDiagnostics(device);
     }
 }
 } // namespace removal_tripwire
@@ -62,6 +64,10 @@ void SetDescriptorRemovalChecks(bool enabled) {
 namespace {
 bool gpu_based_validation = false;
 bool dred_enabled = false;
+std::mutex diagnostic_mutex;
+std::array<std::string, 128> diagnostic_history;
+u64 diagnostic_sequence{};
+std::atomic_flag diagnostic_dumped{};
 std::atomic<AppMemoryQuery> app_memory_query{nullptr};
 } // Anonymous namespace
 
@@ -71,6 +77,20 @@ void SetGpuBasedValidation(bool enabled) {
 
 void SetDredEnabled(bool enabled) {
     dred_enabled = enabled;
+    diagnostic_dumped.clear();
+    std::scoped_lock lock{diagnostic_mutex};
+    diagnostic_sequence = 0;
+    diagnostic_history.fill({});
+}
+
+bool GpuDiagnosticsEnabled() { return dred_enabled; }
+
+void TraceGpuOperation(std::string description) {
+    if (!dred_enabled) return;
+    std::scoped_lock lock{diagnostic_mutex};
+    const u64 sequence = diagnostic_sequence++;
+    diagnostic_history[sequence % diagnostic_history.size()] =
+        fmt::format("seq={} {}", sequence, description);
 }
 
 void SetAppMemoryQuery(AppMemoryQuery query) {
@@ -78,6 +98,7 @@ void SetAppMemoryQuery(AppMemoryQuery query) {
 }
 
 Device::Device() {
+    removal_tripwire::removal_tripped.store(false);
     ThrowIfFailed(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
     // The debug layer (D3D12SDKLayers.dll, the "Graphics Tools" optional feature) is a PC-only aid:
     // it must be enabled before the device exists.
@@ -261,8 +282,22 @@ void Device::ReportDeviceRemoved() {
                  static_cast<u32>(device->GetDeviceRemovedReason()));
     LogDebugMessages();
 
+    DumpDeviceDiagnostics(device.Get());
+}
+
+void DumpDeviceDiagnostics(ID3D12Device* device) {
+    removal_tripwire::removal_tripped.store(true);
+    if (diagnostic_dumped.test_and_set()) return;
+    {
+        std::scoped_lock lock{diagnostic_mutex};
+        const u64 first = diagnostic_sequence > diagnostic_history.size()
+                              ? diagnostic_sequence - diagnostic_history.size() : 0;
+        for (u64 i = first; i < diagnostic_sequence; ++i)
+            LOG_CRITICAL(Render, "D3D12 GPU history: {}",
+                         diagnostic_history[i % diagnostic_history.size()]);
+    }
     ComPtr<ID3D12DeviceRemovedExtendedData> dred;
-    if (FAILED(device.As(&dred))) {
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred)))) {
         LOG_CRITICAL(Render, "D3D12: no DRED data on this device");
         return;
     }
@@ -291,8 +326,7 @@ void Device::ReportDeviceRemoved() {
             LOG_CRITICAL(Render, "D3D12 DRED: list with {} ops stopped after {}:{}",
                          node->BreadcrumbCount, completed, ops);
         }
-        // Every recorded list done means the GPU was not the one that failed: a CPU-side call
-        // with parameters the driver rejects did (see the "right after" line of CheckRemovedAfter).
+        // Empty/incomplete telemetry cannot prove that the GPU executed no failing command.
         LOG_CRITICAL(Render, "D3D12 DRED: {} command lists recorded, {} unfinished", lists,
                      unfinished);
     }
@@ -315,8 +349,9 @@ void Device::ReportDeviceRemoved() {
 }
 
 Device::~Device() {
-    if (queue && fence) {
-        WaitIdle();
+    if (queue && fence && SUCCEEDED(device->GetDeviceRemovedReason())) {
+        try { WaitIdle(); }
+        catch (const std::exception& e) { LOG_ERROR(Render, "Device teardown: {}", e.what()); }
     }
     if (fence_event != nullptr) {
         CloseHandle(fence_event);

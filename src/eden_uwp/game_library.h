@@ -16,6 +16,8 @@ struct LibraryEntry {
     std::wstring developer;
     std::vector<unsigned char> icon;
     bool metadata_loaded{};
+    std::string launch_path; // Absolute internal path or token-scoped external identity.
+    std::wstring source_name;
 };
 struct LibraryScan {
     std::vector<LibraryEntry> entries;

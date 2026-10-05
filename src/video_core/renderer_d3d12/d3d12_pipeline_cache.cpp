@@ -14,6 +14,7 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "video_core/gpu_thread.h"
 #include "common/settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/environment.h"
@@ -384,6 +385,8 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
 PipelineCache::~PipelineCache() = default;
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
+    if (VideoCommon::GPUThread::HasExceptionReported())
+        return nullptr;
     if (!RefreshStages(graphics_key.unique_hashes)) {
         current_pipeline = nullptr;
         return nullptr;
@@ -406,6 +409,8 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
 }
 
 ComputePipeline* PipelineCache::CurrentComputePipeline() {
+    if (VideoCommon::GPUThread::HasExceptionReported())
+        return nullptr;
     const VideoCommon::ShaderInfo* const shader{ComputeShader()};
     if (!shader) {
         return nullptr;

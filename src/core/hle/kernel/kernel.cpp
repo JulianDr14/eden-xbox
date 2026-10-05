@@ -227,8 +227,17 @@ struct KernelCore::Impl {
 
     void CloseServices() {
         // Ensures all servers gracefully shutdown.
-        std::scoped_lock lk{server_lock};
-        server_managers.clear();
+        std::vector<std::unique_ptr<Service::ServerManager>> closing;
+        {
+            std::scoped_lock lk{server_lock};
+            is_shutting_down.store(true, std::memory_order_relaxed);
+            closing.swap(server_managers);
+        }
+        // Service startup can still reach RunServer. Never hold its registration lock while
+        // waiting for service threads, and wake all existing servers before joining any of them.
+        for (auto& manager : closing)
+            manager->RequestStop();
+        closing.clear();
     }
 
     void InitializePhysicalCores() {
@@ -1032,16 +1041,17 @@ void KernelCore::UnregisterInUseObject(KAutoObject* object) {
 
 void KernelCore::RunServer(std::unique_ptr<Service::ServerManager>&& server_manager) {
     auto* manager = server_manager.get();
-
+    bool rejected{};
     {
         std::scoped_lock lk{impl->server_lock};
-        if (impl->is_shutting_down) {
-            return;
-        }
-
-        impl->server_managers.emplace_back(std::move(server_manager));
+        rejected = impl->is_shutting_down.load(std::memory_order_relaxed);
+        if (!rejected)
+            impl->server_managers.emplace_back(std::move(server_manager));
     }
-
+    // An unregistered server must complete its stopped notification too: its destructor waits
+    // for LoopProcess, including when startup races the shutdown registration barrier.
+    if (rejected)
+        manager->RequestStop();
     manager->LoopProcess();
 }
 

@@ -287,10 +287,27 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
 
 RendererD3D12::~RendererD3D12() {
     try {
-        scheduler.Finish();
+        scheduler.DrainForShutdown();
     } catch (const std::exception& e) {
         LOG_ERROR(Render, "{}", e.what());
     }
+}
+
+void RendererD3D12::RemoveDeviceForProbe() {
+    ComPtr<ID3D12Device5> removable;
+    ThrowIfFailed(device.Get()->QueryInterface(IID_PPV_ARGS(&removable)),
+                  "device removal probe requires ID3D12Device5");
+    TraceGpuOperation("explicit device removal probe");
+    removable->RemoveDevice();
+    device.ReportDeviceRemoved();
+    throw std::runtime_error("injected real D3D12 device removal for recovery gate");
+}
+
+void RemoveDeviceForProbe(VideoCore::RendererBase& renderer) {
+    if (Settings::values.renderer_backend.GetValue() != Settings::RendererBackend::Direct3D12) {
+        throw std::runtime_error("device removal probe requires D3D12 renderer");
+    }
+    static_cast<RendererD3D12&>(renderer).RemoveDeviceForProbe();
 }
 
 bool RendererD3D12::CreateBlitPipeline() {

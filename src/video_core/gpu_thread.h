@@ -39,6 +39,13 @@ class RendererBase;
 
 namespace VideoCommon::GPUThread {
 
+/// Headless frontends may observe a failed GPU command and stop emulation on their own thread.
+/// The observer must remain valid until the GPU thread has joined; null preserves normal policy.
+using ExceptionObserver = void (*)(const char*);
+void SetExceptionObserver(ExceptionObserver observer);
+bool ReportException(const char* message);
+bool HasExceptionReported();
+
 /// Command to signal to the GPU thread that a command list is ready for processing
 struct SubmitListCommand final {
     explicit SubmitListCommand(s32 channel_, Tegra::CommandList&& entries_)

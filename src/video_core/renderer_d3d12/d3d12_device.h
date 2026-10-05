@@ -25,7 +25,7 @@ void ThrowIfFailed(HRESULT hr, const char* what);
 namespace removal_tripwire {
 extern std::atomic_bool removal_tripped;
 extern std::atomic_bool check_descriptors;
-void ReportRemovedAfter(HRESULT reason, const std::string& what);
+void ReportRemovedAfter(ID3D12Device* device, HRESULT reason, const std::string& what);
 } // namespace removal_tripwire
 
 /// Also checks after every descriptor a draw writes ("descriptor_checks=1"). Off by default:
@@ -43,7 +43,7 @@ void CheckRemovedAfter(ID3D12Device* device, Describe&& describe) {
         return;
     }
     if (const HRESULT reason = device->GetDeviceRemovedReason(); FAILED(reason)) {
-        removal_tripwire::ReportRemovedAfter(reason, describe());
+        removal_tripwire::ReportRemovedAfter(device, reason, describe());
     }
 }
 
@@ -68,6 +68,9 @@ void SetGpuBasedValidation(bool enabled);
 /// Disabled by default because both facilities add measurable runtime overhead; use boot.cfg
 /// "dred=1" only while diagnosing a device removal.
 void SetDredEnabled(bool enabled);
+bool GpuDiagnosticsEnabled();
+void TraceGpuOperation(std::string description);
+void DumpDeviceDiagnostics(ID3D12Device* device);
 
 /// The app's memory in use and its limit, false when unknown. On the Xbox the GPU allocates from
 /// the same 5 GiB budget as the rest of the process, which DXGI does not show.

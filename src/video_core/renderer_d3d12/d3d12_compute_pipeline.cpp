@@ -10,6 +10,7 @@
 
 #include "common/cityhash.h"
 #include "common/logging.h"
+#include "video_core/gpu_thread.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/memory_manager.h"
@@ -261,6 +262,8 @@ void ComputePipeline::Build() {
                            static_cast<u32>(hr));
     });
     if (FAILED(hr)) {
+        if (hr == E_OUTOFMEMORY)
+            VideoCommon::GPUThread::ReportException("D3D12 compute PSO allocation exhausted memory");
         LOG_ERROR(Render, "D3D12: CreateComputePipelineState failed (HRESULT 0x{:08X}) for {:016x}",
                   static_cast<u32>(hr), unique_hash);
         pipeline_state.Reset();

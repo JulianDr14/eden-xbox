@@ -65,6 +65,8 @@ public:
 
     /// Submits the recorded work and waits for the GPU to finish it.
     void Finish();
+    /// No submissions on a removed device; never throw from renderer/cache destructors.
+    void DrainForShutdown() noexcept;
 
     /// Waits until the GPU has passed tick. On the recording thread, flushes first if tick is still
     /// being recorded; on any other thread, waits for the recording thread to submit it.

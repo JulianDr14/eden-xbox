@@ -12,6 +12,7 @@
 
 #include "common/cityhash.h"
 #include "common/logging.h"
+#include "video_core/gpu_thread.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "video_core/frame_trace.h"
 #include "video_core/memory_manager.h"
@@ -804,7 +805,11 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
                   elements.size(), num_attachments, static_cast<u32>(desc.RTVFormats[0]),
                   static_cast<u32>(desc.DSVFormat), ShaderFeatureFlags(stages[0]),
                   ShaderFeatureFlags(stages[4]));
-        DiagnoseFailedPipeline(device.Get(), desc);
+        if (hr == E_OUTOFMEMORY) {
+            VideoCommon::GPUThread::ReportException("D3D12 graphics PSO allocation exhausted memory");
+        } else {
+            DiagnoseFailedPipeline(device.Get(), desc);
+        }
         pipeline_state.Reset();
         return;
     }

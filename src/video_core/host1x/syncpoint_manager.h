@@ -57,6 +57,8 @@ public:
     void WaitGuest(u32 syncpoint_id, u32 expected_value);
 
     void WaitHost(u32 syncpoint_id, u32 expected_value);
+    /// Cancel blocking waits during emulation teardown without advancing guest counters.
+    void CancelWaits();
 
     bool IsReadyGuest(u32 syncpoint_id, u32 expected_value) const {
         return syncpoints_guest[syncpoint_id].load(std::memory_order_acquire) >= expected_value;
@@ -67,6 +69,7 @@ public:
     }
 
 private:
+    std::atomic<bool> stopping{};
     void Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                    std::list<RegisteredAction>& action_storage);
 

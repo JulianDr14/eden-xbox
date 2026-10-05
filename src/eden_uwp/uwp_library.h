@@ -10,12 +10,13 @@
 
 namespace EdenXbox {
 // Runs on the CoreWindow thread, before constructing the guest renderer. Returns
-// a UTF-8 path relative to LocalState/games, or nullopt when the user exits.
+// an absolute internal path or token-scoped external path, or nullopt on exit.
 // The seeding callback and directory scan run off the UI thread. A non-empty auto_pick (a path
 // relative to the root, boot.cfg "library_pick=") is chosen two seconds after the scan, for
 // unattended library -> game -> library runs.
 std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, unsigned height,
                                          const std::filesystem::path& root,
                                          const std::function<void()>& seed,
-                                         std::string_view auto_pick = {});
+                                         std::string_view auto_pick = {},
+                                         std::string_view initial_notice = {});
 } // namespace EdenXbox

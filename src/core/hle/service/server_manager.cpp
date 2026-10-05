@@ -94,10 +94,13 @@ ServerManager::ServerManager(Core::System& system)
     m_wakeup_holder->LinkToMultiWait(std::addressof(m_deferred_list));
 }
 
-ServerManager::~ServerManager() {
-    // Signal stop.
+void ServerManager::RequestStop() {
     m_stop_source.request_stop();
     m_wakeup_event->Signal(m_system.Kernel());
+}
+
+ServerManager::~ServerManager() {
+    RequestStop();
 
     // Wait for processing to stop.
     m_stopped.Wait();

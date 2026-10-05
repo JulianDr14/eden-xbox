@@ -3,6 +3,8 @@
 #include "eden_uwp/uwp_library.h"
 #include "eden_uwp/stick_navigation.h"
 #include "eden_uwp/uwp_library_canvas.h"
+#include "eden_uwp/uwp_rom_storage.h"
+#include "eden_uwp/storage_path.h"
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +17,7 @@
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.System.Profile.h>
 #include <winrt/Windows.Graphics.Display.h>
+#include <winrt/Windows.Storage.Pickers.h>
 #include "eden_uwp/game_library.h"
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/uwp_library_metadata.h"
@@ -31,7 +34,7 @@ using winrt::Windows::System::VirtualKey;
 std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, unsigned height,
                                          const std::filesystem::path& root,
                                          const std::function<void()>& seed,
-                                         std::string_view auto_pick) {
+                                         std::string_view auto_pick, std::string_view initial_notice) {
     using namespace winrt::Windows::UI::Core;
     auto window = CoreWindow::GetForCurrentThread();
     auto canvas = std::make_unique<LibraryCanvas>(core_window, width, height);
@@ -67,7 +70,12 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     bool metadata_dirty = true;
     unsigned actions = 0;
     enum : unsigned { Up = 1, Down = 2, Play = 4, Quit = 8, Swap = 16, Zone = 32,
-                      Refresh = 64, Panel = 128, Left = 256, Right = 512 };
+                      Refresh = 64, Panel = 128, Left = 256, Right = 512, AddFolder = 1024 };
+    using winrt::Windows::Storage::StorageFolder;
+    winrt::Windows::Foundation::IAsyncOperation<StorageFolder> picker{nullptr};
+    std::future<std::string> validation;
+    std::jthread validation_worker;
+    std::string selected_path;
     bool resize = false, window_closed = false;
     auto size_changed = window.SizeChanged(winrt::auto_revoke, [&](auto&&, WindowSizeChangedEventArgs const& e) {
         const auto scale = winrt::Windows::Graphics::Display::DisplayInformation::GetForCurrentView().RawPixelsPerViewPixel();
@@ -127,6 +135,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         case VirtualKey::X: actions |= Swap; break;
         case VirtualKey::Y: actions |= Zone; break;
         case VirtualKey::R: actions |= Refresh; break;
+        case VirtualKey::O: actions |= AddFolder; break;
         default: break;
         }
         e.Handled(true);
@@ -182,7 +191,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 setting_row = static_cast<unsigned>((y - ControllerRowTop) / ControllerRowHeight);
                 actions |= Play;
             }
-        } else if (x >= 1080 && y >= 43 && y < 87) actions |= Panel;
+        } else if (x >= 670 && x < 895 && y >= 43 && y < 87) actions |= AddFolder;
+        else if (x >= 1080 && y >= 43 && y < 87) actions |= Panel;
         else if (!loading && x >= 320 && x < 504 && y >= 334 && y < 380) actions |= Play;
         else if (!loading && x >= 58 && x < 1226 && y >= 444 && y < 635) {
             const size_t index = selected / 5 * 5 + static_cast<size_t>((x - 58) / 232);
@@ -207,18 +217,43 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     std::jthread metadata_worker;
     unsigned generation = 0;
     bool logging_ready = false;
-    auto start_scan = [&] {
+    auto start_scan = [&](StorageFolder added = nullptr) {
         loading = dirty = true;
         ++generation;
         metadata_dirty = true;
         retained_page = SIZE_MAX;
         metadata_worker.request_stop();
         canvas->InvalidateCovers();
-        std::packaged_task<LibraryScan(std::stop_token)> task{[&](std::stop_token stop) {
+        std::packaged_task<LibraryScan(std::stop_token)> task{[&, added](std::stop_token stop) {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } guard;
             seed();
             std::error_code ec;
             std::filesystem::create_directories(root, ec);
-            return ScanGameLibrary(root, stop);
+            auto result = ScanGameLibrary(root, stop);
+            for (auto& entry : result.entries) {
+                const auto path = (root / entry.relative_path).u8string();
+                entry.launch_path.assign(reinterpret_cast<const char*>(path.data()), path.size());
+                entry.source_name = L"Interna";
+            }
+            try {
+                if (added) RememberGameFolder(added);
+                auto external = ScanExternalGameFolders(stop);
+                if (!external.error.empty()) {
+                    if (!result.error.empty()) result.error += " | ";
+                    result.error += external.error;
+                }
+                result.limited |= external.limited;
+                result.entries.insert(result.entries.end(),
+                    std::make_move_iterator(external.entries.begin()), std::make_move_iterator(external.entries.end()));
+            } catch (const winrt::hresult_error& e) {
+                result.error = "No se pudo autorizar/recuperar la carpeta: " + winrt::to_string(e.message());
+            } catch (const std::exception& e) { result.error = e.what(); }
+            if (!result.entries.empty() && result.error == "La carpeta games esta vacia o no existe.") result.error.clear();
+            std::sort(result.entries.begin(), result.entries.end(), [](const auto& a, const auto& b) {
+                return a.launch_path < b.launch_path;
+            });
+            return result;
         }};
         future = task.get_future();
         scanner = std::jthread(std::move(task));
@@ -295,7 +330,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                     if (hit(GamepadButtons::DPadLeft)) actions |= Left;
                     if (hit(GamepadButtons::DPadRight)) actions |= Right;
                     if (hit(GamepadButtons::A)) actions |= Play;
-                    if (hit(GamepadButtons::X)) actions |= Swap;
+                    if (hit(GamepadButtons::X)) actions |= settings ? Swap : AddFolder;
                     if (hit(GamepadButtons::Y)) actions |= Zone;
                     if (hit(GamepadButtons::Menu)) actions |= Refresh;
                     if (hit(GamepadButtons::View)) actions |= Panel;
@@ -303,6 +338,32 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             } catch (...) { pad.reset(); previous = {}; stick_navigation.Reset(); }
         }
         if (window_closed || QuitRequested()) return std::nullopt;
+        if (picker) {
+            actions = 0; // The system picker owns input until it returns.
+            if (picker.Status() != winrt::Windows::Foundation::AsyncStatus::Started) {
+                try {
+                    auto folder = picker.GetResults();
+                    if (folder) start_scan(folder);
+                    else { notice = L"Seleccion cancelada."; dirty = true; }
+                } catch (const winrt::hresult_error& e) {
+                    notice = L"No se pudo seleccionar la carpeta: " + std::wstring{e.message()}; dirty = true;
+                }
+                picker = nullptr;
+                previous = {};
+                stick_navigation.Reset();
+            }
+        }
+        if (validation.valid()) {
+            actions = 0;
+            if (validation.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
+                try {
+                    const auto error = validation.get();
+                    if (error.empty()) return selected_path;
+                    notice = winrt::to_hstring(error).c_str();
+                } catch (const std::exception& e) { notice = winrt::to_hstring(e.what()).c_str(); }
+                dirty = true;
+            }
+        }
         if (actions & Quit) {
             if (panel.keyboard.open) { panel.keyboard.open = panel.keyboard.capturing = false; dirty = true; actions &= ~Quit; }
             else if (panel.expanded) { panel.expanded = false; dirty = true; actions &= ~Quit; }
@@ -315,27 +376,42 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         if (loading && future.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
             try { scan = future.get(); }
             catch (const std::exception& e) { scan.error = e.what(); }
+            catch (const winrt::hresult_error& e) { scan.error = winrt::to_string(e.message()); }
             loading = false;
             selected = std::min(selected, scan.entries.empty() ? 0 : scan.entries.size() - 1);
             notice = winrt::to_hstring(scan.error).c_str();
+            if (notice.empty() && !initial_notice.empty()) notice = winrt::to_hstring(initial_notice).c_str();
+            initial_notice = {};
             if (scan.limited) notice = L"Limite de exploracion alcanzado: 10000 entradas, 5 niveles.";
             dirty = true;
         }
-        if (!auto_pick.empty() && !loading) {
+        if (!auto_pick.empty() && !loading && !picker && !validation.valid()) {
             if (auto_pick_at == std::chrono::steady_clock::time_point{})
                 auto_pick_at = std::chrono::steady_clock::now() + std::chrono::seconds{2};
             if (std::chrono::steady_clock::now() >= auto_pick_at) {
                 for (size_t i = 0; i < scan.entries.size(); ++i) {
                     const auto path = scan.entries[i].relative_path.u8string();
-                    if (std::string_view{reinterpret_cast<const char*>(path.data()), path.size()} == auto_pick) {
+                    if (scan.entries[i].launch_path == auto_pick ||
+                        (!IsStoragePath(scan.entries[i].launch_path) &&
+                         std::string_view{reinterpret_cast<const char*>(path.data()), path.size()} == auto_pick)) {
                         selected = i; settings = false; actions |= Play;
                     }
                 }
             }
         }
         if (actions & Play && !settings && !panel.keyboard.open && !loading && !scan.entries.empty()) {
-            const auto path = scan.entries[selected].relative_path.u8string();
-            return std::string{reinterpret_cast<const char*>(path.data()), path.size()};
+            selected_path = scan.entries[selected].launch_path;
+            if (!IsStoragePath(selected_path)) return selected_path;
+            notice = L"Comprobando acceso al juego...";
+            dirty = true;
+            std::packaged_task<std::string()> task{[path = selected_path] {
+                winrt::init_apartment(winrt::apartment_type::multi_threaded);
+                struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } guard;
+                return CheckExternalGame(path);
+            }};
+            validation = task.get_future();
+            validation_worker = std::jthread(std::move(task));
+            actions = 0;
         }
         if (settings) {
             if (panel.keyboard.open) { actions &= ~(Swap | Zone); }
@@ -397,14 +473,26 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             controller_notice_until = saved ? now + std::chrono::seconds{3} :
                                              std::chrono::steady_clock::time_point::max();
         }
-        if (actions & Refresh && !loading) start_scan();
+        if (actions & AddFolder && !settings && !loading && !picker && !validation.valid()) {
+            try {
+                winrt::Windows::Storage::Pickers::FolderPicker folder_picker;
+                folder_picker.SuggestedStartLocation(winrt::Windows::Storage::Pickers::PickerLocationId::ComputerFolder);
+                folder_picker.FileTypeFilter().Append(L"*");
+                picker = folder_picker.PickSingleFolderAsync();
+                notice = L"Elige la carpeta de juegos de tu USB.";
+            } catch (const winrt::hresult_error& e) {
+                notice = L"No se pudo abrir el selector: " + std::wstring{e.message()};
+            }
+            dirty = true;
+        }
+        if (actions & Refresh && !loading && !picker && !validation.valid()) start_scan();
         if (metadata.valid() && metadata.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
             try {
                 auto batch = metadata.get();
                 if (batch.generation == generation) {
                     for (auto& entry : batch.entries) {
                         auto found = std::find_if(scan.entries.begin(), scan.entries.end(), [&](const auto& e) {
-                            return e.relative_path == entry.relative_path;
+                            return e.launch_path == entry.launch_path;
                         });
                         if (found != scan.entries.end()) *found = std::move(entry);
                     }

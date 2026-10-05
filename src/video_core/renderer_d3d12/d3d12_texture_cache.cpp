@@ -523,8 +523,7 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
 }
 
 TextureCacheRuntime::~TextureCacheRuntime() {
-    scheduler.Finish();
-    scheduler.CollectGarbage();
+    scheduler.DrainForShutdown();
     LOG_INFO(Render, "D3D12: {}", texture_allocator.Report());
     LOG_INFO(Render, "D3D12: GC readbacks queued {}, ready {}, stale {}, sync {}, pending {} KiB, peak {} KiB",
              gc_queued, gc_ready, gc_stale, gc_sync, gc_pending_bytes / 1024,
