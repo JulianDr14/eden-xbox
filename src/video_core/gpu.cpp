@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "common/assert.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/core.h"
@@ -131,6 +132,8 @@ struct GPU::Impl {
     template <typename Func>
     [[nodiscard]] u64 RequestSyncOperation(Func&& action) {
         std::unique_lock lck{sync_request_mutex};
+        if (shutting_down.load(std::memory_order_acquire))
+            return CurrentSyncRequestFence();
         const u64 fence = ++last_sync_fence;
         sync_requests.emplace_back(std::forward<Func>(action));
         return fence;
@@ -143,16 +146,21 @@ struct GPU::Impl {
 
     void WaitForSyncOperation(const u64 fence) {
         std::unique_lock lck{sync_request_mutex};
-        sync_request_cv.wait(lck, [this, fence] { return CurrentSyncRequestFence() >= fence; });
+        sync_request_cv.wait(lck, [this, fence] {
+            return CurrentSyncRequestFence() >= fence ||
+                   (shutting_down.load(std::memory_order_acquire) && !sync_request_active);
+        });
     }
 
     void WaitForIdle() {
+        if (shutting_down.load(std::memory_order_acquire)) return;
         const u64 fence = RequestSyncOperation([] {});
         gpu_thread.TickGPU(is_async);
         WaitForSyncOperation(fence);
     }
 
     void RunOnGpuThread(std::function<void()> action) {
+        if (shutting_down.load(std::memory_order_acquire)) return;
         const u64 fence = RequestSyncOperation(std::move(action));
         gpu_thread.TickGPU(is_async);
         WaitForSyncOperation(fence);
@@ -164,11 +172,19 @@ struct GPU::Impl {
         while (!sync_requests.empty()) {
             auto request = std::move(sync_requests.front());
             sync_requests.pop_front();
-            sync_request_mutex.unlock();
-            request();
-            current_sync_fence.fetch_add(1, std::memory_order_release);
-            sync_request_mutex.lock();
-            sync_request_cv.notify_all();
+            sync_request_active = true;
+            {
+                lck.unlock();
+                SCOPE_EXIT {
+                    // A failing callback must release its host waiter too. The GPU thread's
+                    // exception observer handles the failure; the frontend will stop the guest.
+                    current_sync_fence.fetch_add(1, std::memory_order_release);
+                    lck.lock();
+                    sync_request_active = false;
+                    sync_request_cv.notify_all();
+                };
+                request();
+            }
         }
     }
 
@@ -190,10 +206,19 @@ struct GPU::Impl {
     }
 
     void NotifyShutdown() {
+        {
+            std::unique_lock lk{sync_mutex};
+            shutting_down.store(true, std::memory_order_release);
+            sync_cv.notify_all();
+        }
+        {
+            std::unique_lock lk{sync_request_mutex};
+            // Cancel queued closures before releasing their callers. An in-flight closure still
+            // owns its caller's stack references until TickWork marks it complete under this lock.
+            sync_requests.clear();
+            sync_request_cv.notify_all();
+        }
         gpu_thread.NotifyShutdown();
-        std::unique_lock lk{sync_mutex};
-        shutting_down.store(true, std::memory_order::relaxed);
-        sync_cv.notify_all();
     }
 
     /// Obtain the CPU Context
@@ -353,6 +378,7 @@ struct GPU::Impl {
     u64 last_sync_fence{};
     std::mutex sync_request_mutex;
     std::condition_variable sync_request_cv;
+    bool sync_request_active{}; // protected by sync_request_mutex
 
     const bool is_async;
 

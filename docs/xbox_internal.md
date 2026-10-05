@@ -2022,3 +2022,58 @@ AyudaExplorar/Elegir muestra cruceta ystick L monocromos. Gameplay no cambiado.
 Harnessdesktop drift/histéresis/diagonal/repetición/inversión/modal/stall/NaN PASS,
 buildincremental4ops/diffcheckcorrectos. Usuario cerró anterior, relanzado
 PID14084 biblioteca/Job5120; gate navegaciónmanual ySeries pendientes,sincommit.
+
+## Traslado a xbox: USB y recuperación (4 oct 2026)
+Por petición del usuario, el prototipo ASTC Directo queda en el commit local
+fe98ef15e7 de xbox-d3d12-astc-directo, sin push. La rama xbox recibe exclusivamente
+biblioteca USB/VFS read-only y recuperación controlada de fallos GPU/carga.
+No se trasladan muestreo ASTC Directo, shaders del prototipo, seeds de cachés,
+replay, guard de compilador ni cambios de JIT/presupuestos; ASTC normal permanece.
+La biblioteca permite Agregar carpeta, persiste FutureAccessList, abre por ruta
+FromApp o stream WinRT y comprueba acceso antes del boot sin copiar el dump.
+Recuperación: observer de excepciones GPU y OOM de PSO, desbloqueo seguro de
+solicitudes host y syncpoints al cerrar, servicios detenidos fuera del lock de
+registro y teardown D3D12 sin submissions al device perdido. El frontend regresa
+con aviso a la biblioteca tras retorno2/15. No garantiza recuperar AV/abort ni
+cualquier fallo del sistema operativo. Los probes gpu_failure_probe=1/removed
+se conservan opt-in; no se activan en gameplay normal.
+El prototipo ya ejercitó retiro explícito de device en PC (retorno0/cierre) y
+recuperación real Series0.2.79 (retorno15/biblioteca647MiB tras DEVICE_HUNG).
+Eso es evidencia de la ruta original, no gate nuevo de la rama xbox.
+En xbox: storage-path.cpp pasa identidades, traversal, NUL, ADS y colisiones.
+Compilan los cinco objetos UWP biblioteca/metadatos/boot/almacenamiento.
+Enlace completo y gates AppContainer/USB físico/recuperación en esta rama aún
+pendientes. No ejecutar el EXE anterior de ASTC como si fuera el nuevo backend.
+El APPX actual build-uwp/series sigue siendo el replay0.2.81 del prototipo.
+Los cambios trasladados quedan sin commit en xbox; no se ha hecho ningún push.Validación incremental adicional: compilan GPU/GPUThread, Device/Scheduler,
+Rasterizer y los tres objetos de PSO/pipeline cache del backend normal.
+Diff-check pasa con finales de línea originales; cero referencias ASTC Directo
+incorporadas. Sin proceso de juego activo ni ejecución del EXE anterior.
+
+## Build y paquetes del backend normal (4 oct 2026)
+
+Build Release UWP x64 de la rama xbox completado (271 pasos previstos, retorno 0).
+PC y Series usan el mismo ejecutable D3D12 normal, con biblioteca USB y recuperación;
+no se reutiliza el EXE ni el paquete de replay ASTC del prototipo. Por indicación
+del usuario, la numeración continúa desde 0.2.70.0: este paquete es **0.2.71.0**;
+las versiones 0.2.73–0.2.81 del prototipo no cuentan para esta rama.
+
+APPX firmado en `build-uwp/series/eden-xbox.appx` (13507968 bytes), certificado y
+VCLibs junto al paquete; EXE/PDB en `build-uwp/symbols/0.2.71.0`. Hashes y opciones
+en `series/package-info.json`. Biblioteca/play activos, prewarm1, límite5120MiB,
+fastmem0, cpu_profile0 y developer_hotkeys0; sin duración programada, dumps ni
+seeds del prototipo. Instalación y gameplay en Series pendientes.
+
+PC tenía registrada 0.2.81.0: `Add-AppxPackage -Register ... -ForceUpdateFromAnyVersion`
+permitió registrar 0.2.71.0 sin desinstalar ni eliminar LocalState. Ejecutar con
+Windows PowerShell5.1. Biblioteca lanzada PID10308, Job5120MiB verificado,
+proceso activo/respondiendo y ~44MiB working set. Diag confirma espera de selección;
+un first-chance hresult_error fue registrado, sin cierre observado ni causa
+confirmada. No es un gate de gameplay, rendimiento o recuperación.
+
+Limpieza: paquetes/símbolos antiguos y 204 artefactos de prueba se apartaron en
+`build-archive/20261004` (~1748MiB), conservando objetos, dependencias y cachés
+necesarios para compilar. Borrado automático rechazado por la herramienta incluso
+tras autorización explícita; se entregó comando manual. La carpeta ya no existía
+al comprobar al final. Juegos/keys/firmware y LocalState fuera de la limpieza.
+No commit ni push en esta operación.

@@ -141,7 +141,7 @@ Scheduler::~Scheduler() {
     try {
         // Teardown runs on whichever thread destroys the renderer; nothing records anymore.
         recording_thread.store(std::this_thread::get_id(), std::memory_order_relaxed);
-        Finish();
+        DrainForShutdown();
     } catch (const std::exception& e) {
         LOG_ERROR(Render, "{}", e.what());
     }
@@ -190,6 +190,10 @@ std::string Scheduler::TakeSyncSites(size_t max_sites) {
 }
 
 u64 Scheduler::Flush() {
+    if (const HRESULT reason = device.Get()->GetDeviceRemovedReason(); FAILED(reason)) {
+        device.ReportDeviceRemoved();
+        throw std::runtime_error(fmt::format("D3D12: flush on removed device 0x{:08X}", static_cast<u32>(reason)));
+    }
     if (IsRecordingThread()) {
         RecordSyncSite('S');
     }
@@ -204,6 +208,10 @@ u64 Scheduler::Flush() {
         ThrowIfFailed(closed, "ID3D12GraphicsCommandList::Close");
     }
     ID3D12CommandList* const lists[] = {command_list.Get()};
+    if (GpuDiagnosticsEnabled()) {
+        TraceGpuOperation(fmt::format("submit tick={} completed={} PSO={}", CurrentTick(),
+                                     fence->GetCompletedValue(), static_cast<void*>(current_pipeline)));
+    }
     device.Queue()->ExecuteCommandLists(1, lists);
     VideoCore::Perf::Add(VideoCore::Perf::Counter::Submits, 1);
     VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GpuSubmit);
@@ -234,6 +242,12 @@ u64 Scheduler::Flush() {
     return signaled;
 }
 
+void Scheduler::DrainForShutdown() noexcept {
+    if (FAILED(device.Get()->GetDeviceRemovedReason())) return;
+    try { Finish(); }
+    catch (const std::exception& e) { LOG_ERROR(Render, "GPU teardown: {}", e.what()); }
+}
+
 void Scheduler::Finish() {
     Wait(Flush());
     CollectGarbage();
@@ -262,6 +276,7 @@ void Scheduler::Wait(u64 tick) {
     }
     const auto start = std::chrono::steady_clock::now();
     const HANDLE event = ThreadWaitEvent();
+    if (GpuDiagnosticsEnabled()) TraceGpuOperation(fmt::format("wait BEGIN tick={}", tick));
     {
         const VideoCore::FrameTrace::ScopedSpan trace_wait{
             VideoCore::FrameTrace::Event::FenceGpuWaitLong, tick};
@@ -269,6 +284,7 @@ void Scheduler::Wait(u64 tick) {
         WaitForSingleObjectEx(event, INFINITE, FALSE);
     }
     StoreMax(known_gpu_tick, tick);
+    if (GpuDiagnosticsEnabled()) TraceGpuOperation(fmt::format("wait END tick={} fence={}", tick, fence->GetCompletedValue()));
     if (counted) {
         VideoCore::Perf::Add(VideoCore::Perf::Counter::FenceWaits, 1);
         VideoCore::Perf::Add(VideoCore::Perf::Counter::FenceWaitUs,

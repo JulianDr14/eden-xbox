@@ -685,3 +685,42 @@ AyudaExplorar/Elegir muestra cruceta ystick L monocromos. Gameplay no cambiado.
 Harnessdesktop drift/histéresis/diagonal/repetición/inversión/modal/stall/NaN PASS,
 buildincremental4ops/diffcheckcorrectos. Usuario cerró anterior, relanzado
 PID14084 biblioteca/Job5120; gate navegaciónmanual ySeries pendientes,sincommit.
+
+## Traslado a xbox: USB y recuperación (4 oct 2026)
+Por petición del usuario, el prototipo ASTC Directo queda en el commit local
+fe98ef15e7 de xbox-d3d12-astc-directo, sin push. La rama xbox recibe exclusivamente
+biblioteca USB/VFS read-only y recuperación controlada de fallos GPU/carga.
+No se trasladan muestreo ASTC Directo, shaders del prototipo, seeds de cachés,
+replay, guard de compilador ni cambios de JIT/presupuestos; ASTC normal permanece.
+La biblioteca permite Agregar carpeta, persiste FutureAccessList, abre por ruta
+FromApp o stream WinRT y comprueba acceso antes del boot sin copiar el dump.
+Recuperación: observer de excepciones GPU y OOM de PSO, desbloqueo seguro de
+solicitudes host y syncpoints al cerrar, servicios detenidos fuera del lock de
+registro y teardown D3D12 sin submissions al device perdido. El frontend regresa
+con aviso a la biblioteca tras retorno2/15. No garantiza recuperar AV/abort ni
+cualquier fallo del sistema operativo. Los probes gpu_failure_probe=1/removed
+se conservan opt-in; no se activan en gameplay normal.
+El prototipo ya ejercitó retiro explícito de device en PC (retorno0/cierre) y
+recuperación real Series0.2.79 (retorno15/biblioteca647MiB tras DEVICE_HUNG).
+Eso es evidencia de la ruta original, no gate nuevo de la rama xbox.
+En xbox: storage-path.cpp pasa identidades, traversal, NUL, ADS y colisiones.
+Compilan los cinco objetos UWP biblioteca/metadatos/boot/almacenamiento.
+Enlace completo y gates AppContainer/USB físico/recuperación en esta rama aún
+pendientes. No ejecutar el EXE anterior de ASTC como si fuera el nuevo backend.
+El APPX actual build-uwp/series sigue siendo el replay0.2.81 del prototipo.
+Los cambios trasladados quedan sin commit en xbox; no se ha hecho ningún push.Validación incremental adicional: compilan GPU/GPUThread, Device/Scheduler,
+Rasterizer y los tres objetos de PSO/pipeline cache del backend normal.
+Diff-check pasa con finales de línea originales; cero referencias ASTC Directo
+incorporadas. Sin proceso de juego activo ni ejecución del EXE anterior.
+
+Gate build/backend normal 4oct: Release UWP x64 completo, retorno0; APPX firmado
+Series en build-uwp/series/eden-xbox.appx (13507968B), símbolos0.2.71.0. Usuario
+ordena continuar numeración de xbox desde0.2.70, ignorando versiones del prototipo.
+PC registrado0.2.71 con ForceUpdateFromAnyVersion sobre0.2.81 sin desinstalación;
+bibliotecaPID10308 activa/respondiendo, Job5120 verificado, ~44MiB working set.
+Un first-chance hresult_error en diag, sin cierre observado/causa confirmada.
+Sin replay/seeds/ASTC Directo; prewarm1/fastmem0/cpu_profile0/hotkeys0/library/play1.
+Build ordenado conservando cachés/objetos; antiguos1748MiB apartados y carpeta
+posteriormente ausente tras comando manual de borrado autorizado (herramienta
+rechazó eliminación automática). Gameplay/USB físico/recuperación/Series pendientes.
+No commit ni push; detalles en docs/xbox_internal.md.

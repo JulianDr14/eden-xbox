@@ -98,9 +98,13 @@ QueryCache::QueryCache(RasterizerD3D12& rasterizer_,
 }
 
 QueryCache::~QueryCache() {
-    DisableStreams();
+    try {
+        if (SUCCEEDED(device.Get()->GetDeviceRemovedReason())) DisableStreams();
+    } catch (const std::exception& e) {
+        LOG_ERROR(Render, "Query teardown: {}", e.what());
+    }
     scheduler.ClearSubmissionCallbacks();
-    scheduler.Finish();
+    scheduler.DrainForShutdown();
 }
 
 bool QueryCache::AnyCommandQueued() const noexcept {

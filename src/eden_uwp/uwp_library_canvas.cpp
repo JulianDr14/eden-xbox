@@ -94,6 +94,8 @@ public:
                                      D2D1_INTERPOLATION_MODE_LINEAR);
         Text(L"eden", 120, 40, 32, 0xf4f7fa, 140, 48, true);
         Text(L"BIBLIOTECA", 266, 54, 16, 0x9ba9ba, 200);
+        Round(670, 43, 225, 44, 14, 0x202b39);
+        ControlPrompt(Navigation::AddFolder, L"Agregar carpeta", 680, 49, 174);
         Text(std::to_wstring(scan.entries.size()) + L" juegos", 900, 52, 18, 0x9ba9ba, 170);
         Round(1080, 43, 146, 44, 14, 0x202b39);
         ControlPrompt(Navigation::Settings, L"Mando", 1090, 49, 100);
@@ -103,13 +105,14 @@ public:
             Text(L"Buscando juegos en tu carpeta...", 64, 266, 24, 0x9ba9ba, 1000);
         } else if (scan.entries.empty()) {
             Text(L"Tu proxima aventura empieza aqui", 64, 192, 40, 0xf4f7fa, 1100, 70, true);
-            Text(L"Agrega tus juegos a la carpeta games y actualiza la biblioteca.", 64, 278, 24, 0x9ba9ba, 1120);
+            Text(L"Conecta tu USB y usa Agregar carpeta para buscar tus juegos.", 64, 278, 24, 0x9ba9ba, 1120);
         } else {
             const auto& game = scan.entries[selected];
             Cover(game, 64, 148, 220);
             Text(L"LISTO PARA JUGAR", 320, 149, 16, 0x77e3bd, 700);
             Text(game.name, 320, 184, 42, 0xf4f7fa, 866, 110, true, true);
-            Text(game.developer.empty() ? L"Tu biblioteca personal" : game.developer,
+            Text((game.developer.empty() ? L"Tu biblioteca personal" : game.developer) +
+                 (game.source_name.empty() ? L"" : L" · " + game.source_name),
                  320, 292, 23, 0x9ba9ba, 850);
             Round(320, 334, 184, 46, 14, 0x77e3bd);
             Round(331, 341, 34, 32, 8, 0x152b26);
@@ -317,16 +320,16 @@ private:
         return bitmap;
     }
     enum class PromptFamily : unsigned { Keyboard, Xbox, Nintendo };
-    enum class Navigation : unsigned { Play, Explore, Settings, Refresh, Back };
+    enum class Navigation : unsigned { Play, Explore, Settings, Refresh, Back, AddFolder };
     void ControlPrompt(Navigation action, const wchar_t* label, float x, float y,
                        float width, unsigned color = 0x9ba9ba) {
         struct Glyph { const wchar_t* asset; const wchar_t* fallback; };
-        static constexpr std::array<Glyph, 5> keyboard{{
+        static constexpr std::array<Glyph, 6> keyboard{{
             {L"keyboard_enter", L"Enter"}, {L"keyboard_arrows", L"Flechas"},
-            {L"keyboard_f1", L"F1"}, {L"keyboard_r", L"R"}, {L"keyboard_escape", L"Esc"}}};
-        static constexpr std::array<Glyph, 5> xbox{{
+            {L"keyboard_f1", L"F1"}, {L"keyboard_r", L"R"}, {L"keyboard_escape", L"Esc"}, {L"keyboard_o", L"O"}}};
+        static constexpr std::array<Glyph, 6> xbox{{
             {L"xbox_a", L"A"}, {L"xbox_dpad", L"Cruceta"}, {L"xbox_view", L"View"},
-            {L"xbox_menu", L"Menu"}, {L"xbox_b", L"B"}}};
+            {L"xbox_menu", L"Menu"}, {L"xbox_b", L"B"}, {L"xbox_x", L"X"}}};
         const auto index = static_cast<unsigned>(action);
         if (prompt_family != PromptFamily::Keyboard && action == Navigation::Explore) {
             // Neutral monochrome d-pad for both controller families. The old
@@ -344,9 +347,10 @@ private:
             // They reuse cached text formats and allocate no bitmap or path.
             brush->SetColor(D2D1::ColorF(0xf4f7fa));
             const auto center = D2D1::Point2F(x + 16, y + 16);
-            if (action == Navigation::Play || action == Navigation::Back) {
+            if (action == Navigation::Play || action == Navigation::Back || action == Navigation::AddFolder) {
                 target->DrawEllipse(D2D1::Ellipse(center, 13, 13), brush.Get(), 2);
-                Text(action == Navigation::Play ? L"A" : L"B", x, y, 18, 0xf4f7fa, 32, 32, true, false, true);
+                Text(action == Navigation::Play ? L"A" : action == Navigation::AddFolder ? L"X" : L"B",
+                     x, y, 18, 0xf4f7fa, 32, 32, true, false, true);
             } else {
                 target->DrawLine(D2D1::Point2F(x + 7, y + 16), D2D1::Point2F(x + 25, y + 16), brush.Get(), 3);
                 if (action == Navigation::Refresh)

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eden_uwp/uwp_library_metadata.h"
+#include "eden_uwp/uwp_rom_storage.h"
 #include <winrt/base.h>
 #include "common/logging.h"
 #include "core/core.h"
@@ -17,15 +18,16 @@ void ReadLibraryMetadata(const std::filesystem::path& root,
     // would reserve guest DRAM and start timing; metadata does not need either.
     Core::System system;
     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
-    system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
+    system.SetFilesystem(MakeUwpFilesystem());
     system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
     for (auto& entry : entries) {
         if (stop.stop_requested()) break;
         entry.metadata_loaded = true;
         try {
             const auto path = (root / entry.relative_path).u8string();
-            const auto file = system.GetFilesystem()->OpenFile(
-                std::string{reinterpret_cast<const char*>(path.data()), path.size()}, FileSys::OpenMode::Read);
+            const auto file = system.GetFilesystem()->OpenFile(entry.launch_path.empty() ?
+                std::string{reinterpret_cast<const char*>(path.data()), path.size()} : entry.launch_path,
+                FileSys::OpenMode::Read);
             auto loader = Loader::GetLoader(system, file);
             if (!loader) continue;
             std::string title;

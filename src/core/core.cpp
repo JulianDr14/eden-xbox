@@ -421,15 +421,23 @@ struct System::Impl {
         is_powered_on = false;
         exit_locked = false;
         exit_requested = false;
+        LOG_INFO(Core, "Shutdown: GPU join");
+        if (host1x_core)
+            host1x_core->GetSyncpointManager().CancelWaits();
         if (gpu_core)
             gpu_core->NotifyShutdown();
 
+        LOG_INFO(Core, "Shutdown: CoreTiming resume");
         stop_event.request_stop();
         core_timing.SyncPause(false);
         Network::CancelPendingSocketOperations();
+        LOG_INFO(Core, "Shutdown: kernel suspend");
         kernel.SuspendEmulation(true);
+        LOG_INFO(Core, "Shutdown: close services");
         kernel.CloseServices();
+        LOG_INFO(Core, "Shutdown: kernel cores");
         kernel.ShutdownCores();
+        LOG_INFO(Core, "Shutdown: services reset");
         services.reset();
         service_manager.reset();
         fs_controller.Reset();
@@ -437,10 +445,12 @@ struct System::Impl {
         core_timing.ClearPendingEvents();
         app_loader.reset();
         audio_core.reset();
+        LOG_INFO(Core, "Shutdown: GPU destruction");
         gpu_core.reset();
         host1x_core.reset();
         perf_stats.reset();
         cpu_manager.Shutdown();
+        LOG_INFO(Core, "Shutdown: kernel destruction");
         debugger.reset();
         kernel.Shutdown();
         stop_event = {};

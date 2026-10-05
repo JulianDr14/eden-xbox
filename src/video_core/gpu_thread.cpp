@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -20,14 +21,36 @@
 #include "video_core/renderer_base.h"
 
 namespace VideoCommon::GPUThread {
+namespace {
+std::atomic<ExceptionObserver> exception_observer{};
+std::atomic_bool exception_reported{};
+}
 
-ThreadManager::ThreadManager(Core::System& system_)
-    : system{system_}
-{}
+void SetExceptionObserver(ExceptionObserver observer) {
+    exception_reported.store(false, std::memory_order_release);
+    exception_observer.store(observer, std::memory_order_release);
+}
+
+bool HasExceptionReported() {
+    return exception_reported.load(std::memory_order_acquire);
+}
+
+bool ReportException(const char* message) {
+    if (const auto observer = exception_observer.load(std::memory_order_acquire)) {
+        exception_reported.store(true, std::memory_order_release);
+        observer(message);
+        return true;
+    }
+    return false;
+}
+
+ThreadManager::ThreadManager(Core::System& system_) : system{system_} {}
 
 ThreadManager::~ThreadManager() = default;
 
-void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Frontend::GraphicsContext& context, Tegra::Control::Scheduler& scheduler) {
+void ThreadManager::StartThread(VideoCore::RendererBase& renderer,
+                                Core::Frontend::GraphicsContext& context,
+                                Tegra::Control::Scheduler& scheduler) {
     rasterizer = renderer.ReadRasterizer();
     thread = std::jthread([&](std::stop_token stop_token) {
         Common::SetCurrentThreadName("GPU");
@@ -37,6 +60,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
 
         auto current_context = context.Acquire();
         CommandDataContainer next;
+        bool failed = false;
         while (!stop_token.stop_requested()) {
             {
                 // Time with nothing to do: the guest CPU has not produced the next work yet.
@@ -54,29 +78,45 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             if (stop_token.stop_requested()) {
                 break;
             }
-            if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
-                VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::SubmitListNs};
-                VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::SubmitLists, 1);
-                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
-            } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
-                VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::GpuTickNs};
-                VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::GpuTicks, 1);
-                system.GPU().TickWork();
-            } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
-                VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::GpuThreadFlushUs,
-                                                   VideoCore::Perf::Counter::GpuThreadFlushes};
-                renderer.ReadRasterizer()->FlushRegion(flush->addr, flush->size);
-            } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
-                VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::CacheInvalidationNs};
-                VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::CacheInvalidations, 1);
-                renderer.ReadRasterizer()->OnCacheInvalidation(invalidate->addr, invalidate->size);
-            } else {
-                ASSERT(false);
+            try {
+                // Continue servicing host sync requests so shutdown can wait for idle. Guest GPU
+                // commands after an exception cannot safely continue a partially executed batch.
+                if (failed && !std::holds_alternative<GPUTickCommand>(next.data)) {
+                    // Discard until the frontend pauses and shuts down the guest.
+                } else if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
+                    VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::SubmitListNs};
+                    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::SubmitLists, 1);
+                    scheduler.Push(system.GPU(), submit_list->channel,
+                                   std::move(submit_list->entries));
+                } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
+                    VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::GpuTickNs};
+                    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::GpuTicks, 1);
+                    system.GPU().TickWork();
+                } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
+                    VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::GpuThreadFlushUs,
+                                                       VideoCore::Perf::Counter::GpuThreadFlushes};
+                    renderer.ReadRasterizer()->FlushRegion(flush->addr, flush->size);
+                } else if (const auto* invalidate =
+                               std::get_if<InvalidateRegionCommand>(&next.data)) {
+                    VideoCore::Perf::ScopedNsTimer timer{
+                        VideoCore::Perf::Counter::CacheInvalidationNs};
+                    VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::CacheInvalidations, 1);
+                    renderer.ReadRasterizer()->OnCacheInvalidation(invalidate->addr,
+                                                                   invalidate->size);
+                } else {
+                    ASSERT(false);
+                }
+            } catch (const std::exception& error) {
+                if (!ReportException(error.what()))
+                    throw;
+                failed = true;
+                LOG_ERROR(Render, "GPU command failed; requesting controlled shutdown: {}",
+                          error.what());
             }
             state.signaled_fence.store(next.fence);
             if (next.block) {
-                // We have to lock the write_lock to ensure that the condition_variable wait not get a
-                // race between the check and the lock itself.
+                // We have to lock the write_lock to ensure that the condition_variable wait not get
+                // a race between the check and the lock itself.
                 std::scoped_lock lk{state.write_lock};
                 state.cv.notify_all();
             }
@@ -118,6 +158,7 @@ void ThreadManager::FlushAndInvalidateRegion(DAddr addr, u64 size, bool is_async
 }
 
 u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_async) {
+    if (thread.get_stop_token().stop_requested()) return state.signaled_fence.load();
     if (!is_async) {
         // In synchronous GPU mode, block the caller until the command has executed
         block = true;
