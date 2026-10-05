@@ -33,3 +33,11 @@ void AssertFatalImpl() {
     Common::Log::Stop();
     std::abort();
 }
+void AssertFailedAt(const char* what) {
+    LOG_CRITICAL(Debug, "{}", what);
+    AssertFailSoftImpl();
+}
+void UnreachableAt(const char* where) {
+    LOG_CRITICAL(Debug, "{}: unreachable", where);
+    AssertFatalImpl();
+}

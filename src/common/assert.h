@@ -23,26 +23,56 @@ void AssertFailSoftImpl();
 #define YUZU_NO_INLINE __attribute__((noinline))
 #endif
 
-#define ASSERT_MSG(_a_, ...)                                                                       \
-    ([&]() YUZU_NO_INLINE {                                                                         \
-        auto&& assert_condition = (_a_);                                                           \
-        if (!(assert_condition)) [[unlikely]] {                                                   \
-            LOG_CRITICAL(Debug, __FILE__ ": assert " __VA_ARGS__);                                \
-            AssertFailSoftImpl();                                                                  \
-        }                                                                                          \
-    }())
-#define ASSERT(_a_) ASSERT_MSG(_a_, "{}", #_a_)
+// Asserts sit on hot paths (the JIT's IR passes and emitters, the shader recompiler), so a passing
+// assert must cost a compare and a branch and nothing else:
+// - The condition is tested inline. Wrapping it in a lambda, as before, made every passing assert
+//   a call, and its [&] capture took the address of each local it named, which forced those
+//   locals out of registers into the stack for the whole function.
+// - The failure path is a call to an out-of-line, cold function. A plain ASSERT passes one string
+//   literal (file, line and condition) to a single shared function; ASSERT_MSG copies its format
+//   arguments into a per-site lambda, by value so that naming a local never takes its address.
+// - MSVC ignores [[unlikely]] for block layout, so the hint matters only on GCC/Clang, where the
+//   cold attribute also moves the failure code out of the hot function's cache lines.
+#if defined(__GNUC__) || defined(__clang__)
+#define EDEN_ASSERT_COLD __attribute__((noinline, cold))
+#define EDEN_ASSERT_COLD_NORETURN __attribute__((noinline, cold, noreturn))
+#define EDEN_ASSERT_PASSES(_a_) __builtin_expect(static_cast<bool>(_a_), 1)
+#else
+#define EDEN_ASSERT_COLD __declspec(noinline)
+#define EDEN_ASSERT_COLD_NORETURN __declspec(noinline) __declspec(noreturn)
+#define EDEN_ASSERT_PASSES(_a_) (_a_)
+#endif
+#define EDEN_ASSERT_STRINGIFY_(x) #x
+#define EDEN_ASSERT_STRINGIFY(x) EDEN_ASSERT_STRINGIFY_(x)
+#define EDEN_ASSERT_WHERE __FILE__ ":" EDEN_ASSERT_STRINGIFY(__LINE__)
+// The traditional MSVC preprocessor (no /Zc:preprocessor, as in Dynarmic) passes a forwarded
+// __VA_ARGS__ as one argument; rescanning the expansion splits it into the named parameters.
+#define EDEN_ASSERT_EXPAND(x) x
 
-#define UNREACHABLE_MSG(...)                                                                       \
-    do {                                                                                           \
-        LOG_CRITICAL(Debug, __FILE__ ": unreachable " __VA_ARGS__);                               \
+/// Logs `what` ("file:line: assert condition") and applies the soft-failure policy.
+EDEN_ASSERT_COLD void AssertFailedAt(const char* what);
+/// Logs `where` ("file:line") as unreachable code and aborts.
+EDEN_ASSERT_COLD_NORETURN void UnreachableAt(const char* where);
+
+#define ASSERT_MSG(_a_, _fmt_, ...)                                                                \
+    (EDEN_ASSERT_PASSES(_a_) ? void(0)                                                             \
+                             : [](auto... assert_args) EDEN_ASSERT_COLD {                          \
+                                   LOG_CRITICAL(Debug, __FILE__ ": assert " _fmt_, assert_args...); \
+                                   AssertFailSoftImpl();                                           \
+                               }(__VA_ARGS__))
+#define ASSERT(_a_)                                                                                \
+    (EDEN_ASSERT_PASSES(_a_) ? void(0) : AssertFailedAt(EDEN_ASSERT_WHERE ": assert " #_a_))
+
+#define UNREACHABLE_MSG(_fmt_, ...)                                                                \
+    [](auto... assert_args) EDEN_ASSERT_COLD_NORETURN {                                            \
+        LOG_CRITICAL(Debug, __FILE__ ": unreachable " _fmt_, assert_args...);                     \
         AssertFatalImpl();                                                                         \
-    } while (0)
-#define UNREACHABLE() UNREACHABLE_MSG("")
+    }(__VA_ARGS__)
+#define UNREACHABLE() UnreachableAt(EDEN_ASSERT_WHERE)
 
 #ifdef _DEBUG
 #define DEBUG_ASSERT(_a_) ASSERT(_a_)
-#define DEBUG_ASSERT_MSG(_a_, ...) ASSERT_MSG(_a_, __VA_ARGS__)
+#define DEBUG_ASSERT_MSG(_a_, ...) EDEN_ASSERT_EXPAND(ASSERT_MSG(_a_, __VA_ARGS__))
 #else // not debug
 #define DEBUG_ASSERT(_a_)                                                                          \
     do {                                                                                           \
@@ -53,16 +83,18 @@ void AssertFailSoftImpl();
 #endif
 
 #define UNIMPLEMENTED() ASSERT(false && "Unimplemented!")
-#define UNIMPLEMENTED_MSG(...) ASSERT_MSG(false, __VA_ARGS__)
+#define UNIMPLEMENTED_MSG(...) EDEN_ASSERT_EXPAND(ASSERT_MSG(false, __VA_ARGS__))
 
 #define UNIMPLEMENTED_IF(cond) ASSERT((!(cond)) && "Unimplemented!")
-#define UNIMPLEMENTED_IF_MSG(cond, ...) ASSERT_MSG(!(cond), __VA_ARGS__)
+#define UNIMPLEMENTED_IF_MSG(cond, ...) EDEN_ASSERT_EXPAND(ASSERT_MSG(!(cond), __VA_ARGS__))
 
 // If the assert is ignored, execute _b_
 #define ASSERT_OR_EXECUTE_MSG(_a_, _b_, ...)                                                       \
     do {                                                                                           \
-        ASSERT_MSG(_a_, __VA_ARGS__);                                                              \
-        if (!(_a_)) { _b_ }                                                                        \
+        if (!EDEN_ASSERT_PASSES(_a_)) {                                                            \
+            EDEN_ASSERT_EXPAND(ASSERT_MSG(false, __VA_ARGS__));                                    \
+            _b_                                                                                    \
+        }                                                                                          \
     } while (0)
 
 // If the assert is ignored, execute _b_

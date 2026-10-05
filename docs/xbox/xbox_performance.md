@@ -2982,3 +2982,43 @@ fences por sí solo. No ampliar presupuestos de memoria para esconder presión.
 Guardado de trazas debug sigue excluido por decisión del usuario. No volver a
 activar diagnósticos amplios por defecto; cada investigación debe usar solo los
 eventos necesarios y comprobar capacidad/overhead deT8.
+
+## Asserts sin coste en el camino que pasa (5 oct 2026)
+
+`common/assert.h` envolvía cada `ASSERT` en una lambda `noinline` con captura `[&]`. Con MSVC
+eso significa que **cada assert que pasa es una llamada a función**, y que cada variable nombrada
+en la condición queda con su dirección tomada: el compilador la saca de registros y la guarda en
+la pila durante toda la función. Dynarmic tiene ~1235 asserts en sus pasadas de IR y emisores, y
+el recompilador de shaders y el resto del core también los usan.
+
+Cambio (global, todo Eden):
+- La condición se evalúa en línea (`cond ? void(0) : fallo`). Un assert que pasa cuesta una
+  comparación y un salto, sin depender del inliner.
+- `ASSERT` llama a una sola función compartida, `AssertFailedAt`, con un literal
+  `"archivo:línea: assert condición"`. Ya no instancia una lambda ni un `FmtLogMessage` por sitio.
+- `ASSERT_MSG` copia sus argumentos de formato **por valor** a una lambda fría por sitio: nombrar
+  una variable local nunca toma su dirección. Solo se evalúan si el assert falla, como antes.
+- `UNREACHABLE` es `noreturn`: el compilador no genera código después.
+- `ASSERT_OR_EXECUTE` evalúa la condición una vez (antes la evaluaba dos).
+- GCC/Clang: `__builtin_expect` y atributo `cold`, que saca el código de fallo de las líneas de
+  caché de la función. MSVC ignora `[[unlikely]]` para el orden de bloques
+  ([Microsoft](https://learn.microsoft.com/en-us/cpp/cpp/attributes)); allí el beneficio viene de
+  la condición en línea y la llamada fría mínima (`lea` + `call`).
+- Dynarmic compila sin `/Zc:preprocessor`: las macros que reenvían `__VA_ARGS__` pasan por
+  `EDEN_ASSERT_EXPAND` para que el preprocesador antiguo separe los argumentos.
+
+Resultados (PC, MSVC 14.51, Release):
+- `tools/xbox/tests/jit-compile-bench.cpp`, 6000 bloques A64 de 33 instrucciones, mediana de 7
+  corridas, cuatro rondas alternadas con la `dynarmic.lib` anterior y la nueva:
+  **167–179 µs/bloque antes, 147–151 µs/bloque después (~11 % menos)**. La peor corrida nueva
+  (152) es mejor que la mejor anterior (165). El tiempo incluye las transiciones W^X, que no
+  cambian, así que la mejora sobre la compilación en sí es mayor.
+- `eden-uwp.exe`: `.text` −160 KB (23,69 → 23,53 MB), `.pdata` −13 KB (~1100 funciones menos).
+  `.rdata` +194 KB por los textos completos de cada assert, que solo se leen si uno falla.
+- `tools/xbox/tests/assert-macros.cpp`: PASS con y sin `/Zc:preprocessor`, `/W4` sin avisos.
+- Gate PC del NRO: centinela del JIT observado, `RunHeadlessBoot returned 0`, 0 asserts en el log.
+
+Comparación: NXbox aplicó una variante solo a Dynarmic, con la condición dentro de una lambda
+externa que depende del inliner y una lambda `[&]` interna por sitio (las variables del mensaje
+siguen con su dirección tomada). Esta versión no usa lambda en el camino que pasa, comparte una
+sola función para `ASSERT`, pasa los argumentos por valor y cubre todo el proyecto.
