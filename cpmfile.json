@@ -79,7 +79,7 @@
         "name": "ffmpeg",
         "package": "FFmpeg",
         "repo": "crueter-ci/FFmpeg",
-        "version": "9.0.1-1788120736-bf1b838f2a"
+        "version": "9.0.2-1790726865-946fcce07b"
     },
     "fmt": {
         "hash": "f0da82c545b01692e9fd30fdfb613dbb8dd9716983dcd0ff19ac2a8d36f74beb5540ef38072fdecc1e34191b3682a8542ecbf3a61ef287dbba0a2679d4e023f2",
@@ -332,6 +332,11 @@
         "package": "xbyak",
         "repo": "herumi/xbyak",
         "version": "v7.40.1"
+    },
+    "zbic": {
+        "hash": "fbe2f37986377d7f0d96ae3224c80b5971df6e8b6961f68061f1975ebb2e8cb78f07b90f014b007be4023dbf5513581504e7f7d61a5237cb2a8a7a61ae11e482",
+        "repo": "kinnay/zbic",
+        "version": "11b08f2712264bbed731545085cbd9702096ceb7"
     },
     "zlib": {
         "hash": "16fea4df307a68cf0035858abe2fd550250618a97590e202037acd18a666f57afc10f8836cbbd472d54a0e76539d0e558cb26f059d53de52ff90634bbf4f47d4",
