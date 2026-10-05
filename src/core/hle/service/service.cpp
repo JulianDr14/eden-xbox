@@ -99,7 +99,11 @@ void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
     if (is_i_storage && is_cmd_read) {
         const auto* const process = ctx.GetThread().GetOwnerProcess();
         if (process != nullptr && system.IsNVDECActiveForProcess(process->GetId())) {
-            std::this_thread::sleep_for(std::chrono::microseconds{600});
+            // The guest movie allocator can exhaust its fixed heap when storage
+            // replies outrun page recycling (Eden #4316). Strikers still aborts
+            // with 600 us / 2 ms in UWP; 8 ms allows playback to progress. Keep
+            // this compatibility pacing confined to the NVDEC owner's reads.
+            std::this_thread::sleep_for(std::chrono::milliseconds{8});
         }
     }
 }

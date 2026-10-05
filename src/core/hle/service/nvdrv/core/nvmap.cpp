@@ -310,7 +310,9 @@ std::optional<NvMap::FreeInfo> NvMap::FreeHandle(Handle::Id handle, bool interna
             .address = handle_description->address,
             .size = handle_description->size,
             .was_uncached = handle_description->flags.map_uncached.Value() != 0,
-            .can_unlock = true,
+            // Create alone does not share any pages with the device. A failed
+            // guest allocation may free such a handle before calling Alloc.
+            .can_unlock = handle_description->allocated && handle_description->address != 0,
         };
     } else {
         return std::nullopt;
@@ -320,6 +322,9 @@ std::optional<NvMap::FreeInfo> NvMap::FreeHandle(Handle::Id handle, bool interna
     if (!hWeak.expired()) {
         LOG_DEBUG(Service_NVDRV, "nvmap handle: {} wasn't freed as it is still in use", handle);
         freeInfo.can_unlock = false;
+        // The caller must not recycle backing memory while another reference
+        // still owns it. NVMAP_IOC_FREE returns zero until the last reference.
+        freeInfo.address = 0;
     }
 
     return freeInfo;

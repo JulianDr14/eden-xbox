@@ -99,7 +99,8 @@ Result SetMemoryPermission(Core::System& system, u64 address, u64 size, MemoryPe
     R_RETURN(page_table.SetMemoryPermission(address, size, perm));
 }
 
-Result SetMemoryAttribute(Core::System& system, u64 address, u64 size, u32 mask, u32 attr) {
+static Result SetMemoryAttributeImpl(Core::System& system, u64 address, u64 size, u32 mask,
+                                    u32 attr) {
     LOG_DEBUG(Kernel_SVC,
               "called, address={:#016x}, size={:#x}, mask={:#08x}, attribute={:#08x}", address,
               size, mask, attr);
@@ -131,6 +132,16 @@ Result SetMemoryAttribute(Core::System& system, u64 address, u64 size, u32 mask,
 }
 
 /// Maps a memory range into a different range.
+Result SetMemoryAttribute(Core::System& system, u64 address, u64 size, u32 mask, u32 attr) {
+    const auto result = SetMemoryAttributeImpl(system, address, size, mask, attr);
+    if (result.IsError()) {
+        LOG_ERROR(Kernel_SVC,
+                  "SetMemoryAttribute failed: address={:#x}, size={:#x}, mask={:#x}, "
+                  "attribute={:#x}, result={:#x}", address, size, mask, attr, result.raw);
+    }
+    return result;
+}
+
 Result MapMemory(Core::System& system, u64 dst_addr, u64 src_addr, u64 size) {
     LOG_TRACE(Kernel_SVC, "called, dst_addr={:#x}, src_addr={:#x}, size={:#x}", dst_addr,
               src_addr, size);

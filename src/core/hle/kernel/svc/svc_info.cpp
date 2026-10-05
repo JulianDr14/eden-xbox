@@ -65,6 +65,7 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle 
             R_SUCCEED();
         case InfoType::HeapRegionSize:
             *result = process->GetPageTable().GetHeapRegionSize();
+            LOG_DEBUG(Kernel_SVC, "GetInfo HeapRegionSize={:#x}", *result);
             R_SUCCEED();
         case InfoType::AslrRegionAddress:
             *result = GetInteger(process->GetPageTable().GetAliasCodeRegionStart());
@@ -80,9 +81,11 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle 
             R_SUCCEED();
         case InfoType::TotalMemorySize:
             *result = process->GetTotalUserPhysicalMemorySize(system.Kernel());
+            LOG_DEBUG(Kernel_SVC, "GetInfo TotalMemorySize={:#x}", *result);
             R_SUCCEED();
         case InfoType::UsedMemorySize:
             *result = process->GetUsedUserPhysicalMemorySize(system.Kernel());
+            LOG_DEBUG(Kernel_SVC, "GetInfo UsedMemorySize={:#x}", *result);
             R_SUCCEED();
         case InfoType::SystemResourceSizeTotal:
             *result = process->GetTotalSystemResourceSize();
@@ -98,9 +101,11 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle 
             R_SUCCEED();
         case InfoType::TotalNonSystemMemorySize:
             *result = process->GetTotalNonSystemUserPhysicalMemorySize(system.Kernel());
+            LOG_DEBUG(Kernel_SVC, "GetInfo TotalNonSystemMemorySize={:#x}", *result);
             R_SUCCEED();
         case InfoType::UsedNonSystemMemorySize:
             *result = process->GetUsedNonSystemUserPhysicalMemorySize(system.Kernel());
+            LOG_DEBUG(Kernel_SVC, "GetInfo UsedNonSystemMemorySize={:#x}", *result);
             R_SUCCEED();
         case InfoType::IsApplication:
             *result = process->IsApplication();

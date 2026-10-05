@@ -100,6 +100,15 @@ void Break(Core::System& system, BreakReason reason, u64 info1, u64 info2) {
         has_dumped_buffer ? std::make_optional(debug_buffer) : std::nullopt);
 
     if (!notification_only) {
+        auto& process = GetCurrentProcess(system.Kernel());
+        LOG_ERROR(Kernel_SVC,
+                  "Guest break memory: normal={:#x}, used={:#x}, total={:#x}, "
+                  "heap_base={:#x}, heap_region={:#x}",
+                  process.GetPageTable().GetNormalMemorySize(),
+                  process.GetUsedUserPhysicalMemorySize(system.Kernel()),
+                  process.GetTotalUserPhysicalMemorySize(system.Kernel()),
+                  GetInteger(process.GetPageTable().GetHeapRegionStart()),
+                  process.GetPageTable().GetHeapRegionSize());
         LOG_CRITICAL(
             Debug_Emulated,
             "Emulated program broke execution! reason={:#016x}, info1={:#016x}, info2={:#016x}",
