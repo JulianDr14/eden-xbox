@@ -66,6 +66,20 @@ public:
             __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(write.GetAddressOf())));
         winrt::check_hresult(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
             CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)));
+        // Cache the installed version so the footer follows manifest updates
+        // without a second version constant or per-frame WinRT calls.
+        const auto version = winrt::Windows::ApplicationModel::Package::Current().Id().Version();
+        const auto version_text = L"v" + std::to_wstring(version.Major) + L"." +
+            std::to_wstring(version.Minor) + L"." + std::to_wstring(version.Build) +
+            L"." + std::to_wstring(version.Revision);
+        ComPtr<IDWriteTextFormat> version_format;
+        winrt::check_hresult(write->CreateTextFormat(L"Segoe UI", nullptr,
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            12, L"es-ES", &version_format));
+        winrt::check_hresult(write->CreateTextLayout(version_text.data(),
+            static_cast<UINT32>(version_text.size()), version_format.Get(), 180, 18,
+            &version_layout));
+        winrt::check_hresult(version_layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING));
         try {
             asset_root = std::filesystem::path{
                 winrt::Windows::ApplicationModel::Package::Current().InstalledLocation().Path().c_str()} / L"Assets";
@@ -83,7 +97,8 @@ public:
         context->Flush();
     }
     void Draw(const LibraryScan& scan, size_t selected, bool loading, bool settings,
-              unsigned setting_row, const ControllerOptions& options, const std::wstring& notice, const ControllerPanel& panel) {
+              unsigned setting_row, const ControllerOptions& options, const std::wstring& notice, const ControllerPanel& panel,
+              const ConfigurationPanel& configuration) {
         prompt_family = PromptFamily::Keyboard;
         if (panel.xbox) prompt_family = PromptFamily::Xbox;
         else if (const auto index = SelectController(panel.devices, options.controller_id))
@@ -95,7 +110,7 @@ public:
         Text(L"eden", 120, 40, 32, 0xf4f7fa, 140, 48, true);
         Text(L"BIBLIOTECA", 266, 54, 16, 0x9ba9ba, 200);
         Round(670, 43, 225, 44, 14, 0x202b39);
-        ControlPrompt(Navigation::AddFolder, L"Agregar carpeta", 680, 49, 174);
+        ControlPrompt(Navigation::AddFolder, L"Configuracion", 680, 49, 174);
         Text(std::to_wstring(scan.entries.size()) + L" juegos", 900, 52, 18, 0x9ba9ba, 170);
         Round(1080, 43, 146, 44, 14, 0x202b39);
         ControlPrompt(Navigation::Settings, L"Mando", 1090, 49, 100);
@@ -105,11 +120,12 @@ public:
             Text(L"Buscando juegos en tu carpeta...", 64, 266, 24, 0x9ba9ba, 1000);
         } else if (scan.entries.empty()) {
             Text(L"Tu proxima aventura empieza aqui", 64, 192, 40, 0xf4f7fa, 1100, 70, true);
-            Text(L"Conecta tu USB y usa Agregar carpeta para buscar tus juegos.", 64, 278, 24, 0x9ba9ba, 1120);
+            Text(L"Abre Configuracion para importar tus claves, firmware y agregar juegos de USB.", 64, 278, 24, 0x9ba9ba, 1120);
         } else {
             const auto& game = scan.entries[selected];
             Cover(game, 64, 148, 220);
-            Text(L"LISTO PARA JUGAR", 320, 149, 16, 0x77e3bd, 700);
+            Text(configuration.status.keys_ready ? L"LISTO PARA JUGAR" : L"IMPORTA TUS CLAVES EN CONFIGURACION",
+                 320, 149, 16, 0x77e3bd, 700);
             Text(game.name, 320, 184, 42, 0xf4f7fa, 866, 110, true, true);
             Text((game.developer.empty() ? L"Tu biblioteca personal" : game.developer) +
                  (game.source_name.empty() ? L"" : L" · " + game.source_name),
@@ -135,6 +151,9 @@ public:
         ControlPrompt(Navigation::Settings, L"Mando", 524, 654, 150);
         ControlPrompt(Navigation::Refresh, L"Actualizar", 754, 654, 150);
         ControlPrompt(Navigation::Back, L"Salir", 1000, 654, 150);
+        brush->SetColor(D2D1::ColorF(0x738194));
+        target->DrawTextLayout(D2D1::Point2F(1046, 690), version_layout.Get(), brush.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_CLIP);
         if (!notice.empty()) Text(notice, 320, 316, 15, 0xe4bb83, 860, 22);
         if (settings) {
             brush->SetColor(D2D1::ColorF(0, 0, 0, 0.72f));
@@ -188,6 +207,7 @@ public:
             }
         }
         if (panel.keyboard.open) DrawKeyboard(panel.keyboard);
+        if (configuration.open && !settings) DrawConfiguration(configuration);
         winrt::check_hresult(target->EndDraw());
         winrt::check_hresult(swapchain->Present(1, 0));
     }
@@ -200,7 +220,9 @@ private:
         Text(L"Configuracion de teclado", 120, 118, 28, 0xf4f7fa, 900, 44, true);
         Text(L"Jugador 1  /  Mando Pro", 120, 166, 17, 0x91a3b8, 650, 30);
         Round(1120, 112, 48, 40, 10, 0x202c3c);
-        Text(L"×", 1120, 112, 24, 0xc5cfdb, 48, 40, false, false, true);
+        brush->SetColor(D2D1::ColorF(0xc5cfdb));
+        target->DrawLine(D2D1::Point2F(1137, 125), D2D1::Point2F(1151, 139), brush.Get(), 2);
+        target->DrawLine(D2D1::Point2F(1151, 125), D2D1::Point2F(1137, 139), brush.Get(), 2);
         Round(120, 210, 480, 342, 16, 0x182331);
         Text(L"VISTA DEL MANDO", 143, 225, 13, 0x91a3b8, 220, 24, true);
         // Reuse Eden Qt's original Pro Controller contours and button coordinates.
@@ -321,6 +343,113 @@ private:
     }
     enum class PromptFamily : unsigned { Keyboard, Xbox, Nintendo };
     enum class Navigation : unsigned { Play, Explore, Settings, Refresh, Back, AddFolder };
+    enum class ConfigurationIcon { Folder, Controller, Key, Firmware, Remove, Settings };
+    void DrawConfigurationIcon(ConfigurationIcon icon, float x, float y, unsigned color) {
+        // Native vector strokes: no texture loads, font glyphs or geometry allocation.
+        brush->SetColor(D2D1::ColorF(color));
+        const auto line = [&](float ax, float ay, float bx, float by) {
+            target->DrawLine(D2D1::Point2F(x + ax, y + ay),
+                             D2D1::Point2F(x + bx, y + by), brush.Get(), 2);
+        };
+        const auto circle = [&](float cx, float cy, float radius) {
+            target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(x + cx, y + cy), radius, radius), brush.Get(), 2);
+        };
+        if (icon == ConfigurationIcon::Folder || icon == ConfigurationIcon::Remove) {
+            line(3, 10, 3, 28); line(3, 28, 29, 28); line(29, 28, 29, 10);
+            line(29, 10, 16, 10); line(16, 10, 12, 6); line(12, 6, 3, 6); line(3, 6, 3, 10);
+            line(3, 14, 29, 14);
+            if (icon == ConfigurationIcon::Remove) line(11, 21, 21, 21);
+        } else if (icon == ConfigurationIcon::Controller) {
+            target->DrawRoundedRectangle(D2D1::RoundedRect(
+                D2D1::RectF(x + 1, y + 7, x + 31, y + 27), 7, 7), brush.Get(), 2);
+            line(7, 17, 15, 17); line(11, 13, 11, 21);
+            circle(23, 14, 1.4f); circle(26, 20, 1.4f);
+        } else if (icon == ConfigurationIcon::Key) {
+            circle(10, 12, 7); circle(10, 12, 2);
+            line(15, 17, 28, 30); line(22, 24, 26, 20); line(26, 28, 30, 24);
+        } else if (icon == ConfigurationIcon::Firmware) {
+            target->DrawRoundedRectangle(D2D1::RoundedRect(
+                D2D1::RectF(x + 7, y + 7, x + 25, y + 25), 3, 3), brush.Get(), 2);
+            target->DrawRectangle(D2D1::RectF(x + 12, y + 12, x + 20, y + 20), brush.Get(), 2);
+            for (float p : {11.0f, 21.0f}) {
+                line(p, 2, p, 7); line(p, 25, p, 30);
+                line(2, p, 7, p); line(25, p, 30, p);
+            }
+        } else {
+            circle(16, 16, 10); circle(16, 16, 4);
+            static constexpr std::array<D2D1_POINT_2F, 8> directions{{
+                {0, -1}, {0.707f, -0.707f}, {1, 0}, {0.707f, 0.707f},
+                {0, 1}, {-0.707f, 0.707f}, {-1, 0}, {-0.707f, -0.707f}}};
+            for (const auto d : directions)
+                line(16 + 11 * d.x, 16 + 11 * d.y, 16 + 15 * d.x, 16 + 15 * d.y);
+        }
+    }
+    void DrawConfiguration(const ConfigurationPanel& panel) {
+        Round(0, 0, 1280, 720, 0, 0x080d15);
+        const auto layout = GetConfigurationLayout(panel);
+        Round(panel.files ? 90.0f : 140.0f, panel.files ? 80.0f : 120.0f,
+              panel.files ? 1100.0f : 1000.0f, panel.files ? 590.0f : 470.0f, 24, 0x202b39);
+        if (panel.files) {
+            Round(130, 108, 48, 48, 12, 0x304b49);
+            DrawConfigurationIcon(ConfigurationIcon::Folder, 138, 116, 0x77e3bd);
+        } else {
+            Round(180, 156, 48, 48, 12, 0x304b49);
+            DrawConfigurationIcon(ConfigurationIcon::Settings, 188, 164, 0x77e3bd);
+        }
+        Text(panel.files ? L"Gestor de archivos" : L"Configuracion",
+             panel.files ? 194.0f : 246.0f, panel.files ? 108.0f : 151.0f, 32, 0xf4f7fa, 850, 50, true);
+        if (panel.files) {
+            Text(std::wstring{panel.status.keys_ready ? L"Claves listas" : L"Claves pendientes"} +
+                 L"  ·  Firmware: " + std::to_wstring(panel.status.firmware_files) + L" archivos", 130, 168, 18, 0x77e3bd, 950);
+            Text(L"Juegos en USB. Claves y firmware se importan al almacenamiento interno.", 130, 201, 16, 0x9ba9ba, 950);
+        } else Text(L"Todo listo para jugar, a tu manera", 246, 198, 17, 0x9ba9ba, 790);
+        const auto count = ConfigurationRowCount(panel);
+        const auto first = ConfigurationFirstRow(panel);
+        for (size_t i = first; i < std::min(first + 5, count); ++i) {
+            const float y = layout.top + static_cast<float>(i - first) * layout.stride;
+            const bool active = i == panel.selected;
+            Round(layout.x, y, layout.width, layout.row_height, 12, active ? 0x304b49 : 0x151f2c);
+            if (active) Round(layout.x, y + 16, 3, layout.row_height - 32, 1.5f, 0x77e3bd);
+            const auto icon = !panel.files ? (i == 0 ? ConfigurationIcon::Folder : ConfigurationIcon::Controller) :
+                i == 0 ? ConfigurationIcon::Folder : i == 1 ? ConfigurationIcon::Key :
+                i == 2 ? ConfigurationIcon::Firmware : ConfigurationIcon::Remove;
+            const float icon_y = y + (layout.row_height - 32) / 2;
+            DrawConfigurationIcon(icon, layout.x + 20, icon_y, active ? 0x77e3bd : 0x9ba9ba);
+            std::wstring title;
+            if (!panel.files) title = i == 0 ? L"Gestor de archivos" : L"Mandos y teclado";
+            else if (i == 0) title = L"Agregar carpeta de juegos";
+            else if (i == 1) title = L"Importar claves de tu consola";
+            else if (i == 2) title = L"Importar firmware de tu consola";
+            else title = L"Quitar carpeta: " + panel.status.sources[i - 3].name;
+            Text(title, layout.x + 72, y + (panel.files ? 10.0f : 13.0f), panel.files ? 20.0f : 22.0f,
+                 0xf4f7fa, layout.width - 135, 32, !panel.files);
+            if (!panel.files) {
+                Text(i == 0 ? L"Carpetas de juegos, claves y firmware de tu consola" :
+                              L"Elige tu dispositivo y personaliza los controles",
+                     layout.x + 72, y + 47, 16, 0xb5c2d0, layout.width - 135, 26);
+            }
+            brush->SetColor(D2D1::ColorF(active ? 0x77e3bd : 0x9ba9ba));
+            const float cx = layout.x + layout.width - 28;
+            const float cy = y + layout.row_height / 2;
+            target->DrawLine(D2D1::Point2F(cx - 4, cy - 5), D2D1::Point2F(cx + 1, cy), brush.Get(), 2);
+            target->DrawLine(D2D1::Point2F(cx + 1, cy), D2D1::Point2F(cx - 4, cy + 5), brush.Get(), 2);
+        }
+        if (!panel.files) {
+            Text(L"DATOS DEL EMULADOR", 180, 463, 12, 0x9ba9ba, 180, 26, true);
+            Text(panel.status.keys_ready ? L"Claves listas" : L"Claves pendientes", 380, 458, 16,
+                 panel.status.keys_ready ? 0x77e3bd : 0xf3ba6a, 220);
+            Text(L"Firmware: " + std::to_wstring(panel.status.firmware_files) + L" archivos",
+                 680, 458, 16, 0x9ba9ba, 350);
+        }
+        if (panel.busy) Text(L"Importando " + std::to_wstring(panel.completed) + L" / " +
+                            std::to_wstring(panel.total) + L" archivos...", 130, 565, 18, 0x77e3bd, 990);
+        else Text(panel.notice, layout.x + 4, panel.files ? 561.0f : 497.0f, 16, 0xf3ba6a,
+                  layout.width - 20, panel.files ? 40.0f : 28.0f, false, true);
+        ControlPrompt(Navigation::Explore, L"Elegir", layout.x + 4, layout.footer, 110);
+        ControlPrompt(Navigation::Play, L"Abrir", layout.x + 380, layout.footer, 110);
+        ControlPrompt(Navigation::Back, panel.busy ? L"Cancelar" : L"Volver",
+                      layout.x + layout.width - 230, layout.footer, 150);
+    }
     void ControlPrompt(Navigation action, const wchar_t* label, float x, float y,
                        float width, unsigned color = 0x9ba9ba) {
         struct Glyph { const wchar_t* asset; const wchar_t* fallback; };
@@ -331,6 +460,21 @@ private:
             {L"xbox_a", L"A"}, {L"xbox_dpad", L"Cruceta"}, {L"xbox_view", L"View"},
             {L"xbox_menu", L"Menu"}, {L"xbox_b", L"B"}, {L"xbox_x", L"X"}}};
         const auto index = static_cast<unsigned>(action);
+        if (action == Navigation::AddFolder) {
+            // The package has no xbox_x/keyboard_o asset. Render both natively,
+            // without a failed WIC open or a glyph depending on the installed font.
+            if (prompt_family == PromptFamily::Keyboard) {
+                Round(x, y, 32, 32, 6, 0x151f2c);
+                Text(L"O", x, y, 18, 0xf4f7fa, 32, 32, true, false, true);
+            } else {
+                brush->SetColor(D2D1::ColorF(prompt_family == PromptFamily::Xbox ? 0x68b7ff : 0xf4f7fa));
+                target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(x + 16, y + 16), 13, 13), brush.Get(), 2);
+                target->DrawLine(D2D1::Point2F(x + 11, y + 10), D2D1::Point2F(x + 21, y + 22), brush.Get(), 2);
+                target->DrawLine(D2D1::Point2F(x + 21, y + 10), D2D1::Point2F(x + 11, y + 22), brush.Get(), 2);
+            }
+            Text(label, x + 40, y + 3, 19, color, width);
+            return;
+        }
         if (prompt_family != PromptFamily::Keyboard && action == Navigation::Explore) {
             // Neutral monochrome d-pad for both controller families. The old
             // bitmap was Kenney's red color variant, not an application state.
@@ -475,6 +619,7 @@ private:
     std::filesystem::path asset_root;
     std::unordered_map<std::wstring, ComPtr<ID2D1Bitmap1>> prompts;
     std::unordered_map<unsigned, ComPtr<ID2D1RoundedRectangleGeometry>> masks;
+    ComPtr<IDWriteTextLayout> version_layout;
     std::unordered_map<unsigned, ComPtr<IDWriteTextFormat>> formats;
     std::unordered_map<std::wstring, ComPtr<ID2D1Bitmap1>> covers;
 };
@@ -484,7 +629,7 @@ LibraryCanvas::~LibraryCanvas() = default;
 void LibraryCanvas::InvalidateCovers() { impl->InvalidateCovers(); }
 void LibraryCanvas::Draw(const LibraryScan& scan, size_t selected, bool loading, bool settings,
                          unsigned row, const ControllerOptions& options, const std::wstring& notice,
-                         const ControllerPanel& panel) {
-    impl->Draw(scan, selected, loading, settings, row, options, notice, panel);
+                         const ControllerPanel& panel, const ConfigurationPanel& configuration) {
+    impl->Draw(scan, selected, loading, settings, row, options, notice, panel, configuration);
 }
 } // namespace EdenXbox

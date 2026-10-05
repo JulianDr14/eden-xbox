@@ -5,6 +5,7 @@
 #include "eden_uwp/uwp_library_canvas.h"
 #include "eden_uwp/uwp_rom_storage.h"
 #include "eden_uwp/storage_path.h"
+#include "eden_uwp/uwp_file_manager.h"
 
 #include <algorithm>
 #include <chrono>
@@ -41,6 +42,14 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     LibraryScan scan;
     size_t selected = 0;
     bool dirty = true, loading = true, settings = false;
+    ConfigurationPanel configuration;
+    bool return_to_configuration = false;
+    unsigned picker_kind = 0; // 0 games, 1 keys, 2 firmware
+    std::future<FileSetupStatus> setup_future;
+    std::jthread setup_worker;
+    FileImportProgress import_progress;
+    std::future<std::string> import_future;
+    std::jthread import_worker;
     std::chrono::steady_clock::time_point auto_pick_at{};
     unsigned setting_row = 0;
     ControllerPanel panel;
@@ -146,6 +155,21 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         const auto scale = std::max(0.01f, std::min(width / 1280.0f, height / 720.0f));
         const float x = static_cast<float>((p.X * dpi - (width - 1280 * scale) / 2) / scale);
         const float y = static_cast<float>((p.Y * dpi - (height - 720 * scale) / 2) / scale);
+        if (configuration.open && !settings) {
+            const auto layout = GetConfigurationLayout(configuration);
+            if (y >= layout.footer - 7 && y < layout.footer + 40 &&
+                x >= layout.x + layout.width - 230 && x < layout.x + layout.width) actions |= Quit;
+            else if (!configuration.busy && x >= layout.x && x < layout.x + layout.width && y >= layout.top) {
+                const auto row = static_cast<size_t>((y - layout.top) / layout.stride);
+                const auto choice = ConfigurationFirstRow(configuration) + row;
+                if (row < 5 && y < layout.top + row * layout.stride + layout.row_height &&
+                    choice < ConfigurationRowCount(configuration)) {
+                    configuration.selected = choice; actions |= Play; dirty = true;
+                }
+            }
+            e.Handled(true);
+            return;
+        }
         if (panel.keyboard.open) {
             auto& editor = panel.keyboard;
             if (Contains({1120, 112, 48, 40}, x, y)) {
@@ -217,6 +241,16 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     std::jthread metadata_worker;
     unsigned generation = 0;
     bool logging_ready = false;
+    auto refresh_setup = [&] {
+        if (setup_future.valid()) return;
+        std::packaged_task<FileSetupStatus()> task{[] {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } guard;
+            return ReadFileSetupStatus();
+        }};
+        setup_future = task.get_future();
+        setup_worker = std::jthread(std::move(task));
+    };
     auto start_scan = [&](StorageFolder added = nullptr) {
         loading = dirty = true;
         ++generation;
@@ -228,6 +262,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
             struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } guard;
             seed();
+            // Recover interrupted publication before a metadata worker constructs NCA readers.
+            ReadFileSetupStatus();
             std::error_code ec;
             std::filesystem::create_directories(root, ec);
             auto result = ScanGameLibrary(root, stop);
@@ -297,7 +333,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             pad = next;
             next_pad_check = now + std::chrono::milliseconds{500};
         }
-        const unsigned context = panel.keyboard.open ? 3 : panel.expanded ? 2 : settings ? 1 : 0;
+        const unsigned context = panel.keyboard.open ? 3 : panel.expanded ? 2 : settings ? 1 : configuration.open ? 4 : 0;
         if (context != navigation_context) {
             stick_navigation.Reset(); navigation_context = context;
         }
@@ -330,7 +366,10 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                     if (hit(GamepadButtons::DPadLeft)) actions |= Left;
                     if (hit(GamepadButtons::DPadRight)) actions |= Right;
                     if (hit(GamepadButtons::A)) actions |= Play;
-                    if (hit(GamepadButtons::X)) actions |= settings ? Swap : AddFolder;
+                    if (hit(GamepadButtons::X)) {
+                        if (settings) actions |= Swap;
+                        else if (!configuration.open) actions |= AddFolder;
+                    }
                     if (hit(GamepadButtons::Y)) actions |= Zone;
                     if (hit(GamepadButtons::Menu)) actions |= Refresh;
                     if (hit(GamepadButtons::View)) actions |= Panel;
@@ -343,10 +382,25 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             if (picker.Status() != winrt::Windows::Foundation::AsyncStatus::Started) {
                 try {
                     auto folder = picker.GetResults();
-                    if (folder) start_scan(folder);
-                    else { notice = L"Seleccion cancelada."; dirty = true; }
+                    if (folder && picker_kind == 0) start_scan(folder);
+                    else if (folder) {
+                        configuration.busy = true;
+                        configuration.notice.clear();
+                        import_progress.completed = 0;
+                        import_progress.total = 0;
+                        metadata_worker.request_stop();
+                        std::packaged_task<std::string(std::stop_token)> task{
+                            [folder, kind = picker_kind, old_metadata = std::move(metadata_worker), &import_progress](std::stop_token stop) mutable {
+                                if (old_metadata.joinable()) old_metadata.join();
+                                winrt::init_apartment(winrt::apartment_type::multi_threaded);
+                                struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } guard;
+                                return ImportSystemFiles(folder, kind == 1 ? FileImport::Keys : FileImport::Firmware, import_progress, stop);
+                            }};
+                        import_future = task.get_future();
+                        import_worker = std::jthread(std::move(task));
+                    } else { configuration.notice = L"Seleccion cancelada."; dirty = true; }
                 } catch (const winrt::hresult_error& e) {
-                    notice = L"No se pudo seleccionar la carpeta: " + std::wstring{e.message()}; dirty = true;
+                    configuration.notice = L"No se pudo seleccionar la carpeta: " + std::wstring{e.message()}; dirty = true;
                 }
                 picker = nullptr;
                 previous = {};
@@ -364,13 +418,80 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 dirty = true;
             }
         }
+        if (setup_future.valid() && setup_future.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
+            try { configuration.status = setup_future.get(); }
+            catch (...) { configuration.notice = L"No se pudo comprobar la configuracion de archivos."; }
+            configuration.selected = std::min(configuration.selected, ConfigurationRowCount(configuration) - 1);
+            dirty = true;
+        }
+        if (configuration.busy) {
+            if (actions & Quit) { import_worker.request_stop(); configuration.notice = L"Cancelando importacion..."; }
+            actions = 0;
+            const auto done = import_progress.completed.load(std::memory_order_relaxed);
+            const auto total = import_progress.total.load(std::memory_order_relaxed);
+            if (done != configuration.completed || total != configuration.total) {
+                configuration.completed = done; configuration.total = total; dirty = true;
+            }
+            if (import_future.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
+                try {
+                    const auto error = import_future.get();
+                    configuration.notice = error.empty() ? L"Importacion completa. Datos listos en almacenamiento interno." : std::wstring{winrt::to_hstring(error)};
+                } catch (...) { configuration.notice = L"No se pudo importar; se conserva la instalacion anterior."; }
+                configuration.busy = false;
+                // The old metadata worker has joined; discard results before rescanning.
+                metadata = {};
+                refresh_setup();
+                start_scan();
+                dirty = true;
+            }
+        }
         if (actions & Quit) {
             if (panel.keyboard.open) { panel.keyboard.open = panel.keyboard.capturing = false; dirty = true; actions &= ~Quit; }
             else if (panel.expanded) { panel.expanded = false; dirty = true; actions &= ~Quit; }
-            else if (settings) { settings = false; dirty = true; actions &= ~Quit; }
+            else if (settings) { settings = false; configuration.open = return_to_configuration; return_to_configuration = false; dirty = true; actions &= ~Quit; }
+            else if (configuration.open) {
+                if (configuration.files) { configuration.files = false; configuration.selected = 0; }
+                else configuration.open = false;
+                dirty = true; actions &= ~Quit;
+            }
             else return std::nullopt;
         }
-        if (actions & Panel) { settings = !settings; panel.keyboard.open = panel.keyboard.capturing = false; panel.expanded = false; dirty = true; }
+        if (actions & Panel && !configuration.open) { settings = !settings; panel.keyboard.open = panel.keyboard.capturing = false; panel.expanded = false; dirty = true; }
+        if (actions & AddFolder && !settings && !picker && !configuration.busy && !validation.valid()) {
+            configuration.open = true; configuration.files = false; configuration.selected = 0;
+            configuration.notice.clear(); refresh_setup(); dirty = true;
+        }
+        if (configuration.open && !settings && !picker && !configuration.busy) {
+            const auto count = ConfigurationRowCount(configuration);
+            if (actions & Up) configuration.selected = (configuration.selected + count - 1) % count;
+            if (actions & Down) configuration.selected = (configuration.selected + 1) % count;
+            if (actions & (Up | Down)) dirty = true;
+            if (actions & Play) {
+                if (!configuration.files) {
+                    if (configuration.selected == 0) { configuration.files = true; configuration.selected = 0; }
+                    else { settings = true; return_to_configuration = true; }
+                } else if (loading || setup_future.valid()) configuration.notice = L"Espera a que termine la comprobacion de archivos.";
+                else if (configuration.selected >= 3) {
+                    try {
+                        ForgetGameFolder(configuration.status.sources[configuration.selected - 3].token);
+                        configuration.notice = L"Carpeta quitada de la biblioteca. Tus juegos siguen en el USB.";
+                        configuration.selected = 0; refresh_setup(); start_scan();
+                    } catch (...) { configuration.notice = L"No se pudo quitar la carpeta."; }
+                } else {
+                    picker_kind = static_cast<unsigned>(configuration.selected);
+                    try {
+                        winrt::Windows::Storage::Pickers::FolderPicker folder_picker;
+                        folder_picker.SuggestedStartLocation(winrt::Windows::Storage::Pickers::PickerLocationId::ComputerFolder);
+                        folder_picker.FileTypeFilter().Append(L"*");
+                        picker = folder_picker.PickSingleFolderAsync();
+                        configuration.notice = picker_kind == 0 ? L"Elige la carpeta de juegos." : picker_kind == 1 ?
+                            L"Elige la carpeta con prod.keys y, opcionalmente, title.keys." : L"Elige la carpeta de firmware extraido (.nca).";
+                    } catch (...) { configuration.notice = L"No se pudo abrir el selector de carpetas."; }
+                }
+                dirty = true;
+            }
+            actions = 0;
+        }
         if (!settings) panel.notice.clear();
         if (!panel.keyboard.open) panel.keyboard.notice.clear();
         if (loading && future.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
@@ -378,6 +499,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             catch (const std::exception& e) { scan.error = e.what(); }
             catch (const winrt::hresult_error& e) { scan.error = winrt::to_string(e.message()); }
             loading = false;
+            if (!configuration.busy) refresh_setup();
             selected = std::min(selected, scan.entries.empty() ? 0 : scan.entries.size() - 1);
             notice = winrt::to_hstring(scan.error).c_str();
             if (notice.empty() && !initial_notice.empty()) notice = winrt::to_hstring(initial_notice).c_str();
@@ -385,7 +507,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             if (scan.limited) notice = L"Limite de exploracion alcanzado: 10000 entradas, 5 niveles.";
             dirty = true;
         }
-        if (!auto_pick.empty() && !loading && !picker && !validation.valid()) {
+        if (!auto_pick.empty() && !configuration.open && !loading && !picker && !validation.valid()) {
             if (auto_pick_at == std::chrono::steady_clock::time_point{})
                 auto_pick_at = std::chrono::steady_clock::now() + std::chrono::seconds{2};
             if (std::chrono::steady_clock::now() >= auto_pick_at) {
@@ -399,15 +521,16 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 }
             }
         }
-        if (actions & Play && !settings && !panel.keyboard.open && !loading && !scan.entries.empty()) {
+        if (actions & Play && !configuration.open && !settings && !panel.keyboard.open && !loading && !scan.entries.empty()) {
             selected_path = scan.entries[selected].launch_path;
-            if (!IsStoragePath(selected_path)) return selected_path;
             notice = L"Comprobando acceso al juego...";
             dirty = true;
             std::packaged_task<std::string()> task{[path = selected_path] {
                 winrt::init_apartment(winrt::apartment_type::multi_threaded);
                 struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } guard;
-                return CheckExternalGame(path);
+                if (!HasUsableHeaderKey() && !path.ends_with(".nro"))
+                    return std::string{"Faltan tus claves. Abre Configuracion > Gestor de archivos > Importar claves."};
+                return IsStoragePath(path) ? CheckExternalGame(path) : std::string{};
             }};
             validation = task.get_future();
             validation_worker = std::jthread(std::move(task));
@@ -473,20 +596,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             controller_notice_until = saved ? now + std::chrono::seconds{3} :
                                              std::chrono::steady_clock::time_point::max();
         }
-        if (actions & AddFolder && !settings && !loading && !picker && !validation.valid()) {
-            try {
-                winrt::Windows::Storage::Pickers::FolderPicker folder_picker;
-                folder_picker.SuggestedStartLocation(winrt::Windows::Storage::Pickers::PickerLocationId::ComputerFolder);
-                folder_picker.FileTypeFilter().Append(L"*");
-                picker = folder_picker.PickSingleFolderAsync();
-                notice = L"Elige la carpeta de juegos de tu USB.";
-            } catch (const winrt::hresult_error& e) {
-                notice = L"No se pudo abrir el selector: " + std::wstring{e.message()};
-            }
-            dirty = true;
-        }
         if (actions & Refresh && !loading && !picker && !validation.valid()) start_scan();
-        if (metadata.valid() && metadata.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
+        if (!configuration.busy && metadata.valid() && metadata.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
             try {
                 auto batch = metadata.get();
                 if (batch.generation == generation) {
@@ -502,7 +613,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             } catch (const std::exception&) { notice = L"No se pudieron leer los datos de algunos juegos."; }
         }
         const size_t page = selected / 5 * 5;
-        if (!loading && !metadata.valid() && !scan.entries.empty() &&
+        if (!configuration.open && !loading && !metadata.valid() && !scan.entries.empty() &&
             (metadata_dirty || retained_page != page)) {
             metadata_dirty = false;
             std::vector<LibraryEntry> requested;
@@ -544,7 +655,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             resize = false;
             dirty = true;
         }
-        if (dirty) { canvas->Draw(scan, selected, loading, settings, setting_row, options, notice, panel); dirty = false; }
+        if (dirty) { canvas->Draw(scan, selected, loading, settings, setting_row, options, notice, panel, configuration); dirty = false; }
         std::this_thread::sleep_for(std::chrono::milliseconds{16});
     }
 }
