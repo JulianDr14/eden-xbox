@@ -488,6 +488,8 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
         command_state.graphics_root = layout.Handle();
     }
     scheduler.SetPipelineState(pipeline.Handle());
+    MarkGpuCommands(cmd, "draw VS/PS", pipeline.Key().unique_hashes[1],
+                    pipeline.Key().unique_hashes[5]);
 
     const auto color_targets = framebuffer.ColorTargets();
     const D3D12_CPU_DESCRIPTOR_HANDLE depth = framebuffer.DepthTarget(bindings.depth_sampled);
@@ -554,6 +556,10 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
     }
     if (layout.SamplerTableIndex() != PipelineLayout::NO_TABLE) {
         cmd->SetGraphicsRootDescriptorTable(layout.SamplerTableIndex(), bindings.sampler_table);
+    }
+    if (layout.IntegerSamplerIndex() != PipelineLayout::NO_TABLE && bindings.integer_samplers) {
+        cmd->SetGraphicsRootConstantBufferView(layout.IntegerSamplerIndex(),
+                                               bindings.integer_samplers);
     }
 
     const D3D12_PRIMITIVE_TOPOLOGY d3d_topology =
@@ -915,6 +921,7 @@ void RasterizerD3D12::DispatchCompute() {
     }
     cmd->SetComputeRootSignature(layout.Handle());
     scheduler.SetPipelineState(pipeline->Handle());
+    MarkGpuCommands(cmd, "dispatch CS", pipeline->UniqueHash(), 0);
     cmd->SetComputeRoot32BitConstants(PipelineLayout::PUSH_CONSTANTS_INDEX, PUSH_CONSTANT_WORDS,
                                       bindings.push_constants.data(), 0);
     dxil_spirv_compute_runtime_data runtime_data{};
@@ -932,6 +939,10 @@ void RasterizerD3D12::DispatchCompute() {
     }
     if (layout.SamplerTableIndex() != PipelineLayout::NO_TABLE) {
         cmd->SetComputeRootDescriptorTable(layout.SamplerTableIndex(), bindings.sampler_table);
+    }
+    if (layout.IntegerSamplerIndex() != PipelineLayout::NO_TABLE && bindings.integer_samplers) {
+        cmd->SetComputeRootConstantBufferView(layout.IntegerSamplerIndex(),
+                                              bindings.integer_samplers);
     }
     VideoCore::Perf::Add(VideoCore::Perf::Counter::Dispatches, 1);
     if (indirect_range) {

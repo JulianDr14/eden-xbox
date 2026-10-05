@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cwchar>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <string_view>
@@ -93,6 +95,18 @@ void TraceGpuOperation(std::string description) {
         fmt::format("seq={} {}", sequence, description);
 }
 
+void MarkGpuCommands(ID3D12GraphicsCommandList* cmd, const char* kind, u64 first, u64 second) {
+    if (!dred_enabled) return;
+    // PIX marker format 0: a wide string, which DRED keeps as the breadcrumb context.
+    wchar_t text[64];
+    const int length = swprintf(text, std::size(text), L"%hs %016llx %016llx", kind,
+                                static_cast<unsigned long long>(first),
+                                static_cast<unsigned long long>(second));
+    if (length > 0) {
+        cmd->SetMarker(0, text, static_cast<UINT>((length + 1) * sizeof(wchar_t)));
+    }
+}
+
 void SetAppMemoryQuery(AppMemoryQuery query) {
     app_memory_query.store(query, std::memory_order_release);
 }
@@ -128,6 +142,11 @@ Device::Device() {
                                               : D3D12_DRED_ENABLEMENT_FORCED_OFF;
             dred->SetAutoBreadcrumbsEnablement(setting);
             dred->SetPageFaultEnablement(setting);
+            // DRED 1.2: keep the marker strings (MarkGpuCommands) with the breadcrumbs.
+            ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred1;
+            if (SUCCEEDED(dred.As(&dred1))) {
+                dred1->SetBreadcrumbContextEnablement(setting);
+            }
             LOG_INFO(Render, "D3D12: DRED breadcrumbs and page faults {}",
                      dred_enabled ? "on" : "off (boot.cfg dred=1 enables diagnostics)");
         } else {
@@ -329,6 +348,41 @@ void DumpDeviceDiagnostics(ID3D12Device* device) {
         // Empty/incomplete telemetry cannot prove that the GPU executed no failing command.
         LOG_CRITICAL(Render, "D3D12 DRED: {} command lists recorded, {} unfinished", lists,
                      unfinished);
+    }
+    // Which pipeline each unfinished list was running: the last marker at or before the first
+    // operation that did not complete.
+    ComPtr<ID3D12DeviceRemovedExtendedData1> dred1;
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs1{};
+    if (SUCCEEDED(dred.As(&dred1)) && SUCCEEDED(dred1->GetAutoBreadcrumbsOutput1(&breadcrumbs1))) {
+        for (const D3D12_AUTO_BREADCRUMB_NODE1* node = breadcrumbs1.pHeadAutoBreadcrumbNode;
+             node != nullptr; node = node->pNext) {
+            const u32 completed = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+            if (completed >= node->BreadcrumbCount) {
+                continue;
+            }
+            const D3D12_DRED_BREADCRUMB_CONTEXT* last = nullptr;
+            for (u32 i = 0; i < node->BreadcrumbContextsCount; ++i) {
+                const D3D12_DRED_BREADCRUMB_CONTEXT& context = node->pBreadcrumbContexts[i];
+                if (context.BreadcrumbIndex <= completed &&
+                    (!last || context.BreadcrumbIndex >= last->BreadcrumbIndex)) {
+                    last = &context;
+                }
+            }
+            if (!last || !last->pContextString) {
+                LOG_CRITICAL(Render, "D3D12 DRED: unfinished list without a marker ({} contexts)",
+                             node->BreadcrumbContextsCount);
+                continue;
+            }
+            std::string context;
+            for (const wchar_t* c = last->pContextString; *c != 0; ++c) {
+                context.push_back(static_cast<char>(*c));
+            }
+            LOG_CRITICAL(Render, "D3D12 DRED: unfinished list was running {} (marker at op {}, "
+                                 "stopped at op {})",
+                         context, last->BreadcrumbIndex, completed);
+        }
+    } else {
+        LOG_CRITICAL(Render, "D3D12 DRED: no breadcrumb contexts (DRED 1.2) on this runtime");
     }
     D3D12_DRED_PAGE_FAULT_OUTPUT page_fault{};
     if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&page_fault)) && page_fault.PageFaultVA != 0) {

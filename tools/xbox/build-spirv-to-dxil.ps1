@@ -59,10 +59,16 @@ Patch-File "src\util\os_misc.c" `
 # copied on every run, so edits to them reach the next build.
 $s2d = Join-Path $src "src\microsoft\spirv_to_dxil"
 Copy-Item (Join-Path $PSScriptRoot "mesa\eden_pipeline.c") $s2d -Force
+Copy-Item (Join-Path $PSScriptRoot "mesa\eden_integer_sampling.h") $s2d -Force
 Copy-Item (Join-Path $PSScriptRoot "..\..\externals\spirv-to-dxil\include\eden_spirv_to_dxil.h") $s2d -Force
 Patch-File "src\microsoft\spirv_to_dxil\spirv_to_dxil.def" `
     "    spirv_to_dxil_get_version`n" `
     "    spirv_to_dxil_get_version`n    eden_spirv_to_dxil_pipeline`n"
+# v2: integer texture sampling. A separate symbol, so an older DLL is detected instead of
+# compiling shaders that would not read the sampler table.
+Patch-File "src\microsoft\spirv_to_dxil\spirv_to_dxil.def" `
+    "    eden_spirv_to_dxil_pipeline`n" `
+    "    eden_spirv_to_dxil_pipeline`n    eden_spirv_to_dxil_pipeline_v2`n"
 Patch-File "src\microsoft\spirv_to_dxil\meson.build" `
     "      'spirv_to_dxil.h',`n" `
     "      'spirv_to_dxil.h',`n      'eden_pipeline.c',`n      'eden_spirv_to_dxil.h',`n"

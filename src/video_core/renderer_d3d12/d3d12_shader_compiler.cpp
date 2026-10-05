@@ -73,7 +73,10 @@ ShaderCompiler::ShaderCompiler() {
         LOG_ERROR(Render, "D3D12: spirv_to_dxil.dll lacks its entry points");
         return;
     }
-    if (!spirv_to_dxil_library.GetSymbol("eden_spirv_to_dxil_pipeline", &translate_pipeline)) {
+    if (spirv_to_dxil_library.GetSymbol("eden_spirv_to_dxil_pipeline_v2", &translate_pipeline)) {
+        lowers_integer_sampling = true;
+    } else if (!spirv_to_dxil_library.GetSymbol("eden_spirv_to_dxil_pipeline",
+                                                &translate_pipeline)) {
         LOG_WARNING(Render, "D3D12: spirv_to_dxil.dll cannot link stages (rebuild it with "
                             "tools/xbox/build-spirv-to-dxil.ps1); stages are translated alone");
     }
@@ -99,8 +102,13 @@ ShaderCompiler::ShaderCompiler() {
     if (SUCCEEDED(validator.As(&version))) {
         version->GetVersion(&major, &minor);
     }
-    LOG_INFO(Render, "D3D12: shader path ready (spirv_to_dxil{}, DXIL validator {}.{})",
-             translate_pipeline ? " with stage linking" : "", major, minor);
+    LOG_INFO(Render, "D3D12: shader path ready (spirv_to_dxil{}{}, DXIL validator {}.{})",
+             translate_pipeline ? " with stage linking" : "",
+             lowers_integer_sampling ? " and integer sampling" : "", major, minor);
+    if (translate_pipeline && !lowers_integer_sampling) {
+        LOG_WARNING(Render, "D3D12: spirv_to_dxil.dll predates integer texture sampling; shaders "
+                            "sampling integer textures will fail validation (rebuild it)");
+    }
     available = true;
 }
 

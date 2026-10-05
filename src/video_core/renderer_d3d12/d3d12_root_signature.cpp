@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 
+#include <eden_spirv_to_dxil.h>
 #include <fmt/format.h>
 #include <spirv_to_dxil.h>
 
@@ -90,6 +91,18 @@ void AppendKey(std::vector<u32>& key, std::span<const D3D12_DESCRIPTOR_RANGE> ra
 
 } // Anonymous namespace
 
+u32 FirstTextureBinding(const Shader::Info& info, u32 stage_binding) {
+    return stage_binding + Shader::NumDescriptors(info.constant_buffer_descriptors) +
+           Shader::NumDescriptors(info.storage_buffers_descriptors) +
+           static_cast<u32>(info.texture_buffer_descriptors.size()) +
+           static_cast<u32>(info.image_buffer_descriptors.size());
+}
+
+u32 NumStageBindings(const Shader::Info& info) {
+    return FirstTextureBinding(info, 0) + Shader::NumDescriptors(info.texture_descriptors) +
+           static_cast<u32>(info.image_descriptors.size());
+}
+
 RootSignatureCache::RootSignatureCache(const Device& device_) : device{device_} {}
 
 RootSignatureCache::~RootSignatureCache() = default;
@@ -136,12 +149,20 @@ const PipelineLayout& RootSignatureCache::Get(std::span<const Shader::Info* cons
                                               bool is_compute) {
     TableRanges ranges;
     u32 binding = 0;
+    bool integer_textures = false;
     for (const Shader::Info* info : infos) {
         if (info) {
             AddStage(*info, binding, ranges);
+            for (const auto& desc : info->texture_descriptors) {
+                integer_textures |= desc.is_integer;
+            }
         }
     }
-    std::vector<u32> key{is_compute ? 1u : 0u};
+    if (integer_textures && binding > EDEN_INTEGER_SAMPLER_MAX_BINDINGS) {
+        throw std::runtime_error(fmt::format(
+            "D3D12: {} bindings exceed the integer sampler table", binding));
+    }
+    std::vector<u32> key{(is_compute ? 1u : 0u) | (integer_textures ? 2u : 0u)};
     AppendKey(key, ranges.resources);
     AppendKey(key, ranges.samplers);
     const u64 hash = Common::CityHash64(reinterpret_cast<const char*>(key.data()),
@@ -193,6 +214,14 @@ const PipelineLayout& RootSignatureCache::Get(std::span<const Shader::Info* cons
             .ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
             .DescriptorTable = {.NumDescriptorRanges = static_cast<UINT>(ranges.samplers.size()),
                                 .pDescriptorRanges = ranges.samplers.data()},
+            .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL,
+        });
+    }
+    if (integer_textures) {
+        layout->integer_sampler_index = static_cast<u32>(params.size());
+        params.push_back({
+            .ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV,
+            .Descriptor = {.ShaderRegister = 0, .RegisterSpace = EDEN_INTEGER_SAMPLER_SPACE},
             .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL,
         });
     }

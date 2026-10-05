@@ -70,6 +70,9 @@ void SetGpuBasedValidation(bool enabled);
 void SetDredEnabled(bool enabled);
 bool GpuDiagnosticsEnabled();
 void TraceGpuOperation(std::string description);
+/// With dred=1, a DRED breadcrumb context naming what the next GPU commands run (pipeline
+/// hashes), so a removal report says which draw the GPU stopped in. No-op otherwise.
+void MarkGpuCommands(ID3D12GraphicsCommandList* cmd, const char* kind, u64 first, u64 second);
 void DumpDeviceDiagnostics(ID3D12Device* device);
 
 /// The app's memory in use and its limit, false when unknown. On the Xbox the GPU allocates from

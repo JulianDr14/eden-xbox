@@ -12,6 +12,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <eden_spirv_to_dxil.h>
+
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_d3d12/d3d12_cache_policy.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
@@ -463,6 +465,9 @@ public:
     [[nodiscard]] D3D12_FILTER Filter() const noexcept { return filter; }
     /// Everything it was created with, for the draw trace.
     [[nodiscard]] std::string Describe() const;
+    /// What spirv_to_dxil's integer texture lowering emulates of this sampler, for a view whose
+    /// last mip level (relative to the view) is last_level.
+    [[nodiscard]] eden_integer_sampler_state IntegerState(u32 last_level) const;
 
 private:
     TextureCacheRuntime* runtime{};

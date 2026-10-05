@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -11,6 +12,8 @@
 #include <mutex>
 #include <type_traits>
 #include <vector>
+
+#include <boost/container/small_vector.hpp>
 
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
@@ -94,6 +97,8 @@ struct PipelineBindings {
     D3D12_GPU_DESCRIPTOR_HANDLE resource_table{};
     D3D12_GPU_DESCRIPTOR_HANDLE sampler_table{};
     std::array<u32, PUSH_CONSTANT_WORDS> push_constants{};
+    /// Integer sampler states (PipelineLayout::IntegerSamplerIndex), 0 when the layout has none.
+    D3D12_GPU_VIRTUAL_ADDRESS integer_samplers{};
     /// When set (draw trace), Configure appends the views of the sampled textures here.
     std::vector<VideoCommon::ImageViewId>* trace_views{};
     /// With trace_views: each texture's sampler (Sampler::Describe), in the same order.
@@ -102,6 +107,22 @@ struct PipelineBindings {
     std::vector<u32>* trace_types{};
     /// A texture of the draw is the bound depth buffer: bind it read-only (DEPTH_SAMPLED_STATE).
     bool depth_sampled{};
+};
+
+/// Integer sampler states of one draw or dispatch, indexed by texture binding. Only the rows of
+/// integer textures are written: the shaders never read the others, so they are not cleared.
+class IntegerSamplerTable {
+public:
+    void Add(u32 binding, const Sampler& sampler, const ImageView& view) {
+        rows.push_back({binding, sampler.IntegerState(static_cast<u32>(std::max(view.range.extent.levels, 1) - 1))});
+        num_bindings = std::max(num_bindings, binding + 1);
+    }
+    /// Copies the rows to the staging stream; returns their address, or 0 if there are none.
+    D3D12_GPU_VIRTUAL_ADDRESS Upload(BufferCache& buffer_cache) const;
+
+private:
+    boost::container::small_vector<std::pair<u32, eden_integer_sampler_state>, 8> rows;
+    u32 num_bindings{};
 };
 
 /// A guest graphics pipeline: signed DXIL of each stage, its root signature and the PSO, built on

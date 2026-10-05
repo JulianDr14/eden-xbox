@@ -29,6 +29,7 @@
 #include "video_core/framebuffer_config.h"
 #include "video_core/frame_trace.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_thread.h"
 #include "video_core/host_shaders/blit_color_float_frag_spv.h"
 #include "video_core/host_shaders/full_screen_triangle_vert_spv.h"
 #include "video_core/perf_counters.h"
@@ -529,6 +530,11 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
             // Keep the emulation running headless rather than taking the GPU thread down.
             LOG_CRITICAL(Render, "{} - presentation disabled", e.what());
             present_failed = true;
+            // A removed device never comes back: let a headless frontend recover now, rather
+            // than only once a later draw happens to fail (0.2.74 froze waiting for that).
+            if (FAILED(device.Get()->GetDeviceRemovedReason())) {
+                VideoCommon::GPUThread::ReportException(e.what());
+            }
         }
     }
     gpu.RendererFrameEndNotify();

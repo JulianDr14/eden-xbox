@@ -3058,6 +3058,22 @@ Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& 
                            desc.MaxLOD, desc.MipLODBias);
     });
 }
+eden_integer_sampler_state Sampler::IntegerState(u32 last_level) const {
+    // Integer textures read the border color's raw bits, as Vulkan's custom border color does.
+    eden_integer_sampler_state state{};
+    for (size_t i = 0; i < 4; ++i) {
+        state.border_color[i] = std::bit_cast<u32>(desc.BorderColor[i]);
+    }
+    state.lod_bias = desc.MipLODBias;
+    state.min_lod = desc.MinLOD;
+    state.max_lod = desc.MaxLOD;
+    state.last_level = last_level;
+    state.wrap[0] = static_cast<u32>(desc.AddressU);
+    state.wrap[1] = static_cast<u32>(desc.AddressV);
+    state.wrap[2] = static_cast<u32>(desc.AddressW);
+    return state;
+}
+
 std::string Sampler::Describe() const {
     return fmt::format("filter 0x{:x} address {}/{}/{} aniso {} lod {}..{} bias {}",
                        static_cast<u32>(desc.Filter), static_cast<u32>(desc.AddressU),
