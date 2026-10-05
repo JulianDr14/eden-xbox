@@ -8,7 +8,7 @@ REM
 REM   tools\xbox\build-env.bat cmake --preset uwp-x64
 REM   tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp
 REM
-REM The three-step dance in docs/uwp_build.md is easy to get subtly wrong and fails SILENTLY (you
+REM The three-step dance in docs/xbox/uwp_build.md is easy to get subtly wrong and fails SILENTLY (you
 REM get a desktop, non-Store-CRT build that compiles and then behaves oddly on-console), so this
 REM script does it in one place and verifies the result before handing control over.
 

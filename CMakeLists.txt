@@ -292,7 +292,7 @@ endif()
 # The bundled OpenSSL prebuilt is /MT and collides with the /MD Store CRT app on the
 # Xbox UWP/AppContainer target (LIBCMT vs MSVCRT at exe link). Build OpenSSL from source
 # there instead - it inherits /MD and configures with OpenSSL's -UWP target. Requires
-# perl + nasm at build time (see docs/uwp_build.md).
+# perl + nasm at build time (see docs/xbox/uwp_build.md).
 if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
     set(DEFAULT_YUZU_USE_BUNDLED_OPENSSL OFF)
 endif()

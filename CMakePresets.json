@@ -5,7 +5,7 @@
     {
       "name": "uwp-x64",
       "displayName": "Xbox UWP / AppContainer (x64, headless core)",
-      "description": "Configures Eden's core stack (common/core/dynarmic/video_core/...) for the Xbox UWP/WindowsStore (AppContainer) target. Desktop frontends are off; dynarmic builds in its W^X + Virtual*FromApp mode. Headless: the Null renderer is chosen at runtime (Vulkan stays compiled). IMPORTANT: run from a 'vcvarsall.bat x64 uwp' shell so cl/link target the Store CRT (see docs/uwp_build.md). The Ninja generator avoids the VS-instance lookup the VS generator requires.",
+      "description": "Configures Eden's core stack (common/core/dynarmic/video_core/...) for the Xbox UWP/WindowsStore (AppContainer) target. Desktop frontends are off; dynarmic builds in its W^X + Virtual*FromApp mode. Headless: the Null renderer is chosen at runtime (Vulkan stays compiled). IMPORTANT: run from a 'vcvarsall.bat x64 uwp' shell so cl/link target the Store CRT (see docs/xbox/uwp_build.md). The Ninja generator avoids the VS-instance lookup the VS generator requires.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-uwp",
       "cacheVariables": {

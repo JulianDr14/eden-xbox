@@ -4,7 +4,7 @@
   SPDX-License-Identifier: GPL-3.0-or-later
 
   Package manifest for the Phase-2 / GATE-2 headless boot appx (src/eden_uwp).
-  Sideloaded through the Xbox Device Portal in Dev Mode; see docs/xbox_deploy.md.
+  Sideloaded through the Xbox Device Portal in Dev Mode; see docs/xbox/xbox_deploy.md.
 
   Identity/Publisher must match the signing certificate's subject exactly, or the
   Device Portal rejects the package. tools/xbox/package-appx.ps1 keeps them in sync.
