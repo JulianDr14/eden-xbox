@@ -2086,3 +2086,266 @@ es [README.md](README.md), enlazado desde AGENTS y el índice general de docs.
 Referencias en scripts, CMake, manifiesto y comentarios actualizadas; los enlaces
 a código y herramientas usan dos niveles (`../../`) desde la nueva carpeta.
 La reorganización no modifica el comportamiento del ejecutable ya compilado.
+
+## Series 0.2.71: metadatos y carga fallidos (4 oct 2026)
+
+Logs de Descargas, 21:37 hora Colombia; copias locales en
+`build-uwp/diagnostics/series-0.2.71-load-failure`. Diag contiene intentos de Wonder
+y Mario Strikers; el log final contiene Strikers y metadatos de cuatro juegos.
+La memoria disponible al fallo es ~4991MiB: no evidencia de OOM ni fallo D3D12.
+
+- P0 carga/metadatos: FromApp abre Strikers (2005879696B), Pikachu (4465457449B),
+  Zelda (17150648656B) y Wonder (3769039184B). Preflight de Strikers correcto.
+  Antes de cada título/icono falla `EVP_CipherInit_ex2` en aes_util.cpp:97 y se
+  registra `m_body_storage != nullptr` en NcaReader. Todos devuelven título vacío,
+  icon0. Load termina con Error12 = ErrorBadNCAHeader y estado de System19.
+  La inicialización del cifrado NCA es el primer fallo observado; no atribuirlo
+  a permisos USB, carátulas D2D ni al backend gráfico.
+- Hipótesis principal: claves NCA/header_key no disponibles o inválidas en la app.
+  El paquete nuevo no incluye userdata/keys; usa LocalState/eden/keys/prod.keys.
+  KeyManager devuelve ceros para una clave ausente y la configuración NCA consume
+  Header sin comprobar HasKey. Los logs no imprimen la presencia de prod.keys,
+  header_key ni el error de OpenSSL: todavía no certifican esta causa. Diagnóstico
+  siguiente debe comprobar presencia/estado sin imprimir valores de claves.
+- P0 crash posterior: Core::System::Load ya ejecuta ShutdownMainProcess al fallar;
+  RunHeadlessBoot vuelve a llamar shutdown. El segundo cierre llega a kernel cores
+  y se produce AV lectura0x6f2 en RVA0x363fdd. Los símbolos archivados de0.2.71
+  resuelven ese RVA como Kernel::KThread::Run+0x3d. Evitar doble teardown y validar
+  la vida de los threads al fallar Load; cadena exacta del thread requiere más
+  diagnóstico, no se demuestra solo con una dirección de instrucción.
+- Secundarios: errores Unknown engine keyboard/camera/joycon/tas; no preceden ni
+  explican el fallo criptográfico durante metadatos. First-chance hresult_error
+  inicial resuelve como LibraryCanvas::Impl::LoadAssetBitmap/Prompt; no es la
+  causa de icon0 (el loader ya entregó cero bytes). No se ha identificado el
+  asset/HRESULT concreto y la biblioteca continúa hasta seleccionar el juego.
+
+Revisión documentada, sin cambios de código ni nuevo commit. USB físico permite
+abrir archivos en esta prueba; gameplay/descifrado y recuperación siguen pendientes.
+
+### Paquete 0.2.71 con datos para instalación limpia
+
+El usuario confirma que desinstaló la app antes de instalar0.2.71: LocalState
+previo no se conservó, coherente con claves ausentes en la prueba. Autoriza incluir
+sus datos de `../eden-data/keys` y `../eden-data/firmware`, manteniendo **0.2.71.0**.
+Paquete local firmado `build-uwp/series-with-data/eden-xbox.appx` (354633693B):
+prod.keys/title.keys y238NCA (~325MiB), sin juegos. Verificación del APPX confirma
+claves idénticas al origen sin imprimirlas, nombres/tamaños de firmware, ejecutable
+actual idéntico y firma presente. Certificado/VCLibs junto al APPX; metadata local
+en package-info.json. No se recompila ni cambia versión/código. Incluye los datos
+para SeedUserData antes de leer metadatos; reproducción Series y resolución AES
+todavía pendientes. El doble teardown permanece pendiente independientemente de
+tener claves. Paquete/datos ignorados por Git, sin commit ni push.
+### Configuración y gestor de archivos (4 oct 2026)
+
+Biblioteca con menú Configuración (O/X/clic), Gestor de archivos y Mandos y teclado.
+Juegos externos siguen usando picker/FutureAccessList y permanecen en USB; quitar
+una fuente no borra juegos. Claves/firmware se importan mediante CopyAsync a los
+destinos internos de Eden, en worker MTA con progreso y cancelación entre archivos.
+Reutiliza KeyManager y el lector NCA; detiene metadatos antes de recargar claves.
+Publicación con directorio temporal/backup preserva lo anterior ante error o
+cancelación y recupera una publicación interrumpida al volver a la biblioteca.
+Sin header_key usable, evita leer metadatos NCA y bloquea el boot con un aviso.
+Los prompts X y el cierre del editor se dibujan con D2D, sin assets ausentes.
+
+Gate AppContainer aislado PASS/retorno0: claves, dos NCA, rechazo de claves
+inválidas, cancelación y recuperación; datos reales preservados. ~1s/26MiB.
+Incremental UWP correcto y biblioteca PC abierta, PID16704, Job5120 verificado.
+Versión0.2.71.0 conservada; nuevo paquete limpio sin keys/firmware/juegos.
+USB físico, firmware completo, navegación visual e instalación Series pendientes.
+El doble teardown de otros fallos de Load sigue pendiente; esto no lo corrige.
+Detalle, límites y fuentes en xbox_frontend.md y xbox_rom_storage.md. Sin commit.
+
+Paquete limpio verificado: build-uwp/series-config/eden-xbox.appx, firma presente, versión0.2.71.0, sin userdata/keys/firmware/juegos ni gate de prueba. EXE idéntico a símbolos archivados en symbols/0.2.71.0-config; conserva símbolos originales0.2.71.0 para los fallos anteriores.
+
+Ajuste visual: tarjetas con iconos vectoriales, descripción y chevron, panel
+principal compacto y estado de datos. Geometry compartida con hit testing.
+Incremental final3operaciones correcto sin nuevas advertencias; PC abiertoPID9260
+con Job5120. Paquete limpio y símbolos-config actualizados; visual/Series pendientes.
+
+Paquete Series actualizado por petición del usuario a0.2.72.0: UWP build al día,
+APPX regenerado/firmado en build-uwp/series-config, versión y ausencia de datos
+privados verificadas. Símbolos archivados en symbols/0.2.72.0. Gate Series pendiente.
+### Series 0.2.72: Mario Strikers detenido al iniciar vídeo
+
+Logs Descargas archivados en build-uwp/diagnostics/series-0.2.72-strikers-startup.
+USB FromApp/preflight correctos; las cuatro carátulas/títulos se descifran.
+Strikers010019401051C000 Load retorna0, Run emitido y primera imagen guest GPU
+presentada a15.761s del log. No Error/Critical de Render ni device removed.
+A22.138/22.299s abre dos streams NVDEC; a22.480s excepción guest PC80CC885C,
+códigoE7FFDEFE. Backtrace: strikers.nss -> NvRmMemHandleAllocAttr ->
+android::SfNvnUtil::AllocateGrallocBuf -> ACodec::allocateOutputMetaDataBuffers /
+allocateBuffersOnPort / OutputPortSettingsChangedState. Después, a22.481s,
+assert UnlockForDeviceAddressSpace al liberar nvmap y a22.483s Handle null freed.
+Esto acota el fallo a la preparación de buffers de vídeo/driver NV, pero no
+identifica aún el ioctl/SVC que falla, su resultado ni prueba causa JIT/decoder.
+No atribuir el fallo inicial al assert posterior sin instrumentación adicional.
+
+La app permanece viva: usuario abre menú y vuelve a biblioteca ~98s; retorno10
+es la ruta de biblioteca, no un crash host. Memoria se estabiliza en2479MiB con
+2640MiB de margen del límite5120; no evidencia de saturación host/guard. Esto no
+excluye límites/errores de asignación de memoria guest. Playtime.bin ausente y
+UnpinHandle imbalance ocurren al cierre, no explican la primera excepción.
+Errores Input de engines no registrados preceden boot pero Load/Render continúan.
+
+Prioridad siguiente: registrar resultado/handle/tamaño/address/flags/session de
+nvmap create/alloc/free y resultados SVC de memoria en la ventana de vídeo;
+comparar Strikers PC/Series y comprobar coherencia de locks/pins al fallar.
+No modificar sincronización ni aumentar presupuestos a partir de este log.
+Revisión documental; no cambios de código ni commit en esta revisión.
+
+### Strikers PC: fallo guest y prueba CPU Accurate (4 oct 2026)
+
+La reproducci?n PC confirma Create de un handle de 0x228000 bytes sin Alloc
+posterior: el cliente falla antes de enviar NVMAP_IOC_ALLOC. FreeHandle intentaba
+desbloquear p?ginas de un handle no asignado; corregido para exigir allocated y
+address no nulo. Mientras hay referencias al backing, Free devuelve address cero
+(seg?n [NV services](https://switchbrew.org/wiki/NV_services)). El assert de
+UnlockForDeviceAddressSpace desaparece en las corridas siguientes. Esto corrige
+un error secundario, pero no resuelve todav?a el arranque.
+
+El decoder VP9 llega a crearse; el juego vuelve a abortar en strikers.nss
++0x61885c. Otra pila incluye NuCachedSource2::onFetch y resultado FS 0x2F5E02
+(NullptrArgument). El callback de asignaci?n del cliente devuelve null en la
+pila NvRm; es compatible con agotamiento del heap privado del juego, no prueba
+agotamiento de RAM host. ?ltima corrida: Q a173s, retorno0, commit2677MiB y
+margen2442MiB del cap5120. Sin rechazos registrados de SetMemoryAttribute.
+
+Prueba de pointer buffer IPC 0x800 no resuelve el aborto; se retira y conserva
+la respuesta anterior. Evidencia en diagnostics/pc-strikers-pointer-candidate.
+El loader interpretaba offset0x28 del NPDM como heap_size, pero pertenece al
+campo Name de0x20..0x2f ([NPDM](https://switchbrew.org/wiki/NPDM)); se elimina
+ese c?lculo y conserva el tama?o por defecto. No atribuirle mejora de arranque.
+Se retira la extracci?n temporal de c?digo guest y el supuesto mensaje en R0/R1.
+
+Siguiente gate: boot.cfg cpu_accuracy=accurate, conectado a Settings de Eden,
+sin cambiar el default Auto. Auto activa Unsafe_IgnoreGlobalMonitor y
+Unsafe_UnfuseFMA; Accurate preserva el monitor y optimizaciones seguras. Build
+incremental correcto. Lanzado PC PID6696, play1/cap5120/fastmem0/prewarm1,
+sin l?mite de gameplay; cierre manual Q. Arranque/resultado/Series pendientes.
+
+El gate Accurate tambi?n reproduce el aborto y la pila NuCachedSource2::onFetch;
+no corrige el fallo. No adoptar Accurate como soluci?n ni atribuir el fallo al
+monitor global. Proceso sigue abierto para cierre manual del usuario; siguiente
+foco: tama?o/vida de las asignaciones del heap privado durante preparaci?n de v?deo.
+
+Cierre del gate Accurate confirmado: Q a49s de gameplay, shutdown completo y
+retorno0; aborto guest ya registrado a13,248s con E7FFDEFE y FS0x2F5E02 en
+NuCachedSource2::onFetch. Commit2678MiB/margen2441MiB. No errores Render,
+rechazos SetMemoryAttribute ni assert UnlockForDeviceAddressSpace. Retorno0
+certifica cierre host, no arranque correcto del juego. Evidencia archivada en
+build-uwp/diagnostics/pc-strikers-accurate. Descargas siguen conteniendo los
+logs Series anteriores0.2.72; no son una nueva prueba del candidato.
+
+### Strikers: heap MoviePlayer y ritmo de lecturas
+
+Gate PC del diagn?stico: TotalNonSystemMemorySize=0xcb500000 (~3253MiB);
+MapPhysicalMemory principal0x9edc0000 (~2542MiB). Al abortar, normal0xa5d76000,
+used0xaa71d000,total0xcd500000: no agotamiento del presupuesto global guest.
+Snapshot temporal del objeto identifica el nombre MoviePlayer Free List Allocator
+y l?mites0x1ae63c37a8..0x1aea3c37a8 (64MiB); petici?n fallida64KiB/alineaci?n16.
+La extracci?n temporal se elimina despu?s de capturar; no queda en el candidato.
+Evidencia diagnostics/pc-strikers-heap-budget y pc-strikers-movie-heap.
+
+Se descubre precedente directamente en el historial de Eden: commit
+c0a85d0e538e04fb56b0f7ca561422119b9f526f,
+[PR4316](https://git.eden-emu.dev/eden-emu/eden/pulls/4316), describe aborto
+del media allocator por lecturas m?s r?pidas que la recuperaci?n de p?ginas.
+La mitigaci?n existente duerme600us despu?s de IStorage Read solo con canales
+NVDEC activos del mismo proceso. Nuestro fork ya incorpora ese commit.
+El gate registra849 lecturas/~279MiB de almacenamiento;146 lecturas/9,125MiB
+ocurren despu?s del primer canal NVDEC. No demuestra que toda lectura pertenezca
+al v?deo ni que la pausa sea suficiente.
+
+Candidato: ampliar ?nicamente esa pausa a2ms, manteniendo predicado por proceso,
+servicio y comando. Sin m?s RAM ni cambios del decoder. Coste esperado: reduce
+el caudal de almacenamiento mientras hay canales de v?deo abiertos; puede
+afectar lecturas de otros assets del mismo proceso en ese intervalo. Es
+mitigaci?n de temporizaci?n, no prueba ni reparaci?n de la sincronizaci?n
+interna del heap guest. Gate de arranque/visual y Series pendientes.
+Referencia para interpretar onFetch: [AOSP NuCachedSource2](https://android.googlesource.com/platform/frameworks/av/+/78d2644/media/libstagefright/NuCachedSource2.cpp).
+
+Gate2ms PC PID11148: decoder VP9 creado11,383s; aborto11,636s, misma
+pila de cach? y FS0x2F5E02. Used/total guest0xaa71d000/0xcd500000; host
+2718MiB/margen2401. No arreglo demostrado. Se retira la pausa2ms y restaura
+600us antes de la siguiente comparaci?n con renderer=null. Cierre Q pendiente.
+
+Gate renderer=null PC PID2432: aborto10,539s, mismo PC relativo+0x61885c,
+NuCachedSource2 y FS0x2F5E02; host1910MiB/margen3209. Sin D3D12 inicializado.
+Descarta dependencia necesaria del renderer para este aborto, no descarta
+inexactitud del n?cleo/NVDEC. Siguiente candidato: pausa8ms ?nicamente en
+el predicado existente NVDEC/IStorage Read; no validado, no adoptar como
+mejora general. Restore D3D12 para prueba visual.
+
+Primer gate8ms PC PID19732 supera40s sin aborto, decoder VP9 y syncpoints
+avanzando, app2807MiB/margen2312. Primera evidencia favorable; intro completa,
+men?, gameplay, cierre y Series a?n pendientes de confirmaci?n. No certificar
+60FPS ni causalidad universal. El ritmo elegido puede limitar caudal de otras
+lecturas IStorage del mismo proceso mientras NVDEC mantiene canales abiertos.
+Build incremental correcto; snapshots temporales retirados, cambios sin commit.
+
+### Cierre PC y candidato Series 0.2.73 (4 oct 2026)
+
+Gate Strikers8ms completo: usuario cierra con Q tras182s, shutdown completo,
+RunHeadlessBoot returned0. Sin Critical/errores Render ni el assert de
+UnlockForDeviceAddressSpace. NVDEC abre10,797/10,807s y cierra ambos canales
+a95,778/95,787s: la reproducci?n progresa y termina; despu?s siguen los
+presents hasta Q. Ventanas de presentaci?n de la reproducci?n~29,6FPS,
+p50~33,3ms; no usar esto para certificar gameplay a60FPS. No hubo capturaT.
+M?ximo muestreado de app3581MiB, margen m?nimo1538MiB del cap5120; cierre
+2702MiB/margen2417. Evidencia en diagnostics/pc-strikers-pacing-8ms.
+
+La intervenci?n necesaria fue ampliar600us a8ms en la mitigaci?n existente
+de Eden para IStorage Read cuando el mismo proceso tiene NVDEC abierto.
+El heap MoviePlayer es64MiB; la petici?n fallida era64KiB. Accurate, cambiar
+pointer buffer, pausa2ms y renderer Null no resolvieron el fallo. El aborto
+con Null demuestra que D3D12 no es una condici?n necesaria.8ms es una
+mitigaci?n validada para esta corrida PC, no una sincronizaci?n exacta del
+heap ni un valor universal certificado; puede ralentizar otros assets le?dos
+por el mismo proceso mientras conserve canalesNVDEC abiertos. Al cerrar
+el ?ltimo canal, la ruta deja de dormir. Sin m?s RAM ni salto de la intro.
+La correcci?n de FreeHandle no asignado y address0 con referencias vivas se
+conserva; elimina un error secundario independiente. C?lculo falso de heap
+desde NPDM.Name eliminado. Snapshots/extracci?n temporal de c?digo retirados.
+
+Versionado: manifiesto0.2.73.0. Home/biblioteca muestra la versi?n del paquete
+instalado abajo a la derecha, fuente12/gris discreto y alineaci?n derecha.
+Package.Current.Id.Version y layoutDWrite se obtienen una vez por canvas;
+no llamadasWinRT ni allocations de ese texto por frame. PC/Series usan
+la misma fuente de versi?n. Validaci?n visual del pie y gate Series pendientes.
+
+Paquete Series0.2.73 preparado y firmado en build-uwp/series-0.2.73/eden-xbox.appx,
+con certificado yVCLibs al lado. APPX verificado: versi?n73, sin keys/firmware/
+juegos, firma presente, EXE id?ntico al build y symbols/0.2.73.0. Manifiesto
+sinBOM. Library/play1, prewarm1, fastmem0, presupuesto5120 y hotkeysdev0;
+sin rendererNull ni filtroDebug de las pruebas. Incremental final de canvas
+pasa3operaciones. package-info.json conserva hashes y configuraci?n.
+Gate Series y confirmaci?n visual de la versi?n pendientes; sin commit/push.
+
+### Series0.2.73: Strikers progresa, pero faltan dibujos (4 oct2026)
+
+Descargas archivadas en diagnostics/series-0.2.73-strikers-black. El diag
+contiene sesiones anteriores72 y ?ltima sesi?n73; el eden_log corresponde
+a Strikers010019401051C000.8ms permite avanzar: dosNVDEC cierran103,847/
+103,852s. Sin el aborto E7FFDEFE/FS0x2F5E02 de arranque anterior ni device
+removed. ?ltima sesi?n73 conserva m?nimo1145MiB de margen muestreado; no
+confundir con m?nimo8MiB de sesiones72 anteriores del mismo diag.
+
+58 errores Render:52 rechazos DXILsample desde77,329s hasta149,840s y6
+Geometry streams no implementado. El validador rechaza sample_* cuando
+el recurso no est? declarado UNORM/SNORM/FLOAT. Falta identificar por qu?
+la traducci?n produce esa declaraci?n/instrucci?n; no afirmar a?n UINT.
+GraphicsPipeline deja Handle null y omite draws tras el fallo. Es una
+explicaci?n concreta para objetos/pases ausentes o negros, sin demostrar
+qu? error produjo cada zona visible. Otro assert de acc:su comando112
+LoadSaveDataThumbnail,39,324s, independiente del rechazoDXIL posterior.
+
+Usuario refiere antecedente del sueloTotK en prototipo. Localizado commit
+54fd4474687cc3fdc164aca1fedee418d1f6815c en xbox-d3d12-astc-directo: corrige
+vertex fetch desalineado poroffset/stride yQuadSwap/helper lanes. Esecommit
+ya es ancestro de xbox; SplitAttributeFetch, generic_input_parts y
+support_quad_shuffles siguen presentes. No hay que copiar el prototipo
+ASTC para recuperar ese arreglo ni equiparar Geometry streams con el
+problema de atributosTotK. Pr?ximas prioridades: validez de sample/recursos
+DXIL y emisiones geometryStream0 frente al perfilD3D12 sin streams.
+Referencia:[DXIL validator](https://github.com/Microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst).
+Revisi?n sin cambios de c?digo, commit ni build.
