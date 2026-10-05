@@ -20,9 +20,14 @@ Result SetHeapSize(Core::System& system, u64* out_address, u64 size) {
 
     // Set the heap size.
     KProcessAddress address{};
-    R_TRY(GetCurrentProcess(system.Kernel())
-              .GetPageTable()
-              .SetHeapSize(std::addressof(address), size));
+    auto& process = GetCurrentProcess(system.Kernel());
+    const auto result = process.GetPageTable().SetHeapSize(std::addressof(address), size);
+    LOG_DEBUG(Kernel_SVC,
+              "SetHeapSize size={:#x}, address={:#x}, result={:#x}, used={:#x}, total={:#x}",
+              size, GetInteger(address), result.raw,
+              process.GetUsedUserPhysicalMemorySize(system.Kernel()),
+              process.GetTotalUserPhysicalMemorySize(system.Kernel()));
+    R_TRY(result);
 
     // We succeeded.
     *out_address = GetInteger(address);
