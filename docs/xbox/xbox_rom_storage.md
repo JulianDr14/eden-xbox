@@ -254,3 +254,11 @@ Los cambios trasladados quedan sin commit en xbox; no se ha hecho ningún push.V
 Rasterizer y los tres objetos de PSO/pipeline cache del backend normal.
 Diff-check pasa con finales de línea originales; cero referencias ASTC Directo
 incorporadas. Sin proceso de juego activo ni ejecución del EXE anterior.
+# Configuración de datos propios (4 oct 2026)
+
+«Agregar carpeta» pasa a **Configuración → Gestor de archivos**. Juegos siguen
+leyéndose desde USB/FutureAccessList; claves y firmware se importan desde el picker
+al almacenamiento interno del núcleo, sin incluirlos en el paquete distribuible.
+El gestor muestra estado, permite quitar fuentes de juegos sin borrar dumps y
+detiene metadatos antes de sustituir claves. Diseño, copia por broker, publicación
+recuperable, cancelación y gate en [xbox_frontend.md](xbox_frontend.md).

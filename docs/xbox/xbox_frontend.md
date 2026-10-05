@@ -506,3 +506,69 @@ núcleos (`Fiber::Abandon`). `heaps:` en el diag muestra memoria viva por tamañ
 Prueba desatendida: `library_pick=<archivo>` en boot.cfg elige el juego en las dos primeras
 visitas a la biblioteca; con `input=40:PLUS+MINUS:1500`, `input=44:UP`, `input=46:A` vuelve sola.
 Harness `tools/xbox/tests/game-menu.cpp` PASS. Pendiente: validar en Series.
+# Configuración y gestor de archivos (4 oct 2026)
+
+La biblioteca abre **Configuración** con O en teclado o X en el mando, además del
+clic en la cabecera. El menú contiene **Gestor de archivos** y **Mandos y teclado**;
+F1/View conserva el acceso directo al mando. B/Esc retrocede entre páginas, y el
+stick/cruceta seleccionan filas. El gestor pagina cinco filas y permite:
+
+- Añadir carpetas de juegos con el picker existente y FutureAccessList.
+- Quitar una fuente de la biblioteca sin borrar archivos del USB.
+- Seleccionar una carpeta con prod.keys y title.keys opcional e importar sus claves.
+- Seleccionar una carpeta de firmware extraído (.nca) e importarla.
+
+Los juegos permanecen en USB. Las claves y firmware se copian desde la carpeta
+seleccionada a los destinos internos usados por Eden: KeysDir y la NAND de sistema.
+KeyManager usa archivos locales (`LoadFromFile`/OpenFileStream); el frontend Qt
+también instala firmware en system/Contents/registered. Reutilizamos KeyManager,
+el lector NCA y esos destinos, sin montar una NAND remota ni reimplementar crypto.
+
+`uwp_file_manager.*` contiene importación/estado, separado del canvas y navegación.
+Trabajo en un MTA worker; CopyAsync del broker sin cargar el firmware completo en
+RAM. Progreso atómico por archivo y cancelación comprobada entre archivos: una copia
+en curso puede terminar antes de cancelar. El worker de metadatos se detiene y se
+une antes de cambiar claves; no importamos mientras el guest está ejecutándose.
+
+Se valida header_key sin imprimirla, tamaños copiados y NCA con Eden; firmware
+requiere SystemVersion/Data y MiiEdit/Program. No equivale a verificar todo el dump
+ni garantiza que todas las revisiones de claves estén presentes. Directorio temporal
+interno y publicación con backup permiten conservar datos anteriores ante error o
+cancelación. Una publicación interrumpida restaura `.previous` al entrar en biblioteca.
+La limpieza de temporales dejados por una terminación abrupta aún no se automatiza.
+Importaciones válidas actualizan KeyManager y reexploran carátulas. Sin header_key,
+el frontend omite lectores NCA y bloquea el boot con un aviso para importar claves.
+
+Se corrigen dos X: el prompt de configuración (xbox_x/keyboard_o no existían como
+assets) y el cierre del editor (carácter ×). Ahora son glyphs nativos D2D sin archivo
+ni dependencia del símbolo en la fuente; Xbox/Nintendo mantienen su estilo.
+
+Gate AppContainer `file_manager_gate=1` opt-in: copia broker, importación de claves
+y dos NCA reales de prueba, recarga, rechazo de claves inválidas, cancelación y
+recuperación tras simular publicación interrumpida. PASS/retorno0, ~26MiB de memoria;
+destinos aislados en LocalState, datos reales preservados. Última ejecución ~1s.
+No es prueba de USB físico, de firmware completo ni de navegación con mando Series.
+Compilación UWP incremental correcta; visual/picker externo/instalación limpia y
+Series pendientes. Los tests normales no activan ese gate.
+
+Trampas: WinRT GetFile/GetFolderFromPathAsync requiere rutas Windows normalizadas
+(make_preferred), no separadores mezclados. Cambiar los comentarios del manifiesto
+puede causar 0x80073CFB al registrar otra vez una misma versión de desarrollo. En PC
+se refrescaron archivos de la ubicación loose ya registrada, con identidad y
+capacidades iguales, sin desinstalar ni perder LocalState; versión sigue0.2.71.0.
+
+Fuentes: [Microsoft, picker y FutureAccessList](https://learn.microsoft.com/en-us/windows/uwp/files/quickstart-using-file-and-folder-pickers),
+[StorageFile.CopyAsync](https://learn.microsoft.com/en-us/uwp/api/windows.storage.storagefile.copyasync),
+y las implementaciones locales `src/qt_common/util/content.cpp`,
+`src/core/crypto/key_manager.cpp` y `src/core/file_sys/content_archive.cpp`.
+Ajuste visual posterior: menú principal compacto (dos tarjetas con título,
+descripción, icono y chevron), cabecera con engranaje y estado de claves/firmware.
+Gestor con iconos de carpeta, clave, chip y quitar fuente. Todos los iconos usan
+trazos vectoriales D2D, sin texturas ni geometrías temporales; sólo se dibujan
+cuando el canvas está dirty. ConfigurationLayout comparte posiciones entre canvas
+y hit testing para mantener clic, teclado y mando coherentes al cambiar tamaños.
+
+La biblioteca muestra `v0.2.73.0` discretamente abajo a la derecha. El texto
+procede de `Package.Current().Id().Version()`, no de una constante duplicada: la
+consulta y el layout DirectWrite se almacenan al crear el canvas y se reutilizan
+al dibujar. Comparte el comportamiento en PC y Series. Gate visual pendiente.
