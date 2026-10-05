@@ -319,7 +319,7 @@ bool RendererD3D12::CreateBlitPipeline() {
         ID3D12Device* const dev = device.Get();
 
         // Eden's blit shaders, exactly as the Vulkan backend uses them, linked as guest pipelines
-        // will be. No Y flip: the blit has always run unflipped (see docs/xbox_d3d12_phase4.md).
+        // will be. No Y flip: the blit has always run unflipped (see docs/xbox/xbox_d3d12_phase4.md).
         const std::array<ShaderCompiler::PipelineStage, 2> stages{{
             {FULL_SCREEN_TRIANGLE_VERT_SPV, DXIL_SPIRV_SHADER_VERTEX},
             {BLIT_COLOR_FLOAT_FRAG_SPV, DXIL_SPIRV_SHADER_FRAGMENT},

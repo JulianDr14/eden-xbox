@@ -1,6 +1,6 @@
 # Packaging and deploying the headless boot appx to an Xbox Series X|S
 
-This is the step that turns the UWP build from [`docs/uwp_build.md`](uwp_build.md) into something
+This is the step that turns the UWP build from [`docs/xbox/uwp_build.md`](uwp_build.md) into something
 that actually runs on a console. It covers **GATE 2**: proving Eden executed guest code through the
 dynarmic JIT inside the Xbox AppContainer.
 
@@ -16,14 +16,14 @@ dynarmic JIT inside the Xbox AppContainer.
 - Device Portal reachable at `https://<xbox-ip>:11443`.
 
 **On the PC**
-- Everything in [`docs/uwp_build.md`](uwp_build.md) (VS 2022 + the **C++ (v143) UWP tools**
+- Everything in [`docs/xbox/uwp_build.md`](uwp_build.md) (VS 2022 + the **C++ (v143) UWP tools**
   component, a Windows 10/11 SDK, CMake, Ninja, native perl + nasm, vswhere on PATH).
 - The Windows SDK also supplies `MakeAppx.exe` and `SignTool.exe`, which the packaging script finds
   on its own.
 
 **The payload**
 - **devkitPro** with the `switch-dev` package, to build the `boot.nro` in
-  [`tools/xbox/boot_nro/`](../tools/xbox/boot_nro/). That is ordinary homebrew, built from source
+  [`tools/xbox/boot_nro/`](../../tools/xbox/boot_nro). That is ordinary homebrew, built from source
   here: no keys, no firmware, no commercial ROMs — house rule, and nothing it calls needs them.
 
 Build the payload from that directory, in **PowerShell or cmd** (not a Git Bash shell — msys2's
@@ -112,7 +112,7 @@ Return codes from `RunHeadlessBoot`: `0` liveness confirmed · `2` the NRO faile
 
 ## Manifest notes
 
-[`dist/uwp/AppxManifest.xml`](../dist/uwp/AppxManifest.xml) is deliberately minimal, but two things
+[`dist/uwp/AppxManifest.xml`](../../dist/uwp/AppxManifest.xml) is deliberately minimal, but two things
 in it are load-bearing:
 
 - **`<Capability Name="codeGeneration" />`** — this is what unlocks `VirtualProtectFromApp`,
@@ -123,7 +123,7 @@ in it are load-bearing:
   A mismatch is the most common sideload rejection; `package-appx.ps1` checks it before packing.
 
 `EntryPoint="eden-uwp.App"` is the conventional moniker for a plain C++/WinRT `CoreApplication` app
-(`wWinMain` + `IFrameworkView`, see [`src/eden_uwp/uwp_boot.cpp`](../src/eden_uwp/uwp_boot.cpp));
+(`wWinMain` + `IFrameworkView`, see [`src/eden_uwp/uwp_boot.cpp`](../../src/eden_uwp/uwp_boot.cpp));
 there is no activatable WinRT class to name.
 
 ## When it does not activate

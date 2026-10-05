@@ -176,7 +176,7 @@ FormatInfo NativeFormat(PixelFormat format) {
 /// The Series' texture unit and its copy engine disagree on where some layers of block-compressed
 /// 2D arrays live: in Mario Wonder's 128x128x105 BC4 tile arrays, layers 84 and 100 read 32 rows
 /// off and others read other texels, while CopyTextureRegion reads back the guest data (see
-/// docs/xbox_d3d12_phase4.md, 0.2.44). Plain texels are copied without reinterpreting blocks.
+/// docs/xbox/xbox_d3d12_phase4.md, 0.2.44). Plain texels are copied without reinterpreting blocks.
 std::optional<FormatInfo> DecodedBcFormat(PixelFormat format) {
     const auto make = [](DXGI_FORMAT resource, DXGI_FORMAT view, PixelFormat copy_format) {
         return FormatInfo{.resource = resource, .view = view, .srv = view, .converted = true,

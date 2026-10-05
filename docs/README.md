@@ -7,6 +7,7 @@ If you want to register/signup as a contributor, take a gander at [CONTRIBUTING.
 This contains documentation created by developers, build instructions, guidelines, instructions/layouts for [cool stuff we made](./CPMUtil.md), and more.
 
 - **[General Build Instructions](./Build.md)**
+- **[Xbox Series X|S / UWP fork documentation](./xbox/README.md)**
 - **[CMake Options](./Options.md)**
 - **[Cross Compiling](./CrossCompile.md)**
 - **[Development Guidelines](./Development.md)**

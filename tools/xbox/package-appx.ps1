@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Stages, packs and signs the Phase-2 headless boot appx (src/eden_uwp) for sideloading
-# onto an Xbox Series X|S in Dev Mode. See docs/xbox_deploy.md for the full flow.
+# onto an Xbox Series X|S in Dev Mode. See docs/xbox/xbox_deploy.md for the full flow.
 #
 #   .\tools\xbox\package-appx.ps1 -BootNro C:\path\to\boot.nro
 #

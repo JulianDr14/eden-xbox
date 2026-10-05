@@ -37,7 +37,7 @@ foreach ($file in "Example10_EdenBlit.cpp", "Example11_EdenIndirect.cpp", "indir
 }
 
 # The devkitPro toolchain expects its own environment; the msys2 make needs a writable temp dir
-# without spaces (see docs/xbox_internal.md).
+# without spaces (see docs/xbox/xbox_internal.md).
 $env:DEVKITPRO = "/opt/devkitpro"
 $env:TMP = $work; $env:TEMP = $work; $env:TMPDIR = $work
 $env:PATH = "$DevkitPro\msys2\usr\bin;$DevkitPro\devkitA64\bin;$DevkitPro\tools\bin;$env:PATH"

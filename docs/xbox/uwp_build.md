@@ -38,7 +38,7 @@ build CORE's JIT/memory work and the eventual headless-boot frontend validate ag
 
 ### Shortcut
 
-[`tools/xbox/build-env.bat`](../tools/xbox/build-env.bat) does the whole environment setup below
+[`tools/xbox/build-env.bat`](../../tools/xbox/build-env.bat) does the whole environment setup below
 in one step and then **verifies** it, which matters because every way of getting it wrong fails
 silently:
 

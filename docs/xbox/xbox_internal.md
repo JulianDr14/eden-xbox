@@ -915,7 +915,7 @@ durante T, conserva perfiles v1 y guarda v2; cupo de observaciones reservado par
 mismo presupuesto64MiB/core. Contadores T clasifican misses por cobertura, presupuesto,
 core/FPCR, codigo distinto o recompilacion. Harness y build incremental UWP correctos;
 primera corrida aprende prioridad, segunda valida seleccion/FPS. Gate manual y Series
-pendientes; sin commit. Detalle en `docs/xbox_performance.md`.
+pendientes; sin commit. Detalle en `docs/xbox/xbox_performance.md`.
 
 
 Gate PC prioridad JIT (30 sep 2026): Q71s, retorno0, dos T completas. Nueva43FPS
@@ -924,7 +924,7 @@ recorrida59,25FPS/559 compilaciones.16973 registros T guardados en v2 y checksum
 verificado. Esta corrida aun cargo v1 sin prioridad; siguiente compara prewarm
 priorizado,64MiB/core. Cinco asserts BufferQueue antes de T, Render sin errores.
 Arranque tuvo pausa larga compatible con suspension host, causa sin confirmar.
-Detalle/evidencia en `docs/xbox_performance.md`; Series pendiente, sin commit.
+Detalle/evidencia en `docs/xbox/xbox_performance.md`; Series pendiente, sin commit.
 
 
 Gate PC prewarm priorizado (30 sep 2026):16973 prioritarios aceptados sin rechazos,
@@ -1711,7 +1711,7 @@ Gate final candidato shaders: DXIL immutable compartido por shared_ptr entre PSO
 GatePC DXILcompartido: Q76s/retorno0; T480completas182760/175587events,FPS56,5/55,p9939,721->41,761 y32,416->40,624,max56,828/48,932ms. Sinmejorageneral.1718PSOsprecargados; cero creacion/WaitBuilt/cacheoutcome enT, ahorroDXIL/hits no medidos. Margen25,918/61,996MiB,GCmax19,251/23,958ms; gapT2GC18,653 conappfree62,070<64MiB compatible recoverysincrono (contadorreadbackoff, no conteo confirmado). OtragapT1WaitD3D12async43,212ms. RenderError0,5BQassert/8unmappedantesT. Parser corrigeforegroundwaitmismotick: host/dequeue necesarios parafaseanidada, fixturepasa. Siguiente margen/GCsync, despuesD3D12/CPUworkers.256/115/5120/T8 intactos, sincommit/Series/60pendientes; detalle enrendimiento.
 
 
-Guard memoria D3D12 (1 oct): prevencion128/64MiB y emergencia10MiB app-free; staging256->128->64->0, retiro por fence sin rings solapados, Finish solo ultima emergencia. DXIL opcional y staging libre se recortan; readbacks pinned/dirty guest conservados, heaps vacios siguen GC existente. Muestra memoria compartida con GC, sin hilo nuevo; swap/pop evita desplazamientos masivos. JIT115/core no se decommitea. Politica/limites/fuentes/gates en docs/xbox_performance.md. Sin commit; gameplay/Series pendientes.
+Guard memoria D3D12 (1 oct): prevencion128/64MiB y emergencia10MiB app-free; staging256->128->64->0, retiro por fence sin rings solapados, Finish solo ultima emergencia. DXIL opcional y staging libre se recortan; readbacks pinned/dirty guest conservados, heaps vacios siguen GC existente. Muestra memoria compartida con GC, sin hilo nuevo; swap/pop evita desplazamientos masivos. JIT115/core no se decommitea. Politica/limites/fuentes/gates en docs/xbox/xbox_performance.md. Sin commit; gameplay/Series pendientes.
 
 
 GatePC memoryguard: Q231s/retorno0,T480 completas181034/186029. Guardactua127,969MiBfree antesT: ring256 retiradoy128 repuesto, capacidad-128MiB real. MargenT93,344/136,520 vs25,918/61,996; FPS56,5/58,25 vs56,5/55,p9938,598/30,355, max63,871/40,592. T1GC43,977ms empeora peortiron, noestabilidadgeneral ni causalidadFPS. Commitmuestreado4986MiBmax,RenderError0,1BQassert+4unmappedantesT. Rama10MiB/Finish/recovery64/overhead/Series pendientes. SiguienteGC largo yD3D12waits;115core/5120/T8conservados,sincommit. Evidencia enrendimiento.
@@ -1860,7 +1860,7 @@ navegan; ajustes básicos letra/posición ydeadzone8/12/18% guardadosLocalSettin
 BuildUWP yscanner desktop pasan; harnessStoreCRT fueraAppContainer falla0xc0000135:
 compilarharness con vcvarsall desktop. PCPID8952/Job5120 biblioteca visible confirmado,
 commitreposo36MiB; usuario sinmando. Transición/gameplay/persistencia/manual ySeries
-pendientes. Diseño, comandos, fuentes yreciclajeEden en docs/xbox_frontend.md.
+pendientes. Diseño, comandos, fuentes yreciclajeEden en docs/xbox/xbox_frontend.md.
 
 Rediseño biblioteca tras rechazo visual: carátula/título destacados, tarjetas,
 foco menta, márgenesTV, panelMando F1/View yratón. Loaders deqt_common ReadTitle/
@@ -1869,7 +1869,7 @@ iconosretenidos<=1MiB/entrada yWIC256x256/cacheGPU12. Buildincremental4ops/harne
 pasan. PCPID20692 Job5120: títuloWonder real+icon93583bytes, commit44MiBreposo;
 selecciónmanual→D3D12→Load0 confirmado. Proceso ausente durantecache sinQ/retorno:
 cierre/gameplay no certificados. Evidencia pc-library-cards{,-diag}.txt;
-visualrediseño/panel/mando/Series pendientes. Fuente/diseño docs/xbox_frontend.md.
+visualrediseño/panel/mando/Series pendientes. Fuente/diseño docs/xbox/xbox_frontend.md.
 
 Usuario confirma carátula/título ymejora visual. Ajuste posterior: logo original
 EdenPNG deltema Qt copiado Assets/EdenLogo.png al empaquetar, cover rounded12 real
@@ -1880,13 +1880,13 @@ ImportaciónPikachuPC: Move-Item desdeDownloads conservaACL si mismo volumen;
 enumeraciónlista funciona pero ReadIcon/ReadTitle falla permission denied. Corregido
 archivo con icacls/grant:R alSIDespecíficoEden obtenidoACLgames. No conceder a todas
 lasapps. ValidarpermisosAppContainer además del tamaño al importar dumps; refrescar
-biblioteca. Detalle docs/xbox_frontend.md.
+biblioteca. Detalle docs/xbox/xbox_frontend.md.
 
 UIprompts porplataforma: DeviceFamilyWindows.Xbox muestra soloA/B/cruceta/View/Menu;
 Desktop Enter/Esc/F1/flechas/R/Q, incluso header/CTA/empty/panel. Subset11PNG Kenney
 InputPrompts1.5A CC0(4695bytes), license/README enAssets/InputPrompts, cachelocal
 porcanvas sinred. Build3ops/diffcheck pasan, visualPC/Seriespendiente,sincommit.
-Fuentes ycriterios docs/xbox_frontend.md.
+Fuentes ycriterios docs/xbox/xbox_frontend.md.
 
 SelectorPC jugador1: automático/teclado/mando porID persistido; catálogo Windows
 raw+Gamepad estándar compartido con gameplay, hotplug500ms. Series conservaauto.
@@ -1894,7 +1894,7 @@ Raw sinmapeo aparece deshabilitado; no soporte arbitrarioBluetooth ni multijugad
 certificado. Frontend separado navegación/canvas/entrada, metadata porpágina sin
 recorrerbiblioteca cada16ms, assetshelper/caches. Harnessselección pasa ybuild
 incremental pasa; últimoajuste/visual/hardware/Series pendientes. Sincommit;
-detalle yfuentes en docs/xbox_frontend.md.
+detalle yfuentes en docs/xbox/xbox_frontend.md.
 
 Gate selectorPC: build finalincremental3ops/harness selección ybiblioteca PASS,
 diffcheck limpio. Biblioteca abiertaPID15052 Job5120 verificado, sin cierre
@@ -2077,3 +2077,12 @@ necesarios para compilar. Borrado automático rechazado por la herramienta inclu
 tras autorización explícita; se entregó comando manual. La carpeta ya no existía
 al comprobar al final. Juegos/keys/firmware y LocalState fuera de la limpieza.
 No commit ni push en esta operación.
+
+## Organización de documentación (4 oct 2026)
+
+Por petición del usuario, los diez documentos `xbox_*.md` y `uwp_build.md` pasan
+de `docs/` a `docs/xbox/`, conservando nombres y contenido histórico. El índice
+es [README.md](README.md), enlazado desde AGENTS y el índice general de docs.
+Referencias en scripts, CMake, manifiesto y comentarios actualizadas; los enlaces
+a código y herramientas usan dos niveles (`../../`) desde la nueva carpeta.
+La reorganización no modifica el comportamiento del ejecutable ya compilado.

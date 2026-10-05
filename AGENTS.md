@@ -1,8 +1,10 @@
 # AGENTS.md: guía para agentes de IA en eden-xbox (fork de JulianDr14)
 
+Índice de documentación Xbox/UWP: [`docs/xbox/README.md`](docs/xbox/README.md).
+
 Léelo entero antes de tocar nada. Resume qué hacemos, en qué punto estamos y cómo trabajamos. El
-detalle técnico está en [`docs/xbox_internal.md`](docs/xbox_internal.md) (cuaderno del proyecto) y en
-[`docs/xbox_d3d12_phase3.md`](docs/xbox_d3d12_phase3.md) (diseño de la fase actual).
+detalle técnico está en [`docs/xbox/xbox_internal.md`](docs/xbox/xbox_internal.md) (cuaderno del proyecto) y en
+[`docs/xbox/xbox_d3d12_phase3.md`](docs/xbox/xbox_d3d12_phase3.md) (diseño de la fase actual).
 
 > `CLAUDE.md` viene del fork original (juanresendiz813) y apunta a rutas `C:\Users\juanr\...` y a un
 > tablero de coordinación que **aquí no existe**. Para este fork, la referencia es este archivo.
@@ -33,7 +35,7 @@ detalle técnico está en [`docs/xbox_internal.md`](docs/xbox_internal.md) (cuad
 | 3c: runtime de la caché de texturas | ✅ PC y Series (0.2.12.0); gate 13×7 RGBA8 y vistas completas |
 | 3d: fences, queries y `RasterizerD3D12` sustituyendo al nulo | ✅ PC y Series (0.2.13.0) tras la revisión de la fase 3; **fase 3 cerrada** |
 | Mudanza a Eden actual (sep 2026): fork de `eden-emulator/mirror`, rama `xbox` | ✅ PC (merge `b18b22a674`); la Series se da por buena (el usuario no la repitió) |
-| 4: pipelines, root signature y shaders del guest | 🔨 4.0–4.3 ✅ en PC y Series (0.2.15.0); 4.4 ✅ en PC (compute en ex09, blits y clears con máscara en ex10, dispatch indirecto con ExecuteIndirect en ex11; limpio con la capa de debug); ex11 ✅ en la Series (0.2.17.0); primer juego (Mario Wonder) hasta la pantalla de título en PC (0.2.18.0: W^X por páginas en dynarmic, applet Application, ManualContentProvider, SRVs incompatibles); título ✅ en la Series (0.2.19.0, sampler con MaxLOD ≥ MinLOD); siguiente: pasar del título (entrada) y rendimiento. Diseño en `docs/xbox_d3d12_phase4.md` |
+| 4: pipelines, root signature y shaders del guest | 🔨 4.0–4.3 ✅ en PC y Series (0.2.15.0); 4.4 ✅ en PC (compute en ex09, blits y clears con máscara en ex10, dispatch indirecto con ExecuteIndirect en ex11; limpio con la capa de debug); ex11 ✅ en la Series (0.2.17.0); primer juego (Mario Wonder) hasta la pantalla de título en PC (0.2.18.0: W^X por páginas en dynarmic, applet Application, ManualContentProvider, SRVs incompatibles); título ✅ en la Series (0.2.19.0, sampler con MaxLOD ≥ MinLOD); siguiente: pasar del título (entrada) y rendimiento. Diseño en `docs/xbox/xbox_d3d12_phase4.md` |
 | 5: paridad (ASTC, stream output, quads, etc.) | 🔨 ASTC GPU + BC3 por defecto (Series OK en 0.2.58.0); ~9 us por draw y DXIL en workers (0.2.60.0); XAudio2 2.9 nativo ✅ Wonder PC 92 s, 0 glitches/starvations/fallos, gate prolongado Series pendiente; fastmem hibrido descartado; page-table JIT limpia mejora en PC y funcionamiento observado en Series 0.2.66.0 (~124 s, gameplay ~27--43 FPS; mejora sugerida, A/B y cierre pendientes); pool de placed textures reduce 648 creaciones de 438,7 a 12,4 ms, gate de Series pendiente; PSO RGBA8 offset 14 y MIN/MAX puntual exacto corregidos, cache PSO graphics/compute compartida: PC Wonder 75 s con debug limpio, gate Series 0.2.67.0 pendiente; depth feedback GPU y deswizzle por sectores (RGBA8 2,66--3,07x aislado, 5.400 casos), traduccion redundante de memoria CPU eliminada y perfil por core: PC Wonder 75 s con debug limpio y cierre 0; Series 0.2.68.0 pendiente |
 
 La rama de trabajo es `xbox`. `master` del fork es Eden tal cual.
@@ -45,7 +47,7 @@ no-op en Windows e invalidar FastDispatch sin ejecutar lookup JIT ni cambiar RX/
 Build UWP y 262144 casos de hash correctos; candidato PC 97 s manuales, retorno 0,
 sin errores Render y dos asserts BufferQueue; coste Compile agregado 1,6% menor observado,
 sin mejora FPS sostenida demostrada (ultimas ventanas 51--54 FPS); A/B y Series pendientes.
-Diseno y evidencia en [`docs/xbox_performance.md`](docs/xbox_performance.md).
+Diseno y evidencia en [`docs/xbox/xbox_performance.md`](docs/xbox/xbox_performance.md).
 Fastmem Full PC: 84 s manuales, retorno 0; ultimas 900 presents 51,82 FPS frente a
 51,17 sin fastmem, callbacks reads ~95,7% menos; sin mejora sostenida demostrada ni
 60 FPS. Ocho asserts BufferQueue; Full Series/default Xbox no certificados ni cambiados.
@@ -102,7 +104,7 @@ de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
    `git fetch eden && git push origin eden/master:master`.
 2. Se fusiona en la rama de trabajo: `git switch xbox && git merge eden/master`.
 3. Se resuelven los conflictos. Los que ya salieron y cómo se resolvieron están en
-   `docs/xbox_internal.md`.
+   `docs/xbox/xbox_internal.md`.
 4. Se adaptan los runtimes D3D12 a los cambios de API de las cachés genéricas.
 5. Se compila y se repite el ciclo de prueba en el PC y en la Series.
 
@@ -120,8 +122,8 @@ de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
 - **Investiga antes de diseñar:** documentación de Microsoft, backends D3D12 de otros emuladores
   (Dolphin, Xenia) y el backend Vulkan de Eden como modelo. Cita las fuentes en el documento de
   diseño.
-- **Documenta todo lo que aprendas** en `docs/xbox_internal.md` (hechos, trampas, comandos) y el
-  diseño de cada fase en su propio `docs/xbox_*.md`. Si un error costó tiempo, va al documento.
+- **Documenta todo lo que aprendas** en `docs/xbox/xbox_internal.md` (hechos, trampas, comandos) y el
+  diseño de cada fase en su propio `docs/xbox/xbox_*.md`. Si un error costó tiempo, va al documento.
 - **Cada fase se parte en sub-fases con un gate verificable.** Cada sub-fase se integra de modo que
   algo visible la ejercite; por ejemplo, el present usa el scheduler antes de que exista el
   rasterizador.
@@ -129,7 +131,7 @@ de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
   simple (por ejemplo, el present por CPU).
 
 ## Ciclo de prueba
-1. **Compilar** (ver `docs/xbox_internal.md`):
+1. **Compilar** (ver `docs/xbox/xbox_internal.md`):
    `tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp`.
    Para cazar errores rápido, compila objetos sueltos con `ninja -C build-uwp <ruta>.cpp.obj`.
 2. **Probar en el PC:** `powershell -ExecutionPolicy Bypass -File tools\xbox\local-run.ps1 -NoBuild`.
@@ -146,9 +148,9 @@ de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
 5. **Tú revisas los archivos:**
    - En el diag: `RunHeadlessBoot returned 0`.
    - En el log: las líneas `D3D12: ...`, sin `Critical` ni errores de `Render`.
-   - Actualiza la tabla de fases en este archivo y en `docs/xbox_internal.md`.
+   - Actualiza la tabla de fases en este archivo y en `docs/xbox/xbox_internal.md`.
 
-## Trampas conocidas (resumen; el detalle está en docs/xbox_internal.md)
+## Trampas conocidas (resumen; el detalle está en docs/xbox/xbox_internal.md)
 - **PATH con devkitPro:** desde PowerShell, `cmd`, `tar` y `make` pueden resolver a sus versiones de
   devkitPro. Usa `$env:SystemRoot\System32\cmd.exe` y `...\tar.exe`.
 - **Git Bash:** no compiles desde ahí.
@@ -165,7 +167,7 @@ de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
 - `src/video_core/renderer_d3d12/`: device, swapchain, compilador de shaders, scheduler, staging y
   descriptores, más el renderer.
 - `src/audio_core/sink/xaudio2_sink.*`: salida PCM XAudio2 2.9 para Windows UWP/Xbox; diseño y
-  gates en `docs/xbox_audio.md`.
+  gates en `docs/xbox/xbox_audio.md`.
 - `src/eden_uwp/`: frontend UWP (arranque headless y diagnóstico).
 - `tools/xbox/`:
   - `build-env.bat`, `package-appx.ps1`, `local-run.ps1` y `build-spirv-to-dxil.ps1` (este último no
@@ -182,7 +184,7 @@ durante T, conserva perfiles v1 y guarda v2; cupo de observaciones reservado par
 mismo presupuesto64MiB/core. Contadores T clasifican misses por cobertura, presupuesto,
 core/FPCR, codigo distinto o recompilacion. Harness y build incremental UWP correctos;
 primera corrida aprende prioridad, segunda valida seleccion/FPS. Gate manual y Series
-pendientes; sin commit. Detalle en `docs/xbox_performance.md`.
+pendientes; sin commit. Detalle en `docs/xbox/xbox_performance.md`.
 
 
 Gate PC prioridad JIT (30 sep 2026): Q71s, retorno0, dos T completas. Nueva43FPS
@@ -191,7 +193,7 @@ recorrida59,25FPS/559 compilaciones.16973 registros T guardados en v2 y checksum
 verificado. Esta corrida aun cargo v1 sin prioridad; siguiente compara prewarm
 priorizado,64MiB/core. Cinco asserts BufferQueue antes de T, Render sin errores.
 Arranque tuvo pausa larga compatible con suspension host, causa sin confirmar.
-Detalle/evidencia en `docs/xbox_performance.md`; Series pendiente, sin commit.
+Detalle/evidencia en `docs/xbox/xbox_performance.md`; Series pendiente, sin commit.
 
 
 Gate PC prewarm priorizado (30 sep 2026):16973 prioritarios aceptados sin rechazos,
@@ -345,7 +347,7 @@ pasa. RenderError0,4BQassertantesT. Guardagingarranque buildincremental pasa tra
 no relanzado,sincommit. Guardadodebug fueraalcance; siguienteGCpacking/descargas
 /margenreal,115/core y5120 intactos,Series y60sostenidos pendientes.
 
-Investigación packing/readback contrastada con Vulkan en docs/xbox_texture_memory.md:
+Investigación packing/readback contrastada con Vulkan en docs/xbox/xbox_texture_memory.md:
 VMA/budget/async flush son modelos útiles, pero GC GPU-dirty sigue síncrono en
 ambos backends y Vulkan no activa defrag. Usuario autoriza ring upload256MiB,
 cutoff32MiB y16regiones conservados; JIT115/core,Job5120,T8 intactos. Build
@@ -580,7 +582,7 @@ worker yentrega frames con dependencia concreta; P2 churn/fragmentación/swizzle
 P3 CPU residual/coberturaJIT/precarga. SeriesUMA/visual/guard/fallbacks y60FPS
 sostenidos pendientes; Vulkan compila/arranca, comparación gameplay pendiente.
 Mantener115/core/Job5120/T8 ydiagnóstico selectivo. Criterios de cierre y evidencia
-en docs/xbox_performance.md, Prioridades pendientes después del GC directo.
+en docs/xbox/xbox_performance.md, Prioridades pendientes después del GC directo.
 
 Frontend biblioteca1oct: `-Library` en local-run/package o`library=1`, raízLocalState/games
 compartidaPC/Series; scannerNSP/XCI/NRO/nesting sinabrir contenedores, cap10000/depth5.
@@ -588,7 +590,7 @@ UI temporalD3D11/D2D/DWrite destruida antesguestD3D12, inputGamepad+teclado.
 Ajustesbásicos letra/posición ydeadzone persistidosLocalSettings. Buildincremental/
 harnessscanner correctos; PCPID8952 Job5120 UIvisible confirmada(36MiBreposo),
 usuario sinmando. Gate transición/gameplay/persistencia/mando/Series pendientes,
-juego pesado aún en dump. Doc docs/xbox_frontend.md, sincommit.
+juego pesado aún en dump. Doc docs/xbox/xbox_frontend.md, sincommit.
 
 Rediseño frontend: usuario rechazó lista básica; carátulas/títulos con loadersEden,
 tarjetadestacada+fila5/focoTV/panelF1-View/ratón. Metadataworker sinDRAM/JITguest,
@@ -600,12 +602,12 @@ pendientes. Docs/xbox_frontend.md ypc-library-cards evidencia; sincommit.
 Usuario confirma UIrediseñada/carátula/título. LogoEden originalPNG ahoraincluido
 enAssets/EdenLogo.png porpackager; carátulasrounded12 conmaskD2D antialiascacheada.
 Build3ops/parserPS/diffcheckpasan; visualajuste/panel/mando/Series pendientes.
-Sincommit; docs/xbox_frontend.md conservaestado yfuentes.
+Sincommit; docs/xbox/xbox_frontend.md conservaestado yfuentes.
 
 UIprompts1oct: detecciónWindows.Xbox víaAnalyticsInfo, ayudas exclusivasmandoSeries;
 PC ayudas teclado, sinleyendas mezcladas. KenneyInputPrompts1.5A CC0/subset11PNG
 enAssets/InputPrompts conlicense/README, cached porcanvas. Build3ops/diffcheck pasan,
-visualPC ySeries pendientes,sincommit; fuentes docs/xbox_frontend.md.
+visualPC ySeries pendientes,sincommit; fuentes docs/xbox/xbox_frontend.md.
 
 SelectorPC jugador1: automático/teclado/mando porID persistido; catálogo Windows
 raw+Gamepad estándar compartido con gameplay, hotplug500ms. Series conservaauto.
@@ -613,7 +615,7 @@ Raw sinmapeo aparece deshabilitado; no soporte arbitrarioBluetooth ni multijugad
 certificado. Frontend separado navegación/canvas/entrada, metadata porpágina sin
 recorrerbiblioteca cada16ms, assetshelper/caches. Harnessselección pasa ybuild
 incremental pasa; últimoajuste/visual/hardware/Series pendientes. Sincommit;
-detalle yfuentes en docs/xbox_frontend.md.
+detalle yfuentes en docs/xbox/xbox_frontend.md.
 
 Gate selectorPC: build finalincremental3ops/harness selección ybiblioteca PASS,
 diffcheck limpio. Biblioteca abiertaPID15052 Job5120 verificado, sin cierre
@@ -655,7 +657,7 @@ IDHID compartidoUI/gameplay, XboxGamepad intacto. Nominalcalibration, sinoutput/
 Bluetooth certificado. Build/selección/selftestAppContainer PASS; hardwaredecoder
 ready1/buttons0/axes~0.001724. PID17396 biblioteca/Job5120, selección/navegación
 manual/gameplay/replug/Series pendientes; manifiesto0.2.70.0/HIDcap. Sincommit;
-detalle/fuentes ytrampaReadWrite en docs/xbox_frontend.md.
+detalle/fuentes ytrampaReadWrite en docs/xbox/xbox_frontend.md.
 
 GateProUSB: usuario confirma selección y navegación cruceta/A/B. Prompts ahora
 siguen dispositivo elegido (Nintendo A/B/-/+/cruceta, XboxGamepad oTeclado),
@@ -723,4 +725,4 @@ Sin replay/seeds/ASTC Directo; prewarm1/fastmem0/cpu_profile0/hotkeys0/library/p
 Build ordenado conservando cachés/objetos; antiguos1748MiB apartados y carpeta
 posteriormente ausente tras comando manual de borrado autorizado (herramienta
 rechazó eliminación automática). Gameplay/USB físico/recuperación/Series pendientes.
-No commit ni push; detalles en docs/xbox_internal.md.
+No commit ni push; detalles en docs/xbox/xbox_internal.md.

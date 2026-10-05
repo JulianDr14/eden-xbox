@@ -600,7 +600,7 @@ queda sin payload que la pruebe hasta un juego de NVN.
 
 ### Primer juego: Super Mario Bros. Wonder (volcado del cartucho del usuario)
 
-Cómo se prueba sin meter nada en el repo: `docs/xbox_internal.md`, "Probar un juego".
+Cómo se prueba sin meter nada en el repo: `docs/xbox/xbox_internal.md`, "Probar un juego".
 
 Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
 
