@@ -5,6 +5,7 @@
 #include "eden_uwp/game_library.h"
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/uwp_controllers.h"
+#include "eden_uwp/uwp_file_manager.h"
 namespace EdenXbox {
 class LibraryCanvas {
 public:
@@ -12,7 +13,8 @@ public:
     ~LibraryCanvas();
     void InvalidateCovers();
     void Draw(const LibraryScan&, size_t, bool, bool, unsigned,
-              const ControllerOptions&, const std::wstring&, const ControllerPanel&);
+              const ControllerOptions&, const std::wstring&, const ControllerPanel&,
+              const ConfigurationPanel&);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

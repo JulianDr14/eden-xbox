@@ -19,6 +19,8 @@ add_executable(eden-uwp WIN32
     uwp_library_metadata.h
     uwp_rom_storage.cpp
     uwp_rom_storage.h
+    uwp_file_manager.cpp
+    uwp_file_manager.h
     storage_path.h
     uwp_pro_controller.cpp
     uwp_controllers.cpp

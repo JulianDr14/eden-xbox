@@ -65,6 +65,7 @@
 #include "eden_uwp/keyboard_bindings.h"
 #include "eden_uwp/uwp_library.h"
 #include "eden_uwp/uwp_rom_storage.h"
+#include "eden_uwp/uwp_file_manager.h"
 
 namespace D3D12 {
 // renderer_d3d12.h; its includes need Mesa's headers, which only video_core sees.
@@ -214,6 +215,7 @@ struct BootConfig {
     bool gpu_failure_probe{};
     bool gpu_removal_probe{};
     unsigned rom_storage_checks{}; // 1=record token, 2=restore after a process restart
+    bool file_manager_gate{};
     bool astc_sync{};
     bool astc_fresh{};
     /// Played by hand ("play=1"): runs until the app is closed, without frame dumps or draw trace.
@@ -222,6 +224,7 @@ struct BootConfig {
     /// diagnostic and falls back to hybrid if the complete mapping cannot be created.
     enum class Fastmem { Off, Auto, Hybrid, Full } fastmem{Fastmem::Off};
     u32 fastmem_hot_mib{384};
+    Settings::CpuAccuracy cpu_accuracy{Settings::CpuAccuracy::Auto};
     /// Draw without waiting for pipelines still compiling ("async_shaders=0" turns it off).
     bool async_shaders{true};
     /// Buttons to press at given times ("input=25:L+R" lines).
@@ -240,6 +243,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     Common::Log::Initialize();
     if (config.rom_storage_checks)
         return RunRomStorageGate(config.rom_storage_checks == 2, WriteDiag) ? 0 : 15;
+    if (config.file_manager_gate) return RunFileManagerGate(WriteDiag) ? 0 : 15;
     // As yuzu_cmd: the default 15.6 ms timer resolution makes the emulated vsync (and any sleep in
     // the core) tick every 15.6 ms and drop one frame in ten, visible as a stutter.
     const auto timer_resolution = Common::Windows::SetCurrentTimerResolutionToMaximum();
@@ -250,6 +254,9 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     if (config.null_audio) {
         Settings::values.sink_id = Settings::AudioEngine::Null;
     }
+    Settings::values.cpu_accuracy = config.cpu_accuracy;
+    WriteDiag(config.cpu_accuracy == Settings::CpuAccuracy::Accurate
+                  ? "step: CPU accuracy Accurate" : "step: CPU accuracy Auto");
     AudioCore::Sink::SetXAudio2ProfileEnabled(config.audio_profile);
     Core::CpuProfile::SetEnabled(config.cpu_profile);
     // Read by HostMemory when Core::System builds the DRAM, so it has to be set before that.
@@ -1463,6 +1470,8 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             config.gpu_failure_probe = true;
                         } else if (line == "rom_storage_checks=record") {
                             config.rom_storage_checks = 1;
+                        } else if (line == "file_manager_gate=1") {
+                            config.file_manager_gate = true;
                         } else if (line == "rom_storage_checks=restore") {
                             config.rom_storage_checks = 2;
                         } else if (line == "astc_verify=1") {
@@ -1475,6 +1484,10 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                                              : line == "fastmem=full" ? Fastmem::Full
                                              : line == "fastmem=hybrid" ? Fastmem::Hybrid
                                                                        : Fastmem::Auto;
+                            WriteDiag("boot.cfg: " + line);
+                        } else if (line == "cpu_accuracy=accurate" || line == "cpu_accuracy=auto") {
+                            config.cpu_accuracy = line == "cpu_accuracy=accurate"
+                                ? Settings::CpuAccuracy::Accurate : Settings::CpuAccuracy::Auto;
                             WriteDiag("boot.cfg: " + line);
                         } else if (line.starts_with("fastmem_hot_mib=")) {
                             const auto requested = static_cast<u32>(

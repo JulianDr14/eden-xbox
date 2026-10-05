@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eden_uwp/uwp_library_metadata.h"
 #include "eden_uwp/uwp_rom_storage.h"
+#include "eden_uwp/uwp_file_manager.h"
 #include <winrt/base.h>
 #include "common/logging.h"
 #include "core/core.h"
@@ -19,10 +20,14 @@ void ReadLibraryMetadata(const std::filesystem::path& root,
     Core::System system;
     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
     system.SetFilesystem(MakeUwpFilesystem());
-    system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
+    const bool have_keys = HasUsableHeaderKey();
+    if (have_keys) system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
     for (auto& entry : entries) {
         if (stop.stop_requested()) break;
         entry.metadata_loaded = true;
+        // A clean install has no user keys yet. Keep placeholders until the file
+        // manager imports them, rather than constructing NCA readers with a zero XTS key.
+        if (!have_keys && entry.relative_path.extension() != L".nro") continue;
         try {
             const auto path = (root / entry.relative_path).u8string();
             const auto file = system.GetFilesystem()->OpenFile(entry.launch_path.empty() ?
