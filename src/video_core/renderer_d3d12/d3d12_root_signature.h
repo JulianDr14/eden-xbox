@@ -37,6 +37,9 @@ constexpr u32 INDIRECT_DISPATCH_WORDS = INDIRECT_DISPATCH_CONSTANT_WORDS + 3;
 ///    space 31
 ///  - CBV_SRV_UAV descriptor table
 ///  - sampler descriptor table
+///  - root CBV, integer sampler states (eden_integer_sampler_state per texture binding): b0
+///    space 29, only when a texture is integer. D3D12 cannot Sample() integer resources, so
+///    spirv_to_dxil turns those samples into texel loads and emulates the sampler with this data
 ///
 /// Descriptor tables follow the binding stream of the SPIR-V backend with
 /// unified_descriptor_binding: one counter over the pipeline's stages in order and, inside each
@@ -65,6 +68,9 @@ public:
     }
     u32 SamplerTableIndex() const noexcept {
         return sampler_table_index;
+    }
+    u32 IntegerSamplerIndex() const noexcept {
+        return integer_sampler_index;
     }
     u32 NumResourceDescriptors() const noexcept {
         return num_resources;
@@ -95,9 +101,16 @@ private:
     u32 runtime_data_words{};
     u32 resource_table_index{NO_TABLE};
     u32 sampler_table_index{NO_TABLE};
+    u32 integer_sampler_index{NO_TABLE};
     u32 num_resources{};
     u32 num_samplers{};
 };
+
+/// Bindings one stage takes in the stream above.
+[[nodiscard]] u32 NumStageBindings(const Shader::Info& info);
+/// Binding of a stage's first texture, given the stage's first binding. Texture array elements
+/// follow it consecutively, in descriptor order.
+[[nodiscard]] u32 FirstTextureBinding(const Shader::Info& info, u32 stage_binding);
 
 /// Builds and deduplicates guest root signatures. Thread-safe: pipelines are built on workers.
 class RootSignatureCache {

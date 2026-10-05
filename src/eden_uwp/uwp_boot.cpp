@@ -321,8 +321,12 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
 
     Core::System system{};
     g_gpu_command_failed.store(false, std::memory_order_release);
-    VideoCommon::GPUThread::SetExceptionObserver([](const char*) {
-        g_gpu_command_failed.store(true, std::memory_order_release);
+    VideoCommon::GPUThread::SetExceptionObserver([](const char* message) {
+        // Logged here, on the GPU thread: tells a stuck recovery apart from a GPU thread that
+        // never got to report its failure.
+        if (!g_gpu_command_failed.exchange(true, std::memory_order_acq_rel)) {
+            WriteDiag(std::string("GPU thread reported a failure: ") + message);
+        }
     });
     WriteDiag("step: Core::System constructed");
     system.Initialize();

@@ -10,6 +10,7 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include "common/alignment.h"
 #include "common/cityhash.h"
 #include "common/logging.h"
 #include "video_core/gpu_thread.h"
@@ -395,6 +396,20 @@ void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
     transitions.push_back(transition);
 }
 
+D3D12_GPU_VIRTUAL_ADDRESS IntegerSamplerTable::Upload(BufferCache& buffer_cache) const {
+    if (rows.empty()) {
+        return 0;
+    }
+    // The staging alignment (512) covers the root CBV's 256-byte placement.
+    const size_t size = Common::AlignUp(num_bindings * sizeof(eden_integer_sampler_state),
+                                        D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+    const StagingBufferRef ref = buffer_cache.runtime.UploadStagingBuffer(size);
+    for (const auto& [binding, state] : rows) {
+        std::memcpy(ref.mapped_span.data() + binding * sizeof(state), &state, sizeof(state));
+    }
+    return ref.buffer->GetGPUVirtualAddress() + ref.offset;
+}
+
 void GraphicsPipeline::WaitBuilt() {
     VideoCore::FrameTrace::ScopedSpan wait_span{
         VideoCore::FrameTrace::Event::PipelineWaitLong, reinterpret_cast<uintptr_t>(this)};
@@ -553,6 +568,9 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     // Views whose images get transitioned once every copy of this draw has been recorded.
     boost::container::small_vector<std::pair<VideoCommon::ImageViewId, bool>, 32> image_transitions;
     bool uses_render_area = false;
+    const bool has_integer_samplers = layout.IntegerSamplerIndex() != PipelineLayout::NO_TABLE;
+    IntegerSamplerTable integer_samplers;
+    u32 stage_binding = 0;
     const SamplerId* samplers_it = samplers.data();
     const ImageViewInOut* views_it = views.data();
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
@@ -563,8 +581,10 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
         const Shader::Info& info = stage_infos[stage];
         views_it += Shader::NumDescriptors(info.texture_buffer_descriptors);
         views_it += Shader::NumDescriptors(info.image_buffer_descriptors);
+        u32 texture_binding = FirstTextureBinding(info, stage_binding);
+        stage_binding += NumStageBindings(info);
         for (const auto& desc : info.texture_descriptors) {
-            for (u32 index = 0; index < desc.count; ++index) {
+            for (u32 index = 0; index < desc.count; ++index, ++texture_binding) {
                 const VideoCommon::ImageViewId view_id = (views_it++)->id;
                 const ImageView& image_view = texture_cache.GetImageView(view_id);
                 const bool aliases_depth = depth_image != VideoCommon::ImageId{} &&
@@ -582,6 +602,9 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
                 const Sampler& sampler = texture_cache.GetSampler(*(samplers_it++));
                 sampler_handles.push_back(sampler.Handle());
                 sampler_keys.push_back(sampler.Key());
+                if (has_integer_samplers && desc.is_integer) {
+                    integer_samplers.Add(texture_binding, sampler, image_view);
+                }
                 image_transitions.emplace_back(view_id, false);
                 if (out.trace_views) {
                     out.trace_views->push_back(view_id);
@@ -646,6 +669,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
             std::span<const D3D12_CPU_DESCRIPTOR_HANDLE>(sampler_handles.data(),
                                                          sampler_handles.size()));
     }
+    out.integer_samplers = integer_samplers.Upload(buffer_cache);
     lap.Lap(VideoCore::Perf::Counter::DrawSamplersNs);
 
     // Push constants: no resolution scaling yet (all rescaling bits clear, down factor 1), then

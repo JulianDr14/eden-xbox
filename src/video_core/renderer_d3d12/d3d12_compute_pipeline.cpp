@@ -202,8 +202,11 @@ void ComputePipeline::Configure(const ComputeBindContext& context, PipelineBindi
     const ImageViewInOut* views_it = views.data();
     views_it += Shader::NumDescriptors(info.texture_buffer_descriptors);
     views_it += Shader::NumDescriptors(info.image_buffer_descriptors);
+    const bool has_integer_samplers = layout.IntegerSamplerIndex() != PipelineLayout::NO_TABLE;
+    IntegerSamplerTable integer_samplers;
+    u32 texture_binding = FirstTextureBinding(info, 0);
     for (const auto& desc : info.texture_descriptors) {
-        for (u32 index = 0; index < desc.count; ++index) {
+        for (u32 index = 0; index < desc.count; ++index, ++texture_binding) {
             const VideoCommon::ImageViewId view_id = (views_it++)->id;
             const ImageView& image_view = texture_cache.GetImageView(view_id);
             image_view.PrepareRead(desc.type);
@@ -211,6 +214,9 @@ void ComputePipeline::Configure(const ComputeBindContext& context, PipelineBindi
             const Sampler& sampler = texture_cache.GetSampler(*(samplers_it++));
             sampler_handles.push_back(sampler.Handle());
             sampler_keys.push_back(sampler.Key());
+            if (has_integer_samplers && desc.is_integer) {
+                integer_samplers.Add(texture_binding, sampler, image_view);
+            }
             image_transitions.emplace_back(view_id, false);
         }
     }
@@ -240,6 +246,7 @@ void ComputePipeline::Configure(const ComputeBindContext& context, PipelineBindi
             std::span<const D3D12_CPU_DESCRIPTOR_HANDLE>(sampler_handles.data(),
                                                          sampler_handles.size()));
     }
+    out.integer_samplers = integer_samplers.Upload(buffer_cache);
 
     // Push constants: no resolution scaling yet (all rescaling bits clear, down factor 1).
     out.push_constants.fill(0);

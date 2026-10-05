@@ -44,6 +44,13 @@ public:
         return translate_pipeline != nullptr;
     }
 
+    /// Whether linked pipelines turn integer texture samples into texel loads, reading the sampler
+    /// from PipelineLayout::IntegerSamplerIndex (eden_spirv_to_dxil_pipeline_v2). Without it,
+    /// DXIL validation rejects those shaders.
+    bool LowersIntegerSampling() const {
+        return lowers_integer_sampling;
+    }
+
     /// Translates and signs one stage. Throws std::runtime_error with the translator's or the
     /// validator's message on failure. Vertex-pipeline stages get Vulkan's Y-down clip space flipped
     /// to D3D's when flip_y is set.
@@ -87,6 +94,7 @@ private:
     ComPtr<IDxcValidator> validator;
     /// The validator is shared by the pipeline workers.
     mutable std::mutex validator_mutex;
+    bool lowers_integer_sampling{};
     bool available{};
 };
 

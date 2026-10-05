@@ -23,6 +23,19 @@ extern "C" {
 
 #define EDEN_SPIRV_TO_DXIL_MAX_STAGES 5
 
+/* v2 integer texture sampling: b0 space 29, indexed by the original texture binding.
+ * Keep fields in 16-byte rows for DXIL constant-buffer loads. No C bitfields in this ABI. */
+#define EDEN_INTEGER_SAMPLER_SPACE 29
+#define EDEN_INTEGER_SAMPLER_MAX_BINDINGS 1024
+struct eden_integer_sampler_state {
+   uint32_t border_color[4];
+   float lod_bias, min_lod, max_lod;
+   uint32_t last_level;
+   uint32_t wrap[3]; /* D3D12_TEXTURE_ADDRESS_MODE values */
+   uint32_t padding;
+   uint32_t reserved[4];
+};
+
 struct eden_spirv_to_dxil_stage {
    const uint32_t *words;
    size_t word_count;
@@ -42,6 +55,14 @@ eden_spirv_to_dxil_pipeline(const struct eden_spirv_to_dxil_stage *stages, unsig
                             const struct dxil_spirv_debug_options *debug_options,
                             const struct dxil_spirv_logger *logger,
                             struct dxil_spirv_object *out);
+
+/* Separate symbol: an older DLL must never silently compile shaders that expect the v2 ABI. */
+bool
+eden_spirv_to_dxil_pipeline_v2(const struct eden_spirv_to_dxil_stage *stages, unsigned count,
+                             enum dxil_validator_version validator_version_max,
+                             const struct dxil_spirv_debug_options *debug_options,
+                             const struct dxil_spirv_logger *logger,
+                             struct dxil_spirv_object *out);
 
 #ifdef __cplusplus
 }

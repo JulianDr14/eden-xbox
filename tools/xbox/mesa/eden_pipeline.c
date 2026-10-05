@@ -12,6 +12,7 @@
 
 #include "dxil_spirv_nir.h"
 #include "eden_spirv_to_dxil.h"
+#include "eden_integer_sampling.h"
 #include "nir_builder.h"
 #include "nir_to_dxil.h"
 #include "spirv/nir_spirv.h"
@@ -45,12 +46,12 @@ mark_alu_exact(nir_builder *b, nir_instr *instr, void *data)
    return true;
 }
 
-bool
-eden_spirv_to_dxil_pipeline(const struct eden_spirv_to_dxil_stage *stages, unsigned count,
-                            enum dxil_validator_version validator_version_max,
-                            const struct dxil_spirv_debug_options *debug_options,
-                            const struct dxil_spirv_logger *logger,
-                            struct dxil_spirv_object *out)
+static bool
+translate_pipeline(const struct eden_spirv_to_dxil_stage *stages, unsigned count,
+                   enum dxil_validator_version validator_version_max,
+                   const struct dxil_spirv_debug_options *debug_options,
+                   const struct dxil_spirv_logger *logger, struct dxil_spirv_object *out,
+                   bool lower_integer_sampling)
 {
    if (count == 0 || count > EDEN_SPIRV_TO_DXIL_MAX_STAGES)
       return false;
@@ -91,6 +92,10 @@ eden_spirv_to_dxil_pipeline(const struct eden_spirv_to_dxil_stage *stages, unsig
       nir_validate_shader(nir[i], "Validate before feeding NIR to the DXIL compiler");
       dxil_spirv_nir_prep(nir[i]);
       dxil_spirv_nir_passes(nir[i], conf, &out[i].metadata);
+      /* After the passes: tex instructions are final (cube and implicit-LOD lowering done) and
+       * nir_to_dxil's own optimization loop scalarizes and lowers what this emits. */
+      if (lower_integer_sampling)
+         eden_lower_integer_sampling(nir[i]);
    }
 
    if (success) {
@@ -138,4 +143,27 @@ eden_spirv_to_dxil_pipeline(const struct eden_spirv_to_dxil_stage *stages, unsig
 
    glsl_type_singleton_decref();
    return success;
+}
+
+bool
+eden_spirv_to_dxil_pipeline(const struct eden_spirv_to_dxil_stage *stages, unsigned count,
+                            enum dxil_validator_version validator_version_max,
+                            const struct dxil_spirv_debug_options *debug_options,
+                            const struct dxil_spirv_logger *logger,
+                            struct dxil_spirv_object *out)
+{
+   return translate_pipeline(stages, count, validator_version_max, debug_options, logger, out,
+                             false);
+}
+
+/* Integer textures sampled through the b0 space 29 table (eden_integer_sampler_state). */
+bool
+eden_spirv_to_dxil_pipeline_v2(const struct eden_spirv_to_dxil_stage *stages, unsigned count,
+                               enum dxil_validator_version validator_version_max,
+                               const struct dxil_spirv_debug_options *debug_options,
+                               const struct dxil_spirv_logger *logger,
+                               struct dxil_spirv_object *out)
+{
+   return translate_pipeline(stages, count, validator_version_max, debug_options, logger, out,
+                             true);
 }

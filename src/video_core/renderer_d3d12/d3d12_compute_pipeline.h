@@ -104,6 +104,10 @@ public:
     /// GraphicsPipeline::Configure.
     void Configure(const ComputeBindContext& context, PipelineBindings& out);
 
+    [[nodiscard]] u64 UniqueHash() const noexcept {
+        return unique_hash;
+    }
+
 private:
     void Build();
 

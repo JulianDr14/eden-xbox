@@ -154,7 +154,12 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
         ConvertDepthMode(ctx);
     }
     if (!ctx.profile.support_geometry_streams) {
-        throw NotImplementedException("Geometry streams");
+        // GeometryStreams is optional, but ordinary geometry shaders can always emit stream 0.
+        // Do not silently redirect another (or a dynamically selected) stream to the rasterizer.
+        if (!stream.IsImmediate() || stream.U32() != 0) {
+            throw NotImplementedException("Nonzero or dynamic geometry stream");
+        }
+        ctx.OpEmitVertex();
     } else if (stream.IsImmediate()) {
         ctx.OpEmitStreamVertex(ctx.Def(stream));
     } else {
@@ -167,7 +172,10 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
 
 void EmitEndPrimitive(EmitContext& ctx, const IR::Value& stream) {
     if (!ctx.profile.support_geometry_streams) {
-        throw NotImplementedException("Geometry streams");
+        if (!stream.IsImmediate() || stream.U32() != 0) {
+            throw NotImplementedException("Nonzero or dynamic geometry stream");
+        }
+        ctx.OpEndPrimitive();
     } else if (stream.IsImmediate()) {
         ctx.OpEndStreamPrimitive(ctx.Def(stream));
     } else {
