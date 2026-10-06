@@ -600,7 +600,7 @@ StagingBufferRef TextureCacheRuntime::DownloadStagingBuffer(size_t size, bool de
 void TextureCacheRuntime::FreeDeferredStagingBuffer(StagingBufferRef& ref) { staging.FreeDeferred(ref); }
 void TextureCacheRuntime::ReleaseGcReadback(StagingBufferRef& map) {
     if (!map.buffer) return;
-    gc_pending_bytes -= 1ULL << map.log2_level;
+    gc_pending_bytes -= map.capacity;
     staging.FreeDeferred(map); // Remains fence-protected even if an obsolete copy is still in flight.
     map.buffer = nullptr;
 }
@@ -686,8 +686,10 @@ bool TextureCacheRuntime::PrepareGcDownload(Image& image,
     auto readback = std::make_unique<Image::GcReadback>();
     readback->footprint_bytes = image.PlanGcDownload(copies, readback->copies);
     const u64 allocation_size = std::max(size, readback->footprint_bytes);
-    const u64 reserved = std::bit_ceil(std::max<u64>(allocation_size, 1));
-    if (reserved > PendingBudget - gc_pending_bytes) {
+    // A reused buffer may be larger than this estimate; the sum form cannot underflow if the
+    // pending total ends a bucket above the budget.
+    const u64 reserved = DedicatedStagingSize(allocation_size);
+    if (gc_pending_bytes + reserved > PendingBudget) {
         VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureGcReadback, 4, image.gpu_addr);
         return false;
     }
@@ -697,7 +699,7 @@ bool TextureCacheRuntime::PrepareGcDownload(Image& image,
             VideoCore::FrameTrace::Event::TextureGcStaging, image.gpu_addr};
         readback->map = DownloadStagingBuffer(allocation_size, true);
     }
-    gc_pending_bytes += 1ULL << readback->map.log2_level;
+    gc_pending_bytes += readback->map.capacity;
     gc_peak_pending_bytes = std::max(gc_peak_pending_bytes, gc_pending_bytes);
     {
         const VideoCore::FrameTrace::ScopedSpan trace_copy{

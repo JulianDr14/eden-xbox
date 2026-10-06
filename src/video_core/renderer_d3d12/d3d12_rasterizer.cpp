@@ -1148,8 +1148,9 @@ void RasterizerD3D12::FlushCommands() {
 }
 void RasterizerD3D12::FlushIfUploadHeavy() {
     if (removal_tripwire::removal_tripped.load(std::memory_order_relaxed)) return;
-    // A loading frame may upload more textures than the 128 MiB staging stream holds within one
-    // command list (151 MiB in Mario Wonder), and the stream only reuses submitted regions. The
+    // A loading frame may upload more textures than the staging stream holds within one command
+    // list (151 MiB in Mario Wonder; the stream is 256 MiB, and the memory guard shrinks it down to
+    // nothing under pressure), and the stream only reuses submitted regions. The
     // reset callback invalidates cached state, so submitting between draws is safe.
     constexpr u64 UPLOAD_SUBMIT_BYTES = 32ULL << 20;
     if (staging.PendingUploadBytes() < UPLOAD_SUBMIT_BYTES) {
