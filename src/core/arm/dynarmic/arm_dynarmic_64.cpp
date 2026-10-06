@@ -25,7 +25,8 @@ namespace Core {
 using namespace Common::Literals;
 
 void ConfigureApplicationPrewarm(System& system, bool warm,
-                                const std::function<void(size_t, size_t)>& progress) {
+                                const std::function<void(size_t, size_t)>& progress,
+                                size_t code_budget) {
     auto* process = system.ApplicationProcess();
     if (!process || !process->Is64Bit() || Settings::IsNceEnabled()) {
         return;
@@ -58,7 +59,7 @@ void ConfigureApplicationPrewarm(System& system, bool warm,
     const auto start = std::chrono::steady_clock::now();
     try {
         JitPrewarm::RunOwners(sizes, [&](size_t core, const JitPrewarm::Progress& callback) {
-            owners[core]->PrewarmBlocks(callback);
+            owners[core]->PrewarmBlocks(callback, code_budget);
         }, progress);
     } catch (const std::exception& e) {
         // RunOwners joins all workers before unwinding. Prepared blocks remain valid.
@@ -579,7 +580,8 @@ size_t ArmDynarmic64::PreparePrewarmCandidates() {
 #endif
 }
 
-void ArmDynarmic64::PrewarmBlocks(const std::function<void(size_t, size_t)>& progress) {
+void ArmDynarmic64::PrewarmBlocks(const std::function<void(size_t, size_t)>& progress,
+                                  size_t code_budget) {
 #if defined(ARCHITECTURE_x86_64)
     if (!m_prewarm) return;
     auto& p = *m_prewarm;
@@ -590,11 +592,10 @@ void ArmDynarmic64::PrewarmBlocks(const std::function<void(size_t, size_t)>& pro
         const auto start = std::chrono::steady_clock::now();
         size_t accepted{}, rejected{}, budget_skipped{};
         const auto space = m_jit->GetCodeCacheSpaceRemaining();
-        constexpr size_t CodeBudget = 115 * 1024 * 1024;
         {
             m_cb->last_code_addr = u64(-1);
             for (size_t n = 0; n < plan.size(); ++n) {
-                if (space - m_jit->GetCodeCacheSpaceRemaining() >= CodeBudget) {
+                if (space - m_jit->GetCodeCacheSpaceRemaining() >= code_budget) {
                     budget_skipped = plan.size() - n;
                     break;
                 }
