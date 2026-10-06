@@ -146,7 +146,8 @@ PadState ReadGamepad(const ControllerDevice& pad, const ControllerOptions& optio
     for (const GamepadMapping& mapping : GAMEPAD_MAPPINGS) {
         if ((reading.Buttons & mapping.xbox) == mapping.xbox) {
             auto button = mapping.button;
-            if (options.swap_face_buttons && pad.pad) {
+            // A Nintendo pad already reads by letter, which is also its position.
+            if (options.swap_face_buttons && pad.pad && !pad.nintendo) {
                 switch (button) {
                 case VirtualButton::ButtonA: button = VirtualButton::ButtonB; break;
                 case VirtualButton::ButtonB: button = VirtualButton::ButtonA; break;
@@ -554,12 +555,19 @@ void GamepadInput::Run(std::stop_token stop) {
         if (controller_api_ready && polls++ % 125 == 0) {
             try {
                 const auto devices = EnumerateControllers();
-                const bool had_pad = pad.has_value();
+                const std::wstring had_id = pad ? pad->id : std::wstring{};
                 const auto selected = SelectController(devices, current_options.controller_id);
                 pad = selected ? std::optional<ControllerDevice>{devices[*selected]} : std::nullopt;
-                if (pad.has_value() != had_pad) {
-                    LOG_INFO(Input, "UWP input: controller {} ({} connected)",
-                             pad ? "in use as player 1" : "disconnected", devices.size());
+                if ((pad ? pad->id : std::wstring{}) != had_id) {
+                    if (pad) {
+                        LOG_INFO(Input, "UWP input: player 1 is {} ({}, {} layout, {} connected)",
+                                 winrt::to_string(pad->name),
+                                 pad->pad ? "Windows gamepad" : "Pro Controller HID",
+                                 pad->nintendo ? "Nintendo" : "Xbox", devices.size());
+                    } else {
+                        LOG_INFO(Input, "UWP input: controller disconnected ({} connected)",
+                                 devices.size());
+                    }
                 }
             } catch (...) {
                 pad.reset();

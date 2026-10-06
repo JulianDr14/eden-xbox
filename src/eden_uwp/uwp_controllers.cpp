@@ -70,9 +70,12 @@ std::vector<ControllerDevice> EnumerateControllers() {
         for (const auto& raw : RawGameController::RawGameControllers()) {
             ControllerDevice device;
             device.id = raw.NonRoamableId().c_str();
-            const bool nintendo_usb = !raw.IsWireless() && raw.HardwareVendorId() == 0x057e && raw.HardwareProductId() == 0x2009;
-            if (nintendo_usb && !pro.empty()) continue; // HID identity is stable across library/gameplay.
-            device.name = nintendo_usb ? L"Nintendo Switch Pro Controller" : raw.DisplayName().c_str();
+            // Over Bluetooth, or over USB before the HID reader has one, Windows itself maps a
+            // Nintendo pad as a Gamepad, and by position: its B (bottom) arrives as Xbox A.
+            device.nintendo = raw.HardwareVendorId() == 0x057e;
+            const bool pro_controller = device.nintendo && raw.HardwareProductId() == 0x2009;
+            if (pro_controller && !raw.IsWireless() && !pro.empty()) continue; // HID identity is stable across library/gameplay.
+            device.name = pro_controller ? L"Nintendo Switch Pro Controller" : raw.DisplayName().c_str();
             if (device.name.empty()) device.name = L"Mando";
             device.wireless = raw.IsWireless();
             device.pad = Gamepad::FromGameController(raw);
