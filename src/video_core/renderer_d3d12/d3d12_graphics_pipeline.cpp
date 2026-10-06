@@ -11,6 +11,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/bug_tracker.h"
 #include "common/cityhash.h"
 #include "common/logging.h"
 #include "video_core/gpu_thread.h"
@@ -101,11 +102,19 @@ D3D12_RENDER_TARGET_BLEND_DESC BlendTarget(const FixedPipelineState::BlendingAtt
     };
 }
 
-/// Warns once per process about state D3D12 cannot express.
-void WarnOnce(std::atomic_bool& flag, const char* what) {
-    if (!flag.exchange(true, std::memory_order_relaxed)) {
+/// Warns once per process about state D3D12 cannot express. The load first keeps repeated calls
+/// (some are per draw) from issuing a locked exchange every time.
+void WarnOnceLog(std::atomic_bool& flag, const char* what) {
+    if (!flag.load(std::memory_order_relaxed) && !flag.exchange(true, std::memory_order_relaxed)) {
+        const Common::BugTracker::TapMute bug_tracker_mute; // reported by the callers' BUG_TRACK
         LOG_WARNING(Render, "D3D12: {} is not supported and is ignored", what);
     }
+}
+/// As WarnOnceLog, and the bug tracker counts every occurrence (keyed by the flag, one per feature).
+void WarnOnce(std::atomic_bool& flag, const char* what) {
+    BUG_TRACK_KEY(UnsupportedState, reinterpret_cast<std::uintptr_t>(&flag),
+                  "{} is not supported and is ignored", what);
+    WarnOnceLog(flag, what);
 }
 std::atomic_bool warned_logic_op;
 std::atomic_bool warned_depth_bounds;
@@ -365,6 +374,10 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
             compiled = true;
         } catch (const std::exception& exception) {
             // Handle() stays null: draws with this pipeline are skipped.
+            BUG_TRACK_KEY(ShaderCompile, key.Hash(),
+                          "DXIL for VS {:016x} PS {:016x} failed: {}", key.unique_hashes[1],
+                          key.unique_hashes[5], exception.what());
+            const Common::BugTracker::TapMute bug_tracker_mute;
             LOG_ERROR(Render, "D3D12: building the pipeline for VS {:016x} PS {:016x} failed: {}",
                       key.unique_hashes[1], key.unique_hashes[5], exception.what());
         }
@@ -710,7 +723,12 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
         }
         DXGI_FORMAT format = MaxwellToD3D12::VertexFormat(attribute.Type(), attribute.Size());
         if (format == DXGI_FORMAT_UNKNOWN) {
-            WarnOnce(warned_vertex_format, "a vertex attribute format (read as RGBA32F)");
+            BUG_TRACK_KEY(UnsupportedFormat,
+                          static_cast<u64>(attribute.Type()) << 8 |
+                              static_cast<u64>(attribute.Size()),
+                          "vertex attribute type {} size {} has no DXGI format; read as RGBA32F",
+                          static_cast<u32>(attribute.Type()), static_cast<u32>(attribute.Size()));
+            WarnOnceLog(warned_vertex_format, "a vertex attribute format (read as RGBA32F)");
             format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         }
         const u32 slot = attribute.buffer;
@@ -743,6 +761,8 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
     if (has_tessellation) {
         desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
     } else if (desc.PrimitiveTopologyType == D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH) {
+        BUG_TRACK(UnsupportedState, "patch topology without tessellation drawn as points");
+        const Common::BugTracker::TapMute bug_tracker_mute;
         LOG_WARNING(Render, "D3D12: patch topology without tessellation, using points");
         desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
     }
@@ -822,6 +842,13 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
                            key.unique_hashes[1], key.unique_hashes[5], static_cast<u32>(hr));
     });
     if (FAILED(hr)) {
+        BUG_TRACK_KEY(PipelineRejected, key.Hash(),
+                      "CreateGraphicsPipelineState failed (HRESULT 0x{:08X}) for VS {:016x} PS "
+                      "{:016x}: {} attributes, {} RTs (RT0 {}), DSV {}",
+                      static_cast<u32>(hr), key.unique_hashes[1], key.unique_hashes[5],
+                      elements.size(), num_attachments, static_cast<u32>(desc.RTVFormats[0]),
+                      static_cast<u32>(desc.DSVFormat));
+        const Common::BugTracker::TapMute bug_tracker_mute;
         LOG_ERROR(Render,
                   "D3D12: CreateGraphicsPipelineState failed (HRESULT 0x{:08X}) for VS {:016x} "
                   "PS {:016x}: {} attributes, {} RTs (RT0 {}), DSV {}, features VS {:x} PS {:x}",

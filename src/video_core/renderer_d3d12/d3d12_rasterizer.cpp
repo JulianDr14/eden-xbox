@@ -14,6 +14,7 @@
 #include <spirv_to_dxil.h>
 
 #include "common/alignment.h"
+#include "common/bug_tracker.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
@@ -234,6 +235,9 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
                         bindings);
     buffer_runtime.SetTraceBuffers(nullptr);
     if (!pipeline->Handle()) {
+        BUG_TRACK_KEY(DrawSkipped, reinterpret_cast<std::uintptr_t>(pipeline),
+                      "draw skipped: the pipeline was rejected (VS {:016x} PS {:016x})",
+                      pipeline->Key().unique_hashes[1], pipeline->Key().unique_hashes[5]);
         if (trace_draws) {
             TraceDraw("draw skipped (PSO rejected)", pipeline, nullptr, traced_views, 0, 0);
         }
@@ -302,7 +306,9 @@ void RasterizerD3D12::DrawIndirect() {
     if (params.is_byte_count) {
         // Transform feedback draws; HasDrawTransformFeedback() is false, so the macro should
         // have drawn them directly.
+        BUG_TRACK(DrawSkipped, "byte-count (transform feedback) indirect draw skipped");
         if (!logged_byte_count_draw) {
+            const Common::BugTracker::TapMute bug_tracker_mute;
             LOG_WARNING(Render, "D3D12: byte-count indirect draws are skipped");
             logged_byte_count_draw = true;
         }
@@ -530,10 +536,16 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
         cmd->OMSetStencilRef(regs.stencil_front_ref);
         command_state.stencil_ref = regs.stencil_front_ref;
     }
-    if (regs.stencil_two_side_enable != 0 && regs.stencil_back_ref != regs.stencil_front_ref &&
-        !logged_stencil_ref) {
-        LOG_WARNING(Render, "D3D12: different front and back stencil references; using the front");
-        logged_stencil_ref = true;
+    if (regs.stencil_two_side_enable != 0 && regs.stencil_back_ref != regs.stencil_front_ref) {
+        BUG_TRACK(UnsupportedState, "different front ({}) and back ({}) stencil references; the "
+                                    "front one is used",
+                  regs.stencil_front_ref, regs.stencil_back_ref);
+        if (!logged_stencil_ref) {
+            const Common::BugTracker::TapMute bug_tracker_mute;
+            LOG_WARNING(Render,
+                        "D3D12: different front and back stencil references; using the front");
+            logged_stencil_ref = true;
+        }
     }
 
     cmd->SetGraphicsRoot32BitConstants(PipelineLayout::PUSH_CONSTANTS_INDEX, PUSH_CONSTANT_WORDS,
@@ -703,7 +715,11 @@ void RasterizerD3D12::DrawTexture() {
     using namespace VideoCore::Surface;
     const PixelFormat format = PixelFormatFromRenderTargetFormat(maxwell3d->regs.rt[0].format);
     if (IsPixelFormatInteger(format) || IsPixelFormatInteger(texture.format)) {
+        BUG_TRACK_KEY(DrawSkipped, static_cast<u64>(format) << 32 | static_cast<u32>(texture.format),
+                      "DrawTexture with integer formats skipped (target {}, texture {})", format,
+                      texture.format);
         if (!logged_draw_texture) {
+            const Common::BugTracker::TapMute bug_tracker_mute;
             LOG_WARNING(Render, "D3D12: DrawTexture with integer formats is skipped");
             logged_draw_texture = true;
         }
@@ -749,7 +765,10 @@ void RasterizerD3D12::Clear(u32 layer_count) {
     framebuffer->PrepareAttachments();
     if (layer_count > 1 || regs.clear_surface.layer != 0) {
         // The views cover every layer they were created with.
+        BUG_TRACK(CopySkipped, "layered clear (layer {}, {} layers) clears every layer of the view",
+                  regs.clear_surface.layer, layer_count);
         if (!logged_layer_clear) {
+            const Common::BugTracker::TapMute bug_tracker_mute;
             LOG_WARNING(Render, "D3D12: layered clears clear every layer of the view");
             logged_layer_clear = true;
         }
@@ -789,7 +808,10 @@ void RasterizerD3D12::Clear(u32 layer_count) {
         if (!full_mask) {
             // Drawn with the write mask in the PSO (Vulkan uses the blend constant instead).
             if (IsPixelFormatInteger(format)) {
+                BUG_TRACK_KEY(CopySkipped, static_cast<u64>(format),
+                              "masked clear of an integer render target ({}) skipped", format);
                 if (!logged_integer_clear) {
+                    const Common::BugTracker::TapMute bug_tracker_mute;
                     LOG_WARNING(Render,
                                 "D3D12: masked clears of integer render targets are skipped");
                     logged_integer_clear = true;
@@ -907,6 +929,9 @@ void RasterizerD3D12::DispatchCompute() {
             return;
         }
         if (dim[0] > max_dim || dim[1] > max_dim || dim[2] > max_dim) {
+            BUG_TRACK(DrawSkipped, "dispatch of {}x{}x{} groups exceeds the D3D12 limit, skipped",
+                      dim[0], dim[1], dim[2]);
+            const Common::BugTracker::TapMute bug_tracker_mute;
             LOG_WARNING(Render, "D3D12: dispatch of {}x{}x{} groups exceeds the limit, skipped",
                         dim[0], dim[1], dim[2]);
             return;
@@ -1160,6 +1185,7 @@ void RasterizerD3D12::FlushIfUploadHeavy() {
     scheduler.Flush();
 }
 void RasterizerD3D12::TickFrame() {
+    Common::BugTracker::TickFrame();
     draw_counter = 0;
     fence_manager.TickFrame();
     {
@@ -1244,6 +1270,11 @@ void RasterizerD3D12::DumpTextureNonFinite(const Image& image) {
                 bad += fmt::format(" L{}/{}:{}", level, layer, *count);
             }
         }
+    }
+    if (total != 0) {
+        BUG_TRACK_KEY(NonFinite, image.gpu_addr,
+                      "{} NaN/Inf texels in texture {} {}x{} @{:x}:{}", total, image.info.format,
+                      image.info.size.width, image.info.size.height, image.gpu_addr, bad);
     }
     LOG_INFO(Render, "D3D12 trace texture {} {}x{}x{} L{} @{:x} flags {:x}: non-finite {}{}",
              image.info.format, image.info.size.width, image.info.size.height,

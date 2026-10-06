@@ -3,6 +3,7 @@
 
 #include <algorithm>
 
+#include "common/bug_tracker.h"
 #include "common/logging.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 
@@ -165,6 +166,9 @@ D3D12_COMPARISON_FUNC ComparisonFunc(Maxwell::ComparisonOp comparison) {
     case Maxwell::ComparisonOp::Always_GL:
         return D3D12_COMPARISON_FUNC_ALWAYS;
     }
+    BUG_TRACK_KEY(UnsupportedState, static_cast<u32>(comparison),
+                  "unknown comparison op {:#x}, replaced by D3D12_COMPARISON_FUNC_ALWAYS", static_cast<u32>(comparison));
+    const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "D3D12: unknown comparison op {}", static_cast<u32>(comparison));
     return D3D12_COMPARISON_FUNC_ALWAYS;
 }
@@ -196,6 +200,9 @@ D3D12_STENCIL_OP StencilOp(Maxwell::StencilOp::Op op) {
     case Maxwell::StencilOp::Op::Decr_GL:
         return D3D12_STENCIL_OP_DECR;
     }
+    BUG_TRACK_KEY(UnsupportedState, static_cast<u32>(op),
+                  "unknown stencil op {:#x}, replaced by D3D12_STENCIL_OP_KEEP", static_cast<u32>(op));
+    const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "D3D12: unknown stencil op {}", static_cast<u32>(op));
     return D3D12_STENCIL_OP_KEEP;
 }
@@ -218,6 +225,9 @@ D3D12_BLEND_OP BlendOp(Maxwell::Blend::Equation equation) {
     case Maxwell::Blend::Equation::Max_GL:
         return D3D12_BLEND_OP_MAX;
     }
+    BUG_TRACK_KEY(UnsupportedState, static_cast<u32>(equation),
+                  "unknown blend equation {:#x}, replaced by D3D12_BLEND_OP_ADD", static_cast<u32>(equation));
+    const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "D3D12: unknown blend equation {}", static_cast<u32>(equation));
     return D3D12_BLEND_OP_ADD;
 }
@@ -283,6 +293,9 @@ D3D12_BLEND BlendFactor(Maxwell::Blend::Factor factor, bool for_alpha) {
     case F::OneMinusConstantAlpha_GL:
         return D3D12_BLEND_INV_BLEND_FACTOR;
     }
+    BUG_TRACK_KEY(UnsupportedState, static_cast<u32>(factor),
+                  "unknown blend factor {:#x}, replaced by D3D12_BLEND_ONE", static_cast<u32>(factor));
+    const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "D3D12: unknown blend factor {}", static_cast<u32>(factor));
     return D3D12_BLEND_ONE;
 }

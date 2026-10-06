@@ -11,6 +11,7 @@
 
 #include <boost/container/static_vector.hpp>
 
+#include "common/bug_tracker.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
@@ -428,6 +429,9 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
         pipeline = CreateComputePipeline(key, shader);
     }
     if (!pipeline) {
+        BUG_TRACK_KEY(DrawSkipped, key.unique_hash,
+                      "dispatches skipped: no pipeline for compute {:016x} (shader build failed)",
+                      key.unique_hash);
         return nullptr;
     }
     if (!pipeline->IsBuilt()) {
@@ -526,6 +530,12 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
         pipeline = CreateGraphicsPipeline();
     }
     if (!pipeline) {
+        // Its shaders failed to recompile or translate (reported once, below): every draw with
+        // this state is lost.
+        BUG_TRACK_KEY(DrawSkipped,
+                      graphics_key.unique_hashes[1] ^ std::rotl(graphics_key.unique_hashes[5], 1),
+                      "draws skipped: no pipeline for VS {:016x} PS {:016x} (shader build failed)",
+                      graphics_key.unique_hashes[1], graphics_key.unique_hashes[5]);
         return nullptr;
     }
     if (current_pipeline) {
@@ -610,6 +620,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             continue;
         }
         if (index == 0) {
+            BUG_TRACK(Unimplemented, "VertexA without VertexB (VS A {:016x})", key.unique_hashes[0]);
+            const Common::BugTracker::TapMute bug_tracker_mute;
             LOG_ERROR(Render, "D3D12: VertexA without VertexB is not implemented");
             return nullptr;
         }
@@ -676,10 +688,18 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                                               layout);
 
 } catch (const Shader::Exception& exception) {
+    BUG_TRACK_KEY(ShaderCompile, key.unique_hashes[1] ^ std::rotl(key.unique_hashes[5], 1),
+                  "recompiling VS {:016x} PS {:016x} failed: {}", key.unique_hashes[1],
+                  key.unique_hashes[5], exception.what());
+    const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "D3D12: recompiling VS {:016x} PS {:016x} failed: {}", key.unique_hashes[1],
               key.unique_hashes[5], exception.what());
     return nullptr;
 } catch (const std::exception& exception) {
+    BUG_TRACK_KEY(ShaderCompile, key.unique_hashes[1] ^ std::rotl(key.unique_hashes[5], 1),
+                  "building the pipeline for VS {:016x} PS {:016x} failed: {}",
+                  key.unique_hashes[1], key.unique_hashes[5], exception.what());
+    const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "D3D12: building the pipeline for VS {:016x} PS {:016x} failed: {}",
               key.unique_hashes[1], key.unique_hashes[5], exception.what());
     return nullptr;
@@ -751,10 +771,16 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
                                              program.info, layout);
 
 } catch (const Shader::Exception& exception) {
+    BUG_TRACK_KEY(ShaderCompile, key.unique_hash, "recompiling compute {:016x} failed: {}",
+                  key.unique_hash, exception.what());
+    const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "D3D12: recompiling compute {:016x} failed: {}", key.unique_hash,
               exception.what());
     return nullptr;
 } catch (const std::exception& exception) {
+    BUG_TRACK_KEY(ShaderCompile, key.unique_hash, "building compute pipeline {:016x} failed: {}",
+                  key.unique_hash, exception.what());
+    const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "D3D12: building compute pipeline {:016x} failed: {}", key.unique_hash,
               exception.what());
     return nullptr;

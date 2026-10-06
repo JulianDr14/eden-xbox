@@ -7,6 +7,7 @@
 
 #include <fmt/format.h>
 
+#include "common/bug_tracker.h"
 #include "common/cityhash.h"
 #include "common/logging.h"
 #include "video_core/perf_counters.h"
@@ -232,7 +233,11 @@ void GuestDescriptorQueue::AddStorageBuffer(ID3D12Resource* resource, u64 offset
     }
     // Raw views address 32-bit words from a 16-byte aligned offset.
     if (resource && offset % D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT != 0) {
+        BUG_TRACK(UnsupportedState, "storage buffer at an offset not aligned to 16 bytes ({}) bound "
+                                    "as null",
+                  offset);
         if (!logged_unaligned) {
+            const Common::BugTracker::TapMute bug_tracker_mute;
             LOG_WARNING(Render, "D3D12: storage buffer at unaligned offset {} bound as null",
                         offset);
             logged_unaligned = true;
@@ -277,7 +282,11 @@ void GuestDescriptorQueue::AddTexelBuffer(ID3D12Resource* resource, u64 offset, 
         resource = nullptr;
     }
     if (resource && offset % element_size != 0) {
+        BUG_TRACK(UnsupportedState, "texel buffer at an offset not aligned to its element ({} % {}) "
+                                    "bound as null",
+                  offset, element_size);
         if (!logged_unaligned) {
+            const Common::BugTracker::TapMute bug_tracker_mute;
             LOG_WARNING(Render, "D3D12: texel buffer at unaligned offset {} bound as null", offset);
             logged_unaligned = true;
         }

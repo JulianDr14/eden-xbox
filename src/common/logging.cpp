@@ -423,7 +423,37 @@ void SetColorConsoleBackendEnabled(bool enabled) {
         logging_instance->color_console_backend.enabled = enabled;
 }
 
+namespace {
+std::atomic<TapSeen> tap_seen{nullptr};
+std::atomic<TapRecord> tap_record{nullptr};
+} // Anonymous namespace
+
+void SetTap(TapSeen seen, TapRecord record) noexcept {
+    tap_seen.store(nullptr, std::memory_order_release);
+    tap_record.store(record, std::memory_order_release);
+    tap_seen.store(seen, std::memory_order_release);
+}
+
 void FmtLogMessageImpl(Class log_class, Level log_level, const char* filename, unsigned int line_num, const char* function, fmt::string_view format, const fmt::format_args& args) {
+    // The bug tracker sees warnings even when the filter hides them. A known call site costs a table
+    // lookup; only a new one formats its message here.
+    if (log_level >= Level::Warning) {
+        if (const TapSeen seen = tap_seen.load(std::memory_order_acquire);
+            seen != nullptr && seen(log_class, log_level, filename, line_num)) {
+            if (const TapRecord record = tap_record.load(std::memory_order_acquire)) {
+                char tap_buffer[480];
+                try {
+                    const auto tap_result =
+                        fmt::vformat_to_n(tap_buffer, sizeof(tap_buffer), format, args);
+                    record(TapEntry{log_class, log_level, filename, line_num, function,
+                                    GetLogClassName(log_class), GetLevelName(log_level),
+                                    std::string_view(tap_buffer, (std::min)(tap_result.size,
+                                                                            sizeof(tap_buffer)))});
+                } catch (...) {
+                }
+            }
+        }
+    }
     if (logging_instance && logging_instance->filter.CheckMessage(log_class, log_level)) {
         auto const flush = ::Settings::values.log_flush_line.GetValue();
         char buffer[BUFSIZ];

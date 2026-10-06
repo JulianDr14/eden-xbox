@@ -51,6 +51,10 @@ void AssertFailSoftImpl();
 
 /// Logs `what` ("file:line: assert condition") and applies the soft-failure policy.
 EDEN_ASSERT_COLD void AssertFailedAt(const char* what);
+/// Bug tracker hook: receives each failed ASSERT/UNIMPLEMENTED/UNREACHABLE `what` string (a literal,
+/// so its address identifies the site) before it is logged.
+using AssertHook = void (*)(const char* what) noexcept;
+void SetAssertHook(AssertHook hook) noexcept;
 /// Logs `where` ("file:line") as unreachable code and aborts.
 EDEN_ASSERT_COLD_NORETURN void UnreachableAt(const char* where);
 
@@ -82,11 +86,22 @@ EDEN_ASSERT_COLD_NORETURN void UnreachableAt(const char* where);
     } while (0)
 #endif
 
+// As ASSERT_MSG, but logged as "unimplemented" so the bug tracker can tell missing features from
+// broken invariants.
+#define EDEN_UNIMPLEMENTED_UNLESS_MSG(_a_, _fmt_, ...)                                             \
+    (EDEN_ASSERT_PASSES(_a_) ? void(0)                                                             \
+                             : [](auto... assert_args) EDEN_ASSERT_COLD {                          \
+                                   LOG_CRITICAL(Debug, __FILE__ ": unimplemented " _fmt_,          \
+                                                assert_args...);                                   \
+                                   AssertFailSoftImpl();                                           \
+                               }(__VA_ARGS__))
+
 #define UNIMPLEMENTED() ASSERT(false && "Unimplemented!")
-#define UNIMPLEMENTED_MSG(...) EDEN_ASSERT_EXPAND(ASSERT_MSG(false, __VA_ARGS__))
+#define UNIMPLEMENTED_MSG(...) EDEN_ASSERT_EXPAND(EDEN_UNIMPLEMENTED_UNLESS_MSG(false, __VA_ARGS__))
 
 #define UNIMPLEMENTED_IF(cond) ASSERT((!(cond)) && "Unimplemented!")
-#define UNIMPLEMENTED_IF_MSG(cond, ...) EDEN_ASSERT_EXPAND(ASSERT_MSG(!(cond), __VA_ARGS__))
+#define UNIMPLEMENTED_IF_MSG(cond, ...)                                                            \
+    EDEN_ASSERT_EXPAND(EDEN_UNIMPLEMENTED_UNLESS_MSG(!(cond), __VA_ARGS__))
 
 // If the assert is ignored, execute _b_
 #define ASSERT_OR_EXECUTE_MSG(_a_, _b_, ...)                                                       \

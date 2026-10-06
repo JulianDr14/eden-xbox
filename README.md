@@ -209,6 +209,55 @@ Guest memory is handled separately: it is reserved up front and committed only w
 touches it, so a game that maps a large heap does not use real memory for the parts it never
 writes.
 
+### The bug tracker
+
+**The problem.** The first run of Mario Strikers: Battle League turned up a series of bugs. About
+thirty pipelines were rejected for sampling integer textures, geometry shaders wrote to streams,
+the GPU hung, an nvmap assert fired and the movie player aborted. Each had to be dug out of
+`eden_log.txt`. That was hard for three reasons:
+- Unsupported features are reported only once per process, or not at all (unsupported texture
+  formats, for example).
+- Lost draws are never counted.
+- Every `UNIMPLEMENTED` ends up mixed into the general log.
+
+**What this fork does.** The tracker deduplicates and counts these bugs and writes them to two
+files of their own in `LocalState\eden\log\`:
+- `eden_graphics_bugs.log` holds one line per bug the first time it appears. Each line gives the
+  time, frame, category, source location and context (shader hashes, format, HRESULT). A table
+  with the counts follows at exit.
+- `eden_graphics_bugs.json` is the same summary for scripts. For each bug it lists hits, first and
+  last frame, the first message, and per-detail counts (one per format, shader pair or HRESULT).
+
+It covers:
+- the renderer: dropped draws and dispatches, rejected pipelines, shader recompilation and DXIL
+  failures, ignored state, formats with no DXGI equivalent, skipped copies and blits, failed API
+  calls, device removal, and NaN/Inf in trace mode;
+- the GPU engines, nvdrv and nvmap;
+- guest panics;
+- every `UNIMPLEMENTED`, `ASSERT`, `UNREACHABLE` and logged stub in the emulator, at its real
+  source location.
+
+Warnings reach the tracker even when `log_filter` hides them. `bug_tracker=0` in `boot.cfg`
+turns the tracker off. To get the files off a console, use the Device Portal file explorer
+(LocalAppData → the package → LocalState → eden → log).
+
+**Why it is built this way.**
+- **Close to free.** Each call site owns its counters, held in static storage. A repeated hit of a
+  known bug costs a few relaxed loads and stores: no locked instruction, no call, no allocation, and
+  the message arguments are not evaluated. Measured: about 1 ns per hit, and 0.3 ns when the
+  tracker is off.
+- **Messages are formatted once per bug.** That happens in a cold, out-of-line function, which hands
+  the message to a bounded lock-free queue and never blocks.
+- **No file I/O on emulator threads.** A writer thread at the lowest priority appends the lines
+  about once a second. It rewrites the JSON at most every ten seconds, and only when a count
+  changed. A device removal, guest panic or game exit flushes at once.
+- **Crash safe.** The crash handlers append the lines still queued, using plain C stdio without
+  locks.
+- **Reported once.** A log that sits next to a tracked site is muted for the tracker, so the same
+  bug does not appear twice.
+- **Tested in isolation.** `tools/xbox/tests/bug-tracker.cpp` covers deduplication, concurrency, the
+  queue, classification, the files end to end, and the cost.
+
 ## Running it on a console
 
 Requirements: an Xbox Series X|S in Developer Mode, the package you built (see

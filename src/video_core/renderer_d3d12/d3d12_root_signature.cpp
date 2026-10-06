@@ -10,6 +10,7 @@
 #include <fmt/format.h>
 #include <spirv_to_dxil.h>
 
+#include "common/bug_tracker.h"
 #include "common/cityhash.h"
 #include "common/logging.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
@@ -71,6 +72,10 @@ void AddStage(const Shader::Info& info, u32& binding, TableRanges& ranges) {
     }
     for (const auto& desc : info.image_descriptors) {
         if (desc.count != 1) {
+            BUG_TRACK_KEY(UnsupportedState, desc.count,
+                          "storage image array of {} elements: only the first is bound",
+                          desc.count);
+            const Common::BugTracker::TapMute bug_tracker_mute;
             LOG_WARNING(Render, "D3D12: image array of {} elements; only the first is bound",
                         desc.count);
         }
