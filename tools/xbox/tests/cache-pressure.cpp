@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
+// The checks must run in any configuration: an NDEBUG build would otherwise pass vacuously.
+#undef NDEBUG
 #include <cassert>
 #include <limits>
 #include <iostream>

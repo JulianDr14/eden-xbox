@@ -21,6 +21,7 @@
 #include "video_core/renderer_d3d12/d3d12_compute_pipeline.h"
 #include "video_core/renderer_d3d12/d3d12_graphics_pipeline.h"
 #include "video_core/renderer_d3d12/d3d12_linked_shader_cache.h"
+#include "video_core/renderer_d3d12/d3d12_memory_guard.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/shader_cache.h"
@@ -64,10 +65,17 @@ public:
     ~PipelineCache();
 
     void GuardMemory(const CacheMemorySnapshot& snapshot) {
-        // Shrink this optional cache once per game; no cache mutex is acquired on normal frames.
-        if (!memory_guard_trimmed && snapshot.app_limit && snapshot.AppFree() <= 128ULL * 1024 * 1024) {
+        // Optional cache: emptied when headroom is low, given back only after sustained headroom
+        // (OptionalCacheGate). The cache mutex is taken only on those two transitions.
+        switch (linked_shaders_gate.Update(snapshot.app_used, snapshot.app_limit)) {
+        case OptionalCacheGate::Action::Trim:
             linked_shaders.SetBudget(0);
-            memory_guard_trimmed = true;
+            break;
+        case OptionalCacheGate::Action::Restore:
+            linked_shaders.SetBudget(decltype(linked_shaders)::DEFAULT_BUDGET);
+            break;
+        case OptionalCacheGate::Action::None:
+            break;
         }
     }
 
@@ -125,7 +133,7 @@ private:
     std::filesystem::path pipeline_cache_filename;
 
     LinkedShaderCache<GraphicsPipeline::DxilStages> linked_shaders;
-    bool memory_guard_trimmed{};
+    OptionalCacheGate linked_shaders_gate;
 
     // Last, so they are joined before the pipelines they build are destroyed.
     Common::ThreadWorker workers;

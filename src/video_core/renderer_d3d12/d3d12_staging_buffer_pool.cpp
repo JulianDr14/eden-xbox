@@ -59,9 +59,13 @@ ComPtr<ID3D12Resource> CreateMappedBuffer(ID3D12Device* device, u64 size,
     ComPtr<ID3D12Resource> buffer;
     VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
                                        VideoCore::Perf::Counter::ResourcesCreated};
-    ThrowIfFailed(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
-                                                  nullptr, IID_PPV_ARGS(&buffer)),
-                  "CreateCommittedResource (staging)");
+    const HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
+                                                       nullptr, IID_PPV_ARGS(&buffer));
+    if (hr == E_OUTOFMEMORY) {
+        throw StagingOutOfMemory(
+            fmt::format("D3D12: out of memory creating a {} byte staging buffer", size));
+    }
+    ThrowIfFailed(hr, "CreateCommittedResource (staging)");
     CheckRemovedAfter(device, [&] {
         return fmt::format("creating a {} byte staging buffer (heap {})", desc.Width,
                            static_cast<u32>(heap_type));
@@ -100,7 +104,7 @@ StagingBufferRef StagingBufferPool::Request(size_t size, MemoryUsage usage, bool
         pending_upload_bytes += size;
     }
     if (!deferred && usage == MemoryUsage::Upload && size <= MAX_STREAM_REQUEST &&
-        stream_buffer && !stream_retiring && size <= stream_buffer_size) {
+        stream_buffer && !ring_guard.Retiring() && size <= stream_buffer_size) {
         return GetStreamBuffer(size);
     }
     return GetStagingBuffer(size, usage, deferred);
@@ -124,61 +128,52 @@ void StagingBufferPool::TickFrame() {
 }
 
 bool StagingBufferPool::GuardMemory(const CacheMemorySnapshot& snapshot) {
-    bool released_ring = false;
-    if (ring_retry_frames) {
-        --ring_retry_frames;
-    }
-    const auto decision = memory_guard.Update(snapshot.app_used, snapshot.app_limit);
-    if (decision.stream_bytes != stream_target) {
+    headroom.Measured(snapshot.app_used, snapshot.app_limit);
+    const auto plan = ring_guard.BeginFrame(snapshot.app_used, snapshot.app_limit,
+                                            stream_buffer ? stream_buffer_size : 0);
+    if (plan.target != plan.previous_target) {
         LOG_INFO(Render, "D3D12: memory guard headroom={} KiB, staging target {} -> {} MiB",
-                 snapshot.AppFree() / 1024, stream_target / 1_MiB,
-                 decision.stream_bytes / 1_MiB);
-        stream_target = decision.stream_bytes;
-        stream_retiring = stream_buffer && stream_target != stream_buffer_size;
+                 snapshot.AppFree() / 1024, plan.previous_target / 1_MiB, plan.target / 1_MiB);
     }
-    // Only the last-resort branch waits. Ordinary reclamation never flushes or waits for the GPU.
-    // Stop issuing ring references before retiring it, including references to unsubmitted work.
-    if (decision.emergency && stream_buffer && !emergency_finished) {
+    // Only the last-resort branch waits; ordinary reclamation never flushes or waits for the GPU.
+    // Retiring() already stops new ring references, including ones for unsubmitted work.
+    if (plan.finish) {
         scheduler.Finish();
-        emergency_finished = true;
     }
-    if (!decision.emergency) {
-        emergency_finished = false;
-    }
-    if (stream_retiring &&
+    bool released_ring = false;
+    if (ring_guard.Retiring() &&
         *std::max_element(sync_ticks.begin(), sync_ticks.end()) <= scheduler.KnownGpuTick()) {
         const u64 released = stream_buffer_size;
         stream_buffer.Reset();
-        released_ring = true;
         stream_pointer = {};
         stream_buffer_size = region_size = iterator = 0;
         sync_ticks.fill(0);
-        stream_retiring = false;
+        ring_guard.OnRetired();
+        released_ring = true;
         LOG_INFO(Render, "D3D12: memory guard retired staging ring ({} MiB released)",
                  released / 1_MiB);
     }
-    // Never overlap old/new rings, or allocate a replacement on the emergency path. Freed bytes
-    // may still be reflected in the OS snapshot until the next frame, so retry without forcing GC.
-    if (!stream_buffer && stream_target && !ring_retry_frames && snapshot.app_limit &&
-        snapshot.AppFree() >= stream_target + 64_MiB) {
+    // A ring released this frame is not in the snapshot yet, so its replacement waits a frame.
+    if (const u64 wanted = ring_guard.WantedRing(stream_buffer ? stream_buffer_size : 0,
+                                                 snapshot.app_used, snapshot.app_limit)) {
         try {
-            stream_buffer = CreateMappedBuffer(device.Get(), stream_target,
-                                                D3D12_HEAP_TYPE_UPLOAD, stream_pointer);
-            stream_buffer_size = stream_target;
-            region_size = stream_target / NUM_SYNCS;
+            stream_buffer = CreateMappedBuffer(device.Get(), wanted, D3D12_HEAP_TYPE_UPLOAD,
+                                               stream_pointer);
+            stream_buffer_size = wanted;
+            region_size = wanted / NUM_SYNCS;
             logged_stream_use = false;
-            LOG_INFO(Render, "D3D12: memory guard staging restored at {} MiB",
-                     stream_target / 1_MiB);
+            headroom.Created(wanted);
+            LOG_INFO(Render, "D3D12: memory guard staging ring at {} MiB", wanted / 1_MiB);
         } catch (const std::exception& e) {
-            // Dedicated uploads remain available; avoid repeatedly attempting optional growth.
-            ring_retry_frames = 120;
+            // Dedicated uploads remain available; back off instead of retrying every frame.
+            ring_guard.OnAllocationFailed();
             LOG_WARNING(Render, "D3D12: memory guard ring allocation deferred: {}", e.what());
         }
     }
-    if (decision.trim) {
-        // Bounded sweep: at most 16 entries in each of four buckets per frame. ReleaseLevel also
-        // checks fence completion and pinned ownership. It does not allocate scratch containers.
-        for (unsigned i = 0; i < (decision.emergency ? NUM_LEVELS : 4); ++i) {
+    if (plan.trim) {
+        // Bounded sweep: at most 16 entries in each of four buckets per frame (every bucket in an
+        // emergency). ReleaseLevel checks fence completion and pinned ownership, allocating nothing.
+        for (unsigned i = 0; i < (plan.emergency ? NUM_LEVELS : 4); ++i) {
             const auto level = NUM_LEVELS - 1 - guard_trim_cursor++ % NUM_LEVELS;
             ReleaseLevel(upload_cache, level);
             ReleaseLevel(download_cache, level);
@@ -236,6 +231,7 @@ StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
         .usage = MemoryUsage::Upload,
         .log2_level{},
         .index{},
+        .capacity = size,
     };
 }
 
@@ -264,8 +260,9 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
         throw std::length_error("D3D12: staging request is too large");
     }
     StagingBuffers& cache_level = GetCache(usage)[log2];
-    const auto is_free = [this](const StagingBuffer& entry) {
-        return !entry.deferred && scheduler.IsFree(entry.tick);
+    // A bucket holds up to sixteen sizes (DedicatedStagingSize): reuse only one large enough.
+    const auto is_free = [this, size](const StagingBuffer& entry) {
+        return !entry.deferred && entry.mapped_span.size() >= size && scheduler.IsFree(entry.tick);
     };
     auto& entries = cache_level.entries;
     const auto hint_it = entries.begin() + cache_level.iterate_index;
@@ -288,13 +285,33 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     if (log2 >= NUM_LEVELS) {
         throw std::length_error("D3D12: staging request is too large");
     }
+    const u64 bytes = DedicatedStagingSize(size);
+    if (headroom.NeedsMeasure(bytes)) {
+        MeasureHeadroom();
+    }
+    if (!headroom.Fits(bytes)) {
+        if (const auto ref = RelieveMemoryPressure(size, usage, deferred, false)) {
+            return *ref;
+        }
+    }
     const D3D12_HEAP_TYPE heap_type =
         usage == MemoryUsage::Download ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_UPLOAD;
     std::span<u8> mapped;
-    ComPtr<ID3D12Resource> buffer = CreateMappedBuffer(device.Get(), 1ULL << log2, heap_type,
-                                                       mapped);
+    ComPtr<ID3D12Resource> buffer;
+    try {
+        buffer = CreateMappedBuffer(device.Get(), bytes, heap_type, mapped);
+    } catch (const StagingOutOfMemory& e) {
+        // The commit limit refused it. Crossing the limit is what the platform punishes, so give
+        // back what submitted work no longer needs and try exactly once more.
+        LOG_WARNING(Render, "D3D12: {}; reclaiming and retrying", e.what());
+        if (const auto ref = RelieveMemoryPressure(size, usage, deferred, true)) {
+            return *ref;
+        }
+        buffer = CreateMappedBuffer(device.Get(), bytes, heap_type, mapped);
+    }
+    headroom.Created(bytes);
     VideoCore::Perf::Add(VideoCore::Perf::Counter::StagingDedicated, 1);
-    VideoCore::Perf::Add(VideoCore::Perf::Counter::StagingDedicatedBytes, 1ULL << log2);
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::StagingDedicatedBytes, bytes);
     StagingBuffer& entry = GetCache(usage)[log2].entries.emplace_back(StagingBuffer{
         .buffer = std::move(buffer),
         .mapped_span = mapped,
@@ -308,11 +325,45 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     // itself then slowed the frame. Large ones and the first few still are.
     constexpr u64 LOGGED_SIZE = 1_MiB;
     constexpr u64 LOGGED_FIRST = 32;
-    if ((1ULL << log2) >= LOGGED_SIZE || unique_ids <= LOGGED_FIRST) {
+    if (bytes >= LOGGED_SIZE || unique_ids <= LOGGED_FIRST) {
         LOG_INFO(Render, "D3D12: created dedicated staging {} buffer ({} bytes, request {} bytes)",
-                 usage == MemoryUsage::Download ? "readback" : "upload", 1ULL << log2, size);
+                 usage == MemoryUsage::Download ? "readback" : "upload", bytes, size);
     }
     return entry.Ref();
+}
+
+std::optional<StagingBufferRef> StagingBufferPool::RelieveMemoryPressure(size_t size,
+                                                                         MemoryUsage usage,
+                                                                         bool deferred,
+                                                                         bool allocation_failed) {
+    // Only this usage's cache: the other may belong to a thread holding the other cache's mutex.
+    StagingBuffersCache& cache = GetCache(usage);
+    ReleaseAllRetired(cache);
+    // Wait only on submitted work, so a draw being recorded is never split, and proactively once
+    // per tick: under sustained pressure each command list stalls at most once, not per allocation.
+    // A refused allocation always reclaims (a repeated wait on a passed tick returns at once).
+    const u64 current = scheduler.CurrentTick();
+    const u64 submitted = current > 0 ? current - 1 : 0;
+    if (scheduler.IsRecordingThread() && (allocation_failed || submitted > pressure_wait_tick)) {
+        pressure_wait_tick = submitted;
+        if (allocation_failed || !scheduler.IsFree(submitted)) {
+            scheduler.Wait(submitted);
+            VideoCore::Perf::Add(VideoCore::Perf::Counter::StagingStreamWaits, 1);
+        }
+        // Deferred releases (textures, buffers) return their memory once their tick has passed.
+        scheduler.CollectGarbage();
+        if (auto ref = TryGetReservedBuffer(size, usage, deferred)) {
+            return ref;
+        }
+        ReleaseAllRetired(cache);
+    }
+    MeasureHeadroom();
+    return std::nullopt;
+}
+
+void StagingBufferPool::MeasureHeadroom() {
+    const CacheMemorySnapshot snapshot = device.QueryCacheMemoryPressure();
+    headroom.Measured(snapshot.app_used, snapshot.app_limit);
 }
 
 u64 StagingBufferPool::PendingUploadBytes() const noexcept {
@@ -323,7 +374,8 @@ StagingBufferPool::StagingBuffersCache& StagingBufferPool::GetCache(MemoryUsage 
     return usage == MemoryUsage::Download ? download_cache : upload_cache;
 }
 
-void StagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2) {
+void StagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2,
+                                     size_t max_checks) {
     auto& staging = cache[log2];
     if (staging.entries.empty()) {
         return;
@@ -332,8 +384,16 @@ void StagingBufferPool::ReleaseLevel(StagingBuffersCache& cache, size_t log2) {
     if (ReclaimRetiredStaging(staging.entries, staging.delete_index,
                              [completed](const StagingBuffer& entry) {
                                  return !entry.deferred && entry.tick <= completed;
-                             })) {
+                             },
+                             max_checks)) {
         staging.iterate_index = 0;
+    }
+}
+
+void StagingBufferPool::ReleaseAllRetired(StagingBuffersCache& cache) {
+    for (size_t level = 0; level < NUM_LEVELS; ++level) {
+        cache[level].delete_index = 0;
+        ReleaseLevel(cache, level, std::numeric_limits<size_t>::max());
     }
 }
 

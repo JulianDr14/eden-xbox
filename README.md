@@ -154,38 +154,56 @@ ever read back from disk.
 ### The memory guard
 
 **The problem.** In Game mode the whole app gets a hard limit of 5120 MiB, and on the Series the
-GPU shares that same memory. A PC emulator assumes it can grow its caches while there is room; on
-the console, crossing the limit means the system ends the app with no warning. A fixed cache size
+GPU shares that same memory. Past the limit, the system refuses new commits
+(`CreateCommittedResource` returns `E_OUTOFMEMORY`). An app left over the limit is suspended after
+two seconds. A PC emulator assumes it can grow its caches while there is room. A fixed cache size
 does not work either: what fits in a 2D game is too much in an open world.
 
 **What this fork does.** Once per frame the GPU thread measures two things: the app's commit
-against its limit (`Windows.System.MemoryManager`) and the GPU's usage against its DXGI budget. It
-keeps a pressure level for each, takes the worse one, and every optional consumer of memory adapts
-to it:
+against its limit (`Windows.System.MemoryManager.AppMemoryUsage`, the same figure the system's
+Resource Manager enforces) and the GPU's usage against its DXGI budget. It keeps a pressure level
+for each, takes the worse one, and every optional consumer of memory adapts to it:
 
 | Free memory in the app | Level | What gives way |
 | --- | --- | --- |
 | More than 512 MiB | Normal | Nothing; textures are evicted at the usual pace |
 | 512 MiB or less | Pressure | Texture garbage collection runs more often and evicts more per frame |
 | 256 MiB or less | Critical | A second, deeper eviction pass |
-| 128 MiB or less | Emergency | Maximum eviction; the cache of linked shaders is dropped; upload ring cut to 128 MiB |
+| 128 MiB or less | Emergency | Maximum eviction; the linked shader cache is emptied; upload ring cut to 128 MiB |
 | 64 MiB or less | — | Upload ring cut to 64 MiB; eviction is no longer rate-limited |
-| 10 MiB or less | Last resort | The GPU is drained and the upload ring is released entirely |
+| 32 MiB or less | Last resort | The GPU is drained and the upload ring is released entirely |
 
 The GPU budget has its own thresholds at 80, 90 and 97 % of its size.
+
+Between two measurements, allocations are checked too. Each new upload or readback buffer is
+subtracted from the last measured headroom. When that estimate nears a 64 MiB reserve, the guard
+measures again. If the buffer would cross the reserve, it first gives memory back: retired buffers
+are freed, work already submitted to the GPU is waited for, and a buffer it releases is reused
+instead of creating a new one. If the system still refuses a commit (a staging buffer or a
+texture), the same reclamation runs and the allocation is retried once.
 
 **Why it is built this way.**
 - **Hysteresis.** Each level is entered at one threshold and left only at a higher one (for
   example, Emergency is entered at 128 MiB free and left at 192 MiB). The caches do not flap
   between sizes every frame.
-- **No stalls in the normal case.** Ordinary reclamation never waits for the GPU. Only the last
-  resort does, because there the alternative is being killed.
+- **No stalls in the normal case.** Ordinary reclamation never waits for the GPU. Near the reserve
+  it waits only for work already submitted, at most once per command list, and never splits a draw
+  being recorded. Only the last resort drains the GPU.
 - **Nothing in use is freed.** Buffers still referenced by submitted GPU work, and readbacks the
   emulator is waiting on, are kept until their fence passes.
-- **It recovers.** After 120 healthy frames with room to spare, the upload ring comes back. A failed
-  allocation is retried later instead of every frame.
+- **It recovers, one step at a time.** The upload ring grows back from 0 to 64, 128 and 256 MiB.
+  Each step needs its new size plus 256 MiB free for 120 frames in a row. If a shrink follows a
+  growth, the next growth needs twice as long (up to two minutes), so a game living near the limit
+  settles instead of oscillating. The linked shader cache comes back after ten seconds with
+  768 MiB free. A failed ring allocation is retried 120 frames later, not every frame.
+- **Little waste in upload buffers.** Large ones are sized in sixteenths of a power of two, so
+  they commit less than 12.5 % more than requested. A 17 MiB upload takes 18 MiB, where it used to
+  take 32.
 - **The texture cache never plans for the whole limit.** Its budget is the smaller of the DXGI
   budget and the app limit minus 1.5 GiB, which is left for the emulated Switch's own memory.
+- **Tested in isolation.** Every threshold and transition lives in
+  `src/video_core/renderer_d3d12/d3d12_memory_guard.h`, which has no device dependency, and is
+  checked by `tools/xbox/tests/memory-guard.cpp`.
 
 Guest memory is handled separately: it is reserved up front and committed only when the game
 touches it, so a game that maps a large heap does not use real memory for the parts it never

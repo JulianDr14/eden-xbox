@@ -213,10 +213,27 @@ TextureResourceAllocator::Resource TextureResourceAllocator::Create(
     }
 
     const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
-    ThrowIfFailed(device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                         initial_state, clear_value,
-                                                         IID_PPV_ARGS(&result.resource)),
-                  "Create committed texture fallback");
+    const auto create_committed = [&] {
+        return device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                      initial_state, clear_value,
+                                                      IID_PPV_ARGS(&result.resource));
+    };
+    HRESULT hr = create_committed();
+    if (hr == E_OUTOFMEMORY && scheduler.IsRecordingThread()) {
+        // The commit limit refused it. Return what submitted work no longer needs (deferred
+        // releases, then heaps they emptied) and try once more. Waiting only on submitted ticks
+        // never flushes the list being recorded.
+        LOG_WARNING(Render, "D3D12: out of memory creating a {} byte texture; reclaiming and "
+                            "retrying", info.SizeInBytes);
+        const u64 current = scheduler.CurrentTick();
+        if (current > 1) {
+            scheduler.Wait(current - 1);
+        }
+        scheduler.CollectGarbage();
+        TrimEmptyHeaps(true);
+        hr = create_committed();
+    }
+    ThrowIfFailed(hr, "Create committed texture fallback");
     {
         std::scoped_lock lock{state->mutex};
         ++state->committed_fallbacks;

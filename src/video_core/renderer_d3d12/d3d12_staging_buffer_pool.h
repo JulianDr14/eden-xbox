@@ -7,6 +7,7 @@
 #include <climits>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 #include "video_core/renderer_d3d12/d3d12_device.h"
@@ -28,6 +29,7 @@ struct StagingBufferRef {
     MemoryUsage usage;
     u32 log2_level;
     u64 index;
+    u64 capacity; ///< Bytes the buffer was created with (dedicated buffers); what it commits.
 };
 
 /// CPU-visible memory for uploads and downloads, a port of the Vulkan backend's pool:
@@ -57,8 +59,11 @@ public:
 
     void TickFrame();
 
-    /// Frame boundary only, with both texture and buffer cache mutexes held.
-    /// Reclaims retired resources; deferred readbacks remain pinned until their owner releases them.
+    /// Frame boundary only, with both texture and buffer cache mutexes held. Resizes the stream
+    /// ring to the app's headroom and reclaims retired resources; deferred readbacks remain pinned
+    /// until their owner releases them. Returns whether the ring was released.
+    /// The emergency branch drains the GPU with those mutexes held: safe because nothing the drain
+    /// runs (Scheduler::CollectGarbage retire callbacks) acquires a cache mutex. Keep it that way.
     [[nodiscard]] bool GuardMemory(const CacheMemorySnapshot& snapshot);
 
     /// Upload bytes requested for the command list being recorded (stream and dedicated).
@@ -82,6 +87,7 @@ private:
                 .usage = usage,
                 .log2_level = log2_level,
                 .index = index,
+                .capacity = mapped_span.size(),
             };
         }
     };
@@ -101,8 +107,16 @@ private:
     std::optional<StagingBufferRef> TryGetReservedBuffer(size_t size, MemoryUsage usage,
                                                          bool deferred);
     StagingBufferRef CreateStagingBuffer(size_t size, MemoryUsage usage, bool deferred);
+    /// Called before a dedicated buffer would cross HeadroomTracker::RESERVE, or after the OS
+    /// refused one. Frees every retired buffer of this kind and, on the recording thread, waits for
+    /// already-submitted work (at most once per tick; the list being recorded is never flushed) so
+    /// a busy buffer can be reused instead of growing. Returns a reusable buffer if one freed up.
+    std::optional<StagingBufferRef> RelieveMemoryPressure(size_t size, MemoryUsage usage,
+                                                          bool deferred, bool allocation_failed);
     StagingBuffersCache& GetCache(MemoryUsage usage);
-    void ReleaseLevel(StagingBuffersCache& cache, size_t log2);
+    void ReleaseLevel(StagingBuffersCache& cache, size_t log2, size_t max_checks = 16);
+    void ReleaseAllRetired(StagingBuffersCache& cache);
+    void MeasureHeadroom();
 
     size_t Region(size_t iter) const noexcept {
         return iter / region_size;
@@ -120,12 +134,10 @@ private:
     std::array<u64, NUM_SYNCS> sync_ticks{};
 
     bool logged_stream_use = false;
-    MemoryGuardPolicy memory_guard;
-    u64 stream_target = 256ULL * 1024 * 1024;
-    bool stream_retiring{};
-    bool emergency_finished{};
+    StagingRingController ring_guard;
+    HeadroomTracker headroom;
+    u64 pressure_wait_tick{};
     unsigned guard_trim_cursor{};
-    unsigned ring_retry_frames{};
 
     StagingBuffersCache upload_cache;
     StagingBuffersCache download_cache;
@@ -136,7 +148,13 @@ private:
     u64 pending_upload_bytes{};
 };
 
+/// The OS refused the commit (E_OUTOFMEMORY): recoverable by releasing memory and retrying.
+struct StagingOutOfMemory : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 /// Creates a buffer in heap_type (UPLOAD or READBACK) and maps it for its whole lifetime.
+/// Throws StagingOutOfMemory when the app's commit limit refuses it.
 ComPtr<ID3D12Resource> CreateMappedBuffer(ID3D12Device* device, u64 size,
                                           D3D12_HEAP_TYPE heap_type, std::span<u8>& mapped);
 

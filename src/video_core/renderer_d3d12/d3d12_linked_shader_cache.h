@@ -67,7 +67,9 @@ public:
         Outcome outcome;
     };
 
-    explicit LinkedShaderCache(size_t budget = 4 * 1024 * 1024, size_t entry_limit = 128)
+    static constexpr size_t DEFAULT_BUDGET = 4 * 1024 * 1024;
+
+    explicit LinkedShaderCache(size_t budget = DEFAULT_BUDGET, size_t entry_limit = 128)
         : budget_bytes{budget}, max_entries{entry_limit} {}
 
     template <class Build, class Measure>
