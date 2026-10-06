@@ -138,6 +138,16 @@ u64 Process::GetProgramId() const {
 
 void Process::Suspend(bool suspended) {
     if (m_process) {
+        // A process that is exiting cannot be paused (SetActivity refuses it), but SetActivity
+        // takes its locks first, while its threads are being terminated and need them. AM pauses
+        // an applet as it exits (ExitProcessAndReturn wakes AM through the state change), and
+        // that race woke a thread that had died meanwhile: an access violation on Strikers'
+        // start. The state is already Terminating by the time AM is woken, so skip it.
+        if (const auto state = m_process->GetState();
+            state == Kernel::KProcess::State::Terminating ||
+            state == Kernel::KProcess::State::Terminated) {
+            return;
+        }
         m_process->SetActivity(m_system.Kernel(), suspended ? Kernel::Svc::ProcessActivity::Paused : Kernel::Svc::ProcessActivity::Runnable);
     }
 }
