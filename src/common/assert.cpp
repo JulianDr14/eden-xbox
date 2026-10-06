@@ -3,6 +3,8 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+
 #include "common/assert.h"
 #include "common/common_funcs.h"
 #include "common/logging.h"
@@ -33,11 +35,24 @@ void AssertFatalImpl() {
     Common::Log::Stop();
     std::abort();
 }
+namespace {
+std::atomic<AssertHook> assert_hook{nullptr};
+} // Anonymous namespace
+
+void SetAssertHook(AssertHook hook) noexcept {
+    assert_hook.store(hook, std::memory_order_release);
+}
 void AssertFailedAt(const char* what) {
+    if (const AssertHook hook = assert_hook.load(std::memory_order_acquire)) {
+        hook(what);
+    }
     LOG_CRITICAL(Debug, "{}", what);
     AssertFailSoftImpl();
 }
 void UnreachableAt(const char* where) {
+    if (const AssertHook hook = assert_hook.load(std::memory_order_acquire)) {
+        hook(where);
+    }
     LOG_CRITICAL(Debug, "{}: unreachable", where);
     AssertFatalImpl();
 }

@@ -17,6 +17,7 @@
 #include <fmt/format.h>
 
 #include "common/alignment.h"
+#include "common/bug_tracker.h"
 #include "common/div_ceil.h"
 #include "common/logging.h"
 #include "common/settings.h"
@@ -297,11 +298,22 @@ void DecayIfDefault(ID3D12GraphicsCommandList* commands, ID3D12Resource* buffer,
 }
 
 template <typename... Args>
-void WarnOnce(bool& logged, fmt::format_string<Args...> format, Args&&... args) {
+void WarnOnceLog(bool& logged, fmt::format_string<Args...> format, Args&&... args) {
     if (!logged) {
+        const Common::BugTracker::TapMute bug_tracker_mute; // reported by the callers' BUG_TRACK
         LOG_WARNING(Render, "D3D12: {}", fmt::format(format, std::forward<Args>(args)...));
         logged = true;
     }
+}
+
+/// Logs once per process; the bug tracker counts every occurrence, keyed by the flag (one per kind
+/// of skipped copy, blit, view or transfer). The message is formatted only on the first one.
+template <typename... Args>
+void WarnOnce(bool& logged, fmt::format_string<Args...> format, Args&&... args) {
+    // fmt only reads its arguments, so forwarding them twice is safe.
+    BUG_TRACK_KEY(CopySkipped, reinterpret_cast<std::uintptr_t>(&logged), "{}",
+                  fmt::format(format, std::forward<Args>(args)...));
+    WarnOnceLog(logged, format, std::forward<Args>(args)...);
 }
 
 /// How the guest packs the texels of a two-plane depth-stencil format.
@@ -1304,8 +1316,12 @@ bool Image::CanTransfer() const {
         return false;
     }
     if (!format.supported) {
-        WarnOnce(logged_unsupported_transfer, "texture format {} has no DXGI mapping yet; its "
-                 "contents are not transferred", info.format);
+        BUG_TRACK_KEY(UnsupportedFormat, static_cast<u64>(info.format),
+                      "texture format {} has no DXGI mapping; its contents are not transferred "
+                      "({}x{})",
+                      info.format, info.size.width, info.size.height);
+        WarnOnceLog(logged_unsupported_transfer, "texture format {} has no DXGI mapping yet; its "
+                    "contents are not transferred", info.format);
         return false;
     }
     if (IsDepthStencilPlanar()) {

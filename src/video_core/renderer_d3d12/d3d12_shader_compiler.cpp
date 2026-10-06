@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -11,6 +12,8 @@
 #include <dxcapi.h>
 #include <fmt/format.h>
 
+#include "common/bug_tracker.h"
+#include "common/cityhash.h"
 #include "common/logging.h"
 #include "video_core/frame_trace.h"
 
@@ -57,6 +60,11 @@ private:
 };
 
 void LogTranslatorMessage(void*, const char* msg) {
+    // Validation errors (e.g. sampling an integer texture) name the failing instruction: each
+    // distinct message is its own bug.
+    BUG_TRACK_KEY(ShaderCompile, Common::CityHash64(msg, std::strlen(msg)), "spirv_to_dxil: {}",
+                  msg);
+    const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "spirv_to_dxil: {}", msg);
 }
 
@@ -106,6 +114,9 @@ ShaderCompiler::ShaderCompiler() {
              translate_pipeline ? " with stage linking" : "",
              lowers_integer_sampling ? " and integer sampling" : "", major, minor);
     if (translate_pipeline && !lowers_integer_sampling) {
+        BUG_TRACK(ShaderCompile, "spirv_to_dxil.dll predates integer texture sampling: shaders "
+                                 "sampling integer textures will fail (rebuild it)");
+        const Common::BugTracker::TapMute bug_tracker_mute;
         LOG_WARNING(Render, "D3D12: spirv_to_dxil.dll predates integer texture sampling; shaders "
                             "sampling integer textures will fail validation (rebuild it)");
     }

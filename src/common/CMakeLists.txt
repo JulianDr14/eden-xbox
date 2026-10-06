@@ -32,6 +32,8 @@ add_library(
     bit_field.h
     bit_util.h
     bounded_threadsafe_queue.h
+    bug_tracker.cpp
+    bug_tracker.h
     cityhash.cpp
     cityhash.h
     common_funcs.h

@@ -33,8 +33,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include "common/bug_tracker.h"
+#include "common/fs/path_util.h"
 #include "common/host_memory.h"
 #include "common/logging.h"
+#include "common/scm_rev.h"
 #include "common/settings.h"
 #include "common/windows/timer_resolution.h"
 #include "core/arm/cpu_profile.h"
@@ -203,6 +206,9 @@ struct BootConfig {
     std::string game;
     /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
     std::string log_filter;
+    /// Graphics bugs, unsupported features and every UNIMPLEMENTED/assert, deduplicated and
+    /// counted in LocalState/eden/log/eden_graphics_bugs.{log,json} ("bug_tracker=0" disables it).
+    bool bug_tracker{true};
     /// Null renderer even with a window, to tell GPU hangs from CPU ones.
     bool null_renderer{};
     /// Presented frame whose draws the D3D12 renderer logs; 0 keeps its default.
@@ -243,6 +249,12 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         Settings::values.log_filter = config.log_filter;
     }
     Common::Log::Initialize();
+    if (config.bug_tracker) {
+        // Idempotent: the library launches several games in one process.
+        Common::BugTracker::Install(Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir),
+                                  std::string(Common::g_build_fullname) + " (" +
+                                      Common::g_scm_desc + ")");
+    }
     if (config.rom_storage_checks)
         return RunRomStorageGate(config.rom_storage_checks == 2, WriteDiag) ? 0 : 15;
     if (config.file_manager_gate) return RunFileManagerGate(WriteDiag) ? 0 : 15;
@@ -358,6 +370,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         system.ShutdownMainProcess();
         if (config.gpu_failure_probe) WriteDiag("GPU recovery shutdown: HID unload");
         system.HIDCore().UnloadInputDevices();
+        Common::BugTracker::RequestFlush(); // this game's summary, before the next one starts
         WriteDiag("step: shutdown complete");
     };
 
@@ -396,6 +409,11 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         return 2;
     }
     ApplyGameLanguage(system);
+    if (config.bug_tracker) {
+        std::string title;
+        void(system.GetAppLoader().ReadTitle(title));
+        Common::BugTracker::SetTitle(system.GetApplicationProcessProgramID(), std::move(title));
+    }
 
     // Install the JIT-liveness observer BEFORE running any guest code: it watches every guest
     // svcOutputDebugString chunk for the sentinel and signals the wait below. Cheap no-op for any
@@ -915,6 +933,7 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* info) {
                       GetCurrentThreadId());
     }
     WriteDiagRaw(line);
+    Common::BugTracker::DrainForCrash(); // first occurrences still queued for eden_graphics_bugs.log
     Common::Log::Stop(); // flush eden_log.txt
     return EXCEPTION_CONTINUE_SEARCH; // let the OS finish the crash (and WER take its dump)
 }
@@ -945,6 +964,7 @@ void OnAbort(int) {
     WriteDiagRaw(FormatStack("[eden-uwp] abort stack:").c_str());
     // Without this the async logger loses whatever it had queued (the last lines before a
     // std::terminate on a worker thread, which never passes through AssertFatalImpl).
+    Common::BugTracker::DrainForCrash();
     Common::Log::Stop();
 }
 
@@ -1445,6 +1465,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             WriteDiag(config.gpu_validation
                                           ? "boot.cfg: D3D12 debug layer with GPU-based validation"
                                           : "boot.cfg: D3D12 debug layer");
+                        } else if (line == "bug_tracker=0") {
+                            config.bug_tracker = false;
+                            WriteDiag("boot.cfg: bug tracker off");
                         } else if (line.starts_with("log_filter=")) {
                             config.log_filter = line.substr(11);
                             WriteDiag("boot.cfg: log filter " + config.log_filter);

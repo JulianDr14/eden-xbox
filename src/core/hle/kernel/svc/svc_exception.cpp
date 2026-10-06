@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cctype>
+#include "common/bug_tracker.h"
 #include "core/core.h"
 #include "core/debugger/debugger.h"
 #include "core/hle/kernel/k_process.h"
@@ -51,16 +52,27 @@ void Break(Core::System& system, BreakReason reason, u64 info1, u64 info2) {
         has_dumped_buffer = true;
     };
     switch (break_reason) {
-    case BreakReason::Panic:
+    case BreakReason::Panic: {
+        // The guest gave up (e.g. an allocator abort): what the emulator did just before is the
+        // bug. Keyed by info1, usually the address of the guest's error buffer.
+        BUG_TRACK_KEY(Other, info1, "guest PANIC (svcBreak) info1={:#x} info2={:#x}", info1, info2);
+        Common::BugTracker::RequestFlush();
+        const Common::BugTracker::TapMute bug_tracker_mute;
         LOG_CRITICAL(Debug_Emulated, "Userspace PANIC! info1={:#016x}, info2={:#016x}", info1,
                      info2);
         handle_debug_buffer(info1, info2);
         break;
-    case BreakReason::Assert:
+    }
+    case BreakReason::Assert: {
+        BUG_TRACK_KEY(Other, info1, "guest assertion failed (svcBreak) info1={:#x} info2={:#x}",
+                      info1, info2);
+        Common::BugTracker::RequestFlush();
+        const Common::BugTracker::TapMute bug_tracker_mute;
         LOG_CRITICAL(Debug_Emulated, "Userspace Assertion failed! info1={:#016x}, info2={:#016x}",
                      info1, info2);
         handle_debug_buffer(info1, info2);
         break;
+    }
     case BreakReason::User:
         LOG_WARNING(Debug_Emulated, "Userspace Break! {:#016x} with size {:#016x}", info1, info2);
         handle_debug_buffer(info1, info2);

@@ -12,6 +12,7 @@
 
 #include <fmt/format.h>
 
+#include "common/bug_tracker.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
@@ -41,6 +42,11 @@ bool Query(ID3D12Device* device, D3D12_FEATURE feature, T& data) {
 
 void ThrowIfFailed(HRESULT hr, const char* what) {
     if (FAILED(hr)) {
+        // `what` is a literal: with the HRESULT it tells the failing call sites apart.
+        BUG_TRACK_KEY(ApiCallFailed,
+                      static_cast<u64>(static_cast<u32>(hr)) << 32 ^
+                          reinterpret_cast<std::uintptr_t>(what),
+                      "{} failed (HRESULT 0x{:08X})", what, static_cast<u32>(hr));
         throw std::runtime_error(
             fmt::format("D3D12: {} failed (HRESULT 0x{:08X})", what, static_cast<u32>(hr)));
     }
@@ -52,9 +58,16 @@ std::atomic_bool check_descriptors{false};
 
 void ReportRemovedAfter(ID3D12Device* device, HRESULT reason, const std::string& what) {
     if (!removal_tripped.exchange(true)) {
-        LOG_CRITICAL(Render, "D3D12: device removed (reason 0x{:08X}) right after {}",
-                     static_cast<u32>(reason), what);
+        BUG_TRACK_KEY(DeviceRemoved, static_cast<u32>(reason),
+                      "device removed (reason 0x{:08X}) right after {}", static_cast<u32>(reason),
+                      what);
+        {
+            const Common::BugTracker::TapMute bug_tracker_mute;
+            LOG_CRITICAL(Render, "D3D12: device removed (reason 0x{:08X}) right after {}",
+                         static_cast<u32>(reason), what);
+        }
         DumpDeviceDiagnostics(device);
+        Common::BugTracker::RequestFlush(); // the process may not survive the recovery
     }
 }
 } // namespace removal_tripwire
@@ -297,11 +310,18 @@ void Device::ReportDeviceRemoved() {
     if (removal_reported.test_and_set()) {
         return;
     }
-    LOG_CRITICAL(Render, "D3D12: device removed, reason 0x{:08X}",
-                 static_cast<u32>(device->GetDeviceRemovedReason()));
+    const HRESULT reason = device->GetDeviceRemovedReason();
+    BUG_TRACK_KEY(DeviceRemoved, static_cast<u32>(reason),
+                  "device removed, reason 0x{:08X} (DRED details in eden_log.txt with dred=1)",
+                  static_cast<u32>(reason));
+    {
+        const Common::BugTracker::TapMute bug_tracker_mute;
+        LOG_CRITICAL(Render, "D3D12: device removed, reason 0x{:08X}", static_cast<u32>(reason));
+    }
     LogDebugMessages();
 
     DumpDeviceDiagnostics(device.Get());
+    Common::BugTracker::RequestFlush();
 }
 
 void DumpDeviceDiagnostics(ID3D12Device* device) {
