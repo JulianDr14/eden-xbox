@@ -133,6 +133,14 @@ public:
     [[nodiscard]] bool SupportsView(DXGI_FORMAT format, D3D12_FORMAT_SUPPORT1 support1,
                                     D3D12_FORMAT_SUPPORT2 support2 = D3D12_FORMAT_SUPPORT2_NONE) const;
 
+    /// RTV (attachment < NUM_RT) or DSV (attachment == NUM_RT) of `count` layers from `first`,
+    /// counted from the attachment view's base, for a clear that names layers. Free it with
+    /// FreeLayerTarget once recorded. Null when the attachment cannot be viewed by layer.
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE LayerTarget(const Framebuffer& framebuffer,
+                                                          size_t attachment, u32 first,
+                                                          u32 count);
+    void FreeLayerTarget(D3D12_CPU_DESCRIPTOR_HANDLE handle, bool depth);
+
     /// RTV of no resource, bound in the render target slots a framebuffer leaves empty.
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE NullRenderTarget() const noexcept {
         return null_rtv;
@@ -141,6 +149,12 @@ public:
 private:
     void EnsureAstcRgbaScratch(u32 width, u32 height);
     void EnsureAstcBc3Scratch(u64 size);
+    /// A blit whose source and destination are the same image (a mip chain built level by level,
+    /// a copy between layers or regions): the source region goes through a scratch texture.
+    void BlitWithinImage(ImageView& dst, ImageView& src, const Region2D& dst_region,
+                         const Region2D& src_region, Tegra::Engines::Fermi2D::Filter filter);
+    void EnsureSelfBlitScratch(DXGI_FORMAT format, u32 width, u32 height);
+    void TransitionSelfBlitScratch(D3D12_RESOURCE_STATES next);
 
     const Device& device;
     Scheduler& scheduler;
@@ -167,6 +181,12 @@ private:
     u32 astc_rgba_width{};
     u32 astc_rgba_height{};
     u64 astc_bc3_size{};
+    /// Source copy for BlitWithinImage, kept for the next blit of the same family.
+    ComPtr<ID3D12Resource> self_blit_scratch;
+    D3D12_RESOURCE_STATES self_blit_state{D3D12_RESOURCE_STATE_COMMON};
+    DXGI_FORMAT self_blit_format{DXGI_FORMAT_UNKNOWN};
+    u32 self_blit_width{};
+    u32 self_blit_height{};
     /// MIN/MAX sampler reductions need tiled resources tier 2; the Xbox Series reports tier 1 and
     /// creating such a sampler there removes the device (DXGI_ERROR_INVALID_CALL).
     bool supports_min_max_filter{};
@@ -511,6 +531,16 @@ public:
     [[nodiscard]] VideoCommon::SubresourceBase ColorBase(size_t index) const noexcept {
         return index < NUM_RT ? color_bases[index] : VideoCommon::SubresourceBase{};
     }
+    /// Layers a render target's view covers, from ColorBase's layer.
+    [[nodiscard]] u32 ColorLayers(size_t index) const noexcept {
+        return index < NUM_RT ? color_layers[index] : 0;
+    }
+    /// Whether a render target's RTV is on the image's reinterpreted copy.
+    [[nodiscard]] bool ColorOnCopy(size_t index) const noexcept {
+        return index < NUM_RT && (copy_colors >> index & 1U) != 0;
+    }
+    [[nodiscard]] VideoCommon::SubresourceBase DepthBase() const noexcept { return depth_base; }
+    [[nodiscard]] u32 DepthLayers() const noexcept { return depth_layers; }
     /// Texture cache image of a render target / the depth buffer; null when absent (draw trace).
     [[nodiscard]] const Image* ColorImage(size_t index) const noexcept;
     [[nodiscard]] const Image* DepthImage() const noexcept;
@@ -530,7 +560,10 @@ private:
     std::array<ImageId, NUM_RT> color_images{};
     std::array<DXGI_FORMAT, NUM_RT> color_formats{};
     std::array<VideoCommon::SubresourceBase, NUM_RT> color_bases{};
+    std::array<u32, NUM_RT> color_layers{};
     ImageId depth_image{};
+    VideoCommon::SubresourceBase depth_base{};
+    u32 depth_layers{};
     DXGI_FORMAT depth_format{DXGI_FORMAT_UNKNOWN};
     u32 samples{1};
     SlotVector<Image>* images{};

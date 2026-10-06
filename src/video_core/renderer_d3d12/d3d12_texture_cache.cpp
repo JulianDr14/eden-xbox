@@ -2009,8 +2009,7 @@ void TextureCacheRuntime::BlitImage(Framebuffer*, ImageView& dst, ImageView& src
         return;
     }
     if (dst_image == src_image) {
-        // Whole-resource state tracking cannot hold a shader resource and a target at once.
-        WarnOnce(logged_self_blit, "blits within one image are not supported yet; skipped");
+        BlitWithinImage(dst, src, dst_region, src_region, filter);
         return;
     }
     if (dst_image->info.num_samples > 1 || src_image->info.num_samples > 1) {
@@ -2098,6 +2097,163 @@ void TextureCacheRuntime::BlitImage(Framebuffer*, ImageView& dst, ImageView& src
                            src.Handle(Shader::TextureType::Color2D), dst_region, src_region,
                            src_size);
 }
+void TextureCacheRuntime::BlitWithinImage(ImageView& dst, ImageView& src,
+                                          const Region2D& dst_region, const Region2D& src_region,
+                                          Tegra::Engines::Fermi2D::Filter filter) {
+    // Whole-resource state tracking cannot hold a shader resource and a target at once, and a
+    // copy cannot read and write one subresource; a scratch copy of the source region can.
+    Image& image = *src.SourceImage();
+    const PixelFormat image_format = image.info.format;
+    const bool color = VideoCore::Surface::GetFormatType(src.format) == SurfaceType::ColorTexture &&
+                       VideoCore::Surface::GetFormatType(dst.format) == SurfaceType::ColorTexture;
+    const FormatInfo src_format = Format(src.format);
+    if (!color || image.info.num_samples > 1 || image.info.type == ImageType::e3D ||
+        image.IsBcDecoded() || image.IsGpuDecoded() ||
+        VideoCore::Surface::DefaultBlockWidth(image_format) != 1 ||
+        VideoCore::Surface::DefaultBlockHeight(image_format) != 1 ||
+        TypelessFamily(src_format.srv) != TypelessFamily(image.ResourceFormat())) {
+        WarnOnce(logged_self_blit, "blit within one {} image ({} -> {}) skipped", image_format,
+                 src.format, dst.format);
+        return;
+    }
+    const s32 dst_width = dst_region.end.x - dst_region.start.x;
+    const s32 dst_height = dst_region.end.y - dst_region.start.y;
+    const s32 src_width = src_region.end.x - src_region.start.x;
+    const s32 src_height = src_region.end.y - src_region.start.y;
+    const bool copy = dst_width > 0 && dst_height > 0 && dst_width == src_width &&
+                      dst_height == src_height && src.format == dst.format;
+    if (!copy) {
+        if (!blit_helper || !blit_helper->IsAvailable()) {
+            WarnOnce(logged_no_blit_helper, "scaled blits need the shader path; skipped");
+            return;
+        }
+        if (VideoCore::Surface::IsPixelFormatInteger(src.format) ||
+            VideoCore::Surface::IsPixelFormatInteger(dst.format)) {
+            WarnOnce(logged_integer_blit, "scaled blits of integer formats ({} -> {}) skipped",
+                     src.format, dst.format);
+            return;
+        }
+        if (!dst.RenderTarget().ptr) {
+            WarnOnce(logged_blit_target, "blit target format {} cannot be rendered to; skipped",
+                     dst.format);
+            return;
+        }
+    }
+    // The source rectangle, flips undone, clamped to its level.
+    const s32 level = src.range.base.level;
+    const s32 level_width = static_cast<s32>(std::max(1U, image.info.size.width >> level));
+    const s32 level_height = static_cast<s32>(std::max(1U, image.info.size.height >> level));
+    const s32 left = std::clamp(std::min(src_region.start.x, src_region.end.x), 0, level_width);
+    const s32 top = std::clamp(std::min(src_region.start.y, src_region.end.y), 0, level_height);
+    const s32 right = std::clamp(std::max(src_region.start.x, src_region.end.x), 0, level_width);
+    const s32 bottom = std::clamp(std::max(src_region.start.y, src_region.end.y), 0, level_height);
+    if (right <= left || bottom <= top) {
+        return;
+    }
+    const u32 width = static_cast<u32>(right - left);
+    const u32 height = static_cast<u32>(bottom - top);
+    EnsureSelfBlitScratch(image.ResourceFormat(), width, height);
+    ID3D12GraphicsCommandList* const commands = scheduler.CommandList();
+    image.Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    TransitionSelfBlitScratch(D3D12_RESOURCE_STATE_COPY_DEST);
+    const D3D12_TEXTURE_COPY_LOCATION image_source{
+        .pResource = image.Handle(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        .SubresourceIndex = image.Subresource(level, src.range.base.layer)};
+    const D3D12_TEXTURE_COPY_LOCATION scratch{
+        .pResource = self_blit_scratch.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        .SubresourceIndex = 0};
+    const D3D12_BOX box{static_cast<u32>(left), static_cast<u32>(top), 0,
+                        static_cast<u32>(right), static_cast<u32>(bottom), 1};
+    commands->CopyTextureRegion(&scratch, 0, 0, 0, &image_source, &box);
+    if (copy) {
+        // An unscaled copy: exact for every format, integers included.
+        TransitionSelfBlitScratch(D3D12_RESOURCE_STATE_COPY_SOURCE);
+        image.Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+        const D3D12_TEXTURE_COPY_LOCATION target{
+            .pResource = image.Handle(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            .SubresourceIndex = image.Subresource(dst.range.base.level, dst.range.base.layer)};
+        const D3D12_BOX scratch_box{0, 0, 0, width, height, 1};
+        commands->CopyTextureRegion(&target, static_cast<u32>(dst_region.start.x),
+                                    static_cast<u32>(dst_region.start.y), 0, &scratch,
+                                    &scratch_box);
+        return;
+    }
+    TransitionSelfBlitScratch(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    const D3D12_CPU_DESCRIPTOR_HANDLE srv = view_descriptors.Allocate();
+    const D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{
+        .Format = src_format.srv,
+        .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
+        .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+        .Texture2D = {.MostDetailedMip = 0, .MipLevels = 1, .PlaneSlice = 0,
+                      .ResourceMinLODClamp = 0.0f},
+    };
+    device.Get()->CreateShaderResourceView(self_blit_scratch.Get(), &srv_desc, srv);
+    // Same orientation as the guest's region, moved to where the scratch holds it.
+    const Region2D scratch_region{
+        .start = {src_region.start.x - left, src_region.start.y - top},
+        .end = {src_region.end.x - left, src_region.end.y - top},
+    };
+    dst.PrepareRender();
+    const bool linear = filter == Tegra::Engines::Fermi2D::Filter::Bilinear;
+    blit_helper->BlitColor({dst.RenderTarget(), Format(dst.format).view, 1}, srv,
+                           linear ? blit_helper->LinearSampler() : blit_helper->NearestSampler(),
+                           dst_region, scratch_region, {self_blit_width, self_blit_height});
+    // The helper copies the descriptor into the shader-visible ring while recording.
+    view_descriptors.Free(srv);
+}
+
+void TextureCacheRuntime::EnsureSelfBlitScratch(DXGI_FORMAT format, u32 width, u32 height) {
+    if (self_blit_scratch && self_blit_format == format && self_blit_width >= width &&
+        self_blit_height >= height) {
+        return;
+    }
+    if (self_blit_scratch) {
+        if (self_blit_format == format) {
+            width = std::max(width, self_blit_width);
+            height = std::max(height, self_blit_height);
+        }
+        scheduler.DeferRelease(std::move(self_blit_scratch));
+    }
+    const D3D12_RESOURCE_DESC desc{
+        .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+        .Alignment = 0,
+        .Width = width,
+        .Height = height,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .Format = format,
+        .SampleDesc = {.Count = 1, .Quality = 0},
+        .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        .Flags = D3D12_RESOURCE_FLAG_NONE,
+    };
+    const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
+    ThrowIfFailed(device.Get()->CreateCommittedResource(
+                      &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                      IID_PPV_ARGS(&self_blit_scratch)),
+                  "Create self-blit scratch texture");
+    self_blit_state = D3D12_RESOURCE_STATE_COMMON;
+    self_blit_format = format;
+    self_blit_width = width;
+    self_blit_height = height;
+    LOG_INFO(Render, "D3D12: blits within one image go through a {}x{} scratch (DXGI {})", width,
+             height, static_cast<u32>(format));
+}
+
+void TextureCacheRuntime::TransitionSelfBlitScratch(D3D12_RESOURCE_STATES next) {
+    if (self_blit_state == next) {
+        return;
+    }
+    const D3D12_RESOURCE_BARRIER barrier{
+        .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        .Transition = {.pResource = self_blit_scratch.Get(),
+                       .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                       .StateBefore = self_blit_state,
+                       .StateAfter = next}};
+    scheduler.CommandList()->ResourceBarrier(1, &barrier);
+    self_blit_state = next;
+}
+
 void TextureCacheRuntime::AccelerateImageUpload(
     Image& image, const StagingBufferRef& map,
     std::span<const VideoCommon::SwizzleParameters> swizzles, u32, u32) {
@@ -3127,6 +3283,7 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
         }
         color_formats[index] = runtime.Format(view->format).view;
         color_bases[index] = view->range.base;
+        color_layers[index] = static_cast<u32>(view->range.extent.layers);
         images = view->slot_images ? view->slot_images : images;
         num_colors = static_cast<u32>(index) + 1;
         if (const Image* const image = view->SourceImage()) {
@@ -3155,6 +3312,8 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
         depth = depth_buffer->DepthStencil();
         depth_read_only = depth_buffer->DepthStencilReadOnly();
         depth_image = depth_buffer->image_id;
+        depth_base = depth_buffer->range.base;
+        depth_layers = static_cast<u32>(depth_buffer->range.extent.layers);
         depth_format = runtime.Format(depth_buffer->format).dsv;
         images = depth_buffer->slot_images ? depth_buffer->slot_images : images;
         has_stencil = VideoCore::Surface::GetFormatType(depth_buffer->format) ==
@@ -3192,6 +3351,61 @@ const Image* Framebuffer::ColorImage(size_t index) const noexcept {
 const Image* Framebuffer::DepthImage() const noexcept {
     if (!images || depth_image == ImageId{}) return nullptr;
     return &(*images)[depth_image];
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE TextureCacheRuntime::LayerTarget(const Framebuffer& framebuffer,
+                                                             size_t attachment, u32 first,
+                                                             u32 count) {
+    const bool depth = attachment == NUM_RT;
+    const Image* const image = depth ? framebuffer.DepthImage() : framebuffer.ColorImage(attachment);
+    if (!image || !image->Handle() || count == 0 || (!depth && framebuffer.ColorOnCopy(attachment))) {
+        return {};
+    }
+    const D3D12_RESOURCE_DESC desc = image->Handle()->GetDesc();
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+        return {};
+    }
+    const VideoCommon::SubresourceBase base =
+        depth ? framebuffer.DepthBase() : framebuffer.ColorBase(attachment);
+    const u32 layers = desc.DepthOrArraySize;
+    const u32 first_layer = static_cast<u32>(base.layer) + first;
+    if (first_layer >= layers) {
+        return {};
+    }
+    count = std::min(count, layers - first_layer);
+    const u32 level = static_cast<u32>(base.level);
+    const bool msaa = desc.SampleDesc.Count > 1;
+    if (depth) {
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsv_descriptors.Allocate();
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc{.Format = framebuffer.DepthFormat(),
+                                               .Flags = D3D12_DSV_FLAG_NONE};
+        if (msaa) {
+            dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
+            dsv_desc.Texture2DMSArray = {first_layer, count};
+        } else {
+            dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+            dsv_desc.Texture2DArray = {level, first_layer, count};
+        }
+        device.Get()->CreateDepthStencilView(image->Handle(), &dsv_desc, dsv);
+        return dsv;
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_descriptors.Allocate();
+    D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{.Format = framebuffer.ColorFormat(attachment)};
+    if (msaa) {
+        rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY;
+        rtv_desc.Texture2DMSArray = {first_layer, count};
+    } else {
+        rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+        rtv_desc.Texture2DArray = {level, first_layer, count, 0};
+    }
+    device.Get()->CreateRenderTargetView(image->Handle(), &rtv_desc, rtv);
+    return rtv;
+}
+
+void TextureCacheRuntime::FreeLayerTarget(D3D12_CPU_DESCRIPTOR_HANDLE handle, bool depth) {
+    if (handle.ptr) {
+        (depth ? dsv_descriptors : rtv_descriptors).Free(handle);
+    }
 }
 
 void TextureCacheRuntime::RunSelfTest() {

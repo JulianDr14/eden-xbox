@@ -763,13 +763,42 @@ void RasterizerD3D12::Clear(u32 layer_count) {
     texture_cache.UpdateRenderTargets(true);
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
     framebuffer->PrepareAttachments();
-    if (layer_count > 1 || regs.clear_surface.layer != 0) {
-        // The views cover every layer they were created with.
+    // As in Vulkan, the clear covers layers [layer, layer + layer_count) of the attachments. The
+    // framebuffer's views cover all their layers; a narrower clear gets views of its own, freed
+    // once recorded (RTVs and DSVs are read when the clear is recorded).
+    const u32 first_layer = regs.clear_surface.layer;
+    const u32 color_attachment = regs.clear_surface.RT;
+    D3D12_CPU_DESCRIPTOR_HANDLE color_target{};
+    D3D12_CPU_DESCRIPTOR_HANDLE depth_target = framebuffer->DepthTarget();
+    D3D12_CPU_DESCRIPTOR_HANDLE color_layers{};
+    D3D12_CPU_DESCRIPTOR_HANDLE depth_layers{};
+    SCOPE_EXIT {
+        texture_runtime.FreeLayerTarget(color_layers, false);
+        texture_runtime.FreeLayerTarget(depth_layers, true);
+    };
+    bool layers_lost = false;
+    if (use_color && framebuffer->HasColor(color_attachment)) {
+        color_target = framebuffer->ColorTargets()[color_attachment];
+        if (first_layer != 0 || layer_count != framebuffer->ColorLayers(color_attachment)) {
+            color_layers = texture_runtime.LayerTarget(*framebuffer, color_attachment,
+                                                       first_layer, layer_count);
+            color_target = color_layers.ptr ? color_layers : color_target;
+            layers_lost |= !color_layers.ptr;
+        }
+    }
+    if ((use_depth || use_stencil) && depth_target.ptr &&
+        (first_layer != 0 || layer_count != framebuffer->DepthLayers())) {
+        depth_layers = texture_runtime.LayerTarget(*framebuffer, VideoCommon::NUM_RT, first_layer,
+                                                   layer_count);
+        depth_target = depth_layers.ptr ? depth_layers : depth_target;
+        layers_lost |= !depth_layers.ptr;
+    }
+    if (layers_lost) {
         BUG_TRACK(CopySkipped, "layered clear (layer {}, {} layers) clears every layer of the view",
-                  regs.clear_surface.layer, layer_count);
+                  first_layer, layer_count);
         if (!logged_layer_clear) {
             const Common::BugTracker::TapMute bug_tracker_mute;
-            LOG_WARNING(Render, "D3D12: layered clears clear every layer of the view");
+            LOG_WARNING(Render, "D3D12: a layered clear cleared every layer of the view");
             logged_layer_clear = true;
         }
     }
@@ -798,8 +827,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
     }
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
 
-    const u32 color_attachment = regs.clear_surface.RT;
-    if (use_color && framebuffer->HasColor(color_attachment)) {
+    if (color_target.ptr) {
         const bool full_mask = regs.clear_surface.R && regs.clear_surface.G &&
                                regs.clear_surface.B && regs.clear_surface.A;
         using namespace VideoCore::Surface;
@@ -820,8 +848,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
                 const u8 mask = static_cast<u8>(regs.clear_surface.R | regs.clear_surface.G << 1 |
                                                 regs.clear_surface.B << 2 |
                                                 regs.clear_surface.A << 3);
-                blit_helper.ClearColor({framebuffer->ColorTargets()[color_attachment],
-                                        framebuffer->ColorFormat(color_attachment),
+                blit_helper.ClearColor({color_target, framebuffer->ColorFormat(color_attachment),
                                         framebuffer->Samples()},
                                        mask, regs.clear_color, rect);
                 InvalidateGraphicsState();
@@ -846,11 +873,10 @@ void RasterizerD3D12::Clear(u32 layer_count) {
                         (regs.clear_color[i] - 0.5f)));
                 }
             }
-            cmd->ClearRenderTargetView(framebuffer->ColorTargets()[color_attachment], color.data(),
-                                       1, &rect);
+            cmd->ClearRenderTargetView(color_target, color.data(), 1, &rect);
         }
     }
-    const D3D12_CPU_DESCRIPTOR_HANDLE depth = framebuffer->DepthTarget();
+    const D3D12_CPU_DESCRIPTOR_HANDLE depth = depth_target;
     if ((use_depth || use_stencil) && depth.ptr) {
         D3D12_CLEAR_FLAGS clear_flags{};
         if (use_depth) {
