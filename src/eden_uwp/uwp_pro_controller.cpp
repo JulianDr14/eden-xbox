@@ -163,7 +163,9 @@ winrt::fire_and_forget DiscoverPro(bool* busy) {
             if (!hid) continue;
             auto pro = std::make_shared<ProControllerReader>(hid);
             pro->Start();
-            devices.push_back({id, L"Nintendo Switch Pro Controller", false, nullptr, std::move(pro)});
+            ControllerDevice device{id, L"Nintendo Switch Pro Controller", false, nullptr, std::move(pro)};
+            device.nintendo = true;
+            devices.push_back(std::move(device));
         }
         auto& registry = ProRegistry();
         // Destroy unsubscribed devices outside the registry lock.
@@ -174,7 +176,23 @@ winrt::fire_and_forget DiscoverPro(bool* busy) {
 }
 ControllerDevice::operator bool() const { return pad || pro_ready; }
 ControllerReading ReadController(const ControllerDevice& device) {
-    if (device.pad) return {device.pad.GetCurrentReading(), false, false};
+    if (device.pad) {
+        ControllerReading reading{device.pad.GetCurrentReading(), false, false};
+        // Windows reports a Nintendo pad's face buttons by position, Xbox style; report them by
+        // letter, as the HID reader does, so both paths of the same pad agree.
+        if (device.nintendo) {
+            auto& buttons = reading.gamepad.Buttons;
+            const auto swap = [&buttons](Buttons a, Buttons b) {
+                const bool has_a = (buttons & a) == a, has_b = (buttons & b) == b;
+                buttons &= ~(a | b);
+                if (has_a) buttons |= b;
+                if (has_b) buttons |= a;
+            };
+            swap(Buttons::A, Buttons::B);
+            swap(Buttons::X, Buttons::Y);
+        }
+        return reading;
+    }
     return device.pro ? device.pro->Read() : ControllerReading{};
 }
 std::vector<ControllerDevice> ProControllers() {

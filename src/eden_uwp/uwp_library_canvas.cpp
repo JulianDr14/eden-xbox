@@ -162,6 +162,8 @@ public:
             Text(L"Tu mando", 658, 168, 34, 0xf4f7fa, 490, 55, true);
             Text(L"Jugador 1 · Ajustes para todos tus juegos", 658, 227, 21, 0x9ba9ba, 490);
             const unsigned offset = panel.xbox ? 0 : 1;
+            const auto active = SelectController(panel.devices, options.controller_id);
+            const bool nintendo = active && panel.devices[*active].nintendo;
             for (unsigned row = 0; row < 3 + offset; ++row) {
                 const float y = ControllerRowTop + row * ControllerRowHeight;
                 Round(648, y, 530, 56, 14, row == setting_row ? 0x304c4b : 0x151e2b);
@@ -175,7 +177,8 @@ public:
                 Text(device ? (options.controller_id.empty() ? L"Automatico · " : L"") +
                          ControllerLabel(panel.devices, options.controller_id) :
                      type ? std::wstring{ConsoleControllerStyleLabel(options.style)} :
-                     face ? (options.swap_face_buttons ? L"Por posicion" : L"Por letra") :
+                     face ? (nintendo ? L"Mando Nintendo: letra y posicion coinciden" :
+                            options.swap_face_buttons ? L"Por posicion" : L"Por letra") :
                          std::to_wstring(static_cast<int>(options.deadzone * 100)) + L"%",
                      669, y + 28, 18, 0x77e3bd, 460, 26);
             }

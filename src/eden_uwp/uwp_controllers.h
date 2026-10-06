@@ -24,6 +24,9 @@ struct ControllerDevice {
     winrt::Windows::Gaming::Input::Gamepad pad{nullptr};
     std::shared_ptr<ProControllerReader> pro;
     bool pro_ready{}; // Availability snapshot for UI diffing.
+    // Nintendo layout (A right, B bottom). ReadController reports its buttons by their printed
+    // letter whichever path reads it, so "by letter" and "by position" are the same on it.
+    bool nintendo{};
     explicit operator bool() const;
 };
 ControllerReading ReadController(const ControllerDevice& device);
