@@ -899,6 +899,8 @@ void WriteDiagRaw(const char* line, bool debugger_channel = true) {
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
+std::string FormatFaultStack(const CONTEXT& fault, const char* prefix);
+
 // Unhandled SEH (access violation, illegal instruction, breakpoint from a soft assert, ...) on any
 // thread. /EHsc catch(...) does not see these, which is why the boot worker's handlers stay silent.
 // Reports the faulting address as an RVA into eden-uwp.exe so it can be resolved with the build's PDB.
@@ -933,6 +935,7 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* info) {
                       GetCurrentThreadId());
     }
     WriteDiagRaw(line);
+    WriteDiagRaw(FormatFaultStack(*info->ContextRecord, "[eden-uwp] crash stack:").c_str());
     Common::BugTracker::DrainForCrash(); // first occurrences still queued for eden_graphics_bugs.log
     Common::Log::Stop(); // flush eden_log.txt
     return EXCEPTION_CONTINUE_SEARCH; // let the OS finish the crash (and WER take its dump)
@@ -943,6 +946,8 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* info) {
 thread_local char t_last_exception[512];
 
 std::string FormatStack(const char* prefix);
+std::string FormatFaultStack(const CONTEXT& fault, const char* prefix);
+std::string FormatFrames(const char* prefix, void* const* frames, USHORT count);
 
 // Eden's fatal ASSERT/UNREACHABLE and the default std::terminate both end in abort(). SIGABRT is
 // process-wide in the UCRT, so this sees it from any thread.
@@ -974,6 +979,41 @@ std::string FormatStack(const char* prefix) {
     void* frames[48];
     const USHORT count = RtlCaptureStackBackTrace(0, static_cast<DWORD>(std::size(frames)),
                                                   frames, nullptr);
+    return FormatFrames(prefix, frames, count);
+}
+
+// The faulting thread's stack, unwound from the fault's context: one captured inside the handler
+// would start in the exception dispatcher. A frame without unwind data (JIT code) is taken as a
+// leaf, so the walk may stop or skip there.
+std::string FormatFaultStack(const CONTEXT& fault, const char* prefix) {
+    CONTEXT context = fault;
+    void* frames[48];
+    USHORT count = 0;
+    while (count < std::size(frames) && context.Rip != 0) {
+        frames[count++] = reinterpret_cast<void*>(context.Rip);
+        DWORD64 image_base{};
+        if (RUNTIME_FUNCTION* const function =
+                RtlLookupFunctionEntry(context.Rip, &image_base, nullptr)) {
+            void* handler_data{};
+            DWORD64 establisher{};
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, function, &context,
+                             &handler_data, &establisher, nullptr);
+        } else {
+            MEMORY_BASIC_INFORMATION region{};
+            if (context.Rsp == 0 ||
+                VirtualQuery(reinterpret_cast<const void*>(context.Rsp), &region,
+                             sizeof(region)) == 0 ||
+                region.State != MEM_COMMIT) {
+                break;
+            }
+            context.Rip = *reinterpret_cast<const DWORD64*>(context.Rsp);
+            context.Rsp += 8;
+        }
+    }
+    return FormatFrames(prefix, frames, count);
+}
+
+std::string FormatFrames(const char* prefix, void* const* frames, USHORT count) {
     const auto base = reinterpret_cast<std::uintptr_t>(&__ImageBase);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + __ImageBase.e_lfanew);
     std::string stack = prefix;
