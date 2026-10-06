@@ -127,23 +127,25 @@ public:
         return values[id.Value()].object;
     }
 
+    /// Not noexcept: a constructor that throws (a texture the commit limit refuses) must reach the
+    /// caller's handler instead of terminating the process. Its slot goes back to the free list.
     template <typename... Args>
-    [[nodiscard]] SlotId insert(Args&&... args) noexcept {
+    [[nodiscard]] SlotId insert(Args&&... args) {
         const u32 index = FreeValueIndex();
-        new (&values[index].object) T(std::forward<Args>(args)...);
+        Construct(index, std::forward<Args>(args)...);
         SetStorageBit(index);
 
         return SlotId{index};
     }
 
     template <typename... Args>
-    [[nodiscard]] SlotId insert_profiled(SlotInsertProfile& profile, Args&&... args) noexcept {
+    [[nodiscard]] SlotId insert_profiled(SlotInsertProfile& profile, Args&&... args) {
         using Clock = std::chrono::steady_clock;
         const auto clock_begin = Clock::now();
         const auto begin = Clock::now();
         const u32 index = FreeValueIndex();
         const auto after_index = Clock::now();
-        new (&values[index].object) T(std::forward<Args>(args)...);
+        Construct(index, std::forward<Args>(args)...);
         const auto after_construct = Clock::now();
         SetStorageBit(index);
         const auto after_bit = Clock::now();
@@ -199,6 +201,16 @@ private:
         NonTrivialDummy dummy;
         T object;
     };
+
+    template <typename... Args>
+    void Construct(u32 index, Args&&... args) {
+        try {
+            new (&values[index].object) T(std::forward<Args>(args)...);
+        } catch (...) {
+            free_list.push_back(index);
+            throw;
+        }
+    }
 
     void SetStorageBit(u32 index) noexcept {
         stored_bitset[index / 64] |= u64(1) << (index % 64);

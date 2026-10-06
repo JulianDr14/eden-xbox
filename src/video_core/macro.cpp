@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstring>
+#include <exception>
+#include <utility>
 #include <fstream>
 #include <optional>
 #include <span>
@@ -713,6 +715,9 @@ static const auto default_cg_mode = Xbyak::DontSetProtectRWE;
 static const auto default_cg_mode = nullptr; //Allow RWE
 #endif
 
+/// A failure in C++ called from the macro JIT, waiting for the program to return.
+thread_local std::exception_ptr macro_jit_failure;
+
 struct MacroJITx64Impl final : public Xbyak::CodeGenerator, public DynamicCachedMacro {
     explicit MacroJITx64Impl(Core::System& system, std::span<const u32> code_)
         : Xbyak::CodeGenerator(MAX_CODE_SIZE, default_cg_mode)
@@ -775,6 +780,9 @@ void MacroJITx64Impl::Execute(Core::System& system, Engines::Maxwell3D& maxwell3
     state.system = &system;
     state.registers = {};
     program(&state, parameters.data(), parameters.data() + parameters.size());
+    if (auto failure = std::exchange(macro_jit_failure, nullptr)) {
+        std::rethrow_exception(failure);
+    }
 }
 
 void MacroJITx64Impl::Compile_ALU(Core::System& system, Macro::Opcode opcode) {
@@ -1003,7 +1011,17 @@ void MacroJITx64Impl::Compile_Read(Core::System& system, Macro::Opcode opcode) {
 }
 
 static void MacroJIT_SendThunk(Core::System* system, Engines::Maxwell3D* maxwell3d, Macro::MethodAddress method_address, u32 value) {
-    maxwell3d->CallMethod(*system, method_address.address, value, true);
+    // The generated code has no unwind data, so an exception crossing it ends the process (a
+    // draw running out of memory did). Hold it until the program returns to Execute, which
+    // rethrows it; the macro's remaining sends are dropped.
+    if (macro_jit_failure) {
+        return;
+    }
+    try {
+        maxwell3d->CallMethod(*system, method_address.address, value, true);
+    } catch (...) {
+        macro_jit_failure = std::current_exception();
+    }
 }
 
 void MacroJITx64Impl::Compile_Send(Core::System& system, Xbyak::Reg32 value) {
