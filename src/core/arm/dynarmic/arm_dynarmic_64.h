@@ -84,7 +84,7 @@ public:
     // Call once after loading the image, before starting any guest core.
     void LoadPrewarmProfile();
     size_t PreparePrewarmCandidates();
-    void PrewarmBlocks(const std::function<void(size_t, size_t)>& progress);
+    void PrewarmBlocks(const std::function<void(size_t, size_t)>& progress, size_t code_budget);
 
     Architecture GetArchitecture() const override {
         return Architecture::AArch64;

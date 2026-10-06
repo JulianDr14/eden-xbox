@@ -63,6 +63,7 @@
 #include "video_core/renderer_base.h"
 
 #include "eden_uwp/headless_emu_window.h"
+#include "eden_uwp/prewarm_budget.h"
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/uwp_controllers.h"
 #include "eden_uwp/keyboard_bindings.h"
@@ -113,6 +114,9 @@ std::string MemoryReport();             // likewise
 std::string LargestAllocations();       // likewise
 std::string HeapReport();               // likewise
 bool QueryAppMemory(u64& used, u64& limit);  // likewise
+/// A game's learned JIT prewarm step (EdenXbox::PrewarmBudget), 0 when none is stored.
+std::int32_t LoadPrewarmStep(u64 program_id);  // likewise
+void SavePrewarmStep(u64 program_id, std::int32_t step);  // likewise
 } // namespace
 
 namespace EdenXbox {
@@ -452,16 +456,21 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         WriteDiag("step: disk shader cache built | " + MemoryReport());
     }
 
+    const u64 program_id = system.GetApplicationProcessProgramID();
+    PrewarmBudget prewarm_budget{LoadPrewarmStep(program_id)};
     if (config.jit_prewarm != BootConfig::JitPrewarm::Off) {
         // All guest cores are still stopped. Each owns a separate JIT; never
         // compile into an instance concurrently with Run or another compiler.
         if (auto* process = system.ApplicationProcess(); process && process->Is64Bit()) {
-            WriteDiag("step: CPU JIT profile/prewarm starting | " + MemoryReport());
+            WriteDiag("step: CPU JIT profile/prewarm starting, " +
+                      std::to_string(prewarm_budget.MiBPerCore()) + " MiB per core | " +
+                      MemoryReport());
             Core::ConfigureApplicationPrewarm(system,
                 config.jit_prewarm == BootConfig::JitPrewarm::Warm,
                 [&system](size_t done, size_t total) {
                     D3D12::ShowCpuLoadProgress(system.Renderer(), done, total);
-                });
+                },
+                prewarm_budget.BytesPerCore());
             WriteDiag("step: CPU JIT profile/prewarm ready | " + MemoryReport());
         }
     }
@@ -510,8 +519,25 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         };
         constexpr auto TICK = std::chrono::milliseconds(20);
         constexpr u32 TICKS_PER_MINUTE = 3000;
+        constexpr u32 TICKS_PER_SECOND = TICKS_PER_MINUTE / 60;
+        // The next session's prewarm budget follows this one's headroom (PrewarmBudget).
+        const auto finish_prewarm_budget = [&](u32 tick) {
+            if (prewarm_budget.Finish(tick / TICKS_PER_SECOND)) {
+                SavePrewarmStep(program_id, static_cast<std::int32_t>(prewarm_budget.Step()));
+                WriteDiag("JIT prewarm budget raised to " +
+                          std::to_string(prewarm_budget.MiBPerCore()) +
+                          " MiB per core for this game's next session");
+            }
+        };
         for (u32 tick = 1;; ++tick) {
             std::this_thread::sleep_for(TICK);
+            if (u64 used{}, limit{}; tick % TICKS_PER_SECOND == 0 && QueryAppMemory(used, limit) &&
+                                     prewarm_budget.Observe(limit > used ? limit - used : 0)) {
+                SavePrewarmStep(program_id, static_cast<std::int32_t>(prewarm_budget.Step()));
+                WriteDiag("JIT prewarm budget lowered to " +
+                          std::to_string(prewarm_budget.MiBPerCore()) +
+                          " MiB per core for this game's next session | " + MemoryReport());
+            }
             if (g_gpu_command_failed.load(std::memory_order_acquire)) {
                 WriteDiag("GPU command failed; shutting down game for library recovery | " + MemoryReport());
                 shutdown();
@@ -520,6 +546,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
             if (EdenXbox::QuitRequested()) {
                 WriteDiag("step: Q pressed after " + std::to_string(tick / 50) +
                           " s, shutting down | " + MemoryReport());
+                finish_prewarm_budget(tick);
                 shutdown();
                 LOG_INFO(Frontend, "Headless boot: session closed with Q.");
                 return 0;
@@ -543,6 +570,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 if (result == GameMenuResult::Library) {
                     WriteDiag("menu: back to the library, shutting the game down | " +
                               MemoryReport());
+                    finish_prewarm_budget(tick);
                     shutdown();
                     return RETURN_TO_LIBRARY;
                 }
@@ -663,6 +691,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.System.h>
@@ -712,6 +741,33 @@ void WriteDiag(const std::string& msg) {
 
 // The title's memory budget as the OS enforces it: Microsoft documents Game-mode UWP titles as capped
 // (5 GB on the Xbox resource page), and exceeding it makes allocations fail rather than paging.
+std::wstring PrewarmStepKey(u64 program_id) {
+    wchar_t key[40];
+    swprintf(key, std::size(key), L"jit_prewarm_step_%016llx",
+             static_cast<unsigned long long>(program_id));
+    return key;
+}
+
+std::int32_t LoadPrewarmStep(u64 program_id) {
+    try {
+        const auto values = Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+        const winrt::hstring key{PrewarmStepKey(program_id)};
+        if (values.HasKey(key)) {
+            return winrt::unbox_value<std::int32_t>(values.Lookup(key));
+        }
+    } catch (...) { /* A missing or invalid value keeps the default budget. */ }
+    return 0;
+}
+
+void SavePrewarmStep(u64 program_id, std::int32_t step) {
+    try {
+        Windows::Storage::ApplicationData::Current().LocalSettings().Values().Insert(
+            winrt::hstring{PrewarmStepKey(program_id)}, winrt::box_value(step));
+    } catch (...) {
+        WriteDiag("WARNING: JIT prewarm budget not saved");
+    }
+}
+
 std::string MemoryReport() {
     try {
         using winrt::Windows::System::MemoryManager;
