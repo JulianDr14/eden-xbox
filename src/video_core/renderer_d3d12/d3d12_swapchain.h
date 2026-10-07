@@ -47,7 +47,9 @@ public:
         return frame_latency_waitable != nullptr;
     }
     /// Blocks until the swapchain can queue another frame. Call once before every Present().
-    void WaitForFrame();
+    /// False when it accepted none for a second (a lost device, a stalled display): Present()
+    /// would block then, so the caller drops the frame instead. True without a waitable object.
+    [[nodiscard]] bool WaitForFrame();
     void Present();
 
 private:

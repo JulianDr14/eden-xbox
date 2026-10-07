@@ -152,8 +152,10 @@ void Buffer::Transition(D3D12_RESOURCE_STATES next) {
 
 BufferCacheRuntime::BufferCacheRuntime(const Device& device_, Scheduler& scheduler_,
                                        StagingBufferPool& staging_,
+                                       TransferBufferPool& transfer_buffers_,
                                        Tegra::MaxwellDeviceMemoryManager& device_memory_)
-    : device{device_}, scheduler{scheduler_}, staging{staging_}, device_memory{device_memory_} {
+    : device{device_}, scheduler{scheduler_}, staging{staging_},
+      transfer_buffers{transfer_buffers_}, device_memory{device_memory_} {
     LOG_INFO(Render, "D3D12: buffer cache runtime ready");
 }
 
@@ -198,7 +200,8 @@ void BufferCacheRuntime::Copy(Buffer* dst, ID3D12Resource* dst_raw, Buffer* src,
         if (scratch_size == 0) {
             return;
         }
-        ComPtr<ID3D12Resource> scratch = CreateDefaultBuffer(scratch_size);
+        // In COMMON, new or reused: the copy below promotes it to COPY_DEST.
+        ComPtr<ID3D12Resource> scratch = transfer_buffers.Acquire(scratch_size);
         std::vector<VideoCommon::BufferCopy> to_scratch;
         std::vector<VideoCommon::BufferCopy> from_scratch;
         u64 offset = 0;
@@ -218,7 +221,7 @@ void BufferCacheRuntime::Copy(Buffer* dst, ID3D12Resource* dst_raw, Buffer* src,
                            .StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE}};
         cmd->ResourceBarrier(1, &to_source);
         Copy(dst, dst_raw, nullptr, scratch.Get(), from_scratch);
-        scheduler.DeferRelease(std::move(scratch));
+        transfer_buffers.Release(std::move(scratch));
         return;
     }
     // Cache buffers are tracked (Buffer::Transition). Raw resources are staging memory, whose
@@ -241,8 +244,17 @@ void BufferCacheRuntime::CopyBuffer(ID3D12Resource* dst, Buffer& src, std::span<
 
 void BufferCacheRuntime::ClearBuffer(Buffer& dst, u32 offset, size_t size, u32 value) {
     auto upload = staging.Request(size, MemoryUsage::Upload);
-    for (size_t pos = 0; pos < size; pos += sizeof(value))
-        std::memcpy(upload.mapped_span.data() + pos, &value, std::min(sizeof(value), size - pos));
+    // Zero, the usual value, in one memset; others word by word, then the partial last word.
+    const size_t words = size / sizeof(value);
+    u8* const data = upload.mapped_span.data();
+    if (value == 0) {
+        std::memset(data, 0, size);
+    } else {
+        for (size_t word = 0; word < words; ++word) {
+            std::memcpy(data + word * sizeof(value), &value, sizeof(value));
+        }
+        std::memcpy(data + words * sizeof(value), &value, size - words * sizeof(value));
+    }
     const VideoCommon::BufferCopy copy{.src_offset = upload.offset, .dst_offset = offset, .size = size};
     CopyBuffer(dst, upload.buffer, {&copy, 1}, true);
 }
@@ -382,9 +394,12 @@ void BufferCacheRuntime::ApplyGeometry(ID3D12GraphicsCommandList* cmd) {
     if (pending_index) {
         cmd->IASetIndexBuffer(&*pending_index);
     }
-    for (u32 mask = pending_vertex_mask; mask != 0; mask &= mask - 1) {
-        const u32 index = static_cast<u32>(std::countr_zero(mask));
-        cmd->IASetVertexBuffers(index, 1, &pending_vertex[index]);
+    // One call per run of consecutive slots (usually a single run from slot 0).
+    for (u32 mask = pending_vertex_mask; mask != 0;) {
+        const u32 first = static_cast<u32>(std::countr_zero(mask));
+        const u32 count = static_cast<u32>(std::countr_one(mask >> first));
+        cmd->IASetVertexBuffers(first, count, &pending_vertex[first]);
+        mask &= count + first >= 32 ? 0u : ~0u << (first + count);
     }
     pending_index.reset();
     pending_vertex_mask = 0;

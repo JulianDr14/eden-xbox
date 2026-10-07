@@ -12,7 +12,7 @@ namespace D3D12 {
 namespace {
 
 /// A wait longer than this means the swapchain stopped presenting (a suspended app, a lost
-/// device): give up on the wait and let Present report what happened.
+/// device): the frame is dropped, and a lost device is reported by the next submission.
 constexpr DWORD FRAME_WAIT_TIMEOUT_MS = 1000;
 
 } // Anonymous namespace
@@ -71,18 +71,20 @@ u32 Swapchain::CurrentIndex() const {
     return swapchain->GetCurrentBackBufferIndex();
 }
 
-void Swapchain::WaitForFrame() {
+bool Swapchain::WaitForFrame() {
     if (frame_latency_waitable == nullptr) {
-        return;
+        return true;
     }
     const VideoCore::FrameTrace::ScopedSpan trace_wait{
         VideoCore::FrameTrace::Event::HostPresentLong, 1};
     // Not alertable: an APC ending the wait early would let Present block.
     if (WaitForSingleObjectEx(frame_latency_waitable, FRAME_WAIT_TIMEOUT_MS, FALSE) ==
         WAIT_TIMEOUT) {
-        LOG_WARNING(Render, "D3D12: the swapchain accepted no frame for {} ms",
+        LOG_WARNING(Render, "D3D12: the swapchain accepted no frame for {} ms; frame dropped",
                     FRAME_WAIT_TIMEOUT_MS);
+        return false;
     }
+    return true;
 }
 
 void Swapchain::Present() {

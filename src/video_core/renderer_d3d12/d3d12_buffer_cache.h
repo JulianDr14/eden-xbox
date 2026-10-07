@@ -12,6 +12,7 @@
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
+#include "video_core/renderer_d3d12/d3d12_transfer_buffer_pool.h"
 
 namespace D3D12 {
 
@@ -76,6 +77,7 @@ class BufferCacheRuntime {
 
 public:
     BufferCacheRuntime(const Device& device, Scheduler& scheduler, StagingBufferPool& staging,
+                       TransferBufferPool& transfer_buffers,
                        Tegra::MaxwellDeviceMemoryManager& device_memory);
 
     /// Where guest uniform, storage and texel buffer views go (set by the rasterizer).
@@ -163,6 +165,7 @@ private:
     const Device& device;
     Scheduler& scheduler;
     StagingBufferPool& staging;
+    TransferBufferPool& transfer_buffers; ///< scratch for copies within one buffer
     Tegra::MaxwellDeviceMemoryManager& device_memory;
     GuestDescriptorQueue* descriptor_queue{};
     std::vector<TracedBuffer>* trace_buffers{};

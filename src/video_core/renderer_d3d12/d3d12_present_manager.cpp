@@ -222,14 +222,17 @@ void PresentManager::PresentThread(std::stop_token token) {
 }
 
 void PresentManager::CopyToSwapchain(PresentFrame& frame) {
+    // Waiting here, before taking the queue lock, is what keeps Present from blocking under it.
+    // A frame the swapchain did not accept in time is dropped: presenting it would block.
+    if (!swapchain.WaitForFrame()) {
+        return;
+    }
     CopyContext& context = copy_contexts[frame.index];
     WaitForCopy(context.fence_value);
     ThrowIfFailed(context.allocator->Reset(), "ID3D12CommandAllocator::Reset (present)");
     ThrowIfFailed(copy_list->Reset(context.allocator.Get(), nullptr),
                   "ID3D12GraphicsCommandList::Reset (present)");
 
-    // Waiting here, before taking the queue lock, is what keeps Present from blocking under it.
-    swapchain.WaitForFrame();
     ID3D12Resource* const back_buffer = swapchain.Image(swapchain.CurrentIndex());
     TransitionResource(copy_list.Get(), back_buffer, D3D12_RESOURCE_STATE_PRESENT,
                        D3D12_RESOURCE_STATE_COPY_DEST);

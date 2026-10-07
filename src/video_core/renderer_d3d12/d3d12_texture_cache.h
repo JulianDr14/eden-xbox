@@ -72,8 +72,9 @@ class TextureCacheRuntime {
 
 public:
     TextureCacheRuntime(const Device& device, Scheduler& scheduler, StagingBufferPool& staging,
-                        CpuDescriptorAllocator& views, CpuDescriptorAllocator& samplers,
-                        CpuDescriptorAllocator& rtvs, CpuDescriptorAllocator& dsvs);
+                        TransferBufferPool& transfer_buffers, CpuDescriptorAllocator& views,
+                        CpuDescriptorAllocator& samplers, CpuDescriptorAllocator& rtvs,
+                        CpuDescriptorAllocator& dsvs);
     ~TextureCacheRuntime();
 
     void Finish();
@@ -182,7 +183,7 @@ private:
     CpuDescriptorAllocator& rtv_descriptors;
     CpuDescriptorAllocator& dsv_descriptors;
     TextureResourceAllocator texture_allocator;
-    TransferBufferPool transfer_buffers;
+    TransferBufferPool& transfer_buffers; ///< shared with the buffer cache; trimmed here
     CachePressureController cache_pressure;
     CachePressure pressure_level{};
     CacheMemorySnapshot pressure_snapshot{};
