@@ -39,7 +39,7 @@ to a new area still stutters while its shaders build.
 | Game | Xbox Series X | State |
 | --- | --- | --- |
 | Game G | **60 FPS**, stable | No graphical errors |
-| Game B | **60 FPS** in matches, stable (same on PC) | The special move cutscene has a bug that is being fixed; the rest of the match has no graphical errors |
+| Game B | **60 FPS** in matches, stable (same on PC) | No graphical errors, special move cutscenes included |
 | Game C | **55–60 FPS**, stable | No crashes or graphical errors |
 | Game E | Still hits the app's memory limit | On PC it reaches the open world at **30 FPS**, after fixes to vertex fetching and to manual derivatives that broke the first cave |
 
