@@ -144,6 +144,10 @@ private:
 
     using IndirectParams = Tegra::Engines::Maxwell3D::DrawManager::IndirectParams;
 
+    // The implementation is split by concern: d3d12_rasterizer.cpp (draws, dispatches, memory
+    // and sync), d3d12_rasterizer_state.cpp (command-list state), d3d12_rasterizer_indirect.cpp,
+    // d3d12_rasterizer_clear.cpp and diagnostics/d3d12_draw_trace.cpp (SetDrawTrace).
+
     /// Records changed state and then the draw. Command-list state is invalidated on every reset.
     void RecordDraw(const GraphicsPipeline& pipeline, const PipelineBindings& bindings,
                     const Framebuffer& framebuffer, const DrawParams& params,
@@ -167,6 +171,8 @@ private:
     void UpdateScissors(ID3D12GraphicsCommandList* cmd);
     [[nodiscard]] D3D12_RECT ScissorRect(size_t index) const;
     void QueryFallback(GPUVAddr, VideoCommon::QueryType, VideoCommon::QueryPropertiesFlags, u32);
+
+    // Draw trace (diagnostics/d3d12_draw_trace.cpp).
     /// One trace line (SetDrawTrace): what was recorded or why it was skipped.
     void TraceDraw(std::string_view what, const GraphicsPipeline* pipeline,
                    const Framebuffer* framebuffer, std::span<const VideoCommon::ImageViewId> views,
@@ -248,9 +254,10 @@ private:
     bool logged_indirect_draw{};
     bool logged_cpu_indirect_draw{};
     bool logged_byte_count_draw{};
-    bool trace_draws{};
     /// Draws, clears and dispatches since the last FlushCommands submission.
     u32 draw_counter{};
+    // Draw trace state (diagnostics/d3d12_draw_trace.cpp).
+    bool trace_draws{};
     bool trace_dumps{};
     u32 trace_index{};
     /// Color targets then depth of the framebuffer the traced draws go to (ids, not the
