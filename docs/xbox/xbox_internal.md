@@ -2349,3 +2349,76 @@ problema de atributosTotK. Pr?ximas prioridades: validez de sample/recursos
 DXIL y emisiones geometryStream0 frente al perfilD3D12 sin streams.
 Referencia:[DXIL validator](https://github.com/Microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst).
 Revisi?n sin cambios de c?digo, commit ni build.
+
+## Reestructuración de renderer_d3d12 (7 oct 2026)
+
+Revisión de la capa D3D12 contra el backend Vulkan de Eden y los backends D3D12 de Dolphin y
+Xenia. Se partió por responsabilidades, se corrigió un bug y se quitaron costes por draw. Commits
+`6921ea6f72` a `c8ee82bb66`. Build UWP y link correctos; **gate en Series pendiente**.
+
+**Corrección (6921ea6f72).** Las texturas *placed* con RT/DS reutilizan memoria de heap que otra
+textura pudo usar. D3D12 exige una barrera de aliasing y `DiscardResource` (o clear o copia
+completa) antes del primer uso. Eso lo hace ahora `Image::InitializePlacedResource`, llamada
+desde `Image::Transition`.
+
+**Rendimiento.**
+- Las transiciones de imagen de un draw o dispatch se emiten con una sola llamada a
+  `ResourceBarrier` (`BarrierBatch`).
+- Los argumentos de raíz gráficos solo se fijan si cambiaron desde que se fijó la root
+  signature. `ExecuteIndirect` los invalida, porque la command signature escribe el runtime
+  data.
+- Las copias de descriptores de textura se hacen con un `CopyDescriptors` por tramo contiguo,
+  en vez de una llamada por descriptor.
+- `TransferBufferPool` recicla los buffers de las copias de textura a través de un buffer.
+  Antes se creaba un recurso committed por copia y por capa. Un buffer que el GPU ya terminó
+  está en COMMON, porque los buffers decaen al acabar cada `ExecuteCommandLists`. Tope de
+  64 MiB ociosos y se vacía con presión de memoria.
+- La captura de pila de los sync sites solo se hace con `gpu_profile`.
+- El stream de staging compara contra el último tick conocido antes de leer el fence.
+
+**Descartado, con motivo:**
+- **Quitar la barrera UAV→UAV entre draws o el doble COPY_DEST:** son necesarias. Las copias a
+  un mismo recurso no se ordenan sin barrera, y en la Series se solapan.
+- **Caché de CBV:** crear un CBV cuesta lo mismo que copiarlo.
+- **Reutilizar la tabla de descriptores si su hash coincide:** la tabla se escribe mientras las
+  cachés enlazan los recursos.
+- **Cachear `HeapType` y la tabla de `SupportsView`:** no están en el camino por draw.
+- **`RSSetViewports` con menos viewports:** el GS puede elegir cualquier índice.
+- **Hilo de presentación, grabación en chunks, `ID3D12PipelineLibrary`, Enhanced Barriers:**
+  quedan como fases futuras. La consola no tiene Agility SDK ni enhanced barriers.
+- **`MemoryGuardCoordinator` y presentar con `BlitImageHelper`:** cambian el comportamiento.
+  Requieren su propio gate.
+
+**Mapa de archivos.** Los `.cpp` comparten las clases de su cabecera:
+- **Texture cache:**
+  - `d3d12_texture_cache.cpp`: runtime, imágenes, GC y presión de memoria.
+  - `d3d12_texture_formats.cpp`: formatos DXGI y enums.
+  - `d3d12_image_transfer.cpp`: subidas y descargas.
+  - `d3d12_depth_stencil_transfer.cpp`
+  - `d3d12_image_copy_blit.cpp`
+  - `d3d12_astc_gpu_decoder.cpp`
+  - `d3d12_image_view.cpp`, `d3d12_sampler.cpp` y `d3d12_framebuffer.cpp`.
+  - Lo compartido está en `d3d12_texture_cache_internal.h`.
+- **Rasterizer:**
+  - `d3d12_rasterizer.cpp`
+  - `d3d12_rasterizer_state.cpp`: estado de la command list.
+  - `d3d12_rasterizer_indirect.cpp`
+  - `d3d12_rasterizer_clear.cpp`
+  - `d3d12_accelerate_dma.cpp`
+- **Renderer:**
+  - `renderer_d3d12.cpp`
+  - `d3d12_present_blit.cpp`: ruta GPU.
+  - `d3d12_present_cpu.cpp`: fallback.
+  - `d3d12_overlay.cpp`
+  - `renderer_d3d12_internal.h`
+- **Blit:** `d3d12_blit_image.cpp` (gráficos) y `d3d12_blit_compute.cpp` (pack de
+  depth-stencil, ASTC y BC3).
+- **Utilidades:**
+  - `d3d12_resource_utils`: buffers, root signatures y barreras.
+  - `d3d12_barrier_batch.h`
+  - `d3d12_pipeline_helper.h`: lo que comparten los pipelines gráfico y de compute, como el
+    `pipeline_helper.h` de Vulkan.
+  - `d3d12_log.h`: `WarnOnceLog`.
+  - `d3d12_transfer_buffer_pool`
+- **`diagnostics/`:** traza de draws, informes de rendimiento, volcado de frames, verificación
+  ASTC y diagnóstico de PSO rechazados. El camino de draw no depende de ellos.
