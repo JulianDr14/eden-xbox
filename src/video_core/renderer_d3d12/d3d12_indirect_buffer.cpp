@@ -7,6 +7,7 @@
 #include "common/alignment.h"
 #include "common/logging.h"
 #include "video_core/renderer_d3d12/d3d12_indirect_buffer.h"
+#include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
 
@@ -49,16 +50,9 @@ IndirectArgumentRing::Chunk& IndirectArgumentRing::FindChunk(u64 size) {
     }
     Chunk& chunk = chunks.emplace_back();
     chunk.size = std::max(CHUNK_SIZE, Common::AlignUp(size, CHUNK_SIZE));
-    const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
-    const D3D12_RESOURCE_DESC desc{.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
-                                   .Width = chunk.size, .Height = 1, .DepthOrArraySize = 1,
-                                   .MipLevels = 1, .Format = DXGI_FORMAT_UNKNOWN,
-                                   .SampleDesc = {.Count = 1},
-                                   .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR};
-    ThrowIfFailed(device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                        D3D12_RESOURCE_STATE_COMMON, nullptr,
-                                                        IID_PPV_ARGS(&chunk.resource)),
-                  "CreateCommittedResource (indirect arguments)");
+    chunk.resource = CreateCommittedBuffer(device.Get(), chunk.size, D3D12_HEAP_TYPE_DEFAULT,
+                                           D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_NONE,
+                                           "CreateCommittedResource (indirect arguments)");
     chunk.last_tick = tick;
     current = chunks.size() - 1;
     LOG_DEBUG(Render, "D3D12: indirect argument chunk {} ({} KiB)", current, chunk.size / 1024);

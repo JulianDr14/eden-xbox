@@ -25,6 +25,7 @@
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/framebuffer_config.h"
+#include "video_core/renderer_d3d12/d3d12_log.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
@@ -231,7 +232,7 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     }
     pipeline->Configure(is_indexed,
                         {*maxwell3d, *gpu_memory, buffer_cache, texture_cache, descriptor_queue,
-                         sampler_heap},
+                         sampler_heap, scheduler},
                         bindings);
     buffer_runtime.SetTraceBuffers(nullptr);
     if (!pipeline->Handle()) {
@@ -307,11 +308,7 @@ void RasterizerD3D12::DrawIndirect() {
         // Transform feedback draws; HasDrawTransformFeedback() is false, so the macro should
         // have drawn them directly.
         BUG_TRACK(DrawSkipped, "byte-count (transform feedback) indirect draw skipped");
-        if (!logged_byte_count_draw) {
-            const Common::BugTracker::TapMute bug_tracker_mute;
-            LOG_WARNING(Render, "D3D12: byte-count indirect draws are skipped");
-            logged_byte_count_draw = true;
-        }
+        WarnOnceLog(logged_byte_count_draw, "byte-count indirect draws are skipped");
         return;
     }
     if (params.max_draw_counts == 0) {
@@ -339,7 +336,7 @@ void RasterizerD3D12::DrawIndirect() {
     buffer_cache.SetDrawIndirect(&params);
     pipeline->Configure(params.is_indexed,
                         {*maxwell3d, *gpu_memory, buffer_cache, texture_cache, descriptor_queue,
-                         sampler_heap},
+                         sampler_heap, scheduler},
                         bindings);
     buffer_cache.SetDrawIndirect(nullptr);
     if (!pipeline->Handle()) {
@@ -409,6 +406,8 @@ void RasterizerD3D12::DrawIndirect() {
     scheduler.CommandList()->ExecuteIndirect(signature, draw_count, range.buffer, range.offset,
                                              params.include_count ? range.buffer : nullptr,
                                              params.include_count ? count_offset : 0);
+    // The command signature wrote the runtime data constants: the next draw sets them again.
+    command_state.root_args.valid = false;
     if (!logged_indirect_draw) {
         LOG_INFO(Render, "D3D12: first indirect draw recorded ({}, up to {} draws{})",
                  params.is_indexed ? "indexed" : "non-indexed", draw_count,
@@ -492,6 +491,7 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
     if (!command_state.valid || command_state.graphics_root != layout.Handle()) {
         cmd->SetGraphicsRootSignature(layout.Handle());
         command_state.graphics_root = layout.Handle();
+        command_state.root_args = {};
     }
     scheduler.SetPipelineState(pipeline.Handle());
     MarkGpuCommands(cmd, "draw VS/PS", pipeline.Key().unique_hashes[1],
@@ -540,39 +540,11 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
         BUG_TRACK(UnsupportedState, "different front ({}) and back ({}) stencil references; the "
                                     "front one is used",
                   regs.stencil_front_ref, regs.stencil_back_ref);
-        if (!logged_stencil_ref) {
-            const Common::BugTracker::TapMute bug_tracker_mute;
-            LOG_WARNING(Render,
-                        "D3D12: different front and back stencil references; using the front");
-            logged_stencil_ref = true;
-        }
+        WarnOnceLog(logged_stencil_ref,
+                    "different front and back stencil references; using the front");
     }
 
-    cmd->SetGraphicsRoot32BitConstants(PipelineLayout::PUSH_CONSTANTS_INDEX, PUSH_CONSTANT_WORDS,
-                                       bindings.push_constants.data(), 0);
-    dxil_spirv_vertex_runtime_data runtime_data{};
-    runtime_data.first_vertex = params.runtime_first_vertex;
-    runtime_data.base_instance = params.base_instance;
-    runtime_data.is_indexed_draw = params.is_indexed;
-    runtime_data.yz_flip_mask = command_state.viewport.yz_flip_mask;
-    runtime_data.viewport_width = command_state.viewport.width;
-    runtime_data.viewport_height = command_state.viewport.height;
-    std::array<u32, sizeof(runtime_data) / sizeof(u32)> runtime_words{};
-    std::memcpy(runtime_words.data(), &runtime_data, sizeof(runtime_data));
-    cmd->SetGraphicsRoot32BitConstants(PipelineLayout::RUNTIME_DATA_INDEX,
-                                       std::min<UINT>(layout.RuntimeDataWords(),
-                                                      static_cast<UINT>(runtime_words.size())),
-                                       runtime_words.data(), 0);
-    if (layout.ResourceTableIndex() != PipelineLayout::NO_TABLE) {
-        cmd->SetGraphicsRootDescriptorTable(layout.ResourceTableIndex(), bindings.resource_table);
-    }
-    if (layout.SamplerTableIndex() != PipelineLayout::NO_TABLE) {
-        cmd->SetGraphicsRootDescriptorTable(layout.SamplerTableIndex(), bindings.sampler_table);
-    }
-    if (layout.IntegerSamplerIndex() != PipelineLayout::NO_TABLE && bindings.integer_samplers) {
-        cmd->SetGraphicsRootConstantBufferView(layout.IntegerSamplerIndex(),
-                                               bindings.integer_samplers);
-    }
+    SetGraphicsRootArguments(cmd, layout, bindings, params);
 
     const D3D12_PRIMITIVE_TOPOLOGY d3d_topology =
         MaxwellToD3D12::PrimitiveTopology(topology, regs.patch_vertices);
@@ -582,6 +554,54 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
     }
     buffer_runtime.ApplyGeometry(cmd);
     command_state.valid = true;
+}
+
+void RasterizerD3D12::SetGraphicsRootArguments(ID3D12GraphicsCommandList* cmd,
+                                               const PipelineLayout& layout,
+                                               const PipelineBindings& bindings,
+                                               const DrawParams& params) {
+    // Consecutive draws of one pipeline mostly repeat their root arguments: only changes are set.
+    auto& cached = command_state.root_args;
+    if (!cached.valid || cached.push_constants != bindings.push_constants) {
+        cmd->SetGraphicsRoot32BitConstants(PipelineLayout::PUSH_CONSTANTS_INDEX,
+                                           PUSH_CONSTANT_WORDS, bindings.push_constants.data(), 0);
+        cached.push_constants = bindings.push_constants;
+    }
+    dxil_spirv_vertex_runtime_data runtime_data{};
+    runtime_data.first_vertex = params.runtime_first_vertex;
+    runtime_data.base_instance = params.base_instance;
+    runtime_data.is_indexed_draw = params.is_indexed;
+    runtime_data.yz_flip_mask = command_state.viewport.yz_flip_mask;
+    runtime_data.viewport_width = command_state.viewport.width;
+    runtime_data.viewport_height = command_state.viewport.height;
+    constexpr size_t runtime_size = sizeof(runtime_data) / sizeof(u32);
+    static_assert(runtime_size <= std::tuple_size_v<decltype(cached.runtime_words)>);
+    std::array<u32, std::tuple_size_v<decltype(cached.runtime_words)>> runtime_words{};
+    std::memcpy(runtime_words.data(), &runtime_data, sizeof(runtime_data));
+    if (!cached.valid || cached.runtime_words != runtime_words) {
+        cmd->SetGraphicsRoot32BitConstants(
+            PipelineLayout::RUNTIME_DATA_INDEX,
+            std::min<UINT>(layout.RuntimeDataWords(), static_cast<UINT>(runtime_size)),
+            runtime_words.data(), 0);
+        cached.runtime_words = runtime_words;
+    }
+    if (layout.ResourceTableIndex() != PipelineLayout::NO_TABLE &&
+        (!cached.valid || cached.resource_table != bindings.resource_table.ptr)) {
+        cmd->SetGraphicsRootDescriptorTable(layout.ResourceTableIndex(), bindings.resource_table);
+        cached.resource_table = bindings.resource_table.ptr;
+    }
+    if (layout.SamplerTableIndex() != PipelineLayout::NO_TABLE &&
+        (!cached.valid || cached.sampler_table != bindings.sampler_table.ptr)) {
+        cmd->SetGraphicsRootDescriptorTable(layout.SamplerTableIndex(), bindings.sampler_table);
+        cached.sampler_table = bindings.sampler_table.ptr;
+    }
+    if (layout.IntegerSamplerIndex() != PipelineLayout::NO_TABLE && bindings.integer_samplers &&
+        (!cached.valid || cached.integer_samplers != bindings.integer_samplers)) {
+        cmd->SetGraphicsRootConstantBufferView(layout.IntegerSamplerIndex(),
+                                               bindings.integer_samplers);
+        cached.integer_samplers = bindings.integer_samplers;
+    }
+    cached.valid = true;
 }
 
 void RasterizerD3D12::InvalidateGraphicsState() {
@@ -718,11 +738,7 @@ void RasterizerD3D12::DrawTexture() {
         BUG_TRACK_KEY(DrawSkipped, static_cast<u64>(format) << 32 | static_cast<u32>(texture.format),
                       "DrawTexture with integer formats skipped (target {}, texture {})", format,
                       texture.format);
-        if (!logged_draw_texture) {
-            const Common::BugTracker::TapMute bug_tracker_mute;
-            LOG_WARNING(Render, "D3D12: DrawTexture with integer formats is skipped");
-            logged_draw_texture = true;
-        }
+        WarnOnceLog(logged_draw_texture, "DrawTexture with integer formats is skipped");
         return;
     }
     const VideoCommon::Region2D dst_region{
@@ -796,11 +812,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
     if (layers_lost) {
         BUG_TRACK(CopySkipped, "layered clear (layer {}, {} layers) clears every layer of the view",
                   first_layer, layer_count);
-        if (!logged_layer_clear) {
-            const Common::BugTracker::TapMute bug_tracker_mute;
-            LOG_WARNING(Render, "D3D12: a layered clear cleared every layer of the view");
-            logged_layer_clear = true;
-        }
+        WarnOnceLog(logged_layer_clear, "a layered clear cleared every layer of the view");
     }
 
     const VideoCommon::Extent2D extent = framebuffer->Extent();
@@ -838,12 +850,8 @@ void RasterizerD3D12::Clear(u32 layer_count) {
             if (IsPixelFormatInteger(format)) {
                 BUG_TRACK_KEY(CopySkipped, static_cast<u64>(format),
                               "masked clear of an integer render target ({}) skipped", format);
-                if (!logged_integer_clear) {
-                    const Common::BugTracker::TapMute bug_tracker_mute;
-                    LOG_WARNING(Render,
-                                "D3D12: masked clears of integer render targets are skipped");
-                    logged_integer_clear = true;
-                }
+                WarnOnceLog(logged_integer_clear,
+                            "masked clears of integer render targets are skipped");
             } else {
                 const u8 mask = static_cast<u8>(regs.clear_surface.R | regs.clear_surface.G << 1 |
                                                 regs.clear_surface.B << 2 |
@@ -919,7 +927,7 @@ void RasterizerD3D12::DispatchCompute() {
     std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
     PipelineBindings bindings;
     pipeline->Configure({*kepler_compute, *gpu_memory, buffer_cache, texture_cache,
-                         descriptor_queue, sampler_heap},
+                         descriptor_queue, sampler_heap, scheduler},
                         bindings);
     if (!pipeline->Handle()) {
         return; // D3D12 rejected the PSO (logged when it was built)

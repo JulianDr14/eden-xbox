@@ -11,6 +11,7 @@
 #include "common/cityhash.h"
 #include "common/logging.h"
 #include "video_core/perf_counters.h"
+#include "video_core/renderer_d3d12/d3d12_log.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 
@@ -236,12 +237,8 @@ void GuestDescriptorQueue::AddStorageBuffer(ID3D12Resource* resource, u64 offset
         BUG_TRACK(UnsupportedState, "storage buffer at an offset not aligned to 16 bytes ({}) bound "
                                     "as null",
                   offset);
-        if (!logged_unaligned) {
-            const Common::BugTracker::TapMute bug_tracker_mute;
-            LOG_WARNING(Render, "D3D12: storage buffer at unaligned offset {} bound as null",
-                        offset);
-            logged_unaligned = true;
-        }
+        WarnOnceLog(logged_unaligned, "storage buffer at unaligned offset {} bound as null",
+                    offset);
         resource = nullptr;
     }
     const u32 words = (size + 3) / 4;
@@ -285,11 +282,7 @@ void GuestDescriptorQueue::AddTexelBuffer(ID3D12Resource* resource, u64 offset, 
         BUG_TRACK(UnsupportedState, "texel buffer at an offset not aligned to its element ({} % {}) "
                                     "bound as null",
                   offset, element_size);
-        if (!logged_unaligned) {
-            const Common::BugTracker::TapMute bug_tracker_mute;
-            LOG_WARNING(Render, "D3D12: texel buffer at unaligned offset {} bound as null", offset);
-            logged_unaligned = true;
-        }
+        WarnOnceLog(logged_unaligned, "texel buffer at unaligned offset {} bound as null", offset);
         resource = nullptr;
     }
     const u64 first = resource ? offset / element_size : 0;

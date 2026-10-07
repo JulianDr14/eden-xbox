@@ -22,8 +22,11 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/perf_counters.h"
+#include "video_core/renderer_d3d12/d3d12_barrier_batch.h"
 #include "video_core/renderer_d3d12/d3d12_blit_image.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
+#include "video_core/renderer_d3d12/d3d12_log.h"
+#include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/accelerated_swizzle.h"
@@ -252,39 +255,17 @@ u32 Component(Tegra::Texture::SwizzleSource source) {
 
 ComPtr<ID3D12Resource> CreateTransferBuffer(ID3D12Device* device, u64 size,
                                             bool unordered_access = false) {
-    const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
-    const D3D12_RESOURCE_DESC desc{.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER, .Alignment = 0,
-        .Width = size, .Height = 1, .DepthOrArraySize = 1, .MipLevels = 1,
-        .Format = DXGI_FORMAT_UNKNOWN, .SampleDesc = {.Count = 1, .Quality = 0},
-        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        .Flags = unordered_access ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
-                                  : D3D12_RESOURCE_FLAG_NONE};
     // Buffers start in COMMON and are promoted on first use.
-    ComPtr<ID3D12Resource> buffer;
-    VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
-                                       VideoCore::Perf::Counter::ResourcesCreated};
-    ThrowIfFailed(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                  D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&buffer)),
-                  "Create texture transfer buffer");
-    return buffer;
+    return CreateCommittedBuffer(device, size, D3D12_HEAP_TYPE_DEFAULT,
+                                 D3D12_RESOURCE_STATE_COMMON,
+                                 unordered_access ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+                                                  : D3D12_RESOURCE_FLAG_NONE,
+                                 "Create texture transfer buffer");
 }
 
 void TransitionBuffer(ID3D12GraphicsCommandList* commands, ID3D12Resource* buffer,
                       D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
-    const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        .Transition = {.pResource = buffer, .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                       .StateBefore = before, .StateAfter = after}};
-    commands->ResourceBarrier(1, &barrier);
-}
-
-D3D12_HEAP_TYPE HeapType(ID3D12Resource* resource) {
-    D3D12_HEAP_PROPERTIES properties{};
-    D3D12_HEAP_FLAGS flags{};
-    if (FAILED(resource->GetHeapProperties(&properties, &flags))) {
-        return D3D12_HEAP_TYPE_DEFAULT;
-    }
-    return properties.Type;
+    TransitionResource(commands, buffer, before, after);
 }
 
 /// DEFAULT-heap buffers (the buffer cache's) are implicitly promoted by copies; hand them back in
@@ -294,15 +275,6 @@ void DecayIfDefault(ID3D12GraphicsCommandList* commands, ID3D12Resource* buffer,
                     D3D12_RESOURCE_STATES promoted) {
     if (HeapType(buffer) == D3D12_HEAP_TYPE_DEFAULT) {
         TransitionBuffer(commands, buffer, promoted, D3D12_RESOURCE_STATE_COMMON);
-    }
-}
-
-template <typename... Args>
-void WarnOnceLog(bool& logged, fmt::format_string<Args...> format, Args&&... args) {
-    if (!logged) {
-        const Common::BugTracker::TapMute bug_tracker_mute; // reported by the callers' BUG_TRACK
-        LOG_WARNING(Render, "D3D12: {}", fmt::format(format, std::forward<Args>(args)...));
-        logged = true;
     }
 }
 
@@ -1001,52 +973,48 @@ u32 Image::Subresource(s32 level, s32 layer, u32 plane) const noexcept {
     return static_cast<u32>(level) + static_cast<u32>(layer) * levels + plane * levels * layers;
 }
 
-void Image::Transition(D3D12_RESOURCE_STATES next) {
+void Image::Transition(D3D12_RESOURCE_STATES next, BarrierBatch* batch) {
     if (!resource) return;
-    if (reinterpreted_ahead) {
-        WriteBackReinterpreted();
+    if (reinterpreted_ahead || needs_placed_init) {
+        // Both record commands on the image: its pending barriers must come first.
+        if (batch) {
+            batch->Flush();
+        }
+        if (reinterpreted_ahead) {
+            WriteBackReinterpreted();
+        }
+        if (needs_placed_init) {
+            InitializePlacedResource();
+        }
     }
-    if (needs_placed_init) {
-        InitializePlacedResource();
-    }
+    BarrierBatch local{runtime->scheduler};
+    BarrierBatch& barriers = batch ? *batch : local;
     if (state == next) {
         // Writes in one state are unordered without a barrier (see Buffer::Transition).
         if (next == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
             ++write_version;
-            const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV,
-                                                 .UAV = {.pResource = resource.Get()}};
-            runtime->scheduler.CommandList()->ResourceBarrier(1, &barrier);
+            barriers.Uav(resource.Get());
         } else if (next == D3D12_RESOURCE_STATE_COPY_DEST) {
             ++write_version;
-            const D3D12_RESOURCE_BARRIER barriers[2]{
-                {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                 .Transition = {.pResource = resource.Get(),
-                                .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                                .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
-                                .StateAfter = D3D12_RESOURCE_STATE_COMMON}},
-                {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                 .Transition = {.pResource = resource.Get(),
-                                .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                                .StateBefore = D3D12_RESOURCE_STATE_COMMON,
-                                .StateAfter = D3D12_RESOURCE_STATE_COPY_DEST}},
-            };
-            runtime->scheduler.CommandList()->ResourceBarrier(2, barriers);
+            barriers.Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                D3D12_RESOURCE_STATE_COMMON);
+            barriers.Transition(resource.Get(), D3D12_RESOURCE_STATE_COMMON,
+                                D3D12_RESOURCE_STATE_COPY_DEST);
         }
-        return;
+    } else {
+        constexpr D3D12_RESOURCE_STATES WRITE_STATES =
+            D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS |
+            D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_COPY_DEST |
+            D3D12_RESOURCE_STATE_RESOLVE_DEST;
+        if ((next & WRITE_STATES) != 0) {
+            ++write_version;
+        }
+        barriers.Transition(resource.Get(), state, next);
+        state = next;
     }
-    constexpr D3D12_RESOURCE_STATES WRITE_STATES =
-        D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS |
-        D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_COPY_DEST |
-        D3D12_RESOURCE_STATE_RESOLVE_DEST;
-    if ((next & WRITE_STATES) != 0) {
-        ++write_version;
+    if (!batch) {
+        local.Flush();
     }
-    const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        .Transition = {.pResource = resource.Get(), .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                       .StateBefore = state, .StateAfter = next}};
-    runtime->scheduler.CommandList()->ResourceBarrier(1, &barrier);
-    state = next;
 }
 
 void Image::InitializePlacedResource() {
@@ -3133,16 +3101,20 @@ Image* ImageView::SourceImage() const noexcept {
     return slot_images && image ? &(*slot_images)[image_id] : nullptr;
 }
 
-void ImageView::TransitionImage(D3D12_RESOURCE_STATES state) const {
+void ImageView::TransitionImage(D3D12_RESOURCE_STATES state, BarrierBatch* batch) const {
     if (slot_images && image) {
+        Image& source = (*slot_images)[image_id];
         // Reads through the reinterpreted copy leave the image alone: touching it would copy the
         // texels back and take the copy out of its readable state.
         if (srv_resource && srv_resource != image &&
             (state & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) == 0) {
-            (*slot_images)[image_id].ReadReinterpreted();
+            if (batch) {
+                batch->Flush();
+            }
+            source.ReadReinterpreted();
             return;
         }
-        (*slot_images)[image_id].Transition(state);
+        source.Transition(state, batch);
     }
 }
 

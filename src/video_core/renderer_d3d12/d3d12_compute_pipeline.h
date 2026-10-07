@@ -26,6 +26,7 @@ class KeplerCompute;
 namespace D3D12 {
 
 class PipelineLayout;
+class Scheduler;
 
 /// Same key as Vulkan's compute pipelines.
 struct ComputePipelineCacheKey {
@@ -66,6 +67,7 @@ struct ComputeBindContext {
     TextureCache& texture_cache;
     GuestDescriptorQueue& descriptor_queue;
     SamplerHeap& sampler_heap;
+    Scheduler& scheduler;
 };
 
 /// A guest compute pipeline: signed DXIL, its root signature and the PSO, built on a worker when

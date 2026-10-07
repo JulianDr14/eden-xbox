@@ -13,6 +13,7 @@
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
+#include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 #include "video_core/surface.h"
@@ -128,35 +129,22 @@ void Buffer::Transition(D3D12_RESOURCE_STATES next) {
     if (current == next) {
         if (next == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
             // Orders the previous draw's or dispatch's writes before this one.
-            const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV,
-                                                 .UAV = {.pResource = buffer.Get()}};
+            const D3D12_RESOURCE_BARRIER barrier = UavBarrier(buffer.Get());
             cmd->ResourceBarrier(1, &barrier);
         } else if (next == D3D12_RESOURCE_STATE_COPY_DEST) {
             // Copies into one resource are unordered without a barrier between them, and the
             // Series runs them in parallel: CreateBuffer's zero fill landed over the data
             // JoinOverlap copies in. A round trip through COMMON waits for the earlier copy.
             const D3D12_RESOURCE_BARRIER barriers[2]{
-                {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                 .Transition = {.pResource = buffer.Get(),
-                                .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                                .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
-                                .StateAfter = D3D12_RESOURCE_STATE_COMMON}},
-                {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                 .Transition = {.pResource = buffer.Get(),
-                                .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                                .StateBefore = D3D12_RESOURCE_STATE_COMMON,
-                                .StateAfter = D3D12_RESOURCE_STATE_COPY_DEST}},
+                TransitionBarrier(buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                  D3D12_RESOURCE_STATE_COMMON),
+                TransitionBarrier(buffer.Get(), D3D12_RESOURCE_STATE_COMMON,
+                                  D3D12_RESOURCE_STATE_COPY_DEST),
             };
             cmd->ResourceBarrier(2, barriers);
         }
     } else {
-        const D3D12_RESOURCE_BARRIER barrier{
-            .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-            .Transition = {.pResource = buffer.Get(),
-                           .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                           .StateBefore = current,
-                           .StateAfter = next}};
-        cmd->ResourceBarrier(1, &barrier);
+        TransitionResource(cmd, buffer.Get(), current, next);
     }
     state = next;
     state_tick = tick;
@@ -170,20 +158,11 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, Scheduler& schedul
 }
 
 ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
-    const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
-    const D3D12_RESOURCE_DESC desc{.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
-                                   .Width = size, .Height = 1, .DepthOrArraySize = 1,
-                                   .MipLevels = 1, .Format = DXGI_FORMAT_UNKNOWN,
-                                   .SampleDesc = {.Count = 1},
-                                   .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-                                   // Storage buffers and image buffers are UAVs.
-                                   .Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS};
-    ComPtr<ID3D12Resource> result;
-    ThrowIfFailed(device.Get()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                  D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&result)),
-                  "CreateCommittedResource (buffer cache)");
-    CheckRemovedAfter(device.Get(), [&] { return fmt::format("creating a {} byte buffer", size); });
-    return result;
+    // Storage buffers and image buffers are UAVs.
+    return CreateCommittedBuffer(device.Get(), size, D3D12_HEAP_TYPE_DEFAULT,
+                                 D3D12_RESOURCE_STATE_COMMON,
+                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                 "CreateCommittedResource (buffer cache)");
 }
 
 void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& buffers) noexcept {

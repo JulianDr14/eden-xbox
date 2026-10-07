@@ -154,6 +154,10 @@ private:
                        Maxwell::PrimitiveTopology topology);
     void InvalidateCommandListState();
     void InvalidateGraphicsState();
+    /// Sets the root constants, tables and integer sampler CBV of a draw that differ from the
+    /// ones the command list holds for the bound root signature.
+    void SetGraphicsRootArguments(ID3D12GraphicsCommandList* cmd, const PipelineLayout& layout,
+                                  const PipelineBindings& bindings, const DrawParams& params);
     void ApplyPendingStateInvalidation();
     /// Indirect draws of topologies rewritten on the CPU: reads the arguments and draws directly.
     void DrawIndirectOnCpu(const IndirectParams& params);
@@ -216,6 +220,16 @@ private:
         u32 stencil_ref{};
         D3D12_PRIMITIVE_TOPOLOGY topology{D3D_PRIMITIVE_TOPOLOGY_UNDEFINED};
         ViewportState viewport{};
+        /// Graphics root arguments set since graphics_root was bound: a root signature change
+        /// discards them, so they are cleared with it.
+        struct RootArguments {
+            bool valid{};
+            std::array<u32, PUSH_CONSTANT_WORDS> push_constants{};
+            std::array<u32, 16> runtime_words{};
+            u64 resource_table{};
+            u64 sampler_table{};
+            D3D12_GPU_VIRTUAL_ADDRESS integer_samplers{};
+        } root_args;
     } command_state;
     bool channel_bound{};
     bool state_invalidation_pending{};

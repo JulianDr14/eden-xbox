@@ -13,6 +13,7 @@
 #include "common/bug_tracker.h"
 #include "common/cityhash.h"
 #include "common/logging.h"
+#include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
 #include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
 
@@ -238,24 +239,7 @@ const PipelineLayout& RootSignatureCache::Get(std::span<const Shader::Info* cons
         .Flags = is_compute ? D3D12_ROOT_SIGNATURE_FLAG_NONE
                             : D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
     };
-    ComPtr<ID3DBlob> blob;
-    ComPtr<ID3DBlob> error;
-    const HRESULT hr =
-        D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
-    if (FAILED(hr)) {
-        std::string message = "(no details)";
-        if (error && error->GetBufferSize() > 0) {
-            message.assign(static_cast<const char*>(error->GetBufferPointer()),
-                           error->GetBufferSize());
-        }
-        throw std::runtime_error(fmt::format(
-            "D3D12: serializing a root signature failed (0x{:08X}): {}", static_cast<u32>(hr),
-            message));
-    }
-    ThrowIfFailed(device.Get()->CreateRootSignature(0, blob->GetBufferPointer(),
-                                                    blob->GetBufferSize(),
-                                                    IID_PPV_ARGS(&layout->root_signature)),
-                  "CreateRootSignature");
+    layout->root_signature = CreateRootSignature(device.Get(), desc, "guest root signature");
     CreateCommandSignatures(*layout, is_compute);
     LOG_DEBUG(Render, "D3D12: root signature {:016x} ({} resource and {} sampler descriptors)",
               hash, ranges.num_resources, ranges.num_samplers);
