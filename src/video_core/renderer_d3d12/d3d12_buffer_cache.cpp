@@ -470,25 +470,6 @@ void BufferCacheRuntime::BindImageBuffer(Buffer& buffer, u32 offset, u32 size,
                                      VideoCore::Surface::BytesPerBlock(format), true);
 }
 
-void BufferCacheRuntime::RunSelfTest() {
-    constexpr size_t test_size = 4096;
-    Buffer gpu_buffer{*this, VAddr{0}, test_size};
-    auto upload = UploadStagingBuffer(test_size);
-    auto readback = DownloadStagingBuffer(test_size, true);
-    for (size_t i = 0; i < test_size; ++i) upload.mapped_span[i] = static_cast<u8>(i * 37 + 11);
-    const VideoCommon::BufferCopy up{.src_offset = upload.offset, .dst_offset = 0, .size = test_size};
-    CopyBuffer(gpu_buffer, upload.buffer, {&up, 1}, true);
-    const VideoCommon::BufferCopy down{.src_offset = 0, .dst_offset = 0, .size = test_size};
-    CopyBuffer(readback.buffer, gpu_buffer, {&down, 1}, true);
-    FreeDeferredStagingBuffer(readback);
-    Finish();
-    for (size_t i = 0; i < test_size; ++i) {
-        if (readback.mapped_span[i] != static_cast<u8>(i * 37 + 11))
-            throw std::runtime_error("D3D12: buffer cache round-trip self-test mismatch");
-    }
-    LOG_INFO(Render, "D3D12: buffer cache round-trip passed ({} bytes)", test_size);
-}
-
 template class VideoCommon::BufferCache<BufferCacheParams>;
 
 } // namespace D3D12

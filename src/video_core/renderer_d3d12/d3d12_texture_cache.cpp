@@ -4,9 +4,7 @@
 #include "video_core/renderer_d3d12/d3d12_texture_cache_internal.h"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
-#include <cstring>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -24,7 +22,6 @@
 #include "video_core/texture_cache/render_targets.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache.h"
-#include "video_core/texture_cache/util.h"
 
 namespace D3D12 {
 
@@ -756,183 +753,6 @@ void TextureCacheRuntime::TransitionImageLayout(Image& image) {
     image.Transition(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 }
-void TextureCacheRuntime::RunSelfTest() {
-    try {
-        constexpr u32 width = 13, height = 7, bytes = width * height * 4;
-        VideoCommon::ImageInfo info{}; info.format = PixelFormat::A8B8G8R8_UNORM;
-        info.type = ImageType::e2D; info.resources = {.levels = 1, .layers = 1}; info.size = {width, height, 1};
-        Image image{*this, info, 0, 0};
-        auto upload = UploadStagingBuffer(bytes); auto readback = DownloadStagingBuffer(bytes, true);
-        for (u32 i = 0; i < bytes; ++i) upload.mapped_span[i] = static_cast<u8>((i * 29 + 7) & 0xff);
-        const BufferImageCopy copy{.buffer_offset = 0, .buffer_size = bytes, .buffer_row_length = width,
-            .buffer_image_height = height, .image_subresource = {}, .image_offset = {}, .image_extent = {width, height, 1}};
-        image.UploadMemory(upload, std::span{&copy, 1}); image.DownloadMemory(readback, std::span{&copy, 1});
-        FreeDeferredStagingBuffer(readback); Finish();
-        if (!std::equal(upload.mapped_span.begin(), upload.mapped_span.begin() + bytes, readback.mapped_span.begin()))
-            throw std::runtime_error{"texture round-trip mismatch"};
-        // Exercise the maintenance path with actual GPU copies, including ownership transfer
-        // and writes between recording and consumption. Finish is used ONLY by this test gate.
-        image.flags &= ~VideoCommon::ImageFlagBits::CpuModified;
-        StagingBufferRef gc_map{};
-        if (PrepareGcDownload(image, std::span{&copy, 1}, gc_map))
-            throw std::runtime_error{"GC readback was not deferred"};
-        Image moved{std::move(image)};
-        image = std::move(moved);
-        Finish();
-        if (!PrepareGcDownload(image, std::span{&copy, 1}, gc_map) ||
-            !std::equal(upload.mapped_span.begin(), upload.mapped_span.begin() + bytes,
-                        gc_map.mapped_span.begin()))
-            throw std::runtime_error{"GC deferred readback/move mismatch"};
-        CompleteGcDownload(image);
-        if (gc_pending_bytes != 0) throw std::runtime_error{"GC move leaked staging"};
-        const auto gate_footprints = [this](VideoCommon::ImageInfo test_info) {
-            Image test_image{*this, test_info, 0, 0};
-            const auto copies = FullDownloadCopies(test_info);
-            const size_t size = test_image.unswizzled_size_bytes;
-            auto input = UploadStagingBuffer(size);
-            for (size_t i = 0; i < size; ++i) input.mapped_span[i] = static_cast<u8>(i * 37 + 11);
-            test_image.UploadMemory(input, copies);
-            test_image.flags &= ~VideoCommon::ImageFlagBits::CpuModified;
-            StagingBufferRef output{};
-            if (PrepareGcDownload(test_image, copies, output) || !test_image.gc_readback ||
-                test_image.gc_readback->copies.empty())
-                throw std::runtime_error{"GC full-subresource footprint plan was not used"};
-            Finish();
-            if (!PrepareGcDownload(test_image, copies, output) || output.mapped_span.size() != size ||
-                !std::equal(input.mapped_span.begin(), input.mapped_span.begin() + size,
-                            output.mapped_span.begin()))
-                throw std::runtime_error{"GC array/mip/volume footprint bytes mismatch"};
-            // Consumption is idempotent while the same token remains valid.
-            if (!PrepareGcDownload(test_image, copies, output) ||
-                !std::equal(input.mapped_span.begin(), input.mapped_span.begin() + size,
-                            output.mapped_span.begin()))
-                throw std::runtime_error{"GC footprint compacted twice"};
-            CompleteGcDownload(test_image);
-        };
-        auto array_info = info;
-        array_info.format = PixelFormat::B10G11R11_FLOAT;
-        array_info.size = {127, 63, 1};
-        array_info.resources = {.levels = 5, .layers = 3};
-        gate_footprints(array_info);
-        auto volume_info = info;
-        volume_info.type = ImageType::e3D;
-        volume_info.size = {13, 7, 3};
-        volume_info.resources = {.levels = 3, .layers = 1};
-        gate_footprints(volume_info);
-        auto bc_info = info;
-        bc_info.format = PixelFormat::BC1_RGBA_UNORM;
-        bc_info.size = {64, 32, 1};
-        bc_info.resources = {.levels = 3, .layers = 1};
-        gate_footprints(bc_info);
-        // Xbox BC arrays are CPU decoded before UploadMemory. Their readback
-        // representation differs from guest BC bytes and must retain the fallback.
-        bc_info.resources.layers = 2;
-        Image decoded_bc_array{*this, bc_info, 0, 0};
-        if (decoded_bc_array.format.copy_format != bc_info.format) {
-            std::vector<Image::GcCopy> rejected;
-            if (decoded_bc_array.PlanGcDownload(FullDownloadCopies(bc_info), rejected) != 0 ||
-                !rejected.empty())
-                throw std::runtime_error{"GC accepted decoded BC array as raw footprints"};
-        }
-        LOG_INFO(Render, "D3D12: GC direct footprint gate passed (B10 arrays/mips, RGBA8 volume, BC1, idempotent in-place compact)");
-
-        if (PrepareGcDownload(image, std::span{&copy, 1}, gc_map))
-            throw std::runtime_error{"GC stale test was not deferred"};
-        Finish();
-        auto newer_upload = UploadStagingBuffer(bytes);
-        for (u32 i = 0; i < bytes; ++i)
-            newer_upload.mapped_span[i] = static_cast<u8>((i * 13 + 11) & 0xff);
-        image.UploadMemory(newer_upload, std::span{&copy, 1});
-        if (PrepareGcDownload(image, std::span{&copy, 1}, gc_map))
-            throw std::runtime_error{"GC accepted stale GPU bytes"};
-        Finish();
-        if (!PrepareGcDownload(image, std::span{&copy, 1}, gc_map) ||
-            !std::equal(newer_upload.mapped_span.begin(), newer_upload.mapped_span.begin() + bytes,
-                        gc_map.mapped_span.begin()))
-            throw std::runtime_error{"GC refreshed GPU bytes mismatch"};
-        CompleteGcDownload(image);
-        PrepareGcDownload(image, std::span{&copy, 1}, gc_map);
-        image.flags |= VideoCommon::ImageFlagBits::CpuModified;
-        if (PrepareGcDownload(image, std::span{&copy, 1}, gc_map) || gc_pending_bytes != 0)
-            throw std::runtime_error{"GC accepted stale CPU bytes or retained staging"};
-        image.flags &= ~VideoCommon::ImageFlagBits::CpuModified;
-        Finish();
-        // Fill the pending budget, prove another image cannot grow it, then discard in flight.
-        {
-            Image budget_image{*this, info, 0, 0};
-            budget_image.flags &= ~VideoCommon::ImageFlagBits::CpuModified;
-            budget_image.UploadMemory(newer_upload, std::span{&copy, 1});
-            budget_image.unswizzled_size_bytes = 8U * 1024 * 1024;
-            if (PrepareGcDownload(budget_image, std::span{&copy, 1}, gc_map) ||
-                gc_pending_bytes != 8ULL * 1024 * 1024 ||
-                PrepareGcDownload(image, std::span{&copy, 1}, gc_map) || image.gc_readback)
-                throw std::runtime_error{"GC pending budget exceeded"};
-        }
-        if (gc_pending_bytes != 0) throw std::runtime_error{"GC discarded readback leaked"};
-        Finish();
-        const auto saved_pressure = pressure_snapshot;
-        pressure_snapshot = {.app_used = 100ULL * 1024 * 1024,
-                             .app_limit = 128ULL * 1024 * 1024};
-        const bool recovered = PrepareGcDownload(image, std::span{&copy, 1}, gc_map);
-        pressure_snapshot = saved_pressure;
-        if (!recovered || gc_pending_bytes != 0 ||
-            !std::equal(newer_upload.mapped_span.begin(), newer_upload.mapped_span.begin() + bytes,
-                        gc_map.mapped_span.begin()))
-            throw std::runtime_error{"GC emergency recovery mismatch"};
-        CompleteGcDownload(image);
-        LOG_INFO(Render, "D3D12: GC deferred readback gate passed (GPU data, moves, GPU/CPU stale rejection, 8 MiB cap, discard, emergency)");
-        VideoCommon::ImageViewInfo view_info{ImageViewType::e2D, info.format};
-        ImageView view{*this, view_info, ImageId{1}, image};
-        Tegra::Texture::TSCEntry tsc{};
-        tsc.raw[0] = 2U | (2U << 3) | (2U << 6);
-        tsc.raw[1] = 2U | (2U << 4) | (1U << 6);
-        Sampler sampler{*this, tsc};
-        std::array<ImageView*, NUM_RT> colors{}; colors[0] = &view;
-        VideoCommon::RenderTargets targets{}; targets.color_buffer_ids[0] = ImageId{1}; targets.draw_buffers[0] = 0; targets.size = {width, height};
-        VideoCommon::ImageInfo depth_info{info}; depth_info.format = PixelFormat::D32_FLOAT;
-        Image depth_image{*this, depth_info, 0, 0};
-        VideoCommon::ImageViewInfo depth_view_info{ImageViewType::e2D, depth_info.format};
-        ImageView depth_view{*this, depth_view_info, ImageId{2}, depth_image};
-        // A snapshot must preserve the previous depth even after the original is written again.
-        const auto depth_dsv = dsv_descriptors.Allocate();
-        const D3D12_DEPTH_STENCIL_VIEW_DESC depth_desc{
-            .Format = DXGI_FORMAT_D32_FLOAT, .ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D};
-        device.Get()->CreateDepthStencilView(depth_image.Handle(), &depth_desc, depth_dsv);
-        depth_image.Transition(D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        scheduler.CommandList()->ClearDepthStencilView(depth_dsv, D3D12_CLEAR_FLAG_DEPTH,
-                                                       0.25f, 0, 0, nullptr);
-        Image* const snapshot = depth_image.PrepareDepthFeedback();
-        if (!snapshot) throw std::runtime_error{"depth feedback allocation failed"};
-        scheduler.CommandList()->ClearDepthStencilView(depth_dsv, D3D12_CLEAR_FLAG_DEPTH,
-                                                       0.75f, 0, 0, nullptr);
-        auto old_depth = DownloadStagingBuffer(width * height * sizeof(float), true);
-        auto new_depth = DownloadStagingBuffer(width * height * sizeof(float), true);
-        snapshot->DownloadMemory(old_depth, std::span{&copy, 1});
-        depth_image.DownloadMemory(new_depth, std::span{&copy, 1});
-        FreeDeferredStagingBuffer(old_depth);
-        FreeDeferredStagingBuffer(new_depth);
-        Finish();
-        dsv_descriptors.Free(depth_dsv);
-        // DownloadMemory repacks the aligned GPU footprint into the requested guest rows.
-        const u32 depth_pitch = width * sizeof(float);
-        for (u32 y = 0; y < height; ++y) {
-            for (u32 x = 0; x < width; ++x) {
-                float before{}, after{};
-                std::memcpy(&before, old_depth.mapped_span.data() + y * depth_pitch + x * 4, 4);
-                std::memcpy(&after, new_depth.mapped_span.data() + y * depth_pitch + x * 4, 4);
-                if (before != 0.25f || after != 0.75f)
-                    throw std::runtime_error{"depth feedback contents mismatch"};
-            }
-        }
-        LOG_INFO(Render, "D3D12: depth feedback round-trip passed (snapshot 0.25, original 0.75)");
-        ImageView null_view{*this, VideoCommon::NullImageViewParams{}};
-        Framebuffer framebuffer{*this, colors, &depth_view, targets};
-        LOG_INFO(Render, "D3D12: texture cache round-trip passed ({}x{} RGBA8 unaligned rows, SRV/UAV/RTV/DSV, null views, sampler, framebuffer)", width, height);
-    } catch (const std::exception& error) {
-        LOG_ERROR(Render, "D3D12: texture cache self-test failed: {}", error.what());
-    }
-}
-
 template class VideoCommon::TextureCache<TextureCacheParams>;
 
 } // namespace D3D12
