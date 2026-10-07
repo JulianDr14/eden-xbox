@@ -114,7 +114,8 @@ public:
 
     /// The most frequent call stacks of submissions and blocking waits on the recording thread
     /// since the last call, as "count x rva<rva<..." (eden-uwp.exe RVAs for the build's PDB).
-    /// Resets the histogram.
+    /// Resets the histogram. Only recorded with the detailed GPU profile: capturing a stack on
+    /// every submission and wait costs CPU time on the recording thread.
     [[nodiscard]] std::string TakeSyncSites(size_t max_sites);
 
 private:

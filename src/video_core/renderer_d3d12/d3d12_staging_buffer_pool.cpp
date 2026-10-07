@@ -221,9 +221,13 @@ bool StagingBufferPool::AreRegionsActive(size_t region_begin, size_t region_end)
     // Strict, as in the Vulkan pool: a region stamped with the tick being recorded is busy too, or a
     // single command list that laps the ring would overwrite its own unsubmitted uploads. Regions
     // shared by consecutive allocations in one lap are skipped by the caller instead.
-    const u64 gpu_tick = scheduler.KnownGpuTick();
-    return std::any_of(sync_ticks.begin() + region_begin, sync_ticks.begin() + region_end,
-                       [gpu_tick](u64 sync_tick) { return gpu_tick < sync_tick; });
+    // IsFree only reads the fence when the last tick it saw is not recent enough.
+    if (region_begin >= region_end) {
+        return false;
+    }
+    const u64 busy_tick = *std::max_element(sync_ticks.begin() + region_begin,
+                                            sync_ticks.begin() + region_end);
+    return !scheduler.IsFree(busy_tick);
 }
 
 StagingBufferRef StagingBufferPool::GetStagingBuffer(size_t size, MemoryUsage usage,

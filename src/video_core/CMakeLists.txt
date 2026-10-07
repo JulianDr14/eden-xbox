@@ -519,6 +519,8 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_swapchain.h
         renderer_d3d12/d3d12_texture_cache.cpp
         renderer_d3d12/d3d12_texture_cache.h
+        renderer_d3d12/d3d12_transfer_buffer_pool.cpp
+        renderer_d3d12/d3d12_transfer_buffer_pool.h
         renderer_d3d12/d3d12_gc_readback.h
         renderer_d3d12/renderer_d3d12.cpp
         renderer_d3d12/renderer_d3d12.h

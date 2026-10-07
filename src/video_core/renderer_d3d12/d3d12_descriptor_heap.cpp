@@ -133,11 +133,10 @@ D3D12_GPU_DESCRIPTOR_HANDLE DescriptorRing::Upload(
         throw std::length_error("D3D12: descriptor upload is too large");
     }
     const DescriptorRange range = Allocate(static_cast<u32>(descriptors.size()));
-    D3D12_CPU_DESCRIPTOR_HANDLE dst = range.cpu;
-    for (const D3D12_CPU_DESCRIPTOR_HANDLE src : descriptors) {
-        device->CopyDescriptorsSimple(1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        dst.ptr += stride;
-    }
+    // One destination range, single-descriptor source ranges (null sizes).
+    const UINT num = static_cast<UINT>(descriptors.size());
+    device->CopyDescriptors(1, &range.cpu, &num, num, descriptors.data(), nullptr,
+                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     CheckRemovedAfterDescriptor(device, [&] {
         return fmt::format("copying {} view descriptors to the shader-visible heap",
                            descriptors.size());
@@ -188,6 +187,7 @@ GuestDescriptorQueue::GuestDescriptorQueue(ID3D12Device* device_, DescriptorRing
     : device{device_}, ring{ring_}, stride{ring_.Stride()} {}
 
 void GuestDescriptorQueue::Acquire(u32 count_) {
+    FlushCopies();
     count = count_;
     written = 0;
     // One spare slot past the table absorbs writes beyond what the root signature declares.
@@ -195,6 +195,7 @@ void GuestDescriptorQueue::Acquire(u32 count_) {
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE GuestDescriptorQueue::Table() {
+    FlushCopies();
     if (written != count && !logged_mismatch) {
         LOG_ERROR(Render, "D3D12: descriptor table filled with {} of {} descriptors", written,
                   count);
@@ -313,12 +314,37 @@ void GuestDescriptorQueue::AddCopy(D3D12_CPU_DESCRIPTOR_HANDLE descriptor) {
     if (count == 0) {
         return;
     }
-    VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::ViewCopyNs};
     VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::ViewCopies, 1);
-    device->CopyDescriptorsSimple(1, Next(), descriptor, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    if (written >= count) {
+        // The spare slot (see Next) is not contiguous with the run: copy it now.
+        FlushCopies();
+        device->CopyDescriptorsSimple(1, Next(), descriptor,
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        return;
+    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE slot = Next();
+    if (!pending_copies.empty() &&
+        slot.ptr != copy_destination.ptr + pending_copies.size() * stride) {
+        FlushCopies(); // a view was created in between: start a new run
+    }
+    if (pending_copies.empty()) {
+        copy_destination = slot;
+    }
+    pending_copies.push_back(descriptor);
+}
+
+void GuestDescriptorQueue::FlushCopies() {
+    if (pending_copies.empty()) {
+        return;
+    }
+    VideoCore::Perf::ScopedNsTimer timer{VideoCore::Perf::Counter::ViewCopyNs};
+    const UINT num = static_cast<UINT>(pending_copies.size());
+    device->CopyDescriptors(1, &copy_destination, &num, num, pending_copies.data(), nullptr,
+                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     CheckRemovedAfterDescriptor(device, [&] {
-        return fmt::format("copying a texture descriptor (0x{:x}) for a draw", descriptor.ptr);
+        return fmt::format("copying {} texture descriptors for a draw", num);
     });
+    pending_copies.clear();
 }
 
 // --- SamplerHeap ------------------------------------------------------------------------------

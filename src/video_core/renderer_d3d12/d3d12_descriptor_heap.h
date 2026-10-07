@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <boost/container/small_vector.hpp>
+
 #include "video_core/renderer_d3d12/d3d12_device.h"
 
 namespace D3D12 {
@@ -115,8 +117,11 @@ public:
     /// resource is null or the offset is not a whole number of elements.
     void AddTexelBuffer(ID3D12Resource* resource, u64 offset, u32 size, DXGI_FORMAT format,
                         u32 element_size, bool with_uav);
-    /// Copies of offline descriptors (texture SRVs, image UAVs).
+    /// Copies of offline descriptors (texture SRVs, image UAVs). Consecutive copies are recorded
+    /// with one CopyDescriptors call when the table is finished.
     void AddCopy(D3D12_CPU_DESCRIPTOR_HANDLE descriptor);
+    /// Writes the pending copies to the slots reserved for them (Table() also does).
+    void FlushCopies();
 
 private:
     D3D12_CPU_DESCRIPTOR_HANDLE Next();
@@ -127,6 +132,9 @@ private:
     DescriptorRange range{};
     u32 count{};
     u32 written{};
+    /// Sources of the pending copies, written from copy_destination on.
+    boost::container::small_vector<D3D12_CPU_DESCRIPTOR_HANDLE, 64> pending_copies;
+    D3D12_CPU_DESCRIPTOR_HANDLE copy_destination{};
     bool logged_mismatch{};
     bool logged_unaligned{};
 };

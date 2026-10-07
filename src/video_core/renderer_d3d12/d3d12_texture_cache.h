@@ -19,6 +19,7 @@
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_gc_readback.h"
 #include "video_core/renderer_d3d12/d3d12_resource_allocator.h"
+#include "video_core/renderer_d3d12/d3d12_transfer_buffer_pool.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/texture_cache_base.h"
@@ -165,6 +166,7 @@ private:
     CpuDescriptorAllocator& rtv_descriptors;
     CpuDescriptorAllocator& dsv_descriptors;
     TextureResourceAllocator texture_allocator;
+    TransferBufferPool transfer_buffers;
     CachePressureController cache_pressure;
     CachePressure pressure_level{};
     CacheMemorySnapshot pressure_snapshot{};

@@ -888,8 +888,11 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
     }
     LOG_INFO(Render, "D3D12 guest GPU wait sites: {}", DescribeGuestWaitSites());
     LOG_INFO(Render, "D3D12 macro profiles: {}", DescribeMacroProfiles());
-    // Who submits and waits (S/W, count, eden-uwp.exe RVAs from the innermost caller out).
-    LOG_INFO(Render, "D3D12 sync sites: {}", scheduler.TakeSyncSites(6));
+    // Who submits and waits (S/W, count, eden-uwp.exe RVAs from the innermost caller out); only
+    // recorded with the detailed GPU profile.
+    if (VideoCore::Perf::DetailedGpuProfileEnabled()) {
+        LOG_INFO(Render, "D3D12 sync sites: {}", scheduler.TakeSyncSites(6));
+    }
     const DXGI_QUERY_VIDEO_MEMORY_INFO video = device.QueryVideoMemory();
     LOG_INFO(Render,
              "D3D12 memory: GPU {} MiB, DXGI budget {} MiB, cache budget {} MiB, caches see {} MiB used",

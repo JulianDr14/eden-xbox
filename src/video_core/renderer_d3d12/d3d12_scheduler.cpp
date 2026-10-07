@@ -194,7 +194,7 @@ u64 Scheduler::Flush() {
         device.ReportDeviceRemoved();
         throw std::runtime_error(fmt::format("D3D12: flush on removed device 0x{:08X}", static_cast<u32>(reason)));
     }
-    if (IsRecordingThread()) {
+    if (VideoCore::Perf::DetailedGpuProfileEnabled() && IsRecordingThread()) {
         RecordSyncSite('S');
     }
     std::scoped_lock lock{submit_mutex};
@@ -271,7 +271,7 @@ void Scheduler::Wait(u64 tick) {
     // Only the recording (GPU) thread stalls the frame by waiting; the fence thread waits by
     // design.
     const bool counted = IsRecordingThread();
-    if (counted) {
+    if (counted && VideoCore::Perf::DetailedGpuProfileEnabled()) {
         RecordSyncSite('W');
     }
     const auto start = std::chrono::steady_clock::now();
