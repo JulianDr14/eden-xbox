@@ -485,6 +485,8 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_descriptor_heap.cpp
         renderer_d3d12/d3d12_descriptor_heap.h
         renderer_d3d12/diagnostics/d3d12_draw_trace.cpp
+        renderer_d3d12/diagnostics/d3d12_frame_dump.cpp
+        renderer_d3d12/diagnostics/d3d12_perf_report.cpp
         renderer_d3d12/d3d12_fence_manager.cpp
         renderer_d3d12/d3d12_fence_manager.h
         renderer_d3d12/d3d12_graphics_pipeline.cpp
@@ -495,9 +497,12 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_indirect_buffer.h
         renderer_d3d12/d3d12_maxwell_to_d3d12.cpp
         renderer_d3d12/d3d12_maxwell_to_d3d12.h
+        renderer_d3d12/d3d12_overlay.cpp
         renderer_d3d12/d3d12_pipeline_cache.cpp
         renderer_d3d12/d3d12_pipeline_cache.h
         renderer_d3d12/d3d12_pipeline_helper.h
+        renderer_d3d12/d3d12_present_blit.cpp
+        renderer_d3d12/d3d12_present_cpu.cpp
         renderer_d3d12/d3d12_device.cpp
         renderer_d3d12/d3d12_device.h
         renderer_d3d12/d3d12_scheduler.cpp
@@ -538,6 +543,7 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_gc_readback.h
         renderer_d3d12/renderer_d3d12.cpp
         renderer_d3d12/renderer_d3d12.h
+        renderer_d3d12/renderer_d3d12_internal.h
     )
     target_compile_definitions(video_core PUBLIC HAS_D3D12)
     # spirv_to_dxil.dll (Mesa) is loaded at runtime; only its C headers are needed to build.
