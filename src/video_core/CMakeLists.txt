@@ -474,6 +474,7 @@ endif()
 
 if (ENABLE_D3D12)
     target_sources(video_core PRIVATE
+        renderer_d3d12/d3d12_accelerate_dma.cpp
         renderer_d3d12/d3d12_barrier_batch.h
         renderer_d3d12/d3d12_blit_image.cpp
         renderer_d3d12/d3d12_blit_image.h
@@ -483,6 +484,7 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_compute_pipeline.h
         renderer_d3d12/d3d12_descriptor_heap.cpp
         renderer_d3d12/d3d12_descriptor_heap.h
+        renderer_d3d12/diagnostics/d3d12_draw_trace.cpp
         renderer_d3d12/d3d12_fence_manager.cpp
         renderer_d3d12/d3d12_fence_manager.h
         renderer_d3d12/d3d12_graphics_pipeline.cpp
@@ -508,6 +510,9 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_resource_utils.h
         renderer_d3d12/d3d12_rasterizer.cpp
         renderer_d3d12/d3d12_rasterizer.h
+        renderer_d3d12/d3d12_rasterizer_clear.cpp
+        renderer_d3d12/d3d12_rasterizer_indirect.cpp
+        renderer_d3d12/d3d12_rasterizer_state.cpp
         renderer_d3d12/d3d12_root_signature.cpp
         renderer_d3d12/d3d12_root_signature.h
         renderer_d3d12/d3d12_shader_compiler.cpp
