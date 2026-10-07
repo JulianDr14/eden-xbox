@@ -39,7 +39,7 @@ to a new area still stutters while its shaders build.
 | Game | Xbox Series X | State |
 | --- | --- | --- |
 | Pokémon: Let's Go, Pikachu! | **60 FPS**, stable | No graphical errors |
-| Mario Strikers: Battle League | **60 FPS** in matches, stable (same on PC) | The Hyper Strike cutscene has a bug that is being fixed; the rest of the match has no graphical errors |
+| Mario Strikers: Battle League | **60 FPS** in matches, stable (same on PC) | No graphical errors, Hyper Strike cutscenes included |
 | Super Mario Bros. Wonder | **55–60 FPS**, stable | No crashes or graphical errors |
 | The Legend of Zelda: Tears of the Kingdom | Still hits the app's memory limit | On PC it reaches the open world at **30 FPS**, after fixes to vertex fetching and to manual derivatives that broke the first cave |
 
