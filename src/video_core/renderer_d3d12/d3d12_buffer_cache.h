@@ -77,7 +77,6 @@ class BufferCacheRuntime {
 public:
     BufferCacheRuntime(const Device& device, Scheduler& scheduler, StagingBufferPool& staging,
                        Tegra::MaxwellDeviceMemoryManager& device_memory);
-    void RunSelfTest();
 
     /// Where guest uniform, storage and texel buffer views go (set by the rasterizer).
     void SetDescriptorQueue(GuestDescriptorQueue* queue) noexcept { descriptor_queue = queue; }

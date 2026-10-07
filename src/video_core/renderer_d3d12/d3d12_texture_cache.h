@@ -21,6 +21,7 @@
 #include "video_core/renderer_d3d12/d3d12_resource_allocator.h"
 #include "video_core/renderer_d3d12/d3d12_transfer_buffer_pool.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
+#include "video_core/texture_cache/accelerated_swizzle.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 
@@ -75,7 +76,6 @@ public:
                         CpuDescriptorAllocator& rtvs, CpuDescriptorAllocator& dsvs);
     ~TextureCacheRuntime();
 
-    void RunSelfTest();
     void Finish();
 
     /// Where shader blits go (set by the renderer once the helper exists; null means skip).
@@ -150,6 +150,22 @@ public:
 
 private:
     void EnsureAstcRgbaScratch(u32 width, u32 height);
+    /// One band of a GPU ASTC upload, as VerifyGpuAstcBand compares it.
+    struct AstcVerifyBand {
+        const Image& image;
+        const StagingBufferRef& map;
+        const VideoCommon::SwizzleParameters& swizzle;
+        const VideoCommon::Accelerated::BlockLinearSwizzle2DParams& params;
+        u32 mip_width;
+        u32 rows;
+        u32 block_width;
+        u32 block_height;
+        u32 bc3_row_pitch;
+        u64 bc3_bytes;
+    };
+    /// SetAstcGpuVerify (diagnostics/d3d12_astc_verify.cpp): reads the band's GPU BC3 and RGBA
+    /// back, waits, and logs how they differ from the CPU decoder's.
+    void VerifyGpuAstcBand(const AstcVerifyBand& band);
     void EnsureAstcBc3Scratch(u64 size);
     /// A blit whose source and destination are the same image (a mip chain built level by level,
     /// a copy between layers or regions): the source region goes through a scratch texture.
