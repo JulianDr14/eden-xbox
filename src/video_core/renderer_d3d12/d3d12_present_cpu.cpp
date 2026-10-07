@@ -190,23 +190,18 @@ void RendererD3D12::RecordUpload(const StagingBufferRef& upload) {
     cmd->ResourceBarrier(1, &barrier);
 }
 
-void RendererD3D12::RecordCopy(const StagingBufferRef& upload, ID3D12Resource* image) {
+void RendererD3D12::RecordCopy(const StagingBufferRef& upload, PresentFrame& frame) {
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
-    D3D12_RESOURCE_BARRIER barrier =
-        TransitionBarrier(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
-    cmd->ResourceBarrier(1, &barrier);
+    frame.Transition(cmd, D3D12_RESOURCE_STATE_COPY_DEST);
     const D3D12_TEXTURE_COPY_LOCATION dst{
-        .pResource = image,
+        .pResource = frame.image.Get(),
         .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
         .SubresourceIndex = 0,
     };
     const D3D12_TEXTURE_COPY_LOCATION src = StagingSource(upload, footprint);
     cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    barrier = TransitionBarrier(image, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    cmd->ResourceBarrier(1, &barrier);
-    DrawPerformanceOverlay(cmd, back_buffer_rtvs[swapchain.CurrentIndex()]);
-    barrier = TransitionBarrier(image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-    cmd->ResourceBarrier(1, &barrier);
+    frame.Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    DrawPerformanceOverlay(cmd, frame.rtv);
 }
 
 } // namespace D3D12

@@ -119,7 +119,7 @@ bool RendererD3D12::CreateBlitPipeline() {
 }
 
 bool RendererD3D12::CompositeAccelerated(const Tegra::FramebufferConfig& framebuffer,
-                                         u32 image_index) {
+                                         PresentFrame& frame) {
     const DAddr framebuffer_addr = framebuffer.address + framebuffer.offset;
     const auto texture = rasterizer.AccelerateDisplay(framebuffer, framebuffer_addr);
     if (!texture || texture->srv.ptr == 0 || texture->width == 0 || texture->height == 0) {
@@ -143,7 +143,7 @@ bool RendererD3D12::CompositeAccelerated(const Tegra::FramebufferConfig& framebu
     const D3D12_GPU_DESCRIPTOR_HANDLE sampler_table =
         sampler_heap.GetTable({&LINEAR_SAMPLER_KEY, 1}, {&linear_sampler, 1});
     const D3D12_GPU_DESCRIPTOR_HANDLE srv_table = descriptor_ring.Upload({&texture->srv, 1});
-    RecordBlit(swapchain.Image(image_index), image_index, srv_table, sampler_table, scale_offset);
+    RecordBlit(frame, srv_table, sampler_table, scale_offset);
     if (!logged_accelerated) {
         LOG_INFO(Render, "D3D12: presenting the GPU-rendered guest image ({}x{} image, {}x{} "
                  "framebuffer)", texture->width, texture->height, framebuffer.width,
@@ -153,16 +153,13 @@ bool RendererD3D12::CompositeAccelerated(const Tegra::FramebufferConfig& framebu
     return true;
 }
 
-void RendererD3D12::RecordBlit(ID3D12Resource* image, u32 image_index,
-                               D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
+void RendererD3D12::RecordBlit(PresentFrame& frame, D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
                                D3D12_GPU_DESCRIPTOR_HANDLE sampler_table,
                                const std::array<float, 4>& tex_scale_offset) {
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
-    D3D12_RESOURCE_BARRIER barrier =
-        TransitionBarrier(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    cmd->ResourceBarrier(1, &barrier);
+    frame.Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = back_buffer_rtvs[image_index];
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = frame.rtv;
     constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     cmd->ClearRenderTargetView(rtv, black, 0, nullptr);
     cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
@@ -200,9 +197,6 @@ void RendererD3D12::RecordBlit(ID3D12Resource* image, u32 image_index,
     DrawShaderIndicator(cmd, rtv);
     DrawPerformanceOverlay(cmd, rtv);
     DrawGameMenu(cmd, rtv);
-
-    barrier = TransitionBarrier(image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-    cmd->ResourceBarrier(1, &barrier);
 }
 
 } // namespace D3D12

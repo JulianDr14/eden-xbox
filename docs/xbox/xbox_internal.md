@@ -2422,3 +2422,43 @@ desde `Image::Transition`.
   - `d3d12_transfer_buffer_pool`
 - **`diagnostics/`:** traza de draws, informes de rendimiento, volcado de frames, verificación
   ASTC y diagnóstico de PSO rechazados. El camino de draw no depende de ellos.
+
+## Hilo de presentación D3D12 (7 oct 2026)
+
+**Antes.** El hilo de GPU componía la imagen sobre el back buffer y llamaba a `Present(1, 0)`,
+que bloquea hasta el vsync cuando la cola de DXGI está llena. Además esperaba el tick del back
+buffer. Todo ese tiempo no grababa el frame siguiente.
+
+**Ahora** (`d3d12_present_manager`, el equivalente de `vk_present_manager`):
+- El renderer compone en uno de los 3 `PresentFrame`. Son texturas propias con el formato y el
+  tamaño del swapchain, prestadas con RAII (`FrameLease`): un frame que falla vuelve al pool.
+- `PresentManager::Present` hace `scheduler.Flush()` y encola el frame.
+- El hilo `D3D12Present` (prioridad alta) espera el *frame latency waitable object* del
+  swapchain (`MAX_FRAME_LATENCY` = 2). Después copia el frame al back buffer con su propia
+  command list y llama a `Present`.
+- El hilo de GPU solo espera cuando los 3 frames están en cola, y nunca más de 3 frames por
+  delante del GPU.
+
+**Sincronización.**
+- **Orden en el GPU:** la misma cola directa, en orden de envío. Un frame se encola después de
+  enviar su render, y se vuelve a prestar después de enviar su copia.
+- **`Device::QueueMutex`:** serializa cada `ExecuteCommandLists` con su `Signal`, y también
+  `Present`. Hay reportes de bloqueo mutuo entre `Present` y `ExecuteCommandLists` llamados
+  desde dos hilos (gamedev.net 681243). `Present` no bloquea con el mutex tomado porque antes se
+  espera al waitable object, en modo no alertable.
+- **Allocators de la copia:** uno por frame, y se resetean solo cuando el fence de copia pasó.
+
+**Respaldo.** Si la consola rechaza el swapchain con waitable object, o con `async_present=0` en
+boot.cfg, la copia y el `Present` se hacen en el hilo de GPU, como antes. El log dice qué modo se
+usa: `D3D12: presentation on its own thread` o `on the GPU thread`.
+
+**Coste.** Una copia de pantalla completa por frame en el GPU y 3 texturas del tamaño del
+swapchain.
+
+**Referencias:**
+- [Reduce latency with DXGI 1.3 swap chains](https://learn.microsoft.com/en-us/windows/uwp/gaming/reduce-latency-with-dxgi-1-3-swap-chains)
+- `vk_present_manager.cpp` de Eden.
+- `d3d12_presenter.cc` de Xenia: presenta desde el hilo de UI, en la misma cola.
+
+**Gate en Series pendiente.** Hay que comparar FPS y `max wait` / `max record+present` del log
+de pacing con `async_present=0` y con `async_present=1`.

@@ -25,6 +25,7 @@
 #include "video_core/renderer_d3d12/d3d12_swapchain.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
+#include "video_core/renderer_d3d12/d3d12_present_manager.h"
 
 namespace D3D12 {
 
@@ -56,6 +57,9 @@ void HideGameMenu(VideoCore::RendererBase& renderer);
 /// Presentation already runs on the rasterizer infrastructure (phase 3a): the scheduler's command
 /// list and ticks, staging memory from the stream buffer, and descriptors from the shader-visible
 /// ring and the sampler heap.
+///
+/// Frames are composited into the present manager's frames, which copies them to the swapchain
+/// and presents them on its own thread (d3d12_present_manager.h).
 ///
 /// Implementation files: renderer_d3d12.cpp (setup, Composite, Present), d3d12_present_blit.cpp
 /// (GPU path), d3d12_present_cpu.cpp (CPU fallback), d3d12_overlay.cpp, and in diagnostics/
@@ -120,20 +124,20 @@ private:
 
     /// Records the shader-path upload of the CPU-read guest image into guest_texture.
     void RecordUpload(const StagingBufferRef& upload);
-    /// Draws a texture into back buffer image_index, letterboxed; tex_scale_offset maps the
+    /// Draws a texture into frame, letterboxed, then the overlays; tex_scale_offset maps the
     /// screen (x right, y up in D3D12 clip space) to texture coordinates.
-    void RecordBlit(ID3D12Resource* image, u32 image_index, D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
+    void RecordBlit(PresentFrame& frame, D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
                     D3D12_GPU_DESCRIPTOR_HANDLE sampler_table,
                     const std::array<float, 4>& tex_scale_offset);
-    /// Presents the guest image the GPU rendered (texture cache), without reading it back.
-    /// False when the framebuffer is not a cached image.
-    bool CompositeAccelerated(const Tegra::FramebufferConfig& framebuffer, u32 image_index);
-    /// Records the CPU-path copy of the upload image into the back buffer.
-    void RecordCopy(const StagingBufferRef& upload, ID3D12Resource* image);
-    /// Submits the recorded frame and presents back buffer image_index.
-    void Present(u32 image_index);
-    /// Records a copy of back buffer image into readback memory (before Present).
-    StagingBufferRef RecordFrameReadback(ID3D12Resource* image);
+    /// Composites the guest image the GPU rendered (texture cache) into frame, without reading
+    /// it back. False when the framebuffer is not a cached image.
+    bool CompositeAccelerated(const Tegra::FramebufferConfig& framebuffer, PresentFrame& frame);
+    /// Records the CPU-path copy of the upload image into frame.
+    void RecordCopy(const StagingBufferRef& upload, PresentFrame& frame);
+    /// Submits the recorded frame and hands it to the present manager.
+    void Present(FrameLease&& frame);
+    /// Records a copy of frame into readback memory (before Present).
+    StagingBufferRef RecordFrameReadback(PresentFrame& frame);
     /// Waits for the copy and writes it as frame.bmp next to the log: the one way to see what
     /// the console presented without a capture card.
     void WriteFrameDump(StagingBufferRef& readback, u32 dump_index);
@@ -155,9 +159,9 @@ private:
     SamplerHeap sampler_heap;
     BlitImageHelper blit_helper;
     RasterizerD3D12 rasterizer;
+    /// After everything it uses: its present thread stops before they go away.
+    PresentManager present_manager;
 
-    std::array<u64, Swapchain::IMAGE_COUNT> present_ticks{};
-    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, Swapchain::IMAGE_COUNT> back_buffer_rtvs{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{}; ///< window-sized image (CPU path)
     u64 upload_size{};
 

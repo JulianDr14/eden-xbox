@@ -212,16 +212,20 @@ u64 Scheduler::Flush() {
         TraceGpuOperation(fmt::format("submit tick={} completed={} PSO={}", CurrentTick(),
                                      fence->GetCompletedValue(), static_cast<void*>(current_pipeline)));
     }
-    device.Queue()->ExecuteCommandLists(1, lists);
+    const u64 signaled = current_tick.load(std::memory_order_relaxed);
+    {
+        // The present thread submits to the same queue (see Device::QueueMutex).
+        std::scoped_lock queue_lock{device.QueueMutex()};
+        device.Queue()->ExecuteCommandLists(1, lists);
+        ThrowIfFailed(device.Queue()->Signal(fence.Get(), signaled),
+                      "ID3D12CommandQueue::Signal");
+    }
     VideoCore::Perf::Add(VideoCore::Perf::Counter::Submits, 1);
     VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::GpuSubmit);
     CheckRemovedAfter(device.Get(), [&] {
         return fmt::format("submitting tick {} (removed by the GPU or by a recorded command)",
-                           current_tick.load(std::memory_order_relaxed));
+                           signaled);
     });
-
-    const u64 signaled = current_tick.load(std::memory_order_relaxed);
-    ThrowIfFailed(device.Queue()->Signal(fence.Get(), signaled), "ID3D12CommandQueue::Signal");
     allocator_pool.push_back({std::move(current_allocator), signaled});
     {
         // Publish the submission to threads waiting on it (see Wait).

@@ -206,6 +206,9 @@ struct BootConfig {
     bool null_audio{};
     /// Diagnostic only: ignore requests for 30 Hz presentation ("force_swap_interval=1").
     bool force_swap_interval_one{};
+    /// Copy and present frames on a thread of their own, so the GPU thread never waits for the
+    /// display ("async_present=0" presents on the GPU thread, as Present used to).
+    bool async_present{true};
     /// File name of a game in LocalState\games to boot instead of boot.nro (package-appx.ps1 -Game).
     std::string game;
     /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
@@ -326,6 +329,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     D3D12::SetDredEnabled(config.dred);
     VideoCore::Perf::SetDetailedGpuProfile(config.gpu_profile);
     VideoCore::Perf::SetForceSwapIntervalOne(config.force_swap_interval_one);
+    Settings::values.async_presentation.SetValue(config.async_present);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
         D3D12::SetGpuBasedValidation(config.gpu_validation);
@@ -1552,6 +1556,10 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             config.null_audio = false;
                             WriteDiag("boot.cfg: unknown audio backend '" + line.substr(6) +
                                       "', using XAudio2");
+                        } else if (line == "async_present=0" || line == "async_present=1") {
+                            config.async_present = line.back() == '1';
+                            WriteDiag(std::string("boot.cfg: presentation thread ") +
+                                      (config.async_present ? "on" : "off"));
                         } else if (line == "force_swap_interval=1") {
                             config.force_swap_interval_one = true;
                             WriteDiag("boot.cfg: forcing guest swap intervals above one to one");

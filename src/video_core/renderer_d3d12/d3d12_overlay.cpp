@@ -286,14 +286,10 @@ void RendererD3D12::ShowLoadProgress(size_t done, size_t total, std::string_view
     }
     last_load_present = now;
     try {
-        const u32 index = swapchain.CurrentIndex();
-        scheduler.Wait(present_ticks[index]);
-        ID3D12Resource* const image = swapchain.Image(index);
+        FrameLease frame = present_manager.AcquireFrame();
         ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
-        D3D12_RESOURCE_BARRIER barrier =
-            TransitionBarrier(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        cmd->ResourceBarrier(1, &barrier);
-        const D3D12_CPU_DESCRIPTOR_HANDLE rtv = back_buffer_rtvs[index];
+        frame->Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtv = frame->rtv;
         constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         cmd->ClearRenderTargetView(rtv, black, 0, nullptr);
 
@@ -318,11 +314,7 @@ void RendererD3D12::ShowLoadProgress(size_t done, size_t total, std::string_view
         AppendText(text, label, (screen_width - TextWidth(label.size(), cell)) / 2,
                    bar_top + 6 * cell, cell);
         ClearRects(cmd, rtv, OVERLAY_TEXT, text);
-
-        barrier = TransitionBarrier(image, D3D12_RESOURCE_STATE_RENDER_TARGET,
-                             D3D12_RESOURCE_STATE_PRESENT);
-        cmd->ResourceBarrier(1, &barrier);
-        Present(index);
+        Present(std::move(frame));
     } catch (const std::exception& e) {
         LOG_ERROR(Render, "D3D12: shader cache progress not shown: {}", e.what());
     }
@@ -334,24 +326,17 @@ void RendererD3D12::ShowGameMenu(std::optional<GameMenuOverlay> menu) {
         return;
     }
     try {
-        const u32 index = swapchain.CurrentIndex();
-        scheduler.Wait(present_ticks[index]);
+        FrameLease frame = present_manager.AcquireFrame();
         // The guest is paused: blit its last frame again (the menu is drawn with it), or show the
         // menu on black when that frame is not a GPU image.
-        if (!blit_ready || !last_framebuffer || !CompositeAccelerated(*last_framebuffer, index)) {
-            ID3D12Resource* const image = swapchain.Image(index);
+        if (!blit_ready || !last_framebuffer || !CompositeAccelerated(*last_framebuffer, *frame)) {
             ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
-            D3D12_RESOURCE_BARRIER barrier =
-                TransitionBarrier(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            cmd->ResourceBarrier(1, &barrier);
+            frame->Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
             constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-            cmd->ClearRenderTargetView(back_buffer_rtvs[index], black, 0, nullptr);
-            DrawGameMenu(cmd, back_buffer_rtvs[index]);
-            barrier = TransitionBarrier(image, D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                 D3D12_RESOURCE_STATE_PRESENT);
-            cmd->ResourceBarrier(1, &barrier);
+            cmd->ClearRenderTargetView(frame->rtv, black, 0, nullptr);
+            DrawGameMenu(cmd, frame->rtv);
         }
-        Present(index);
+        Present(std::move(frame));
     } catch (const std::exception& e) {
         LOG_ERROR(Render, "D3D12: game menu not shown: {}", e.what());
     }
