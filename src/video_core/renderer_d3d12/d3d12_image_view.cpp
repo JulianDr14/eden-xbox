@@ -225,6 +225,11 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
         if (is_3d) {
             uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
             uav_desc.Texture3D = {base_level, 0, static_cast<u32>(-1)};
+        } else if (resource_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D) {
+            // A 2D-array UAV on a 1D resource is an invalid call: the device is removed (an
+            // R32_FLOAT 1D image in Super Mario 3D World).
+            uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
+            uav_desc.Texture1DArray = {base_level, base_layer, layers};
         } else {
             uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
             uav_desc.Texture2DArray = {base_level, base_layer, layers, 0};
