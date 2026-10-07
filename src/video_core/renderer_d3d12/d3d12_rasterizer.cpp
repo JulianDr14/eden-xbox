@@ -44,6 +44,34 @@ std::optional<VideoCore::QueryType> MaxwellToVideoCoreQuery(VideoCommon::QueryTy
 
 } // Anonymous namespace
 
+bool RasterizerD3D12::CullsEveryPrimitive() const {
+    // D3D12 has no cull mode for both faces (MaxwellToD3D12::CullMode): those draws are skipped.
+    using Maxwell = Tegra::Engines::Maxwell3D::Regs;
+    const auto& regs = maxwell3d->regs;
+    if (regs.gl_cull_test_enabled == 0 || regs.gl_cull_face != Maxwell::CullFace::FrontAndBack) {
+        return false;
+    }
+    // Geometry and tessellation stages may turn the primitives into points or lines.
+    if (regs.IsShaderConfigEnabled(Maxwell::ShaderType::TessellationInit) ||
+        regs.IsShaderConfigEnabled(Maxwell::ShaderType::Tessellation) ||
+        regs.IsShaderConfigEnabled(Maxwell::ShaderType::Geometry)) {
+        return false;
+    }
+    // Culling only discards polygons: points and lines still draw.
+    switch (maxwell3d->draw_manager.draw_state.topology) {
+    case Maxwell::PrimitiveTopology::Points:
+    case Maxwell::PrimitiveTopology::Lines:
+    case Maxwell::PrimitiveTopology::LineLoop:
+    case Maxwell::PrimitiveTopology::LineStrip:
+    case Maxwell::PrimitiveTopology::LinesAdjacency:
+    case Maxwell::PrimitiveTopology::LineStripAdjacency:
+    case Maxwell::PrimitiveTopology::Patches:
+        return false;
+    default:
+        return true;
+    }
+}
+
 RasterizerD3D12::RasterizerD3D12(Tegra::GPU& gpu_,
                                  Tegra::MaxwellDeviceMemoryManager& device_memory_,
                                  const Device& device, Scheduler& scheduler_,
@@ -80,6 +108,12 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     };
     gpu_memory->FlushCaching();
     ApplyPendingStateInvalidation();
+    if (CullsEveryPrimitive()) {
+        if (trace_draws) {
+            TraceDraw("draw skipped (both faces culled)", nullptr, nullptr, {}, 0, 0);
+        }
+        return;
+    }
 
     GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
     if (!pipeline) {
