@@ -86,6 +86,7 @@ public:
     }
 private:
     friend bool RunProControllerDecoderSelfTest();
+    /// bytes holds at most the first 64 bytes of the report (Receive): all the poller reads.
     bool Decode(std::span<u8> bytes) {
         if (bytes.size() < sizeof(InputReportActive) || bytes.size() > 64 || bytes[0] != 0x30) return false;
         std::scoped_lock lock{mutex};
@@ -96,11 +97,14 @@ private:
     void Receive(const winrt::Windows::Devices::HumanInterfaceDevice::HidInputReport& report) {
         try {
             const auto buffer = report.Data();
-            // The poller memcpy requires a complete active packet including ID.
-            if (report.Id() != 0x30 || buffer.Length() < sizeof(InputReportActive) || buffer.Length() > 64) return;
+            // The poller memcpy requires a complete active packet including ID. Over USB the
+            // report is 64 bytes; over Bluetooth it is padded to 362 (the descriptor's size), and
+            // everything past the 64 the poller reads is ignored.
+            if (report.Id() != 0x30 || buffer.Length() < sizeof(InputReportActive)) return;
             std::array<u8, 64> bytes{};
-            std::copy_n(buffer.data(), buffer.Length(), bytes.data());
-            Decode(std::span<u8>{bytes.data(), buffer.Length()});
+            const size_t length = std::min<size_t>(buffer.Length(), bytes.size());
+            std::copy_n(buffer.data(), length, bytes.data());
+            Decode(std::span<u8>{bytes.data(), length});
         } catch (const winrt::hresult_error&) {} // unplug: stale snapshot becomes neutral
     }
     Hid hid;
@@ -151,11 +155,12 @@ struct Registry {
 Registry& ProRegistry() { static Registry registry; return registry; }
 winrt::fire_and_forget DiscoverPro(bool* busy) {
     try {
-        const auto infos = co_await winrt::Windows::Devices::Enumeration::DeviceInformation::FindAllAsync(
-            Hid::GetDeviceSelector(1, 4, 0x057e, 0x2009));
         auto previous = ProControllers();
         std::vector<ControllerDevice> devices;
-        for (const auto& info : infos) {
+        // Over USB the pad is a joystick (usage 4), over Bluetooth a gamepad (usage 5).
+        for (const u16 usage : {u16{4}, u16{5}})
+        for (const auto& info : co_await winrt::Windows::Devices::Enumeration::DeviceInformation::FindAllAsync(
+                 Hid::GetDeviceSelector(1, usage, 0x057e, 0x2009))) {
             const std::wstring id{info.Id().c_str()};
             const auto found = std::find_if(previous.begin(), previous.end(), [&](const auto& d) { return d.id == id; });
             if (found != previous.end() && found->pro && found->pro->Ready()) { devices.push_back(*found); continue; }
@@ -163,7 +168,8 @@ winrt::fire_and_forget DiscoverPro(bool* busy) {
             if (!hid) continue;
             auto pro = std::make_shared<ProControllerReader>(hid);
             pro->Start();
-            ControllerDevice device{id, L"Nintendo Switch Pro Controller", false, nullptr, std::move(pro)};
+            ControllerDevice device{id, L"Nintendo Switch Pro Controller", usage == 5, nullptr,
+                                    std::move(pro)};
             device.nintendo = true;
             devices.push_back(std::move(device));
         }
