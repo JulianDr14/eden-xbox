@@ -32,6 +32,7 @@ namespace {
 constexpr u32 DESCRIPTOR_RING_SIZE = 256 * 1024;
 
 std::atomic<u32> traced_frame_override{};
+std::atomic<u32> traced_frame_count{1};
 std::atomic<bool> frame_diagnostics{true};
 
 IUnknown* CoreWindowOf(const Core::Frontend::EmuWindow& emu_window) {
@@ -45,8 +46,9 @@ IUnknown* CoreWindowOf(const Core::Frontend::EmuWindow& emu_window) {
 
 } // Anonymous namespace
 
-void SetTracedFrame(u32 frame) {
+void SetTracedFrame(u32 frame, u32 count) {
     traced_frame_override.store(frame, std::memory_order_relaxed);
+    traced_frame_count.store(std::max<u32>(count, 1), std::memory_order_relaxed);
 }
 
 void SetFrameDiagnostics(bool enabled) {
@@ -175,7 +177,10 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                     LOG_INFO(Render, "D3D12: tracing the draws of frame {}", traced_frame);
                     // An explicit trace_frame also writes its render targets (trace\*.bmp).
                     rasterizer.SetDrawTrace(true, override_frame != 0);
-                } else if (diagnostics && accelerated_frames == traced_frame) {
+                } else if (diagnostics &&
+                           accelerated_frames ==
+                               traced_frame - 1 +
+                                   traced_frame_count.load(std::memory_order_relaxed)) {
                     rasterizer.SetDrawTrace(false);
                     LOG_INFO(Render, "D3D12: draw trace of frame {} complete", traced_frame);
                 }

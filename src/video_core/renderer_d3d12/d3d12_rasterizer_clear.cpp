@@ -127,13 +127,14 @@ void RasterizerD3D12::Clear(u32 layer_count) {
         rect.bottom = std::min(rect.bottom, scissor.bottom);
     }
     if (trace_draws) {
-        TraceDraw(fmt::format("clear rt{} mask {}{}{}{} depth {} stencil {} rect {},{}-{},{} "
-                              "color {:.3f},{:.3f},{:.3f},{:.3f}",
+        TraceDraw(fmt::format("clear rt{} mask {}{}{}{} depth {} ({:.6g}) stencil {} rect "
+                              "{},{}-{},{} color {:.3f},{:.3f},{:.3f},{:.3f}",
                               regs.clear_surface.RT.Value(), regs.clear_surface.R.Value(),
                               regs.clear_surface.G.Value(), regs.clear_surface.B.Value(),
-                              regs.clear_surface.A.Value(), use_depth, use_stencil, rect.left,
-                              rect.top, rect.right, rect.bottom, regs.clear_color[0],
-                              regs.clear_color[1], regs.clear_color[2], regs.clear_color[3]),
+                              regs.clear_surface.A.Value(), use_depth, regs.clear_depth,
+                              use_stencil, rect.left, rect.top, rect.right, rect.bottom,
+                              regs.clear_color[0], regs.clear_color[1], regs.clear_color[2],
+                              regs.clear_color[3]),
                   nullptr, framebuffer, {}, 0, 0);
     }
     if (rect.right <= rect.left || rect.bottom <= rect.top) {
