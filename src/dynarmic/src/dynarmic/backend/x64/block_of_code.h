@@ -177,13 +177,10 @@ private:
     static constexpr size_t MXCSR_ALREADY_EXITED = 1 << 0;
     static constexpr size_t FORCE_RETURN = 1 << 1;
 
-    ConstantPool constant_pool;
-    JitStateInfo jsi;
-    std::array<const void*, 4> return_from_run_code;
-    RunCodeFuncType run_code = nullptr;
-    RunCodeFuncType step_code = nullptr;
-    RunCodeCallbacks cb;
-    CodePtr code_begin = nullptr;
+    // The code region's memory state comes before constant_pool: its constructor already commits
+    // and writes code memory (EnsureMemoryCommitted), so this state must be initialized by then.
+    // Declared after it, committed_size was read uninitialized there; with a large garbage value
+    // nothing was committed and the pool's first write faulted.
 #ifdef _WIN32
     size_t committed_size = 0;
 #endif
@@ -198,6 +195,14 @@ private:
     bool wx_writing = false;
 #endif
     bool prelude_complete = false;
+
+    ConstantPool constant_pool;
+    JitStateInfo jsi;
+    std::array<const void*, 4> return_from_run_code;
+    RunCodeFuncType run_code = nullptr;
+    RunCodeFuncType step_code = nullptr;
+    RunCodeCallbacks cb;
+    CodePtr code_begin = nullptr;
 
     void GenRunCode(std::function<void(BlockOfCode&)> rcp);
 };
