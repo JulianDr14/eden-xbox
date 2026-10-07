@@ -433,6 +433,7 @@ Device::~Device() {
 }
 
 u64 Device::Signal() {
+    std::scoped_lock lock{queue_mutex};
     const u64 value = next_fence_value++;
     ThrowIfFailed(queue->Signal(fence.Get(), value), "ID3D12CommandQueue::Signal");
     return value;

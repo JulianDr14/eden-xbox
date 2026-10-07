@@ -6,6 +6,7 @@
 #include "video_core/renderer_d3d12/d3d12_cache_policy.h"
 
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -96,6 +97,12 @@ public:
     ID3D12CommandQueue* Queue() const {
         return queue.Get();
     }
+    /// Serializes work on the queue across threads: every ExecuteCommandLists with the Signal
+    /// that follows it, and IDXGISwapChain::Present, which submits to the queue internally
+    /// (Present and ExecuteCommandLists called from two threads at once can deadlock).
+    std::mutex& QueueMutex() const {
+        return queue_mutex;
+    }
     IDXGIFactory4* Factory() const {
         return factory.Get();
     }
@@ -146,6 +153,7 @@ private:
     u32 debug_messages_logged{};
     std::atomic_flag removal_reported;
     ComPtr<ID3D12CommandQueue> queue;
+    mutable std::mutex queue_mutex;
     ComPtr<ID3D12Fence> fence;
     HANDLE fence_event{};
     u64 next_fence_value{1};

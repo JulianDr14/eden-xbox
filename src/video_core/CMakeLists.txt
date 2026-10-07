@@ -505,6 +505,8 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_pipeline_cache.cpp
         renderer_d3d12/d3d12_pipeline_cache.h
         renderer_d3d12/d3d12_pipeline_helper.h
+        renderer_d3d12/d3d12_present_manager.cpp
+        renderer_d3d12/d3d12_present_manager.h
         renderer_d3d12/d3d12_present_blit.cpp
         renderer_d3d12/d3d12_present_cpu.cpp
         renderer_d3d12/d3d12_device.cpp

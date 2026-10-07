@@ -6,6 +6,7 @@
 #include <exception>
 #include <optional>
 #include <span>
+#include <string>
 #include <stdexcept>
 #include <utility>
 
@@ -73,23 +74,21 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
                   sampler_descriptors},
       rasterizer{gpu_, device_memory_, device, scheduler, shader_compiler, buffer_cache_runtime,
                  texture_cache_runtime, descriptor_ring, sampler_heap, blit_helper,
-                 staging_pool} {
+                 staging_pool},
+      present_manager{device, scheduler, swapchain, rtv_descriptors,
+                      Settings::values.async_presentation.GetValue()} {
     ID3D12Device* const dev = device.Get();
     texture_cache_runtime.SetBlitHelper(&blit_helper);
 
     const D3D12_RESOURCE_DESC image_desc =
         Texture2DDesc(swapchain.Width(), swapchain.Height(), Swapchain::FORMAT);
     dev->GetCopyableFootprints(&image_desc, 0, 1, 0, &footprint, nullptr, nullptr, &upload_size);
-    for (u32 i = 0; i < Swapchain::IMAGE_COUNT; ++i) {
-        back_buffer_rtvs[i] = rtv_descriptors.Allocate();
-        dev->CreateRenderTargetView(swapchain.Image(i), nullptr, back_buffer_rtvs[i]);
-    }
 
     blit_ready = CreateBlitPipeline();
 
     // Present one dark-blue frame straight away: on-console, a blue screen before the guest draws
     // anything proves the device and swapchain work independently of the emulation.
-    const u32 index = swapchain.CurrentIndex();
+    FrameLease frame = present_manager.AcquireFrame();
     // Force this one-time visible copy through the dedicated path. Guest frames below use the
     // stream ring, so the phase-3a.2 gate exercises both allocation paths.
     StagingBufferRef upload = staging_pool.Request(upload_size, MemoryUsage::Upload, true);
@@ -98,14 +97,15 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
                                            y * footprint.Footprint.RowPitch);
         std::fill_n(row, swapchain.Width(), 0xFF402010u);
     }
-    RecordCopy(upload, swapchain.Image(index));
+    RecordCopy(upload, *frame);
     staging_pool.FreeDeferred(upload);
-    Present(index);
+    Present(std::move(frame));
     LOG_INFO(Render, "D3D12: presenting through the scheduler (tick {})", scheduler.CurrentTick());
 }
 
 RendererD3D12::~RendererD3D12() {
     try {
+        present_manager.WaitIdle();
         scheduler.DrainForShutdown();
     } catch (const std::exception& e) {
         LOG_ERROR(Render, "{}", e.what());
@@ -136,14 +136,16 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
     last_framebuffer = framebuffers.front();
     if (!present_failed) {
         try {
+            if (std::optional<std::string> error = present_manager.TakeError()) {
+                throw std::runtime_error(*error);
+            }
             const Tegra::FramebufferConfig& framebuffer = framebuffers.front();
-            const u32 index = swapchain.CurrentIndex();
-            // Frame pacing: at most IMAGE_COUNT frames ahead of the GPU.
+            // Frame pacing: waits while every present frame is queued, at most FRAME_COUNT
+            // frames ahead of the GPU.
             const auto wait_start = std::chrono::steady_clock::now();
-            scheduler.Wait(present_ticks[index]);
+            FrameLease frame = present_manager.AcquireFrame();
             const auto wait_end = std::chrono::steady_clock::now();
-            ID3D12Resource* const image = swapchain.Image(index);
-            if (blit_ready && CompositeAccelerated(framebuffer, index)) {
+            if (blit_ready && CompositeAccelerated(framebuffer, *frame)) {
                 // frame.bmp once the guest has had two seconds to settle, then frame_<n>.bmp
                 // every ten seconds or so, to follow a game's progress in a headless run.
                 constexpr u32 DUMP_FRAME = 120;
@@ -156,9 +158,9 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                                   (accelerated_frames - DUMP_FRAME) / DUMP_INTERVAL < MAX_DUMPS;
                 std::optional<StagingBufferRef> readback;
                 if (dump) {
-                    readback = RecordFrameReadback(image);
+                    readback = RecordFrameReadback(*frame);
                 }
-                Present(index);
+                Present(std::move(frame));
                 if (readback) {
                     WriteFrameDump(*readback, (accelerated_frames - DUMP_FRAME) / DUMP_INTERVAL);
                 }
@@ -191,15 +193,15 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                 CopyGuestImage(framebuffer, upload.mapped_span.data(),
                                guest_footprint.Footprint.RowPitch);
                 RecordUpload(upload);
-                RecordBlit(image, index, srv_table, sampler_table, {1.0f, 1.0f, 0.0f, 0.0f});
-                Present(index);
+                RecordBlit(*frame, srv_table, sampler_table, {1.0f, 1.0f, 0.0f, 0.0f});
+                Present(std::move(frame));
             } else {
                 const StagingBufferRef upload =
                     staging_pool.Request(upload_size, MemoryUsage::Upload);
                 ScaleGuestImage(framebuffer, upload.mapped_span.data(),
                                 footprint.Footprint.RowPitch);
-                RecordCopy(upload, image);
-                Present(index);
+                RecordCopy(upload, *frame);
+                Present(std::move(frame));
             }
             const auto present_end = std::chrono::steady_clock::now();
             using Ms = std::chrono::duration<double, std::milli>;
@@ -226,9 +228,8 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
     render_window.OnFrameDisplayed();
 }
 
-void RendererD3D12::Present(u32 image_index) {
-    present_ticks[image_index] = scheduler.Flush();
-    swapchain.Present();
+void RendererD3D12::Present(FrameLease&& frame) {
+    present_manager.Present(std::move(frame));
     staging_pool.TickFrame();
 }
 

@@ -21,21 +21,18 @@ namespace D3D12 {
 
 using namespace PresentDetail;
 
-StagingBufferRef RendererD3D12::RecordFrameReadback(ID3D12Resource* image) {
+StagingBufferRef RendererD3D12::RecordFrameReadback(PresentFrame& frame) {
     StagingBufferRef readback = staging_pool.Request(upload_size, MemoryUsage::Download, true);
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
-    D3D12_RESOURCE_BARRIER barrier =
-        TransitionBarrier(image, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    cmd->ResourceBarrier(1, &barrier);
+    // Left in COPY_SOURCE: the state the present manager wants it in.
+    frame.Transition(cmd, D3D12_RESOURCE_STATE_COPY_SOURCE);
     const D3D12_TEXTURE_COPY_LOCATION src{
-        .pResource = image,
+        .pResource = frame.image.Get(),
         .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
         .SubresourceIndex = 0,
     };
     const D3D12_TEXTURE_COPY_LOCATION dst = StagingSource(readback, footprint);
     cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-    cmd->ResourceBarrier(1, &barrier);
     return readback;
 }
 
