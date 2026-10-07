@@ -889,6 +889,9 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         auto allocated = runtime->texture_allocator.Create(desc, D3D12_RESOURCE_STATE_COMMON);
         resource = std::move(allocated.resource);
         resource_allocation = std::move(allocated.allocation);
+        needs_placed_init = allocated.placed &&
+                            (resource_flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                                               D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) != 0;
         if (!resource) {
             throw std::runtime_error("D3D12: texture allocator returned no resource");
         }
@@ -951,6 +954,7 @@ Image& Image::operator=(Image&& other) noexcept {
         gpu_decoded = other.gpu_decoded;
         footprint_format = other.footprint_format;
         state = other.state;
+        needs_placed_init = other.needs_placed_init;
         write_version = other.write_version;
         depth_feedback = std::move(other.depth_feedback);
         depth_feedback_failed = other.depth_feedback_failed;
@@ -1002,6 +1006,9 @@ void Image::Transition(D3D12_RESOURCE_STATES next) {
     if (reinterpreted_ahead) {
         WriteBackReinterpreted();
     }
+    if (needs_placed_init) {
+        InitializePlacedResource();
+    }
     if (state == next) {
         // Writes in one state are unordered without a barrier (see Buffer::Transition).
         if (next == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
@@ -1040,6 +1047,28 @@ void Image::Transition(D3D12_RESOURCE_STATES next) {
                        .StateBefore = state, .StateAfter = next}};
     runtime->scheduler.CommandList()->ResourceBarrier(1, &barrier);
     state = next;
+}
+
+void Image::InitializePlacedResource() {
+    needs_placed_init = false;
+    const bool depth =
+        (resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0;
+    const D3D12_RESOURCE_STATES target =
+        depth ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET;
+    const D3D12_RESOURCE_BARRIER barriers[2]{
+        {.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING,
+         .Aliasing = {.pResourceBefore = nullptr, .pResourceAfter = resource.Get()}},
+        {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+         .Transition = {.pResource = resource.Get(),
+                        .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        .StateBefore = state, .StateAfter = target}},
+    };
+    auto* const commands = runtime->scheduler.CommandList();
+    commands->ResourceBarrier(2, barriers);
+    // The heap range may hold another resource's data; RT/DS metadata must be initialized.
+    commands->DiscardResource(resource.Get(), nullptr);
+    state = target;
+    ++write_version;
 }
 
 ID3D12Resource* Image::SliceArray() {
