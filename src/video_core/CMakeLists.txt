@@ -476,6 +476,7 @@ if (ENABLE_D3D12)
     target_sources(video_core PRIVATE
         renderer_d3d12/d3d12_accelerate_dma.cpp
         renderer_d3d12/d3d12_barrier_batch.h
+        renderer_d3d12/d3d12_blit_compute.cpp
         renderer_d3d12/d3d12_blit_image.cpp
         renderer_d3d12/d3d12_blit_image.h
         renderer_d3d12/d3d12_buffer_cache.cpp
