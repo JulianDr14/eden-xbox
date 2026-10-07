@@ -144,3 +144,7 @@ El log informa Run y callbacks por core; Run es tiempo transcurrido e incluye tr
 callbacks y preemption, no utilizacion CPU. El perfil esta desactivado por defecto y agrega
 trabajo si se activa: comparar rendimiento con la misma configuracion en ambas builds.
 Para estudiar las cargas, combinarlo con `gpu_profile=1` y repetir el mismo recorrido.
+
+La presentación usa un hilo propio por defecto. Con `async_present=0` en BootCfg se presenta en
+el hilo de GPU, como antes de ese cambio. El log dice qué modo se usa:
+`D3D12: presentation on its own thread` o `on the GPU thread`.

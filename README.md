@@ -80,6 +80,7 @@ flowchart TB
         direction LR
         caches["Buffer and texture caches<br/>ASTC → BC3 on the GPU"]
         pipes["Pipeline cache<br/>root signatures · PSOs"]
+        present["Present manager<br/>own present thread"]
     end
 
     subgraph shaders["Shader translation"]
@@ -108,7 +109,7 @@ Where things live:
 | Path | What |
 | --- | --- |
 | `src/eden_uwp/` | Front end: CoreWindow boot, library, in-game menu, controllers, file import, `eden_uwp_diag.txt` |
-| `src/video_core/renderer_d3d12/` | The D3D12 renderer: scheduler, buffer and texture caches, pipelines, root signatures, presentation |
+| `src/video_core/renderer_d3d12/` | The D3D12 renderer: scheduler, buffer and texture caches, pipelines, root signatures, presentation (see [Inside the renderer](#inside-the-renderer)) |
 | `src/shader_recompiler/` | Eden's shader recompiler, with the adjustments the D3D12 profile needs |
 | `tools/xbox/mesa/` | Our additions to Mesa's `spirv_to_dxil` (pipeline linking, integer sampling) |
 | `tools/xbox/` | Build, packaging, local run and Mesa build scripts |
@@ -117,6 +118,31 @@ Where things live:
 Two runtime DLLs are loaded from the package root: `spirv_to_dxil.dll` (built from Mesa by
 `tools/xbox/build-spirv-to-dxil.ps1`) and `dxil.dll` (from the Windows SDK). If either is missing,
 the renderer falls back to presenting the guest framebuffer through the CPU.
+
+### Inside the renderer
+
+`renderer_d3d12` follows the layout of Eden's Vulkan backend. The generic `TextureCache`,
+`BufferCache`, `ShaderCache` and `FenceManager` templates, the Vulkan `StateTracker` and
+`FixedPipelineState` are shared; the D3D12 part supplies their runtimes. Each file has one job:
+
+| Area | Files | What |
+| --- | --- | --- |
+| Device and submission | `d3d12_device`, `d3d12_scheduler`, `d3d12_fence_manager`, `d3d12_query_cache` | Device, direct queue, command lists and allocators, GPU ticks, deferred releases, guest fences and queries |
+| Presentation | `renderer_d3d12`, `d3d12_present_manager`, `d3d12_swapchain`, `d3d12_present_blit`, `d3d12_present_cpu`, `d3d12_overlay` | Composites each frame into a frame of its own; a dedicated thread copies it to the swapchain and presents (see below) |
+| Draws | `d3d12_rasterizer*`, `d3d12_accelerate_dma`, `d3d12_maxwell_to_d3d12`, `d3d12_graphics_pipeline`, `d3d12_compute_pipeline`, `d3d12_root_signature` | Draw state, clears, indirect draws, DMA, PSOs and their root arguments |
+| Shaders | `d3d12_pipeline_cache`, `d3d12_shader_compiler`, `d3d12_linked_shader_cache` | SPIR-V → DXIL translation on worker threads, the per-game disk cache of guest pipelines, reuse of linked shaders |
+| Textures | `d3d12_texture_cache`, `d3d12_image_*`, `d3d12_depth_stencil_transfer`, `d3d12_astc_gpu_decoder`, `d3d12_sampler`, `d3d12_framebuffer`, `d3d12_texture_formats` | Images, views, uploads and downloads, copies and blits, ASTC on the GPU |
+| Helper shaders | `d3d12_blit_image`, `d3d12_blit_compute` | Blits, masked clears, depth-stencil packing, ASTC decode and BC3 encode |
+| Memory | `d3d12_buffer_cache`, `d3d12_staging_buffer_pool`, `d3d12_transfer_buffer_pool`, `d3d12_resource_allocator`, `d3d12_memory_guard` | Buffers, the upload ring, reused GPU scratch buffers, placed texture heaps, the memory guard |
+| Binding | `d3d12_descriptor_heap`, `d3d12_barrier_batch`, `d3d12_pipeline_helper`, `d3d12_resource_utils` | Descriptor ring and sampler heap, batched barriers, helpers shared by draws and dispatches |
+| Diagnostics | `diagnostics/` | Draw trace, frame dumps, performance report, pipeline and ASTC checks; kept off the hot paths |
+
+**Presentation.** The GPU thread composites each frame into one of three textures of its own and
+submits it. A separate thread (`D3D12Present`) waits on the swapchain's frame latency waitable object,
+copies the frame into the back buffer and presents it, so the GPU thread never waits for the display.
+Both threads submit to the same queue under one lock, because `Present` and `ExecuteCommandLists`
+racing on two threads can deadlock. Without a waitable swapchain, or with `async_present=0` in
+`boot.cfg`, presentation runs on the GPU thread as before.
 
 ### The JIT warm-up
 
