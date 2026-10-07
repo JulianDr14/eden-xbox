@@ -29,7 +29,7 @@ void RasterizerD3D12::DrawIndirect() {
         WarnOnceLog(logged_byte_count_draw, "byte-count indirect draws are skipped");
         return;
     }
-    if (params.max_draw_counts == 0) {
+    if (params.max_draw_counts == 0 || CullsEveryPrimitive()) {
         return;
     }
     if (BufferCacheRuntime::IsEmulatedTopology(maxwell3d->draw_manager.draw_state.topology)) {

@@ -144,6 +144,9 @@ private:
 
     using IndirectParams = Tegra::Engines::Maxwell3D::DrawManager::IndirectParams;
 
+    /// Whether the guest culls both faces of the draw's polygons, which draws nothing.
+    bool CullsEveryPrimitive() const;
+
     // The implementation is split by concern: d3d12_rasterizer.cpp (draws, dispatches, memory
     // and sync), d3d12_rasterizer_state.cpp (command-list state), d3d12_rasterizer_indirect.cpp,
     // d3d12_rasterizer_clear.cpp and diagnostics/d3d12_draw_trace.cpp (SetDrawTrace).

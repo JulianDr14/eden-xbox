@@ -310,7 +310,7 @@ D3D12_CULL_MODE CullMode(bool enabled, Maxwell::CullFace face) {
     case Maxwell::CullFace::Back:
         return D3D12_CULL_MODE_BACK;
     case Maxwell::CullFace::FrontAndBack:
-        // No D3D12 equivalent; the rasterizer discards these draws (phase 4.3).
+        // No D3D12 equivalent; RasterizerD3D12::CullsEveryPrimitive skips these draws.
         return D3D12_CULL_MODE_NONE;
     }
     return D3D12_CULL_MODE_NONE;
