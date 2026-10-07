@@ -36,6 +36,7 @@ namespace D3D12 {
 
 class GuestDescriptorQueue;
 class SamplerHeap;
+class Scheduler;
 
 using Maxwell = Tegra::Engines::Maxwell3D::Regs;
 
@@ -90,6 +91,7 @@ struct PipelineBindContext {
     TextureCache& texture_cache;
     GuestDescriptorQueue& descriptor_queue;
     SamplerHeap& sampler_heap;
+    Scheduler& scheduler;
 };
 
 /// Root arguments of one draw, filled by GraphicsPipeline::Configure.

@@ -25,6 +25,7 @@
 #include "video_core/host_shaders/vulkan_depthstencil_clear_frag_spv.h"
 #include "video_core/renderer_d3d12/d3d12_blit_image.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
+#include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
 
@@ -82,23 +83,6 @@ constexpr u32 BC3_SOURCE_PARAM = 1;
 constexpr u32 BC3_DESTINATION_PARAM = 2;
 constexpr u32 BC3_CONSTANT_WORDS = 4;
 constexpr u32 BC3_GROUP_SIZE = 8;
-
-void Serialize(const Device& device, const D3D12_ROOT_SIGNATURE_DESC& desc,
-               ComPtr<ID3D12RootSignature>& out, const char* what) {
-    ComPtr<ID3DBlob> serialized;
-    ComPtr<ID3DBlob> error;
-    if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized,
-                                           &error))) {
-        throw std::runtime_error(
-            error ? std::string(static_cast<const char*>(error->GetBufferPointer()),
-                                error->GetBufferSize())
-                  : std::string("D3D12SerializeRootSignature failed"));
-    }
-    ThrowIfFailed(device.Get()->CreateRootSignature(0, serialized->GetBufferPointer(),
-                                                    serialized->GetBufferSize(),
-                                                    IID_PPV_ARGS(&out)),
-                  what);
-}
 
 D3D12_DEPTH_STENCILOP_DESC ReplaceStencil() {
     return {
@@ -213,7 +197,7 @@ void BlitImageHelper::CreateRootSignature() {
         .pStaticSamplers = nullptr,
         .Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE,
     };
-    Serialize(device, desc, root_signature, "CreateRootSignature (blit helpers)");
+    root_signature = D3D12::CreateRootSignature(device.Get(), desc, "blit helpers root signature");
 }
 
 void BlitImageHelper::CreatePackPipelines(const ShaderCompiler& compiler) {
@@ -242,7 +226,8 @@ void BlitImageHelper::CreatePackPipelines(const ShaderCompiler& compiler) {
         .pStaticSamplers = nullptr,
         .Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE,
     };
-    Serialize(device, desc, pack_root_signature, "CreateRootSignature (depth-stencil pack)");
+    pack_root_signature =
+        D3D12::CreateRootSignature(device.Get(), desc, "depth-stencil pack root signature");
     const auto create = [&](std::span<const u32> spirv, ComPtr<ID3D12PipelineState>& out) {
         const std::vector<u8> dxil = compiler.Compile(spirv, DXIL_SPIRV_SHADER_COMPUTE);
         const D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_desc{
@@ -298,7 +283,8 @@ void BlitImageHelper::CreateAstcPipeline(const ShaderCompiler& compiler) {
         .pStaticSamplers = nullptr,
         .Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE,
     };
-    Serialize(device, desc, astc_root_signature, "CreateRootSignature (ASTC decoder)");
+    astc_root_signature =
+        D3D12::CreateRootSignature(device.Get(), desc, "ASTC decoder root signature");
     const std::array<ShaderCompiler::PipelineStage, 1> stages{{
         {D3D12_ASTC_DECODER_COMP_SPV, DXIL_SPIRV_SHADER_COMPUTE},
     }};
@@ -380,7 +366,8 @@ void BlitImageHelper::CreateBc3Pipeline(const ShaderCompiler& compiler) {
     };
     const D3D12_ROOT_SIGNATURE_DESC desc{static_cast<UINT>(params.size()), params.data(), 1,
                                          &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
-    Serialize(device, desc, bc3_root_signature, "CreateRootSignature (BC3 encoder)");
+    bc3_root_signature =
+        D3D12::CreateRootSignature(device.Get(), desc, "BC3 encoder root signature");
     const std::array<ShaderCompiler::PipelineStage, 1> stages{{
         {D3D12_BC3_ENCODER_COMP_SPV, DXIL_SPIRV_SHADER_COMPUTE},
     }};

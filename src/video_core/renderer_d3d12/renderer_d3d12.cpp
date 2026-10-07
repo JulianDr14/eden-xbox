@@ -33,6 +33,7 @@
 #include "video_core/host_shaders/blit_color_float_frag_spv.h"
 #include "video_core/host_shaders/full_screen_triangle_vert_spv.h"
 #include "video_core/perf_counters.h"
+#include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/renderer_d3d12.h"
 #include "video_core/shader_notify.h"
 #include "video_core/surface.h"
@@ -369,20 +370,7 @@ bool RendererD3D12::CreateBlitPipeline() {
             .pStaticSamplers = nullptr,
             .Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE,
         };
-        ComPtr<ID3DBlob> serialized;
-        ComPtr<ID3DBlob> error;
-        const HRESULT hr = D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1,
-                                                       &serialized, &error);
-        if (FAILED(hr)) {
-            throw std::runtime_error(
-                error ? std::string(static_cast<const char*>(error->GetBufferPointer()),
-                                    error->GetBufferSize())
-                      : std::string("D3D12SerializeRootSignature failed"));
-        }
-        ThrowIfFailed(dev->CreateRootSignature(0, serialized->GetBufferPointer(),
-                                               serialized->GetBufferSize(),
-                                               IID_PPV_ARGS(&blit_root_signature)),
-                      "CreateRootSignature");
+        blit_root_signature = CreateRootSignature(dev, root_desc, "present blit root signature");
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
         pso.pRootSignature = blit_root_signature.Get();

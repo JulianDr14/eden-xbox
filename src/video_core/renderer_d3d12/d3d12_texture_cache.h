@@ -30,6 +30,7 @@ using VideoCommon::ImageId;
 using VideoCommon::NUM_RT;
 using VideoCommon::Region2D;
 
+class BarrierBatch;
 class BlitImageHelper;
 class Device;
 class Scheduler;
@@ -249,7 +250,9 @@ public:
     /// Copies both planes from src, which has the same resource format.
     void CopyDepthStencilFrom(Image& src, std::span<const VideoCommon::ImageCopy> copies);
     [[nodiscard]] u32 Subresource(s32 level, s32 layer, u32 plane = 0) const noexcept;
-    void Transition(D3D12_RESOURCE_STATES next);
+    /// Records the barriers into next, or adds them to batch (flushed first when the transition
+    /// must record other commands).
+    void Transition(D3D12_RESOURCE_STATES next, BarrierBatch* batch = nullptr);
     [[nodiscard]] D3D12_RESOURCE_STATES State() const noexcept { return state; }
     bool IsRescaled() const noexcept { return false; }
     bool ScaleUp(bool = false) { return false; }
@@ -408,7 +411,7 @@ public:
     [[nodiscard]] Image* SourceImage() const noexcept;
 
     /// Transitions the whole image this view belongs to (no-op for null and buffer views).
-    void TransitionImage(D3D12_RESOURCE_STATES state) const;
+    void TransitionImage(D3D12_RESOURCE_STATES state, BarrierBatch* batch = nullptr) const;
 
     /// Records what reading Handle(texture_type) needs first (a 3D image read as a 2D array
     /// refreshes its slice copy); call before the draw or dispatch, outside any other copy.

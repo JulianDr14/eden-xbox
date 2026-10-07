@@ -7,6 +7,7 @@
 
 #include "video_core/renderer_d3d12/d3d12_query_cache.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
+#include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 
 namespace D3D12 {
@@ -60,23 +61,10 @@ void QueryPool::AddPage(VideoCore::QueryType type) {
     const D3D12_QUERY_HEAP_DESC heap_desc{.Type = info.heap, .Count = PAGE_SIZE, .NodeMask = 0};
     ThrowIfFailed(device.Get()->CreateQueryHeap(&heap_desc, IID_PPV_ARGS(&page.heap)),
                   "CreateQueryHeap");
-    const D3D12_HEAP_PROPERTIES props{.Type = D3D12_HEAP_TYPE_READBACK};
-    const D3D12_RESOURCE_DESC desc{
-        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
-        .Alignment = 0,
-        .Width = info.bytes * PAGE_SIZE,
-        .Height = 1,
-        .DepthOrArraySize = 1,
-        .MipLevels = 1,
-        .Format = DXGI_FORMAT_UNKNOWN,
-        .SampleDesc = {.Count = 1, .Quality = 0},
-        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        .Flags = D3D12_RESOURCE_FLAG_NONE,
-    };
-    ThrowIfFailed(device.Get()->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc,
-                                                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                        IID_PPV_ARGS(&page.readback)),
-                  "CreateCommittedResource (query readback)");
+    page.readback = CreateCommittedBuffer(device.Get(), info.bytes * PAGE_SIZE,
+                                          D3D12_HEAP_TYPE_READBACK,
+                                          D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE,
+                                          "CreateCommittedResource (query readback)");
     // New slots go first: the free list's front was not free yet.
     TypePool& pool = pools[static_cast<size_t>(type)];
     for (u32 i = PAGE_SIZE; i-- > 0;) {

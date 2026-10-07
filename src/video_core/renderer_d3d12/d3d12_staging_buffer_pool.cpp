@@ -10,6 +10,7 @@
 #include "common/bit_util.h"
 #include "common/literals.h"
 #include "common/logging.h"
+#include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
@@ -39,37 +40,18 @@ ComPtr<ID3D12Resource> CreateMappedBuffer(ID3D12Device* device, u64 size,
     if (size == 0) {
         throw std::invalid_argument("D3D12: staging buffer size must not be zero");
     }
-    const D3D12_HEAP_PROPERTIES heap{.Type = heap_type};
-    const D3D12_RESOURCE_DESC desc{
-        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
-        .Alignment = 0,
-        .Width = size,
-        .Height = 1,
-        .DepthOrArraySize = 1,
-        .MipLevels = 1,
-        .Format = DXGI_FORMAT_UNKNOWN,
-        .SampleDesc = {.Count = 1, .Quality = 0},
-        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        .Flags = D3D12_RESOURCE_FLAG_NONE,
-    };
     // These are the only states the two heap types allow, for their whole lifetime.
     const D3D12_RESOURCE_STATES state = heap_type == D3D12_HEAP_TYPE_READBACK
                                             ? D3D12_RESOURCE_STATE_COPY_DEST
                                             : D3D12_RESOURCE_STATE_GENERIC_READ;
-    ComPtr<ID3D12Resource> buffer;
-    VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::ResourceCreateUs,
-                                       VideoCore::Perf::Counter::ResourcesCreated};
-    const HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
-                                                       nullptr, IID_PPV_ARGS(&buffer));
+    HRESULT hr{};
+    ComPtr<ID3D12Resource> buffer =
+        CreateCommittedBuffer(device, size, heap_type, state, D3D12_RESOURCE_FLAG_NONE,
+                              "CreateCommittedResource (staging)", &hr);
     if (hr == E_OUTOFMEMORY) {
         throw StagingOutOfMemory(
             fmt::format("D3D12: out of memory creating a {} byte staging buffer", size));
     }
-    ThrowIfFailed(hr, "CreateCommittedResource (staging)");
-    CheckRemovedAfter(device, [&] {
-        return fmt::format("creating a {} byte staging buffer (heap {})", desc.Width,
-                           static_cast<u32>(heap_type));
-    });
     void* pointer{};
     const D3D12_RANGE no_cpu_reads{0, 0};
     const D3D12_RANGE* const read_range =

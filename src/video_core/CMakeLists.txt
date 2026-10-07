@@ -474,6 +474,7 @@ endif()
 
 if (ENABLE_D3D12)
     target_sources(video_core PRIVATE
+        renderer_d3d12/d3d12_barrier_batch.h
         renderer_d3d12/d3d12_blit_image.cpp
         renderer_d3d12/d3d12_blit_image.h
         renderer_d3d12/d3d12_buffer_cache.cpp
@@ -487,12 +488,14 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_graphics_pipeline.cpp
         renderer_d3d12/d3d12_graphics_pipeline.h
         renderer_d3d12/d3d12_linked_shader_cache.h
+        renderer_d3d12/d3d12_log.h
         renderer_d3d12/d3d12_indirect_buffer.cpp
         renderer_d3d12/d3d12_indirect_buffer.h
         renderer_d3d12/d3d12_maxwell_to_d3d12.cpp
         renderer_d3d12/d3d12_maxwell_to_d3d12.h
         renderer_d3d12/d3d12_pipeline_cache.cpp
         renderer_d3d12/d3d12_pipeline_cache.h
+        renderer_d3d12/d3d12_pipeline_helper.h
         renderer_d3d12/d3d12_device.cpp
         renderer_d3d12/d3d12_device.h
         renderer_d3d12/d3d12_scheduler.cpp
@@ -501,6 +504,8 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_query_cache.h
         renderer_d3d12/d3d12_resource_allocator.cpp
         renderer_d3d12/d3d12_resource_allocator.h
+        renderer_d3d12/d3d12_resource_utils.cpp
+        renderer_d3d12/d3d12_resource_utils.h
         renderer_d3d12/d3d12_rasterizer.cpp
         renderer_d3d12/d3d12_rasterizer.h
         renderer_d3d12/d3d12_root_signature.cpp

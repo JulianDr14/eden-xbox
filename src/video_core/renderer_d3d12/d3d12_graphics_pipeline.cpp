@@ -19,9 +19,12 @@
 #include "video_core/frame_trace.h"
 #include "video_core/memory_manager.h"
 #include "video_core/perf_counters.h"
+#include "video_core/renderer_d3d12/d3d12_barrier_batch.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_graphics_pipeline.h"
+#include "video_core/renderer_d3d12/d3d12_log.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
+#include "video_core/renderer_d3d12/d3d12_pipeline_helper.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 #include "video_core/shader_notify.h"
@@ -102,19 +105,12 @@ D3D12_RENDER_TARGET_BLEND_DESC BlendTarget(const FixedPipelineState::BlendingAtt
     };
 }
 
-/// Warns once per process about state D3D12 cannot express. The load first keeps repeated calls
-/// (some are per draw) from issuing a locked exchange every time.
-void WarnOnceLog(std::atomic_bool& flag, const char* what) {
-    if (!flag.load(std::memory_order_relaxed) && !flag.exchange(true, std::memory_order_relaxed)) {
-        const Common::BugTracker::TapMute bug_tracker_mute; // reported by the callers' BUG_TRACK
-        LOG_WARNING(Render, "D3D12: {} is not supported and is ignored", what);
-    }
-}
-/// As WarnOnceLog, and the bug tracker counts every occurrence (keyed by the flag, one per feature).
+/// Warns once per process about state D3D12 cannot express; the bug tracker counts every
+/// occurrence (keyed by the flag, one per feature).
 void WarnOnce(std::atomic_bool& flag, const char* what) {
     BUG_TRACK_KEY(UnsupportedState, reinterpret_cast<std::uintptr_t>(&flag),
                   "{} is not supported and is ignored", what);
-    WarnOnceLog(flag, what);
+    WarnOnceLog(flag, "{} is not supported and is ignored", what);
 }
 std::atomic_bool warned_logic_op;
 std::atomic_bool warned_depth_bounds;
@@ -276,31 +272,6 @@ void DiagnoseFailedPipeline(ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_
     }
 }
 
-/// Explicit format of a typed image buffer (as pipeline_helper.h in the Vulkan backend).
-std::optional<VideoCore::Surface::PixelFormat> PixelFormatFromImageFormat(
-    Shader::ImageFormat format) {
-    using VideoCore::Surface::PixelFormat;
-    switch (format) {
-    case Shader::ImageFormat::Typeless:
-        return std::nullopt;
-    case Shader::ImageFormat::R8_UINT:
-        return PixelFormat::R8_UINT;
-    case Shader::ImageFormat::R8_SINT:
-        return PixelFormat::R8_SINT;
-    case Shader::ImageFormat::R16_UINT:
-        return PixelFormat::R16_UINT;
-    case Shader::ImageFormat::R16_SINT:
-        return PixelFormat::R16_SINT;
-    case Shader::ImageFormat::R32_UINT:
-        return PixelFormat::R32_UINT;
-    case Shader::ImageFormat::R32G32_UINT:
-        return PixelFormat::R32G32_UINT;
-    case Shader::ImageFormat::R32G32B32A32_UINT:
-        return PixelFormat::R32G32B32A32_UINT;
-    }
-    return std::nullopt;
-}
-
 } // Anonymous namespace
 
 size_t GraphicsPipelineCacheKey::Hash() const noexcept {
@@ -441,15 +412,18 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     const auto& maxwell3d = context.maxwell3d;
     const auto& regs = maxwell3d.regs;
 
-    boost::container::small_vector<ImageViewInOut, 64> views;
-    boost::container::small_vector<SamplerId, 64> samplers;
+    ImageViewList views;
+    SamplerIdList samplers;
     VideoCore::Perf::LapTimer lap;
 
     texture_cache.SynchronizeDescriptors(false);
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
 
     const bool via_header_index = regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding;
-    const auto config_stage = [&](size_t stage) {
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        if (!HasStage(stage)) {
+            continue;
+        }
         const Shader::Info& info = stage_infos[stage];
         buffer_cache.UnbindGraphicsStorageBuffers(stage);
         size_t ssbo_index = 0;
@@ -460,94 +434,31 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
         }
         const auto& cbufs = maxwell3d.state.shader_stages[stage].const_buffers;
         const auto read_handle = [&](const auto& desc, u32 index) {
-            const u32 index_offset = index << desc.size_shift;
-            const u32 offset = desc.cbuf_offset + index_offset;
-            const GPUVAddr addr = cbufs[desc.cbuf_index].address + offset;
-            if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&> ||
-                          std::is_same_v<decltype(desc),
-                                         const Shader::TextureBufferDescriptor&>) {
-                if (desc.has_secondary) {
-                    const u32 second_offset = desc.secondary_cbuf_offset + index_offset;
-                    const GPUVAddr separate_addr =
-                        cbufs[desc.secondary_cbuf_index].address + second_offset;
-                    const u32 lhs_raw = gpu_memory.Read<u32>(addr) << desc.shift_left;
-                    const u32 rhs_raw = gpu_memory.Read<u32>(separate_addr)
-                                        << desc.secondary_shift_left;
-                    return Tegra::Texture::TexturePair(lhs_raw | rhs_raw, via_header_index);
-                }
-            }
-            return Tegra::Texture::TexturePair(gpu_memory.Read<u32>(addr), via_header_index);
+            return ReadTextureHandle(gpu_memory, desc, index, via_header_index,
+                                     [&](u32 cbuf) { return cbufs[cbuf].address; });
         };
-        const auto add_image = [&](const auto& desc, bool blacklist) {
-            for (u32 index = 0; index < desc.count; ++index) {
-                const auto handle = read_handle(desc, index);
-                views.push_back({.index = handle.first, .blacklist = blacklist, .id = {}});
-            }
-        };
-        for (const auto& desc : info.texture_buffer_descriptors) {
-            add_image(desc, false);
-        }
-        for (const auto& desc : info.image_buffer_descriptors) {
-            add_image(desc, false);
-        }
-        for (const auto& desc : info.texture_descriptors) {
-            for (u32 index = 0; index < desc.count; ++index) {
-                const auto handle = read_handle(desc, index);
-                views.push_back({handle.first});
-                samplers.push_back(texture_cache.GetSamplerId(handle.second, false));
-            }
-        }
-        for (const auto& desc : info.image_descriptors) {
-            add_image(desc, desc.is_written);
-        }
-    };
-    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-        if (HasStage(stage)) {
-            config_stage(stage);
-        }
+        GatherStageViews(info, texture_cache, false, read_handle, views, samplers);
     }
     texture_cache.FillImageViews(std::span(views.data(), views.size()), false, has_images);
     lap.Lap(VideoCore::Perf::Counter::DrawTexturesNs);
 
-    ImageViewInOut* texture_buffer_it = views.data();
-    const auto bind_stage_info = [&](size_t stage) {
-        size_t index = 0;
-        const auto add_buffer = [&](const auto& desc) {
-            constexpr bool is_image =
-                std::is_same_v<decltype(desc), const Shader::ImageBufferDescriptor&>;
-            for (u32 i = 0; i < desc.count; ++i) {
-                bool is_written = false;
-                ImageView& image_view = texture_cache.GetImageView(texture_buffer_it->id);
-                VideoCore::Surface::PixelFormat format = image_view.format;
-                if constexpr (is_image) {
-                    is_written = desc.is_written;
-                    if (const auto explicit_format =
-                            PixelFormatFromImageFormat(desc.format)) {
-                        format = *explicit_format;
-                    }
-                }
-                buffer_cache.BindGraphicsTextureBuffer(stage, index, image_view.GpuAddr(),
-                                                       image_view.BufferSize(), format,
-                                                       is_written, is_image);
-                ++index;
-                ++texture_buffer_it;
-            }
-        };
-        buffer_cache.UnbindGraphicsTextureBuffers(stage);
+    const ImageViewInOut* texture_buffer_it = views.data();
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        if (!HasStage(stage)) {
+            continue;
+        }
         const Shader::Info& info = stage_infos[stage];
-        for (const auto& desc : info.texture_buffer_descriptors) {
-            add_buffer(desc);
-        }
-        for (const auto& desc : info.image_buffer_descriptors) {
-            add_buffer(desc);
-        }
+        buffer_cache.UnbindGraphicsTextureBuffers(stage);
+        BindStageTextureBuffers(info, texture_cache, texture_buffer_it,
+                                [&](size_t index, ImageView& view,
+                                    VideoCore::Surface::PixelFormat format, bool is_written,
+                                    bool is_image) {
+                                    buffer_cache.BindGraphicsTextureBuffer(
+                                        stage, index, view.GpuAddr(), view.BufferSize(), format,
+                                        is_written, is_image);
+                                });
         texture_buffer_it += Shader::NumDescriptors(info.texture_descriptors);
         texture_buffer_it += Shader::NumDescriptors(info.image_descriptors);
-    };
-    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-        if (HasStage(stage)) {
-            bind_stage_info(stage);
-        }
     }
 
     buffer_cache.UpdateGraphicsBuffers(is_indexed);
@@ -576,10 +487,8 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     // uniform, storage and texel buffers from the buffer cache, then textures and images.
     GuestDescriptorQueue& queue = context.descriptor_queue;
     queue.Acquire(layout.NumResourceDescriptors());
-    boost::container::small_vector<D3D12_CPU_DESCRIPTOR_HANDLE, 32> sampler_handles;
-    boost::container::small_vector<u64, 32> sampler_keys;
-    // Views whose images get transitioned once every copy of this draw has been recorded.
-    boost::container::small_vector<std::pair<VideoCommon::ImageViewId, bool>, 32> image_transitions;
+    SamplerTableBuilder sampler_table;
+    ImageTransitionList image_transitions;
     bool uses_render_area = false;
     const bool has_integer_samplers = layout.IntegerSamplerIndex() != PipelineLayout::NO_TABLE;
     IntegerSamplerTable integer_samplers;
@@ -613,8 +522,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
                     queue.AddCopy(image_view.Handle(desc.type));
                 }
                 const Sampler& sampler = texture_cache.GetSampler(*(samplers_it++));
-                sampler_handles.push_back(sampler.Handle());
-                sampler_keys.push_back(sampler.Key());
+                sampler_table.Add(sampler);
                 if (has_integer_samplers && desc.is_integer) {
                     integer_samplers.Add(texture_binding, sampler, image_view);
                 }
@@ -630,17 +538,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
                 }
             }
         }
-        for (const auto& desc : info.image_descriptors) {
-            const VideoCommon::ImageViewId view_id = views_it->id;
-            views_it += desc.count;
-            ImageView& image_view = texture_cache.GetImageView(view_id);
-            if (desc.is_written) {
-                texture_cache.MarkModification(image_view.image_id);
-            }
-            queue.AddCopy(image_view.StorageView(desc.type, desc.format));
-            queue.AddCopy(image_view.Handle(desc.type));
-            image_transitions.emplace_back(view_id, true);
-        }
+        PushStorageImages(info, texture_cache, queue, views_it, image_transitions);
         uses_render_area |= info.uses_render_area;
     }
     if (buffer_cache.any_buffer_uploaded) {
@@ -654,20 +552,23 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
 
     // Depth-based effects sample the bound depth buffer: both uses then share a read-only state
     // (DEPTH_SAMPLED_STATE) and the draw binds the read-only DSV.
+    BarrierBatch barriers{context.scheduler};
     for (const auto& [view_id, is_storage] : image_transitions) {
         ImageView& image_view = texture_cache.GetImageView(view_id);
         if (!is_storage && depth_image != VideoCommon::ImageId{} &&
             image_view.image_id == depth_image) {
             if (!depth_feedback_ready) {
                 out.depth_sampled = true;
-                image_view.TransitionImage(DEPTH_SAMPLED_STATE);
+                image_view.TransitionImage(DEPTH_SAMPLED_STATE, &barriers);
             }
             continue;
         }
         image_view.TransitionImage(is_storage ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
                                               : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-                                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                   &barriers);
     }
+    barriers.Flush();
     target_lap.Lap(VideoCore::Perf::Counter::DrawImageTransitionsNs);
     if (out.depth_sampled && writable_depth) {
         WarnOnce(warned_depth_feedback, "depth feedback snapshot allocation failed; depth writes");
@@ -675,22 +576,13 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     lap.Lap(VideoCore::Perf::Counter::DrawTargetsNs);
 
     out.resource_table = queue.Table();
-    out.sampler_table = {};
-    if (!sampler_handles.empty()) {
-        out.sampler_table = context.sampler_heap.GetTable(
-            std::span<const u64>(sampler_keys.data(), sampler_keys.size()),
-            std::span<const D3D12_CPU_DESCRIPTOR_HANDLE>(sampler_handles.data(),
-                                                         sampler_handles.size()));
-    }
+    out.sampler_table = sampler_table.Table(context.sampler_heap);
     out.integer_samplers = integer_samplers.Upload(buffer_cache);
     lap.Lap(VideoCore::Perf::Counter::DrawSamplersNs);
 
     // Push constants: no resolution scaling yet (all rescaling bits clear, down factor 1), then
     // the render area, which shares the first words exactly as in the Vulkan backend.
-    out.push_constants.fill(0);
-    constexpr u32 down_factor_word =
-        Shader::Backend::SPIRV::RESCALING_LAYOUT_DOWN_FACTOR_OFFSET / sizeof(u32);
-    out.push_constants[down_factor_word] = std::bit_cast<u32>(1.0f);
+    ResetPushConstants(out.push_constants);
     if (uses_render_area) {
         out.push_constants[0] = std::bit_cast<u32>(static_cast<f32>(regs.surface_clip.width));
         out.push_constants[1] = std::bit_cast<u32>(static_cast<f32>(regs.surface_clip.height));
@@ -728,7 +620,8 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
                               static_cast<u64>(attribute.Size()),
                           "vertex attribute type {} size {} has no DXGI format; read as RGBA32F",
                           static_cast<u32>(attribute.Type()), static_cast<u32>(attribute.Size()));
-            WarnOnceLog(warned_vertex_format, "a vertex attribute format (read as RGBA32F)");
+            WarnOnceLog(warned_vertex_format, "{} is not supported and is ignored",
+                        "a vertex attribute format (read as RGBA32F)");
             format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         }
         const u32 slot = attribute.buffer;
