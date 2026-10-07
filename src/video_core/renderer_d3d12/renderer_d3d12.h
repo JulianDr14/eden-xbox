@@ -56,6 +56,10 @@ void HideGameMenu(VideoCore::RendererBase& renderer);
 /// Presentation already runs on the rasterizer infrastructure (phase 3a): the scheduler's command
 /// list and ticks, staging memory from the stream buffer, and descriptors from the shader-visible
 /// ring and the sampler heap.
+///
+/// Implementation files: renderer_d3d12.cpp (setup, Composite, Present), d3d12_present_blit.cpp
+/// (GPU path), d3d12_present_cpu.cpp (CPU fallback), d3d12_overlay.cpp, and in diagnostics/
+/// d3d12_perf_report.cpp and d3d12_frame_dump.cpp.
 class RendererD3D12 final : public VideoCore::RendererBase {
 public:
     explicit RendererD3D12(Core::Frontend::EmuWindow& emu_window,
