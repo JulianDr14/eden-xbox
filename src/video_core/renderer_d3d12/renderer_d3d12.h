@@ -149,6 +149,7 @@ private:
     ShaderCompiler shader_compiler;
     Scheduler scheduler;
     StagingBufferPool staging_pool;
+    TransferBufferPool transfer_buffers; ///< GPU scratch buffers of both caches' copies
     BufferCacheRuntime buffer_cache_runtime;
     CpuDescriptorAllocator view_descriptors;    ///< offline CBV/SRV/UAV
     CpuDescriptorAllocator sampler_descriptors; ///< offline samplers

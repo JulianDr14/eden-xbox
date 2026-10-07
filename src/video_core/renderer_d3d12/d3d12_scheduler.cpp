@@ -328,13 +328,21 @@ void Scheduler::DeferRelease(ComPtr<IUnknown> object, std::function<void()>&& re
 void Scheduler::CollectGarbage() {
     const u64 gpu_tick = KnownGpuTick();
     ReadTimestamps(gpu_tick);
-    std::scoped_lock lock{release_mutex};
-    while (!pending_releases.empty() && pending_releases.front().tick <= gpu_tick) {
-        pending_releases.front().object.Reset();
-        if (pending_releases.front().retire) {
-            pending_releases.front().retire();
+    // Released outside the lock: destroying a resource can take a while, and a retire callback
+    // takes its owner's lock, which must not nest inside this one (DeferRelease callers).
+    std::vector<PendingRelease> retired;
+    {
+        std::scoped_lock lock{release_mutex};
+        while (!pending_releases.empty() && pending_releases.front().tick <= gpu_tick) {
+            retired.push_back(std::move(pending_releases.front()));
+            pending_releases.pop_front();
         }
-        pending_releases.pop_front();
+    }
+    for (PendingRelease& release : retired) {
+        release.object.Reset();
+        if (release.retire) {
+            release.retire();
+        }
     }
 }
 

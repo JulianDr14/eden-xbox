@@ -151,10 +151,9 @@ D3D12_GPU_DESCRIPTOR_HANDLE DescriptorRing::Upload(
 
 bool DescriptorRing::TryAllocate(u32 count, u32& offset) {
     Retire();
-    if (in_flight.empty()) {
-        head = 0;
-        tail = 0;
-    }
+    // A drained ring keeps its head (tail caught up with it) instead of restarting at 0: a draw may
+    // still be writing the table it took when a mid-draw Finish retired every range, and its slots
+    // sit right behind the head, so only a whole lap of the ring could reach them again.
     const bool empty = in_flight.empty();
     if (empty || head > tail) {
         // Free space is [head, capacity) and then [0, tail).
@@ -394,11 +393,10 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
         used = 0;
     }
     const u32 first = used;
-    D3D12_CPU_DESCRIPTOR_HANDLE dst{cpu_base.ptr + static_cast<SIZE_T>(first) * stride};
-    for (const D3D12_CPU_DESCRIPTOR_HANDLE src : samplers) {
-        device->CopyDescriptorsSimple(1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-        dst.ptr += stride;
-    }
+    // One destination range, single-descriptor source ranges (null sizes), as DescriptorRing.
+    const D3D12_CPU_DESCRIPTOR_HANDLE dst{cpu_base.ptr + static_cast<SIZE_T>(first) * stride};
+    device->CopyDescriptors(1, &dst, &count, count, samplers.data(), nullptr,
+                            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     CheckRemovedAfter(device, [&] {
         return fmt::format("copying {} sampler descriptors", samplers.size());
     });

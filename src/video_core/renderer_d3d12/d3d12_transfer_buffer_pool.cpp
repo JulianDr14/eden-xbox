@@ -51,7 +51,7 @@ ComPtr<ID3D12Resource> TransferBufferPool::Acquire(u64 size, bool unordered_acce
                                  D3D12_RESOURCE_STATE_COMMON,
                                  unordered_access ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
                                                   : D3D12_RESOURCE_FLAG_NONE,
-                                 "Create texture transfer buffer");
+                                 "Create transfer buffer");
 }
 
 void TransferBufferPool::Release(ComPtr<ID3D12Resource>&& buffer) {

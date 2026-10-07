@@ -12,8 +12,9 @@ namespace D3D12 {
 
 class Scheduler;
 
-/// Reuses the DEFAULT-heap buffers that texture copies go through (reinterpretations, plane
-/// splits, row repacks) instead of creating a committed resource for every copy and layer.
+/// Reuses the DEFAULT-heap buffers that copies go through (texture reinterpretations, plane
+/// splits, row repacks; copies within one cached buffer) instead of creating a committed
+/// resource for every copy and layer. One pool, owned by the renderer, serves both caches.
 ///
 /// A released buffer is handed out again once the GPU has finished the submission that used it.
 /// It is in COMMON then, like a new one: buffers decay to COMMON at the end of every

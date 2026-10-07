@@ -2462,3 +2462,28 @@ swapchain.
 
 **Gate en Series pendiente.** Hay que comparar FPS y `max wait` / `max record+present` del log
 de pacing con `async_present=0` y con `async_present=1`.
+
+## Segunda revisión de renderer_d3d12 (7 oct 2026)
+
+**Bugs corregidos.**
+- **Ring de descriptores.** Cuando todos los rangos se retiraban, `DescriptorRing` volvía a
+  empezar en el slot 0. Un `Finish` a mitad de un draw (sampler heap lleno, presión de memoria)
+  retira también la tabla que ese draw todavía está escribiendo. Si después, en el mismo draw,
+  otra subida al ring (un blit o una conversión) pedía slots, podía recibir los mismos. Ahora el
+  ring sigue desde su cabeza: los slots del draw en curso solo se reutilizan tras una vuelta
+  completa.
+- **Espera del swapchain.** Si el *waitable object* no se señalaba en 1 s, el hilo de
+  presentación llamaba igualmente a `Present`, que entonces podía bloquearse con
+  `Device::QueueMutex` tomado y frenar al hilo de GPU. Ahora el frame se descarta. Además, la
+  espera va antes de resetear la command list de la copia.
+
+**Optimizaciones.**
+- Las copias de un buffer sobre sí mismo usan el `TransferBufferPool` en vez de crear un recurso
+  committed en cada copia. El pool pasa a ser del renderer y lo comparten los dos caches.
+- `SamplerHeap::GetTable` copia la tabla con un solo `CopyDescriptors`.
+- Los vertex buffers consecutivos se fijan con un solo `IASetVertexBuffers`.
+- `ClearBuffer` rellena con `memset` cuando el valor es 0.
+
+**Mantenibilidad.** `Scheduler::CollectGarbage` destruye los recursos y llama a los callbacks
+de retiro fuera de `release_mutex`. Así no los ejecuta con ese lock tomado ni bloquea a quien
+llama a `DeferRelease` desde otro hilo.
