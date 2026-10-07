@@ -541,6 +541,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
         PushStorageImages(info, texture_cache, queue, views_it, image_transitions);
         uses_render_area |= info.uses_render_area;
     }
+    queue.FlushCopies();
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;

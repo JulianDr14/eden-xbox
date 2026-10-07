@@ -489,7 +489,7 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
                                          CpuDescriptorAllocator& dsvs)
     : device{device_}, scheduler{scheduler_}, staging{staging_}, view_descriptors{views},
       sampler_descriptors{samplers}, rtv_descriptors{rtvs}, dsv_descriptors{dsvs},
-      texture_allocator{device_, scheduler_} {
+      texture_allocator{device_, scheduler_}, transfer_buffers{device_, scheduler_} {
     null_rtv = rtv_descriptors.Allocate();
     const D3D12_RENDER_TARGET_VIEW_DESC null_desc{
         .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -716,6 +716,7 @@ void TextureCacheRuntime::TickFrame() {
         pressure_level = cache_pressure.Update(pressure_snapshot);
     }
     texture_allocator.TrimEmptyHeaps(pressure_level != CachePressure::Normal);
+    transfer_buffers.Trim(pressure_level != CachePressure::Normal);
     if (VideoCore::FrameTrace::Active()) {
         const auto stats = texture_allocator.GetStats();
         VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::TextureHeapUsage,
@@ -1151,7 +1152,7 @@ void Image::CopyThroughBuffer(ID3D12Resource* src, ID3D12Resource* dst) {
     u64 total_bytes = 0;
     runtime->device.Get()->GetCopyableFootprints(&src_desc, 0, count, 0, footprints.data(),
                                                  nullptr, nullptr, &total_bytes);
-    ComPtr<ID3D12Resource> transfer = CreateTransferBuffer(runtime->device.Get(), total_bytes);
+    ComPtr<ID3D12Resource> transfer = runtime->transfer_buffers.Acquire(total_bytes);
     auto* const commands = runtime->scheduler.CommandList();
     for (u32 subresource = 0; subresource < count; ++subresource) {
         const D3D12_TEXTURE_COPY_LOCATION from{
@@ -1175,7 +1176,7 @@ void Image::CopyThroughBuffer(ID3D12Resource* src, ID3D12Resource* dst) {
             .SubresourceIndex = subresource};
         commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
     }
-    runtime->scheduler.DeferRelease(std::move(transfer));
+    runtime->transfer_buffers.Release(std::move(transfer));
 }
 
 void Image::RefreshSliceArray() {
@@ -1192,7 +1193,7 @@ void Image::RefreshSliceArray() {
     u64 total_bytes = 0;
     runtime->device.Get()->GetCopyableFootprints(&desc, 0, count, 0, footprints.data(), nullptr,
                                                  nullptr, &total_bytes);
-    ComPtr<ID3D12Resource> transfer = CreateTransferBuffer(runtime->device.Get(), total_bytes);
+    ComPtr<ID3D12Resource> transfer = runtime->transfer_buffers.Acquire(total_bytes);
     auto* const commands = runtime->scheduler.CommandList();
     Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
     const auto slices = [&](u32 level) { return std::min(layers, std::max(1U, layers >> level)); };
@@ -1232,7 +1233,7 @@ void Image::RefreshSliceArray() {
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     TransitionBuffer(commands, slice_array.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                      slice_array_state);
-    runtime->scheduler.DeferRelease(std::move(transfer));
+    runtime->transfer_buffers.Release(std::move(transfer));
     slice_array_version = write_version;
 }
 
@@ -1410,7 +1411,8 @@ void Image::UploadDepthStencil(ID3D12Resource* buffer, size_t base_offset,
                 continue;
             }
             auto* const commands = runtime->scheduler.CommandList();
-            ComPtr<ID3D12Resource> planes = CreateTransferBuffer(device, footprints.size, true);
+            ComPtr<ID3D12Resource> planes =
+                runtime->transfer_buffers.Acquire(footprints.size, true);
             if (whole) {
                 TransitionBuffer(commands, planes.Get(), D3D12_RESOURCE_STATE_COMMON,
                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1441,7 +1443,7 @@ void Image::UploadDepthStencil(ID3D12Resource* buffer, size_t base_offset,
             TransitionBuffer(commands, planes.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                              D3D12_RESOURCE_STATE_COPY_SOURCE);
             CopyPlanes(level, image_layer, planes.Get(), footprints, false);
-            runtime->scheduler.DeferRelease(std::move(planes));
+            runtime->transfer_buffers.Release(std::move(planes));
             if (!logged_depth_stencil_upload) {
                 logged_depth_stencil_upload = true;
                 LOG_INFO(Render, "D3D12: first depth-stencil upload ({} {}x{} level {} region "
@@ -1483,11 +1485,11 @@ void Image::DownloadDepthStencil(std::span<ID3D12Resource*> buffers, std::span<s
         for (u32 layer = 0; layer < layers; ++layer) {
             const s32 image_layer = copy.image_subresource.base_layer + static_cast<s32>(layer);
             auto* const commands = runtime->scheduler.CommandList();
-            ComPtr<ID3D12Resource> planes = CreateTransferBuffer(device, footprints.size);
+            ComPtr<ID3D12Resource> planes = runtime->transfer_buffers.Acquire(footprints.size);
             CopyPlanes(level, image_layer, planes.Get(), footprints, true);
             TransitionBuffer(commands, planes.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            ComPtr<ID3D12Resource> packed = CreateTransferBuffer(device, packed_size, true);
+            ComPtr<ID3D12Resource> packed = runtime->transfer_buffers.Acquire(packed_size, true);
             TransitionBuffer(commands, packed.Get(), D3D12_RESOURCE_STATE_COMMON,
                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             helper->MergeDepthStencil({
@@ -1515,8 +1517,8 @@ void Image::DownloadDepthStencil(std::span<ID3D12Resource*> buffers, std::span<s
                                            packed_size);
             }
             copied = true;
-            runtime->scheduler.DeferRelease(std::move(planes));
-            runtime->scheduler.DeferRelease(std::move(packed));
+            runtime->transfer_buffers.Release(std::move(planes));
+            runtime->transfer_buffers.Release(std::move(packed));
             if (!logged_depth_stencil_download) {
                 logged_depth_stencil_download = true;
                 LOG_INFO(Render, "D3D12: first depth-stencil download ({} {}x{} level {} region "
@@ -1578,8 +1580,10 @@ void Image::CopyDepthStencilFrom(Image& src, std::span<const ImageCopy> copies) 
             }
             // Part of a subresource: both go through footprints, the region is copied row by
             // row between them, and the destination returns whole.
-            ComPtr<ID3D12Resource> src_planes = CreateTransferBuffer(device, src_footprints.size);
-            ComPtr<ID3D12Resource> dst_planes = CreateTransferBuffer(device, dst_footprints.size);
+            ComPtr<ID3D12Resource> src_planes =
+                runtime->transfer_buffers.Acquire(src_footprints.size);
+            ComPtr<ID3D12Resource> dst_planes =
+                runtime->transfer_buffers.Acquire(dst_footprints.size);
             src.CopyPlanes(copy.src_subresource.base_level, src_layer, src_planes.Get(),
                            src_footprints, true);
             CopyPlanes(copy.dst_subresource.base_level, dst_layer, dst_planes.Get(),
@@ -1605,8 +1609,8 @@ void Image::CopyDepthStencilFrom(Image& src, std::span<const ImageCopy> copies) 
                              D3D12_RESOURCE_STATE_COPY_SOURCE);
             CopyPlanes(copy.dst_subresource.base_level, dst_layer, dst_planes.Get(),
                        dst_footprints, false);
-            runtime->scheduler.DeferRelease(std::move(src_planes));
-            runtime->scheduler.DeferRelease(std::move(dst_planes));
+            runtime->transfer_buffers.Release(std::move(src_planes));
+            runtime->transfer_buffers.Release(std::move(dst_planes));
         }
     }
 }
@@ -1686,8 +1690,7 @@ void Image::UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* map
                 src.PlacedFootprint.Offset = packed.offset;
             } else {
                 // GPU-only source (DMA from the buffer cache): repack row by row on the GPU.
-                transfer = CreateTransferBuffer(runtime->device.Get(),
-                                                layout.padded_slice * layout.depth);
+                transfer = runtime->transfer_buffers.Acquire(layout.padded_slice * layout.depth);
                 for (u32 z = 0; z < layout.depth; ++z) {
                     for (u32 row = 0; row < layout.rows; ++row) {
                         commands->CopyBufferRegion(
@@ -1717,7 +1720,7 @@ void Image::UploadMemoryImpl(ID3D12Resource* buffer, size_t base_offset, u8* map
             }
             VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::TextureUploadCopies, 1);
             if (transfer) {
-                runtime->scheduler.DeferRelease(std::move(transfer));
+                runtime->transfer_buffers.Release(std::move(transfer));
             }
         }
     }
@@ -1788,8 +1791,8 @@ void Image::DownloadMemory(std::span<ID3D12Resource*> buffers, std::span<size_t>
                     continue;
                 }
                 // The destination wants tight rows: go through a padded buffer, then row copies.
-                ComPtr<ID3D12Resource> transfer = CreateTransferBuffer(
-                    runtime->device.Get(), layout.padded_slice * layout.depth);
+                ComPtr<ID3D12Resource> transfer =
+                    runtime->transfer_buffers.Acquire(layout.padded_slice * layout.depth);
                 dst.pResource = transfer.Get();
                 dst.PlacedFootprint.Offset = 0;
                 commands->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
@@ -1805,7 +1808,7 @@ void Image::DownloadMemory(std::span<ID3D12Resource*> buffers, std::span<size_t>
                             layout.row_bytes);
                     }
                 }
-                runtime->scheduler.DeferRelease(std::move(transfer));
+                runtime->transfer_buffers.Release(std::move(transfer));
             }
         }
         if (promoted) {
@@ -1950,7 +1953,7 @@ void TextureCacheRuntime::CopyThroughBuffer(Image& dst, Image& src,
             continue;
         }
         for (s32 layer = 0; layer < copy.src_subresource.num_layers; ++layer) {
-            ComPtr<ID3D12Resource> transfer = CreateTransferBuffer(device.Get(), size);
+            ComPtr<ID3D12Resource> transfer = transfer_buffers.Acquire(size);
             D3D12_TEXTURE_COPY_LOCATION footprint{.pResource = transfer.Get(),
                                                   .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
             footprint.PlacedFootprint.Footprint = {.Format = src.FootprintFormat(),
@@ -1979,7 +1982,7 @@ void TextureCacheRuntime::CopyThroughBuffer(Image& dst, Image& src,
                                                     copy.dst_subresource.base_layer + layer)};
             commands->CopyTextureRegion(&target, copy.dst_offset.x, copy.dst_offset.y,
                                         copy.dst_offset.z, &footprint, nullptr);
-            scheduler.DeferRelease(std::move(transfer));
+            transfer_buffers.Release(std::move(transfer));
         }
     }
 }
