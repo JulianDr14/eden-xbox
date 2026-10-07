@@ -73,7 +73,8 @@
 
 namespace D3D12 {
 // renderer_d3d12.h; its includes need Mesa's headers, which only video_core sees.
-void SetTracedFrame(u32 frame);
+void SetTracedFrame(u32 frame, u32 count);
+void SetDumpedShader(u64 unique_hash);
 void SetFrameDiagnostics(bool enabled);
 void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
 void ShowCpuLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
@@ -220,6 +221,8 @@ struct BootConfig {
     bool null_renderer{};
     /// Presented frame whose draws the D3D12 renderer logs; 0 keeps its default.
     u32 traced_frame{};
+    /// Presented frames the trace spans from traced_frame on (boot.cfg "trace_frames=").
+    u32 traced_frames{1};
     /// Keep D3D12 block-compressed 2D arrays compressed instead of decoding them on the CPU.
     bool bc_arrays_native{};
     /// How ASTC reaches D3D12 ("astc="): BC3 for single textures and RGBA8 for arrays. "gpu" (the
@@ -301,7 +304,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                                                                : "hybrid diagnostic") +
               (fastmem_enabled ? " (hot " + std::to_string(config.fastmem_hot_mib) + " MiB)" : "") +
               ", asynchronous shaders " + (config.async_shaders ? "on" : "off"));
-    D3D12::SetTracedFrame(config.traced_frame);
+    D3D12::SetTracedFrame(config.traced_frame, config.traced_frames);
     D3D12::SetFrameDiagnostics(!config.play);
     // The GPU spends the same 5 GiB as the emulated DRAM and the JIT: the texture and buffer
     // caches evict against what the whole app has left, not DXGI's budget.
@@ -1575,6 +1578,15 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         } else if (line.starts_with("log_filter=")) {
                             config.log_filter = line.substr(11);
                             WriteDiag("boot.cfg: log filter " + config.log_filter);
+                        } else if (line.starts_with("dump_shader=")) {
+                            const u64 hash = std::strtoull(line.c_str() + 12, nullptr, 16);
+                            D3D12::SetDumpedShader(hash);
+                            WriteDiag("boot.cfg: dumping shader " + line.substr(12));
+                        } else if (line.starts_with("trace_frames=")) {
+                            config.traced_frames = std::max<u32>(
+                                1, static_cast<u32>(std::strtoul(line.c_str() + 13, nullptr, 10)));
+                            WriteDiag("boot.cfg: trace spans " + std::to_string(config.traced_frames) +
+                                      " frames");
                         } else if (line.starts_with("trace_frame=")) {
                             config.traced_frame =
                                 static_cast<u32>(std::strtoul(line.c_str() + 12, nullptr, 10));

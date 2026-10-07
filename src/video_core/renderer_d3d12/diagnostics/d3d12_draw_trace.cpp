@@ -210,6 +210,17 @@ void RasterizerD3D12::CheckTracedBuffers(std::span<const TracedBuffer> buffers,
                                          const DrawParams& params, bool verbose) {
     using Kind = TracedBuffer::Kind;
     constexpr u32 max_checked = 8U << 20;
+    // The first 64 words of a cbuf as floats, to follow the matrices a draw is given.
+    const auto LogUniformFloats = [this](u32 slot, const u8* data, u32 size) {
+        std::string values;
+        for (u32 at = 0; at + 4 <= std::min(size, 256U); at += 4) {
+            float value;
+            std::memcpy(&value, data + at, 4);
+            values += fmt::format("{}{:.5g}", at % 64 == 0 ? " |" : " ", value);
+        }
+        LOG_INFO(Render, "D3D12 trace cbuf #{}: slot {} size {}:{}", trace_index - 1, slot, size,
+                 values);
+    };
     std::optional<std::pair<u32, u32>> index_range; // vertex numbers, base vertex included
     if (!params.is_indexed && params.num_vertices != 0) {
         index_range.emplace(params.base_vertex, params.base_vertex + params.num_vertices - 1);
@@ -232,6 +243,9 @@ void RasterizerD3D12::CheckTracedBuffers(std::span<const TracedBuffer> buffers,
             }
             return "?";
         }();
+        if (traced.kind == Kind::StreamedUniform && traced.mapped) {
+            LogUniformFloats(traced.slot, traced.mapped, traced.size);
+        }
         if (!traced.buffer || traced.size == 0) {
             if (!verbose && traced.kind != Kind::NullUniform) {
                 continue;
@@ -293,10 +307,13 @@ void RasterizerD3D12::CheckTracedBuffers(std::span<const TracedBuffer> buffers,
             guest_non_finite += (b & 0x7f800000U) == 0x7f800000U ? 1 : 0;
         }
         staging.FreeDeferred(readback);
+        if (traced.kind == Kind::Uniform) {
+            LogUniformFloats(traced.slot, guest.data(), size);
+        }
         ++traced_buffers_checked;
         if (mismatched != 0) {
             ++traced_buffers_differing;
-        } else if (!verbose) {
+        } else if (!verbose && traced.kind != Kind::Vertex) {
             continue;
         }
         std::string line = fmt::format(
@@ -317,7 +334,7 @@ void RasterizerD3D12::CheckTracedBuffers(std::span<const TracedBuffer> buffers,
             line += fmt::format(", holds {} vertices, draw reads {}..{}",
                                 traced.size / traced.stride, index_range->first,
                                 index_range->second);
-            if (verbose && traced.stride % 4 == 0 && traced.stride <= 64) {
+            if (traced.stride % 4 == 0 && traced.stride <= 64) {
                 // Range of each float column over the vertices the draw reads.
                 const u32 columns = traced.stride / 4;
                 std::array<float, 16> low;
@@ -587,6 +604,22 @@ std::string RasterizerD3D12::TraceDepthChanges(const Image& target) {
     u32 min_y = UINT32_MAX;
     u32 max_x = 0;
     u32 max_y = 0;
+    // Depth values of the changed texels, before and after: 32-bit float depth, or the 24-bit
+    // unorm depth of D24S8 (the low 24 bits).
+    const bool float_depth = desc.Format == DXGI_FORMAT_R32_TYPELESS ||
+                             desc.Format == DXGI_FORMAT_D32_FLOAT ||
+                             desc.Format == DXGI_FORMAT_R32G8X24_TYPELESS ||
+                             desc.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    const auto depth_value = [&](const u8* p) {
+        u32 raw{};
+        std::memcpy(&raw, p, sizeof(raw));
+        return float_depth ? std::bit_cast<float>(raw)
+                           : static_cast<float>(raw & 0xFFFFFF) / 16777215.0f;
+    };
+    float before_min = std::numeric_limits<float>::max();
+    float before_max = std::numeric_limits<float>::lowest();
+    float after_min = before_min;
+    float after_max = before_max;
     for (u32 y = 0; y < height; ++y) {
         const u8* const a = before.data() + y * row_bytes;
         const u8* const b = now.data() + y * row_bytes;
@@ -596,6 +629,14 @@ std::string RasterizerD3D12::TraceDepthChanges(const Image& target) {
         for (u32 x = 0; x < width; ++x) {
             if (std::memcmp(a + x * texel, b + x * texel, texel) == 0) {
                 continue;
+            }
+            if (texel >= 4) {
+                const float old_depth = depth_value(a + x * texel);
+                const float new_depth = depth_value(b + x * texel);
+                before_min = std::min(before_min, old_depth);
+                before_max = std::max(before_max, old_depth);
+                after_min = std::min(after_min, new_depth);
+                after_max = std::max(after_max, new_depth);
             }
             ++changed;
             min_x = std::min(min_x, x);
@@ -638,8 +679,13 @@ std::string RasterizerD3D12::TraceDepthChanges(const Image& target) {
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     stream.write(reinterpret_cast<const char*>(file.data()),
                  static_cast<std::streamsize>(file.size()));
-    return fmt::format(" | depth changed {} texels in {},{}..{},{}", changed, min_x, min_y, max_x,
-                       max_y);
+    std::string values;
+    if (texel >= 4) {
+        values = fmt::format(" from {:.6g}..{:.6g} to {:.6g}..{:.6g} (format {})", before_min,
+                             before_max, after_min, after_max, static_cast<u32>(desc.Format));
+    }
+    return fmt::format(" | depth changed {} texels in {},{}..{},{}{}", changed, min_x, min_y,
+                       max_x, max_y, values);
 }
 
 std::optional<u64> RasterizerD3D12::DumpTarget(const Image& target, const std::string* bmp_name,
@@ -837,12 +883,61 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
                             dynamic.depth_test_enable.Value(), dynamic.depth_write_enable.Value(),
                             static_cast<u32>(dynamic.DepthTestFunc()),
                             dynamic.stencil_enable.Value(), dynamic.cull_enable.Value());
+        line += fmt::format(" face {} front {}", static_cast<u32>(dynamic.CullFace()),
+                            static_cast<u32>(dynamic.FrontFace()));
+        // Vertex attributes the vertex stage reads: buffer, offset, size and type.
+        for (u32 i = 0; i < 4; ++i) {
+            const auto& attrib = maxwell3d->regs.vertex_attrib_format[i];
+            line += fmt::format(" attr{} {:08x}(b{} +{} s{:x} t{}{})", i, attrib.hex,
+                                attrib.buffer.Value(), attrib.offset.Value(),
+                                static_cast<u32>(attrib.size.Value()),
+                                static_cast<u32>(attrib.type.Value()),
+                                attrib.constant ? " const" : "");
+        }
         line += fmt::format(" a2c {} alpha test {} ref {:.4g} early z {} msaa {}",
                             key.state.alpha_to_coverage_enabled.Value(),
                             key.state.alpha_test_func.Value(),
                             std::bit_cast<float>(key.state.alpha_test_ref),
                             key.state.early_z.Value(),
                             static_cast<u32>(key.state.msaa_mode.Value()));
+        // Clip distances the vertex stage writes, and which the guest enables.
+        u32 clip_written = 0;
+        const Shader::Info& vs_info = pipeline->StageInfo(0);
+        for (u32 i = 0; i < 8; ++i) {
+            const auto attribute = static_cast<Shader::IR::Attribute>(
+                static_cast<u32>(Shader::IR::Attribute::ClipDistance0) + i);
+            if (vs_info.stores[attribute]) {
+                clip_written |= 1u << i;
+            }
+        }
+        line += fmt::format(" clip written {:x} enabled {:x}", clip_written,
+                            maxwell3d->regs.user_clip_enable.raw);
+        // Depth range: the guest's viewport 0 transform and what D3D12 gets from it.
+        const auto& regs = maxwell3d->regs;
+        const auto& vp = regs.viewport_transform[0];
+        std::array<D3D12_VIEWPORT, Maxwell::NumViewports> viewports{};
+        const ViewportState vp_state = ComputeViewports(viewports);
+        line += fmt::format(" | z mode {} scale {:.6g} translate {:.6g} -> D3D {:.6g}..{:.6g}"
+                            " flip {:x} clamp_disabled {}",
+                            regs.depth_mode == Maxwell::DepthMode::MinusOneToOne ? "-1..1" : "0..1",
+                            vp.scale_z, vp.translate_z, viewports[0].MinDepth,
+                            viewports[0].MaxDepth, vp_state.yz_flip_mask,
+                            dynamic.depth_clamp_disabled.Value());
+        // Viewport 0 and scissor 0, guest and D3D12.
+        const auto& sc = regs.scissor_test[0];
+        const D3D12_RECT scissor = ScissorRect(0);
+        line += fmt::format(" | vp xy {:.6g},{:.6g} scale {:.6g},{:.6g} swizzle_y {} -> D3D {:.6g},{:.6g} "
+                            "{:.6g}x{:.6g} | origin {} flip_y {} clip {}x{} | scissor {} {},{}-{},{} "
+                            "-> D3D {},{}-{},{}",
+                            vp.translate_x, vp.translate_y, vp.scale_x, vp.scale_y,
+                            static_cast<u32>(vp.swizzle.y.Value()), viewports[0].TopLeftX,
+                            viewports[0].TopLeftY, viewports[0].Width, viewports[0].Height,
+                            regs.window_origin.mode == Maxwell::WindowOrigin::Mode::UpperLeft
+                                ? "upper-left"
+                                : "lower-left",
+                            regs.window_origin.flip_y.Value(), regs.surface_clip.width,
+                            regs.surface_clip.height, sc.enable, sc.min_x, sc.min_y, sc.max_x,
+                            sc.max_y, scissor.left, scissor.top, scissor.right, scissor.bottom);
     }
     if (framebuffer) {
         const VideoCommon::Extent2D extent = framebuffer->Extent();

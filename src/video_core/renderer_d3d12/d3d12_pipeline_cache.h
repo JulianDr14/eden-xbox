@@ -36,6 +36,11 @@ class ShaderNotify;
 
 namespace D3D12 {
 
+/// Diagnostics: the shader with this unique hash writes its translated IR and SPIR-V next to the
+/// log (shader_<hash>_<stage>.ir.txt / .spv) when a pipeline using it is built. 0 (the default)
+/// dumps nothing. Set before boot (boot.cfg "dump_shader=").
+void SetDumpedShader(u64 unique_hash);
+
 class ShaderCompiler;
 class TextureCacheRuntime;
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <exception>
 #include <fstream>
@@ -20,6 +21,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/exception.h"
+#include "shader_recompiler/frontend/ir/program.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
@@ -38,6 +40,20 @@
 namespace D3D12 {
 
 namespace {
+
+std::atomic<u64> dumped_shader{};
+
+/// Writes a translated stage's IR and SPIR-V next to the log (SetDumpedShader).
+void DumpShader(u64 unique_hash, size_t stage, const Shader::IR::Program& program,
+                std::span<const u32> spirv) {
+    const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir);
+    const std::string base = fmt::format("shader_{:016x}_{}", unique_hash, stage);
+    std::ofstream{directory / (base + ".ir.txt"), std::ios::trunc} << Shader::IR::DumpProgram(program);
+    std::ofstream{directory / (base + ".spv"), std::ios::binary | std::ios::trunc}.write(
+        reinterpret_cast<const char*>(spirv.data()),
+        static_cast<std::streamsize>(spirv.size_bytes()));
+    LOG_INFO(Render, "D3D12: shader {:016x} stage {} dumped ({})", unique_hash, stage, base);
+}
 
 using Shader::Backend::SPIRV::EmitSPIRV;
 using Shader::Maxwell::ConvertLegacyToGeneric;
@@ -279,6 +295,10 @@ ShaderCaps QueryShaderCaps(const Device& device) {
 }
 
 } // Anonymous namespace
+
+void SetDumpedShader(u64 unique_hash) {
+    dumped_shader.store(unique_hash, std::memory_order_relaxed);
+}
 
 PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
                              const Device& device_, const ShaderCompiler& compiler_,
@@ -632,6 +652,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         const auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage)};
         ConvertLegacyToGeneric(program, runtime_info);
         spirv[stage_index] = EmitSPIRV(profile, runtime_info, program, binding);
+        if (const u64 dump = dumped_shader.load(std::memory_order_relaxed);
+            dump != 0 && key.unique_hashes[index] == dump) [[unlikely]] {
+            DumpShader(dump, stage_index, program, spirv[stage_index]);
+        }
         stage_indices.push_back(stage_index);
         previous_stage = &program;
     }

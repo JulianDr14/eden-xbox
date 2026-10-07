@@ -29,9 +29,11 @@
 
 namespace D3D12 {
 
-/// Presented frame whose draws go to the log (the draw trace). 0 keeps the default: the frame that
-/// ends in frame_1.bmp. Set before boot (boot.cfg "trace_frame=").
-void SetTracedFrame(u32 frame);
+/// Presented frame whose draws go to the log (the draw trace), and how many presented frames the
+/// trace spans from it (a game may present more than once per frame it draws). Frame 0 keeps the
+/// default: the frame that ends in frame_1.bmp. Set before boot (boot.cfg "trace_frame=",
+/// "trace_frames=").
+void SetTracedFrame(u32 frame, u32 count = 1);
 
 /// Whether presents write frame*.bmp and trace a frame's draws (the default). Off for a session
 /// played by hand (boot.cfg "play=1"). Set before boot.
