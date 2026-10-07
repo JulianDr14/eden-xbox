@@ -315,6 +315,8 @@ private:
     /// Copies the texels between the image and its reinterpreted copy through a buffer.
     void RefreshReinterpreted();
     void WriteBackReinterpreted();
+    /// Aliasing barrier, transition to the writable state and discard (see needs_placed_init).
+    void InitializePlacedResource();
     void CopyThroughBuffer(ID3D12Resource* src, ID3D12Resource* dst);
     void TransitionReinterpreted(D3D12_RESOURCE_STATES next);
     /// Hash and transparency of a CPU-decoded upload (first ones only), to compare machines.
@@ -345,6 +347,9 @@ private:
     bool gpu_decoded{};
     DXGI_FORMAT footprint_format{}; ///< format GetCopyableFootprints uses for plane 0
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
+    /// A placed render target or depth stencil whose heap memory another resource may have used:
+    /// D3D12 requires an aliasing barrier and a discard before its first use.
+    bool needs_placed_init{};
     /// Bumped by every transition into a writable state: every GPU write to the image follows one.
     u64 write_version{1};
     std::unique_ptr<Image> depth_feedback;
