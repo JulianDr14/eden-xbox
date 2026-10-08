@@ -21,7 +21,9 @@ namespace {
 
 using namespace Common::Literals;
 
-constexpr u64 STREAM_BUFFER_SIZE = 256_MiB;
+/// Largest staging ring. 128 MiB still holds four of the largest uploads it serves
+/// (MAX_STREAM_REQUEST) and leaves 128 MiB more commit to a large game near the memory limit.
+constexpr u64 STREAM_BUFFER_SIZE = 128_MiB;
 /// Largest upload the stream serves; it may span several regions. Larger ones (and deferred ones)
 /// get dedicated buffers. Up to 0.2.50 only one region (8 MiB) was served: a 2048x2048 texture
 /// with mips decoded to RGBA8 (22 MB) then took a new 32 MiB buffer, and a loading screen in
@@ -63,7 +65,7 @@ ComPtr<ID3D12Resource> CreateMappedBuffer(ID3D12Device* device, u64 size,
 
 StagingBufferPool::StagingBufferPool(const Device& device_, Scheduler& scheduler_)
     : device{device_}, scheduler{scheduler_}, stream_buffer_size{STREAM_BUFFER_SIZE},
-      region_size{STREAM_BUFFER_SIZE / NUM_SYNCS} {
+      region_size{STREAM_BUFFER_SIZE / NUM_SYNCS}, ring_guard{STREAM_BUFFER_SIZE} {
     stream_buffer = CreateMappedBuffer(device.Get(), stream_buffer_size, D3D12_HEAP_TYPE_UPLOAD,
                                        stream_pointer);
     stream_charge = Common::MemoryCharge(Common::MemoryAccount::StagingRing, stream_buffer_size);
