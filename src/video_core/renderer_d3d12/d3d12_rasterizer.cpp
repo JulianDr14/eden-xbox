@@ -88,6 +88,7 @@ RasterizerD3D12::RasterizerD3D12(Tegra::GPU& gpu_,
       buffer_cache{device_memory_, buffer_runtime_}, texture_cache{texture_runtime, device_memory_},
       pipeline_cache{device_memory_, device, compiler, texture_runtime, gpu_.ShaderNotify()},
       query_cache{*this, device_memory_, device, scheduler_},
+      conditional_rendering{device, scheduler_, query_cache},
       accelerate_dma{buffer_cache, texture_cache},
       fence_manager{*this, gpu_, texture_cache, buffer_cache, query_cache, scheduler_} {
     buffer_runtime.SetDescriptorQueue(&descriptor_queue);
@@ -101,6 +102,9 @@ RasterizerD3D12::~RasterizerD3D12() {
 
 void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     ++draw_counter;
+    if (conditional_rendering.SkipsDraws()) {
+        return;
+    }
     VideoCore::Perf::ScopedNsTimer draw_timer{VideoCore::Perf::Counter::DrawNs};
     SCOPE_EXIT {
         FlushIfUploadHeavy();
@@ -215,6 +219,7 @@ void RasterizerD3D12::RecordDraw(const GraphicsPipeline& pipeline,
     BindDrawState(pipeline, bindings, framebuffer, params, topology);
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
     VideoCore::Perf::Add(VideoCore::Perf::Counter::Draws, 1);
+    const ConditionalRendering::Scope predicate{conditional_rendering, cmd};
     if (params.is_indexed) {
         cmd->DrawIndexedInstanced(params.num_vertices, params.num_instances, params.first_index,
                                   static_cast<INT>(params.base_vertex), params.base_instance);
@@ -352,6 +357,10 @@ std::optional<RasterizerD3D12::DisplayTexture> RasterizerD3D12::AccelerateDispla
         .width = image_view->size.width,
         .height = image_view->size.height,
     };
+}
+
+bool RasterizerD3D12::AccelerateConditionalRendering() {
+    return conditional_rendering.Accelerate(maxwell3d->regs, *gpu_memory);
 }
 
 void RasterizerD3D12::ResetCounter(VideoCommon::QueryType type) {

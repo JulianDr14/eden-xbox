@@ -483,6 +483,8 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_buffer_cache.h
         renderer_d3d12/d3d12_compute_pipeline.cpp
         renderer_d3d12/d3d12_compute_pipeline.h
+        renderer_d3d12/d3d12_conditional_rendering.cpp
+        renderer_d3d12/d3d12_conditional_rendering.h
         renderer_d3d12/d3d12_descriptor_heap.cpp
         renderer_d3d12/d3d12_descriptor_heap.h
         renderer_d3d12/diagnostics/d3d12_astc_verify.cpp

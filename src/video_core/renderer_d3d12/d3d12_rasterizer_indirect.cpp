@@ -29,7 +29,8 @@ void RasterizerD3D12::DrawIndirect() {
         WarnOnceLog(logged_byte_count_draw, "byte-count indirect draws are skipped");
         return;
     }
-    if (params.max_draw_counts == 0 || CullsEveryPrimitive()) {
+    if (params.max_draw_counts == 0 || conditional_rendering.SkipsDraws() ||
+        CullsEveryPrimitive()) {
         return;
     }
     if (BufferCacheRuntime::IsEmulatedTopology(maxwell3d->draw_manager.draw_state.topology)) {
@@ -121,9 +122,12 @@ void RasterizerD3D12::DrawIndirect() {
     };
     BindDrawState(*pipeline, bindings, *framebuffer, draw_params,
                   maxwell3d->draw_manager.draw_state.topology);
-    scheduler.CommandList()->ExecuteIndirect(signature, draw_count, range.buffer, range.offset,
-                                             params.include_count ? range.buffer : nullptr,
-                                             params.include_count ? count_offset : 0);
+    {
+        const ConditionalRendering::Scope predicate{conditional_rendering, cmd};
+        cmd->ExecuteIndirect(signature, draw_count, range.buffer, range.offset,
+                             params.include_count ? range.buffer : nullptr,
+                             params.include_count ? count_offset : 0);
+    }
     // The command signature wrote the runtime data constants: the next draw sets them again.
     command_state.root_args.valid = false;
     if (!logged_indirect_draw) {
