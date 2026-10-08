@@ -57,22 +57,7 @@ ComPtr<ID3D12Resource> TransferBufferPool::Acquire(u64 size, bool unordered_acce
                                      "Create transfer buffer", &hr);
     };
     ComPtr<ID3D12Resource> buffer = create();
-    if (!buffer && hr == E_OUTOFMEMORY && scheduler.IsRecordingThread()) {
-        // The commit limit refused it, typically while a loading screen fills the caches. Closing
-        // the game for it lost the session; give back what finished work no longer needs (idle
-        // pooled buffers, deferred releases, then the heaps they emptied) and try once more.
-        // Waiting only on submitted ticks never splits the list being recorded.
-        LOG_WARNING(Render, "D3D12: out of memory creating a {} byte transfer buffer; reclaiming "
-                            "and retrying", size);
-        Trim(true);
-        const u64 current = scheduler.CurrentTick();
-        if (current > 1) {
-            scheduler.Wait(current - 1);
-        }
-        scheduler.CollectGarbage();
-        if (reclaimer) {
-            reclaimer();
-        }
+    if (!buffer && hr == E_OUTOFMEMORY && ReclaimAfterOutOfMemory(size, "transfer buffer")) {
         buffer = create();
         if (buffer) {
             LOG_INFO(Render, "D3D12: transfer buffer created after reclaiming");
@@ -82,6 +67,28 @@ ComPtr<ID3D12Resource> TransferBufferPool::Acquire(u64 size, bool unordered_acce
         ThrowIfFailed(hr, "Create transfer buffer");
     }
     return buffer;
+}
+
+bool TransferBufferPool::ReclaimAfterOutOfMemory(u64 size, const char* what) {
+    if (!scheduler.IsRecordingThread()) {
+        return false;
+    }
+    // The commit limit refused it, typically while a loading screen fills the caches. Closing
+    // the game for it lost the session; give back what finished work no longer needs (idle
+    // pooled buffers, deferred releases, then the heaps they emptied). Waiting only on
+    // submitted ticks never splits the list being recorded.
+    LOG_WARNING(Render, "D3D12: out of memory creating a {} byte {}; reclaiming and retrying",
+                size, what);
+    Trim(true);
+    const u64 current = scheduler.CurrentTick();
+    if (current > 1) {
+        scheduler.Wait(current - 1);
+    }
+    scheduler.CollectGarbage();
+    if (reclaimer) {
+        reclaimer();
+    }
+    return true;
 }
 
 void TransferBufferPool::Release(ComPtr<ID3D12Resource>&& buffer) {
