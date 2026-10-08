@@ -238,6 +238,11 @@ struct BootConfig {
     /// default since 0.2.59) performs both decode and BC3 encode on the GPU; "bc3" keeps the CPU
     /// reference path and "cpu" expands every image to RGBA8.
     enum class Astc { Bc3, Gpu, GpuRgba, Cpu } astc{Astc::Gpu};
+    /// ASTC 2D arrays as BC3 too ("astc_arrays=bc3", the default) or RGBA8 ("astc_arrays=rgba").
+    /// RGBA8 is four times the memory: one array of 121 layers took 650 MiB and closed a game at
+    /// the 5 GiB limit. BC arrays read some layers wrong on the Series (0.2.44), seen with BC4
+    /// arrays uploaded by copy; "rgba" stays as the way back if ASTC arrays show it too.
+    bool astc_arrays_rgba{};
     bool astc_verify{};
     bool gpu_failure_probe{};
     bool gpu_removal_probe{};
@@ -326,14 +331,14 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     D3D12::SetAppMemoryQuery(QueryAppMemory);
     D3D12::SetBcArrayDecode(!config.bc_arrays_native);
     // RGBA8 ASTC made loading frames upload 150-260 MiB at once and the console run out of memory
-    // (0.2.50): single textures become BC3 (a quarter of the memory), 2D arrays stay RGBA8 (a
-    // block-compressed array misreads layers on the Series) and are decoded on the GPU.
+    // (0.2.50): textures become BC3 (a quarter of the memory), 2D arrays too unless
+    // astc_arrays=rgba (BootConfig::astc_arrays_rgba), all decoded and encoded on the GPU.
     const bool astc_rgba = config.astc == BootConfig::Astc::Cpu ||
                            config.astc == BootConfig::Astc::GpuRgba;
     Settings::values.astc_recompression.SetValue(astc_rgba
                                                      ? Settings::AstcRecompression::Uncompressed
                                                      : Settings::AstcRecompression::Bc3);
-    VideoCommon::SetAstcArrayRecompression(false);
+    VideoCommon::SetAstcArrayRecompression(!config.astc_arrays_rgba);
     // The compute decoder was opt-in until its dispatches set spirv_to_dxil's compute runtime data
     // (0.2.58): 4 minutes of Mario Wonder on the Series decoded no ASTC on the CPU, without
     // corruption or hangs. "astc=bc3" brings back the CPU path.
@@ -1701,6 +1706,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                                           : line == "astc=cpu"      ? Astc::Cpu
                                                                    : Astc::Bc3;
                             WriteDiag("boot.cfg: ASTC " + line.substr(5));
+                        } else if (line == "astc_arrays=bc3" || line == "astc_arrays=rgba") {
+                            config.astc_arrays_rgba = line == "astc_arrays=rgba";
+                            WriteDiag("boot.cfg: ASTC arrays " + line.substr(12));
                         } else if (line == "astc_fresh=1") {
                             config.astc_fresh = true;
                             WriteDiag("boot.cfg: new ASTC scratch resources for every GPU upload");

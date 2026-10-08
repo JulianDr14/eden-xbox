@@ -314,16 +314,15 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
         // Per image: arrays may stay RGBA8 when the rest is recompressed (see
         // VideoCommon::SetAstcArrayRecompression).
         format = AstcFormat(info_.format, VideoCommon::AstcRecompressionFor(info_));
-        // GPU mode decodes arrays straight into their RGBA8 image. A single-layer BC3 image uses
-        // the same decoder through the bounded scratch texture followed by the GPU BC3 encoder.
+        // GPU mode decodes RGBA8 images straight into the image. BC3 ones, arrays included, go
+        // through the bounded scratch texture and the GPU BC3 encoder, one layer at a time.
         const BlitImageHelper* const helper = runtime->blit_helper;
         gpu_decoded = gpu_astc_decode.load(std::memory_order_relaxed) && helper &&
                       helper->CanDecodeAstc() &&
                       info_.type == ImageType::e2D && info_.size.depth == 1 &&
                       info_.num_samples == 1 &&
                       (format.copy_format == PixelFormat::A8B8G8R8_UNORM ||
-                       (format.copy_format == PixelFormat::BC3_UNORM &&
-                        info_.resources.layers == 1 && helper->CanEncodeBc3()));
+                       (format.copy_format == PixelFormat::BC3_UNORM && helper->CanEncodeBc3()));
     }
     if (format.converted) {
         flags |= VideoCommon::ImageFlagBits::Converted | VideoCommon::ImageFlagBits::CostlyLoad;

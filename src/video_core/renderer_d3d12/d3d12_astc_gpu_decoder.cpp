@@ -196,96 +196,126 @@ void TextureCacheRuntime::AccelerateImageUpload(
         const u64 bc3_bytes = static_cast<u64>(bc3_row_pitch) * Common::DivCeil(band_rows, 4U);
         EnsureAstcBc3Scratch(bc3_bytes);
 
-        for (u32 first_y = 0; first_y < mip_height; first_y += band_rows) {
-            const u32 rows = std::min(band_rows, mip_height - first_y);
-            auto* const commands = scheduler.CommandList();
-            if (astc_rgba_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+        // One layer at a time through the same bounded scratch: each layer's blocks start
+        // layer_stride bytes after the previous one's, and each is its own subresource.
+        for (u32 layer = 0; layer < layers; ++layer) {
+            const u64 layer_offset = static_cast<u64>(params.layer_stride) * layer;
+            const D3D12_CPU_DESCRIPTOR_HANDLE layer_srv =
+                layer == 0 ? source_srv : view_descriptors.Allocate();
+            if (layer != 0) {
+                const u64 layer_source = source_offset + layer_offset;
+                const u64 layer_bytes =
+                    layer_source < buffer_size
+                        ? std::min<u64>(params.layer_stride, buffer_size - layer_source)
+                        : 0;
+                const u32 layer_words = static_cast<u32>(layer_bytes / 4);
+                const D3D12_SHADER_RESOURCE_VIEW_DESC layer_desc{
+                    .Format = DXGI_FORMAT_R32_TYPELESS,
+                    .ViewDimension = D3D12_SRV_DIMENSION_BUFFER,
+                    .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                    .Buffer = {.FirstElement = layer_words ? layer_source / 4 : 0,
+                               .NumElements = layer_words,
+                               .StructureByteStride = 0,
+                               .Flags = D3D12_BUFFER_SRV_FLAG_RAW},
+                };
+                device.Get()->CreateShaderResourceView(layer_words ? map.buffer : nullptr,
+                                                       &layer_desc, layer_srv);
+            }
+            for (u32 first_y = 0; first_y < mip_height; first_y += band_rows) {
+                const u32 rows = std::min(band_rows, mip_height - first_y);
+                auto* const commands = scheduler.CommandList();
+                if (astc_rgba_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+                    TransitionBuffer(commands, astc_rgba_scratch.Get(), astc_rgba_state,
+                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    astc_rgba_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                } else {
+                    const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV,
+                                                         .UAV = {.pResource = astc_rgba_scratch.Get()}};
+                    commands->ResourceBarrier(1, &barrier);
+                }
+                const D3D12_CPU_DESCRIPTOR_HANDLE rgba_uav = view_descriptors.Allocate();
+                const D3D12_UNORDERED_ACCESS_VIEW_DESC rgba_uav_desc{
+                    .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+                    .ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY,
+                    .Texture2DArray = {.MipSlice = 0, .FirstArraySlice = 0, .ArraySize = 1,
+                                       .PlaneSlice = 0},
+                };
+                device.Get()->CreateUnorderedAccessView(astc_rgba_scratch.Get(), nullptr,
+                                                        &rgba_uav_desc, rgba_uav);
+                blit_helper->DecodeAstc({
+                    .source = layer_srv,
+                    .destination = rgba_uav,
+                    .block_width = block_width,
+                    .block_height = block_height,
+                    .layer_stride = params.layer_stride,
+                    .block_size = params.block_size,
+                    .x_shift = params.x_shift,
+                    .gob_block_height = params.block_height,
+                    .gob_block_height_mask = params.block_height_mask,
+                    .blocks_x = swizzle.num_tiles.width,
+                    .blocks_y = Common::DivCeil(rows, block_height),
+                    .layers = 1,
+                    .input_words = input_words,
+                    .first_block_row = first_y / block_height,
+                });
+                view_descriptors.Free(rgba_uav);
+
                 TransitionBuffer(commands, astc_rgba_scratch.Get(), astc_rgba_state,
-                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                astc_rgba_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-            } else {
-                const D3D12_RESOURCE_BARRIER barrier{.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV,
-                                                     .UAV = {.pResource = astc_rgba_scratch.Get()}};
-                commands->ResourceBarrier(1, &barrier);
-            }
-            const D3D12_CPU_DESCRIPTOR_HANDLE rgba_uav = view_descriptors.Allocate();
-            const D3D12_UNORDERED_ACCESS_VIEW_DESC rgba_uav_desc{
-                .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
-                .ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY,
-                .Texture2DArray = {.MipSlice = 0, .FirstArraySlice = 0, .ArraySize = 1,
-                                   .PlaneSlice = 0},
-            };
-            device.Get()->CreateUnorderedAccessView(astc_rgba_scratch.Get(), nullptr,
-                                                    &rgba_uav_desc, rgba_uav);
-            blit_helper->DecodeAstc({
-                .source = source_srv,
-                .destination = rgba_uav,
-                .block_width = block_width,
-                .block_height = block_height,
-                .layer_stride = params.layer_stride,
-                .block_size = params.block_size,
-                .x_shift = params.x_shift,
-                .gob_block_height = params.block_height,
-                .gob_block_height_mask = params.block_height_mask,
-                .blocks_x = swizzle.num_tiles.width,
-                .blocks_y = Common::DivCeil(rows, block_height),
-                .layers = 1,
-                .input_words = input_words,
-                .first_block_row = first_y / block_height,
-            });
-            view_descriptors.Free(rgba_uav);
+                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                astc_rgba_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                if (astc_bc3_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+                    TransitionBuffer(commands, astc_bc3_scratch.Get(), astc_bc3_state,
+                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    astc_bc3_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                }
+                const D3D12_CPU_DESCRIPTOR_HANDLE rgba_srv = view_descriptors.Allocate();
+                const D3D12_SHADER_RESOURCE_VIEW_DESC rgba_srv_desc{
+                    .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+                    .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
+                    .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                    .Texture2D = {.MostDetailedMip = 0, .MipLevels = 1,
+                                  .PlaneSlice = 0, .ResourceMinLODClamp = 0.0f},
+                };
+                device.Get()->CreateShaderResourceView(astc_rgba_scratch.Get(), &rgba_srv_desc,
+                                                       rgba_srv);
+                blit_helper->EncodeBc3({rgba_srv, astc_bc3_scratch->GetGPUVirtualAddress(),
+                                        mip_width, rows, rows,
+                                        bc3_row_pitch / 4});
+                view_descriptors.Free(rgba_srv);
 
-            TransitionBuffer(commands, astc_rgba_scratch.Get(), astc_rgba_state,
-                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            astc_rgba_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-            if (astc_bc3_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
                 TransitionBuffer(commands, astc_bc3_scratch.Get(), astc_bc3_state,
-                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                astc_bc3_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                                 D3D12_RESOURCE_STATE_COPY_SOURCE);
+                astc_bc3_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                if (first_y == 0 && layer == 0 &&
+                    gpu_astc_verify.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                    VerifyGpuAstcBand({.image = image, .map = map, .swizzle = swizzle,
+                                       .params = params, .mip_width = mip_width, .rows = rows,
+                                       .block_width = block_width, .block_height = block_height,
+                                       .bc3_row_pitch = bc3_row_pitch, .bc3_bytes = bc3_bytes});
+                }
+                image.Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+                const D3D12_TEXTURE_COPY_LOCATION src{
+                    .pResource = astc_bc3_scratch.Get(),
+                    .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                    .PlacedFootprint = {
+                        .Offset = 0,
+                        .Footprint = {.Format = image.FootprintFormat(),
+                                      .Width = Common::AlignUp(mip_width, 4U),
+                                      .Height = Common::AlignUp(rows, 4U),
+                                      .Depth = 1,
+                                      .RowPitch = bc3_row_pitch},
+                    },
+                };
+                const D3D12_TEXTURE_COPY_LOCATION dst{
+                    .pResource = image.Handle(),
+                    .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                    .SubresourceIndex = image.Subresource(swizzle.level, layer),
+                };
+                commands->CopyTextureRegion(&dst, 0, first_y, 0, &src, nullptr);
             }
-            const D3D12_CPU_DESCRIPTOR_HANDLE rgba_srv = view_descriptors.Allocate();
-            const D3D12_SHADER_RESOURCE_VIEW_DESC rgba_srv_desc{
-                .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
-                .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
-                .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-                .Texture2D = {.MostDetailedMip = 0, .MipLevels = 1,
-                              .PlaneSlice = 0, .ResourceMinLODClamp = 0.0f},
-            };
-            device.Get()->CreateShaderResourceView(astc_rgba_scratch.Get(), &rgba_srv_desc,
-                                                   rgba_srv);
-            blit_helper->EncodeBc3({rgba_srv, astc_bc3_scratch->GetGPUVirtualAddress(),
-                                    mip_width, rows, rows,
-                                    bc3_row_pitch / 4});
-            view_descriptors.Free(rgba_srv);
-
-            TransitionBuffer(commands, astc_bc3_scratch.Get(), astc_bc3_state,
-                             D3D12_RESOURCE_STATE_COPY_SOURCE);
-            astc_bc3_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
-            if (first_y == 0 && gpu_astc_verify.fetch_sub(1, std::memory_order_relaxed) > 0) {
-                VerifyGpuAstcBand({.image = image, .map = map, .swizzle = swizzle,
-                                   .params = params, .mip_width = mip_width, .rows = rows,
-                                   .block_width = block_width, .block_height = block_height,
-                                   .bc3_row_pitch = bc3_row_pitch, .bc3_bytes = bc3_bytes});
+            if (layer != 0) {
+                view_descriptors.Free(layer_srv);
             }
-            image.Transition(D3D12_RESOURCE_STATE_COPY_DEST);
-            const D3D12_TEXTURE_COPY_LOCATION src{
-                .pResource = astc_bc3_scratch.Get(),
-                .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-                .PlacedFootprint = {
-                    .Offset = 0,
-                    .Footprint = {.Format = image.FootprintFormat(),
-                                  .Width = Common::AlignUp(mip_width, 4U),
-                                  .Height = Common::AlignUp(rows, 4U),
-                                  .Depth = 1,
-                                  .RowPitch = bc3_row_pitch},
-                },
-            };
-            const D3D12_TEXTURE_COPY_LOCATION dst{
-                .pResource = image.Handle(),
-                .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-                .SubresourceIndex = image.Subresource(swizzle.level, 0),
-            };
-            commands->CopyTextureRegion(&dst, 0, first_y, 0, &src, nullptr);
         }
         view_descriptors.Free(source_srv);
     }
