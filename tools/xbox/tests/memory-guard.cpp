@@ -28,17 +28,19 @@ void TestPolicy() {
     auto tight = guard.Update(UsedFor(33 * M), limit);
     assert(tight.stream_bytes == 64 * M && !tight.emergency);
     auto emergency = guard.Update(UsedFor(32 * M), limit);
-    assert(emergency.emergency && emergency.trim && emergency.stream_bytes == 0);
-    assert(guard.Update(limit + M, limit).emergency);
+    // Even an emergency keeps the floor ring: without it every upload is a dedicated buffer.
+    assert(emergency.emergency && emergency.trim &&
+           emergency.stream_bytes == MemoryGuardPolicy::FLOOR_RING);
+    assert(guard.Update(limit + M, limit).stream_bytes == MemoryGuardPolicy::FLOOR_RING);
 
-    // 0 -> 64 MiB needs 64 + 256 MiB free for 120 consecutive frames. A missing measurement
+    // 32 -> 64 MiB needs 64 + 256 MiB free for 120 consecutive frames. A missing measurement
     // restarts the count; it never implies headroom.
     for (unsigned i = 0; i < 119; ++i) {
-        assert(guard.Update(UsedFor(320 * M), limit).stream_bytes == 0);
+        assert(guard.Update(UsedFor(320 * M), limit).stream_bytes == 32 * M);
     }
-    assert(guard.Update(0, 0).stream_bytes == 0);
+    assert(guard.Update(0, 0).stream_bytes == 32 * M);
     for (unsigned i = 0; i < 119; ++i) {
-        assert(guard.Update(UsedFor(320 * M), limit).stream_bytes == 0);
+        assert(guard.Update(UsedFor(320 * M), limit).stream_bytes == 32 * M);
     }
     assert(guard.Update(UsedFor(320 * M), limit).stream_bytes == 64 * M);
 
@@ -99,19 +101,29 @@ void TestRingController() {
     plan = ring.BeginFrame(UsedFor(150 * M), limit, 128 * M);
     assert(!ring.Retiring() && plan.target == 128 * M);
 
-    // An emergency drains the GPU once, while a ring exists, and never allocates a replacement.
+    // An emergency drains the GPU once, while a ring above the floor exists, and replaces it with
+    // a floor ring however little is free.
+    constexpr std::uint64_t floor = MemoryGuardPolicy::FLOOR_RING;
     plan = ring.BeginFrame(UsedFor(20 * M), limit, 128 * M);
-    assert(plan.emergency && plan.finish && plan.target == 0 && ring.Retiring());
+    assert(plan.emergency && plan.finish && plan.target == floor && ring.Retiring());
     plan = ring.BeginFrame(UsedFor(20 * M), limit, 128 * M);
     assert(plan.emergency && !plan.finish);
     ring.OnRetired();
-    plan = ring.BeginFrame(UsedFor(20 * M), limit, 0);
-    assert(!plan.finish && !ring.Retiring());
-    assert(ring.WantedRing(0, UsedFor(4000 * M), limit) == 0);
+    assert(ring.WantedRing(0, UsedFor(0), limit) == floor);
+    assert(ring.WantedRing(0, UsedFor(20 * M), limit) == floor);
+    // A floor ring in place is kept, without draining or retiring it.
+    plan = ring.BeginFrame(UsedFor(20 * M), limit, floor);
+    assert(plan.emergency && !plan.finish && !ring.Retiring());
+    assert(ring.WantedRing(floor, UsedFor(20 * M), limit) == 0);
     // Leaving the emergency re-arms the drain for the next one.
-    ring.BeginFrame(UsedFor(40 * M), limit, 0);
+    ring.BeginFrame(UsedFor(40 * M), limit, floor);
     plan = ring.BeginFrame(UsedFor(20 * M), limit, 64 * M);
     assert(plan.finish);
+    // A refused floor ring still backs off.
+    StagingRingController refused;
+    refused.BeginFrame(UsedFor(10 * M), limit, 0);
+    refused.OnAllocationFailed();
+    assert(refused.WantedRing(0, UsedFor(10 * M), limit) == 0);
 
     // A refused allocation backs off for RETRY_FRAMES frames.
     StagingRingController fresh;
