@@ -4,6 +4,7 @@
 #include <algorithm>
 
 #include "common/alignment.h"
+#include "common/logging.h"
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
@@ -47,11 +48,40 @@ ComPtr<ID3D12Resource> TransferBufferPool::Acquire(u64 size, bool unordered_acce
             return buffer;
         }
     }
-    return CreateCommittedBuffer(device.Get(), size, D3D12_HEAP_TYPE_DEFAULT,
-                                 D3D12_RESOURCE_STATE_COMMON,
-                                 unordered_access ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
-                                                  : D3D12_RESOURCE_FLAG_NONE,
-                                 "Create transfer buffer");
+    HRESULT hr = S_OK;
+    const auto create = [&] {
+        return CreateCommittedBuffer(device.Get(), size, D3D12_HEAP_TYPE_DEFAULT,
+                                     D3D12_RESOURCE_STATE_COMMON,
+                                     unordered_access ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+                                                      : D3D12_RESOURCE_FLAG_NONE,
+                                     "Create transfer buffer", &hr);
+    };
+    ComPtr<ID3D12Resource> buffer = create();
+    if (!buffer && hr == E_OUTOFMEMORY && scheduler.IsRecordingThread()) {
+        // The commit limit refused it, typically while a loading screen fills the caches. Closing
+        // the game for it lost the session; give back what finished work no longer needs (idle
+        // pooled buffers, deferred releases, then the heaps they emptied) and try once more.
+        // Waiting only on submitted ticks never splits the list being recorded.
+        LOG_WARNING(Render, "D3D12: out of memory creating a {} byte transfer buffer; reclaiming "
+                            "and retrying", size);
+        Trim(true);
+        const u64 current = scheduler.CurrentTick();
+        if (current > 1) {
+            scheduler.Wait(current - 1);
+        }
+        scheduler.CollectGarbage();
+        if (reclaimer) {
+            reclaimer();
+        }
+        buffer = create();
+        if (buffer) {
+            LOG_INFO(Render, "D3D12: transfer buffer created after reclaiming");
+        }
+    }
+    if (!buffer) {
+        ThrowIfFailed(hr, "Create transfer buffer");
+    }
+    return buffer;
 }
 
 void TransferBufferPool::Release(ComPtr<ID3D12Resource>&& buffer) {

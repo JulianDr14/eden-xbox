@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -39,6 +40,12 @@ public:
 
     [[nodiscard]] u64 PooledBytes() const;
 
+    /// What else to free when the commit limit refuses a buffer, after the pool's own buffers and
+    /// the finished work's deferred releases (the texture cache's emptied heaps).
+    void SetReclaimer(std::function<void()> reclaimer_) {
+        reclaimer = std::move(reclaimer_);
+    }
+
 private:
     struct Entry {
         ComPtr<ID3D12Resource> buffer;
@@ -57,6 +64,7 @@ private:
     mutable std::mutex mutex;
     std::vector<Entry> entries;
     u64 pooled_bytes{};
+    std::function<void()> reclaimer;
 };
 
 } // namespace D3D12
