@@ -120,8 +120,8 @@ std::unique_ptr<Owner> Owner::Create(System& system, Kernel::KProcess& process, 
         p.path = Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "jit-profile" /
                  fmt::format("{:016x}", p.title) / fmt::format("{}{}.bin", layout.file_stem, p.core);
         p.executable_ranges = CollectExecutableRanges(process);
-        p.observed.reserve(MaxRecords - GameplayCapacity);
-        p.gameplay_observed.reserve(GameplayCapacity);
+        // No reserve up front: full capacity is 8 MiB of commit per core for the whole session, and
+        // a session usually observes far fewer blocks. Observe still caps both at their capacity.
         std::error_code ec;
         const auto bytes = std::filesystem::file_size(p.path, ec);
         if (!ec) {
