@@ -51,6 +51,7 @@
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/kernel/svc/svc_debug_string.h" // Kernel::Svc::SetDebugStringObserver
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/physical_core.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
@@ -199,6 +200,8 @@ struct BootConfig {
     bool gpu_profile{};
     /// Per-core JIT elapsed time and slow callback counts ("cpu_profile=1"). Diagnostic only.
     bool cpu_profile{};
+    /// How idle emulated cores wait for work ("idle_spin=off|adaptive|adaptive:<us>|fixed:<us>").
+    Common::SpinPolicy idle_spin{};
     /// Per-game JIT profile, compiled before the guest runs ("jit_prewarm=1", the default),
     /// only learned ("jit_prewarm=record") or disabled ("jit_prewarm=0").
     enum class JitPrewarm { Off, Record, Warm } jit_prewarm{JitPrewarm::Warm};
@@ -284,6 +287,8 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                   ? "step: CPU accuracy Accurate" : "step: CPU accuracy Auto");
     AudioCore::Sink::SetXAudio2ProfileEnabled(config.audio_profile);
     Core::CpuProfile::SetEnabled(config.cpu_profile);
+    // Read when Core::System builds the kernel's cores.
+    Kernel::PhysicalCore::SetIdleSpinPolicy(config.idle_spin);
     // Read by HostMemory when Core::System builds the DRAM, so it has to be set before that.
     // The 384-MiB Series experiment covered only 388 of 2637 MiB requested by Wonder (15%). The
     // resulting fastmem fault/recompile storm was markedly slower than the page table, so Auto
@@ -1536,6 +1541,13 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
                         } else if (line == "cpu_profile=1") {
                             config.cpu_profile = true;
+                        } else if (line.starts_with("idle_spin=")) {
+                            if (const auto policy = Common::SpinPolicy::Parse(line.substr(10))) {
+                                config.idle_spin = *policy;
+                                WriteDiag("boot.cfg: idle cores " + policy->Describe());
+                            } else {
+                                WriteDiag("boot.cfg: invalid idle_spin, ignored");
+                            }
                         } else if (line.starts_with("memory_limit_mib=")) {
                             const auto value = line.substr(17);
                             unsigned long parsed{};

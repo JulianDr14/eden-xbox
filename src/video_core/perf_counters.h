@@ -130,6 +130,8 @@ enum class Counter : size_t {
     GuestDequeueWaits,     ///< times the game waited for a free framebuffer (DequeueBuffer)
     GuestDequeueWaitUs,
     GuestCoreIdleUs,       ///< emulated CPU cores with no guest thread to run, summed over cores
+    GuestCoreWakesSpun,    ///< idle cores interrupted while spinning (no OS wake)
+    GuestCoreWakesBlocked, ///< idle cores interrupted after blocking in the OS
     Count,
 };
 

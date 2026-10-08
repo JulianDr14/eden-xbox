@@ -3050,3 +3050,43 @@ Evidencia copiada diagnostics/pc-mk8-a32-prewarm-skipped/{diag,log}.txt. No se
 interrumpe proceso abierto; para usar correccion hay que restage/reabrir app,
 jugar/aprender y salir normalmente, despues reabrir para validar perfil/prewarm.
 Sin commit.
+
+## Espera híbrida de los núcleos emulados (7 oct 2026)
+
+Traza xperf (muestreo 1 kHz + cambios de contexto, PC i7-9750H) durante carreras a ~30 FPS de
+un juego A32: ningún hilo saturado (núcleos emulados 33-48 % de un núcleo host, 25-33 % de sus
+muestras en el kernel de Windows). Cada hilo de núcleo se dormía y despertaba ~4100 veces/s,
+corría 48-53 µs de mediana entre siestas y Windows tardaba ~38 µs de mediana en volver a
+correrlo. El 92 % de los despertares entre núcleos: ArbitrateUnlock → SignalToAddress →
+KScheduler::EnableScheduling → PhysicalCore::Interrupt (un mutex del guest liberado en un
+núcleo despierta a su esperador en otro). Siestas: mediana 86 µs, 70 % ≤ 100 µs, 92 % ≤ 200 µs.
+Unos 400 relevos por frame × ~40 µs explican el paso de 16,7 a 33 ms. El JIT ejecutando código
+ya traducido es ~40-50 % del tiempo de núcleo y compilar ~2,6 %: el prewarm no podía mejorarlo.
+
+Diseño (spin-then-park, como WorkSema de PCSX2 y los mutex adaptativos del SO):
+- common/cpu_wait: esperar en la CPU sin el SO hasta que se active un bit, con plazo en ticks
+  de host. MWAITX en AMD Zen 2+ (la Series), UMWAIT C0.1 en Intel con WAITPKG, si no pause.
+  Los métodos monitor requieren TSC invariante y se prueban una vez bajo SEH: un hipervisor que
+  los anuncie sin permitirlos cae a pause.
+- common/wake_flag: SpinPolicy (off | adaptive | adaptive:<us> | fixed:<us>, por defecto
+  adaptive:200), AdaptiveSpinBudget y WakeFlag. El estado RAISED|BLOCKED vive en un solo
+  atómico en su propia línea de caché: Raise solo entra al SO (atomic::notify_one, es decir
+  WakeByAddress) si el esperador ya se bloqueó, y el esperador anuncia el bloqueo con fetch_or
+  en el mismo atómico, sin la ventana de pérdida de un par flag/condvar. El presupuesto
+  adaptativo mide la duración real de cada espera, no si la atrapó el spin: con una tasa de
+  aciertos de menos de 1/4 baja a 1/8 del límite (menús, cargas) y vuelve en cuanto las esperas
+  caben en el límite. Una primera versión, con la tasa relativa al presupuesto usado, se quedaba
+  atascada en 1/8 con esperas de 50 µs; el gate lo detectó.
+- PhysicalCore: WakeFlag sustituye a condition_variable + bool; m_guard sigue ordenando
+  Interrupt con EnterContext. Contadores GuestCoreWakesSpun/Blocked en la línea "frame chain".
+- boot.cfg: idle_spin=off|adaptive|adaptive:<us>|fixed:<us>. Sin la línea: adaptive:200. Las
+  apps UWP de Xbox tienen 4 núcleos exclusivos y 2 compartidos: si el hilo de GPU sufre en la
+  Series, comparar adaptive:100 y off.
+
+Gate tools/xbox/tests/wake-flag.cpp (runner build-uwp/diagnostics/wake-flag/run.bat, enlaza
+common.lib y fmt.lib, /DARCHITECTURE_x86_64): parseo, presupuesto, espera bloqueada y con spin,
+y un ping-pong de 100 000 relevos por política y método sin despertares perdidos (watchdog).
+PASS en i7-9750H (pause). Relevos con 50 µs de trabajo: off 18,8-35,9 µs de sobrecoste por
+relevo (varía con los estados de reposo de la CPU); adaptive 0,53 µs, con 39 992 relevos
+resueltos en spin y 6 bloqueados. Pendiente: FPS en juego en PC y Series, y comprobar en el log
+de la Series qué método elige.

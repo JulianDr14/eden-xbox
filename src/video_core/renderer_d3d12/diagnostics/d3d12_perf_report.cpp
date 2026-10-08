@@ -265,13 +265,15 @@ std::string DescribeFrameChain(const VideoCore::Perf::Snapshot& d) {
         "game queued {} frames | vsyncs {} ({} lost), {} with a new frame; waited for the GPU "
         "thread {:.1f} ms | composites {} ({:.1f} ms after the request on average, {} over a "
         "frame) | game waited for a free framebuffer {} times ({:.1f} ms) | forced {} swap "
-        "intervals to one | emulated cores idle {:.1f} ms in all",
+        "intervals to one | emulated cores idle {:.1f} ms in all, woken {} times while "
+        "spinning and {} after blocking",
         get(Counter::GuestFramesQueued), get(Counter::Vsyncs), get(Counter::VsyncsLost),
         get(Counter::VsyncFrames), Ms(d, Counter::VsyncComposeWaitUs), get(Counter::Composites),
         average_ms(Counter::CompositeLatencyUs, Counter::Composites), get(Counter::CompositesLate),
         get(Counter::GuestDequeueWaits), Ms(d, Counter::GuestDequeueWaitUs),
         get(Counter::GuestSwapIntervalOverrides),
-        Ms(d, Counter::GuestCoreIdleUs));
+        Ms(d, Counter::GuestCoreIdleUs), get(Counter::GuestCoreWakesSpun),
+        get(Counter::GuestCoreWakesBlocked));
 }
 
 /// The largest share of a slow frame, in words.

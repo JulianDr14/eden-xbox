@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/thread_cpu_time.h"
@@ -20,11 +21,25 @@
 #include "video_core/frame_trace.h"
 
 namespace Kernel {
+namespace {
+
+Common::SpinPolicy idle_spin_policy{};
+
+} // namespace
+
+void PhysicalCore::SetIdleSpinPolicy(Common::SpinPolicy policy) {
+    idle_spin_policy = policy;
+}
 
 PhysicalCore::PhysicalCore(KernelCore& kernel, std::size_t core_index)
-    : m_core_index{core_index}
+    : m_core_index{core_index}, m_interrupt{idle_spin_policy}
 {
     m_is_single_core = !kernel.IsMulticore();
+    if (core_index == 0 && !m_is_single_core) {
+        LOG_INFO(Core, "Idle emulated cores: {} ({}), then block",
+                 idle_spin_policy.Describe(),
+                 Common::CpuWaitMethodName(Common::BestCpuWaitMethod()));
+    }
 }
 PhysicalCore::~PhysicalCore() = default;
 
@@ -40,7 +55,7 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
         std::scoped_lock lk{m_guard};
 
         // Check if we are already interrupted. If we are, we can just stop immediately.
-        if (m_is_interrupted) {
+        if (m_interrupt.IsRaised()) {
             return false;
         }
 
@@ -351,12 +366,20 @@ void PhysicalCore::LogBacktrace(KernelCore& kernel) {
 void PhysicalCore::Idle() {
     // Frame chain counters: an emulated core with no guest thread to run.
     VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::GuestCoreIdleUs};
-    std::unique_lock lk{m_guard};
-    m_on_interrupt.wait(lk, [this] { return m_is_interrupted; });
+    switch (m_interrupt.Wait()) {
+    case Common::WakeFlag::WaitResult::Spun:
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestCoreWakesSpun, 1);
+        break;
+    case Common::WakeFlag::WaitResult::Blocked:
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::GuestCoreWakesBlocked, 1);
+        break;
+    case Common::WakeFlag::WaitResult::AlreadyRaised:
+        break;
+    }
 }
 
 bool PhysicalCore::IsInterrupted() const {
-    return m_is_interrupted;
+    return m_interrupt.IsRaised();
 }
 
 void PhysicalCore::Interrupt() {
@@ -367,11 +390,9 @@ void PhysicalCore::Interrupt() {
     auto* arm_interface = m_arm_interface;
     auto* thread = m_current_thread;
 
-    // Add interrupt flag.
-    m_is_interrupted = true;
-
-    // Interrupt ourselves.
-    m_on_interrupt.notify_one();
+    // Add the interrupt flag. An idle core spinning on it takes it with no system call; only a
+    // blocked one is woken through the OS.
+    m_interrupt.Raise();
 
     // If there is no thread running, we are done.
     if (arm_interface == nullptr) {
@@ -384,7 +405,7 @@ void PhysicalCore::Interrupt() {
 
 void PhysicalCore::ClearInterrupt() {
     std::scoped_lock lk{m_guard};
-    m_is_interrupted = false;
+    m_interrupt.Clear();
 }
 
 } // namespace Kernel
