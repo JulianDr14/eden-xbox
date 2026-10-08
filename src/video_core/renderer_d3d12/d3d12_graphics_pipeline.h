@@ -11,10 +11,12 @@
 #include <memory>
 #include <mutex>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
 
+#include "common/memory_ledger.h"
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -129,8 +131,18 @@ private:
 
 /// A guest graphics pipeline: signed DXIL of each stage, its root signature and the PSO, built on
 /// a worker when one is given. Mirrors Vulkan::GraphicsPipeline (transitions, IsBuilt).
+///
+/// The PSO, the driver's compiled pipeline and by far its largest part, is resident only while it
+/// is drawn (PipelineResidencyPolicy): a dormant pipeline keeps its DXIL, and Wake builds the PSO
+/// again from it.
 class GraphicsPipeline {
 public:
+    enum class State : u8 {
+        Building, ///< DXIL or PSO being built on a worker.
+        Ready,    ///< PSO built, or the pipeline failed (Handle() null): drawable or skipped.
+        Dormant,  ///< DXIL kept, no PSO: Wake builds it.
+    };
+
     static constexpr size_t NUM_STAGES = Maxwell::MaxShaderStage;
     using DxilStages = std::array<std::vector<u8>, NUM_STAGES>;
     using SharedDxilStages = std::shared_ptr<const DxilStages>;
@@ -141,7 +153,7 @@ public:
                      VideoCore::ShaderNotify* shader_notify, Common::ThreadWorker* worker_thread,
                      const GraphicsPipelineCacheKey& key, std::function<SharedDxilStages(u64)> compile_dxil,
                      const std::array<const Shader::Info*, NUM_STAGES>& infos,
-                     const PipelineLayout& layout);
+                     const PipelineLayout& layout, bool build_pso = true);
     ~GraphicsPipeline();
 
     GraphicsPipeline(const GraphicsPipeline&) = delete;
@@ -162,11 +174,40 @@ public:
     }
 
     [[nodiscard]] bool IsBuilt() const noexcept {
-        return is_built.load(std::memory_order::acquire);
+        return build_state.load(std::memory_order::acquire) == State::Ready;
     }
 
-    /// Blocks until the worker finished the PSO.
+    [[nodiscard]] bool IsDormant() const noexcept {
+        return build_state.load(std::memory_order::acquire) == State::Dormant;
+    }
+
+    /// Blocks until the worker finished the PSO. A dormant pipeline must be woken first.
     void WaitBuilt();
+
+    /// GPU thread: a dormant pipeline queues the build of its PSO from the kept DXIL.
+    void Wake(Common::ThreadWorker& worker);
+
+    /// GPU thread: releases the PSO of a ready pipeline once the GPU is done with it, keeping the
+    /// DXIL to build it again. Pipelines that failed have nothing to release. True if released.
+    bool Evict(Scheduler& scheduler);
+
+    /// GPU thread: the frame this pipeline was last drawn in.
+    void Touch(u64 frame) noexcept {
+        last_used_frame = frame;
+    }
+    [[nodiscard]] u64 LastUsedFrame() const noexcept {
+        return last_used_frame;
+    }
+
+    /// GPU thread: true only the first time, so a session records each pipeline it draws once.
+    [[nodiscard]] bool MarkDrawn() noexcept {
+        return !std::exchange(drawn, true);
+    }
+
+    /// Key().Hash(), computed once: it identifies the pipeline across sessions.
+    [[nodiscard]] u64 KeyHash() const noexcept {
+        return key_hash;
+    }
 
     /// Null when D3D12 rejected the pipeline (logged once when it was built).
     [[nodiscard]] ID3D12PipelineState* Handle() const noexcept {
@@ -196,10 +237,14 @@ public:
     void Configure(bool is_indexed, const PipelineBindContext& context, PipelineBindings& out);
 
 private:
-    void Build(const TextureCacheRuntime& texture_runtime);
+    void Build();
+
+    void Publish(State next);
 
     const Device& device;
+    const TextureCacheRuntime& texture_runtime;
     const GraphicsPipelineCacheKey key;
+    const u64 key_hash;
     const PipelineLayout& layout;
     SharedDxilStages dxil; ///< Immutable linked bytecode shared across fixed-state PSOs.
     std::array<bool, NUM_STAGES> has_stage{};
@@ -215,7 +260,14 @@ private:
 
     std::mutex build_mutex;
     std::condition_variable build_condvar;
-    std::atomic_bool is_built{false};
+    std::atomic<State> build_state{State::Building};
+
+    u64 last_used_frame{}; ///< GPU thread only.
+    bool drawn{};          ///< GPU thread only.
+    Common::MemoryCharge pso_charge; ///< While the PSO is resident.
+
+    /// The object itself, mostly its stages' Shader::Info. Its DXIL is charged where it is shared.
+    Common::MemoryCharge charge{Common::MemoryAccount::Pipelines, sizeof(GraphicsPipeline)};
 };
 
 } // namespace D3D12
