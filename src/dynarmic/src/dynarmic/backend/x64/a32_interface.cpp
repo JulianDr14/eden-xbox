@@ -6,8 +6,10 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <algorithm>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <mutex>
 
 #include <boost/icl/interval_set.hpp>
@@ -26,6 +28,7 @@
 #include "dynarmic/common/atomic.h"
 #include "dynarmic/frontend/A32/a32_location_descriptor.h"
 #include "dynarmic/frontend/A32/translate/a32_translate.h"
+#include "dynarmic/frontend/A32/translate/translate_callbacks.h"
 #include "dynarmic/interface/A32/a32.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/location_descriptor.h"
@@ -61,6 +64,76 @@ static Optimization::PolyfillOptions GenPolyfillOptions(const BlockOfCode& code)
         .vector_multiply_widen = true,
     };
 }
+
+namespace {
+
+// Forwards Translate's callbacks and fingerprints the code words it consumes. Only
+// built when someone needs the fingerprint, so plain compiles keep the direct path.
+// Reads never go below the block's first word and never go backwards: ARM reads one
+// word per instruction, Thumb one per halfword (a word may be read twice).
+class FingerprintingCallbacks final : public TranslateCallbacks {
+public:
+    FingerprintingCallbacks(TranslateCallbacks& inner_, const LocationDescriptor& location, const BlockProfile* expected_)
+            : inner{inner_}, start{location.PC() & ~u32{3}}, expected{expected_} {
+        profile.descriptor = location.UniqueHash();
+    }
+
+    std::optional<u32> MemoryReadCode(VAddr vaddr) override {
+        // vaddr < start would wrap: rejected explicitly. A prewarm stops reading past
+        // the recorded span, the block grew and its result is discarded either way.
+        const u64 end = u64{vaddr} - start + 4;
+        if (vaddr < start || end > BlockProfile::MaxCodeBytes || (expected && end > expected->code_bytes)) {
+            valid = false;
+            if (expected) {
+                return std::nullopt;
+            }
+            return inner.MemoryReadCode(vaddr);
+        }
+        const auto word = inner.MemoryReadCode(vaddr);
+        if (!word) {
+            valid = false;
+            return word;
+        }
+        profile.MixWord(*word);
+        profile.code_bytes = std::max(profile.code_bytes, static_cast<std::uint32_t>(end));
+        return word;
+    }
+
+    bool PreCodeReadHook(bool is_thumb, VAddr pc, A32::IREmitter& ir) override {
+        return inner.PreCodeReadHook(is_thumb, pc, ir);
+    }
+
+    void PreCodeTranslationHook(bool is_thumb, VAddr pc, A32::IREmitter& ir) override {
+        inner.PreCodeTranslationHook(is_thumb, pc, ir);
+    }
+
+    std::uint64_t GetTicksForCode(bool is_thumb, VAddr vaddr, std::uint32_t instruction) override {
+        return inner.GetTicksForCode(is_thumb, vaddr, instruction);
+    }
+
+    /// The fingerprint, when every read succeeded inside the limits.
+    std::optional<BlockProfile> Result() const {
+        if (!valid || profile.code_bytes == 0) {
+            return std::nullopt;
+        }
+        return profile;
+    }
+
+    /// True when the translated code is exactly the expected block.
+    bool Matches(const BlockProfile& block) const {
+        const auto result = Result();
+        return result && result->code_bytes == block.code_bytes && result->code_hash == block.code_hash;
+    }
+
+private:
+    TranslateCallbacks& inner;
+    const u32 start;
+    const BlockProfile* const expected;
+    BlockProfile profile;
+    bool valid = true;
+};
+
+}  // namespace
 
 struct Jit::Impl {
     Impl(Jit* jit, A32::UserConfig conf) noexcept
@@ -170,6 +243,30 @@ struct Jit::Impl {
         return Common::DisassembleX64(p, p + size);
     }
 
+    bool PrecompileBlock(const BlockProfile& block) {
+        const IR::LocationDescriptor descriptor{block.descriptor};
+        const A32::LocationDescriptor location{descriptor};
+        const u32 alignment_mask = location.TFlag() ? 1 : 3;
+        // The round trip through LocationDescriptor rejects bits A32 does not use. Never
+        // reuse an existing entry against a profile, never evacuate warmed code for one.
+        if (location.SingleStepping() || (location.PC() & alignment_mask) ||
+            location.UniqueHash() != block.descriptor || block.code_bytes == 0 ||
+            block.code_bytes > BlockProfile::MaxCodeBytes || (block.code_bytes & 3) ||
+            block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE ||
+            emitter.GetBasicBlock(descriptor)) {
+            return false;
+        }
+        return Compile(descriptor, &block).has_value();
+    }
+
+    void SetBlockProfileCallback(std::function<void(const BlockProfile&)> callback) {
+        block_profile_callback = std::move(callback);
+    }
+
+    std::size_t GetCodeCacheSpaceRemaining() const {
+        return block_of_code.SpaceRemaining();
+    }
+
 private:
     static CodePtr GetCurrentBlockThunk(void* this_voidptr) {
         Jit::Impl& this_ = *static_cast<Jit::Impl*>(this_voidptr);
@@ -191,8 +288,12 @@ private:
     A32EmitX64::BlockDescriptor GetBasicBlock(IR::LocationDescriptor descriptor) {
         if (auto block = emitter.GetBasicBlock(descriptor))
             return *block;
+        return *Compile(descriptor, nullptr);
+    }
 
-        constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
+    /// Compiles a block that is not in the cache. With `expected`, the guest code must be
+    /// exactly the recorded block or nothing is emitted (std::nullopt, never without it).
+    std::optional<A32EmitX64::BlockDescriptor> Compile(IR::LocationDescriptor descriptor, const BlockProfile* expected) {
         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
             invalidate_entire_cache = true;
             PerformRequestedCacheInvalidation(HaltReason::CacheInvalidation);
@@ -201,10 +302,28 @@ private:
 
         // LocationDescriptor ctor() does important ops (like tflags) do not skip
         auto const arch_descriptor = A32::LocationDescriptor{descriptor};
+        const TranslationOptions options{conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions};
         ir_block.Reset(arch_descriptor);
-        A32::Translate(ir_block, arch_descriptor, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
+        const bool observe = block_profile_callback && !arch_descriptor.SingleStepping();
+        if (!expected && !observe) {
+            A32::Translate(ir_block, arch_descriptor, conf.callbacks, options);
+            Optimization::Optimize(ir_block, conf, polyfill_options);
+            return emitter.Emit(ir_block);
+        }
+
+        FingerprintingCallbacks fingerprint{*conf.callbacks, arch_descriptor, expected};
+        A32::Translate(ir_block, arch_descriptor, &fingerprint, options);
+        if (expected && !fingerprint.Matches(*expected)) {
+            return std::nullopt;
+        }
         Optimization::Optimize(ir_block, conf, polyfill_options);
-        return emitter.Emit(ir_block);
+        const auto block = emitter.Emit(ir_block);
+        if (observe) {
+            if (const auto profile = fingerprint.Result()) {
+                block_profile_callback(*profile);
+            }
+        }
+        return block;
     }
 
     void PerformRequestedCacheInvalidation(HaltReason hr) {
@@ -229,6 +348,8 @@ private:
         }
     }
 
+    static constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
+
     IR::Block ir_block = {LocationDescriptor(0, PSR(0), FPSCR(0), false)};
     A32JitState jit_state;
     BlockOfCode block_of_code;
@@ -237,6 +358,7 @@ private:
     // Keep it here in order to not mess with initializer lists
     const A32::UserConfig conf;
     Jit* jit_interface;
+    std::function<void(const BlockProfile&)> block_profile_callback;
 
     // Requests made during execution to invalidate the cache are queued up here.
     bool invalidate_entire_cache = false;
@@ -311,6 +433,21 @@ void Jit::SetFpscr(std::uint32_t value) {
 
 void Jit::ClearExclusiveState() {
     impl->ClearExclusiveState();
+}
+
+void Jit::SetBlockProfileCallback(std::function<void(const BlockProfile&)> callback) {
+    ASSERT(!is_executing);
+    impl->SetBlockProfileCallback(std::move(callback));
+}
+
+bool Jit::PrecompileBlock(const BlockProfile& block) {
+    ASSERT(!is_executing);
+    return impl->PrecompileBlock(block);
+}
+
+std::size_t Jit::GetCodeCacheSpaceRemaining() const {
+    ASSERT(!is_executing);
+    return impl->GetCodeCacheSpaceRemaining();
 }
 
 std::string Jit::Disassemble() const {

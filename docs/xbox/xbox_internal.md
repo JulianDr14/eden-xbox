@@ -2487,3 +2487,34 @@ de pacing con `async_present=0` y con `async_present=1`.
 **Mantenibilidad.** `Scheduler::CollectGarbage` destruye los recursos y llama a los callbacks
 de retiro fuera de `release_mutex`. Así no los ejecuta con ese lock tomado ni bloquea a quien
 llama a `DeferRelease` desde otro hilo.
+
+## Gate A32 prewarm (7 oct 2026)
+
+El harness tools/xbox/tests/jit-prewarm-a32.cpp enlazado con dynarmic.lib y
+fmt.lib del build UWP pasa ARM/Thumb: aprendizaje, precarga sin ejecutar guest
+ni alterar estado, hash de Thumb a mitad de palabra, rechazo de codigo/estado/
+alineacion, reubicacion, exclusion single-step, rangos y codec por ISA.
+El harness A64 jit-prewarm.cpp tambien pasa como regresion de la logica compartida.
+Se corrigio Observe: validar el descriptor original antes de enmascarar State;
+el test detecto que single-step podia perder su bit invalido y guardarse como
+bloque normal. Ambos harness necesitaban stubs abort para AssertFailedAt y
+UnreachableAt de la biblioteca actual; no desactivar assertions (/UNDEBUG).
+Runner reproducible local: build-uwp/diagnostics/jit-prewarm-a32/run.bat y
+run-a64.bat, entorno desktop x64, /MD, /std:c++20, OneCore.lib; vswhere requiere
+Visual Studio Installer en PATH. Build incremental eden-uwp correcto tras la
+correccion: recompila owner/A32/A64 y enlaza core.lib y bin/eden-uwp.exe, retorno0.
+Gameplay A32, aprendizaje/persistencia desde frontend, FPS y Series pendientes.
+Sin commit; no se lanzo gameplay ni se certifica rendimiento con estos gates.
+
+Lanzamiento PC A32 (7 oct 2026): build incremental eden-uwp retorno0, no work to do. local-run.ps1 -NoBuild -Library -TimeoutSec5 con jit_prewarm1/fastmem0; Job5120MiB verificado PID2944. TimeoutSec solo limita espera del launcher, no gameplay. Biblioteca abierta para seleccion manual; aprendizaje/prewarm A32 real y cierre pendientes, sin commit.
+
+MK8 A32 gate frontend (7 oct 2026): usuario jugo, volvio a biblioteca y reabrio
+0100152000022000. Diag retorno10/shutdown completo (volver a biblioteca), segunda
+Load0, shadercache y Run sin ningun paso CPUprewarm; log sin JIT profile/prewarm.
+Causa: uwp_boot.cpp conservaba process->Is64Bit() en el caller, por lo que A32 no
+activaba siquiera aprendizaje. Se elimina filtro ISA y diag identifica A32/A64.
+Harness backend PASS anterior no ejercitaba este caller: gate frontend aun pendiente.
+Evidencia copiada diagnostics/pc-mk8-a32-prewarm-skipped/{diag,log}.txt. No se
+interrumpe proceso abierto; para usar correccion hay que restage/reabrir app,
+jugar/aprender y salir normalmente, despues reabrir para validar perfil/prewarm.
+Sin commit.

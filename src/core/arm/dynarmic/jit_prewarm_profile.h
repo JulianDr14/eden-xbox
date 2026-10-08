@@ -9,14 +9,49 @@
 #include <fstream>
 #include <memory>
 #include <numeric>
-
+#include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "core/arm/jit_prewarm_stats.h"
 #include "dynarmic/interface/block_profile.h"
 
 namespace Core::JitPrewarm {
+
+/// What differs between guest ISAs in a profile: where the PC sits in a block descriptor,
+/// which other descriptor bits select a translation, how a PC is aligned, and the file
+/// identity. Records, merge, catalog and warm plan are shared by every layout.
+struct Layout {
+    std::string_view name;            ///< Log tag.
+    std::string_view file_stem;       ///< "<stem><core>.bin" in the title's profile directory.
+    std::array<char, 8> magic;
+    std::optional<std::array<char, 8>> legacy_magic; ///< Readable older format, no gameplay samples.
+    std::uint64_t pc_mask;
+    std::uint64_t state_mask;         ///< Descriptor bits besides the PC that a block depends on.
+    std::uint64_t halfword_pc_bit;    ///< State bit that allows a halfword-aligned PC (Thumb).
+
+    constexpr std::uint64_t Pc(std::uint64_t descriptor) const { return descriptor & pc_mask; }
+    constexpr std::uint64_t State(std::uint64_t descriptor) const { return descriptor & state_mask; }
+    constexpr bool ValidDescriptor(std::uint64_t descriptor) const {
+        const std::uint64_t alignment = (descriptor & halfword_pc_bit) != 0 ? 1 : 3;
+        return (descriptor & alignment) == 0 && (descriptor & ~(pc_mask | state_mask)) == 0;
+    }
+};
+
+// A64: 56-bit PC, FPCR mode bits above it. Single-stepping is excluded: never recorded.
+inline constexpr Layout A64Layout{
+    "a64", "core-", {'E','D','J','I','T','P','0','2'}, std::array<char, 8>{'E','D','J','I','T','P','0','1'},
+    (1ULL << 56) - 1, 0x07c80000ULL << 37, 0};
+// A32: 32-bit PC; above it FPSCR mode bits, T, E and the IT state (A32::LocationDescriptor).
+inline constexpr Layout A32Layout{
+    "a32", "a32-core-", {'E','D','J','A','3','2','0','1'}, std::nullopt,
+    0xffff'ffffULL, 0x07f7'ff03ULL << 32, 1ULL << 32};
+
+/// The first guest word a block was translated from; BlockProfile::code_bytes counts from it.
+constexpr std::uint64_t CodeStart(std::uint64_t pc) {
+    return pc & ~std::uint64_t{3};
+}
 
 struct Record : Dynarmic::BlockProfile {
     std::uint32_t gameplay_samples{};
@@ -28,16 +63,14 @@ struct Record : Dynarmic::BlockProfile {
 };
 using BuildId = std::array<std::uint8_t, 32>;
 constexpr std::size_t MaxRecords = 262144;
-constexpr std::uint64_t PcMask = (1ULL << 56) - 1;
-constexpr std::uint64_t DescriptorMask = 0x07c80000ULL << 37;
 constexpr std::size_t HeaderBytes = 8 + 8 + 32 + 4 + 4 + 8;
 constexpr std::size_t RecordBytes = 8 + 8 + 4 + 4;
+constexpr std::size_t LegacyRecordBytes = 8 + 8 + 4;
 constexpr std::size_t GameplayCapacity = MaxRecords / 4;
 
-inline bool ValidRecord(const Record& record) {
+inline bool ValidRecord(const Layout& layout, const Record& record) {
     return record.code_bytes != 0 && record.code_bytes <= Record::MaxCodeBytes &&
-           (record.code_bytes & 3) == 0 && (record.descriptor & 3) == 0 &&
-           (record.descriptor & ~(PcMask | DescriptorMask)) == 0;
+           (record.code_bytes & 3) == 0 && layout.ValidDescriptor(record.descriptor);
 }
 
 inline std::uint64_t PayloadHash(std::span<const Record> records, bool legacy = false) {
@@ -83,8 +116,9 @@ inline std::uint64_t ReadInteger(std::istream& in, unsigned bytes) {
 }
 
 // Versioned little-endian file; no native struct padding, guest bytes or host pointers.
+// The magic names the layout, so a profile is never read with another ISA's rules.
 // Failure leaves the destination unchanged and bounds allocation before reading payload.
-inline bool Read(std::istream& in, std::uint64_t file_bytes, std::uint64_t title,
+inline bool Read(std::istream& in, std::uint64_t file_bytes, const Layout& layout, std::uint64_t title,
                  const BuildId& build, std::uint32_t core, std::vector<Record>& result) {
     std::array<char, 8> magic{};
     in.read(magic.data(), magic.size());
@@ -94,9 +128,9 @@ inline bool Read(std::istream& in, std::uint64_t file_bytes, std::uint64_t title
     const auto stored_core = ReadInteger(in, 4);
     const auto count = ReadInteger(in, 4);
     const auto hash = ReadInteger(in, 8);
-    const bool legacy = magic == std::array<char, 8>{'E','D','J','I','T','P','0','1'};
-    const auto record_bytes = legacy ? 20 : RecordBytes;
-    if (!in || (!legacy && magic != std::array<char, 8>{'E','D','J','I','T','P','0','2'}) ||
+    const bool legacy = layout.legacy_magic && magic == *layout.legacy_magic;
+    const auto record_bytes = legacy ? LegacyRecordBytes : RecordBytes;
+    if (!in || (!legacy && magic != layout.magic) ||
         stored_title != title || stored_build != build || stored_core != core ||
         count > MaxRecords || file_bytes != HeaderBytes + count * record_bytes) {
         return false;
@@ -111,7 +145,7 @@ inline bool Read(std::istream& in, std::uint64_t file_bytes, std::uint64_t title
         if (!legacy) {
             r.gameplay_samples = static_cast<std::uint32_t>(ReadInteger(in, 4));
         }
-        if (!in || !ValidRecord(r) ||
+        if (!in || !ValidRecord(layout, r) ||
             (!records.empty() && records.back().descriptor >= r.descriptor)) {
             return false;
         }
@@ -124,12 +158,12 @@ inline bool Read(std::istream& in, std::uint64_t file_bytes, std::uint64_t title
     return true;
 }
 
-inline bool Write(std::ostream& out, std::uint64_t title, const BuildId& build,
+inline bool Write(std::ostream& out, const Layout& layout, std::uint64_t title, const BuildId& build,
                   std::uint32_t core, std::span<const Record> records) {
     if (records.size() > MaxRecords) {
         return false;
     }
-    out.write("EDJITP02", 8);
+    out.write(layout.magic.data(), layout.magic.size());
     WriteInteger(out, title, 8);
     out.write(reinterpret_cast<const char*>(build.data()), build.size());
     WriteInteger(out, core, 4);
@@ -184,7 +218,11 @@ enum class WarmStatus : std::uint8_t { RecordOnly, Budget, Rejected, Accepted };
 
 // Shared immutable indexes once CPU owners start. Identity-checked records only;
 // cross-core/FPCR matches indicate profile coverage, not permission to reuse host code.
+// One application has one ISA, so one layout describes every owner's descriptors.
 struct Catalog {
+    explicit Catalog(const Layout& layout_) : layout{&layout_} {}
+
+    const Layout* layout;
     std::array<std::vector<std::uint64_t>, 4> descriptors;
     std::vector<std::uint64_t> pcs;
     std::vector<Record> priority;
@@ -209,7 +247,7 @@ struct Catalog {
         }
         priority.resize(output);
         for (const auto& core : descriptors) {
-            for (const auto descriptor : core) pcs.push_back(descriptor & PcMask);
+            for (const auto descriptor : core) pcs.push_back(layout->Pc(descriptor));
         }
         std::sort(pcs.begin(), pcs.end());
         pcs.erase(std::unique(pcs.begin(), pcs.end()), pcs.end());
@@ -218,6 +256,9 @@ struct Catalog {
 inline std::shared_ptr<Catalog> application_catalog;
 
 struct Profile {
+    explicit Profile(const Layout& layout_) : layout{&layout_} {}
+
+    const Layout* layout;
     std::filesystem::path path;
     BuildId build{};
     std::uint64_t title{};
@@ -241,6 +282,20 @@ struct Profile {
         }
         const auto& range = *std::prev(next);
         return pc >= range.first && pc < range.second && bytes <= range.second - pc;
+    }
+
+    /// The recorded block's descriptor in this session's address space, or nullopt when its
+    /// code does not lie inside the static RX image (a relocation or a different build).
+    std::optional<std::uint64_t> Rebase(const Record& relative) const {
+        const auto offset = layout->Pc(relative.descriptor);
+        if (base > layout->pc_mask || offset > layout->pc_mask - base) {
+            return std::nullopt;
+        }
+        const auto pc = base + offset;
+        if (!Contains(CodeStart(pc), relative.code_bytes)) {
+            return std::nullopt;
+        }
+        return layout->State(relative.descriptor) | pc;
     }
 
     std::size_t PrepareShared() {
@@ -273,6 +328,9 @@ struct Profile {
     };
     const Record& GetRecord(const Candidate& candidate) const {
         return candidate.shared ? shared[candidate.index] : loaded[candidate.index];
+    }
+    WarmStatus& GetStatus(const Candidate& candidate) {
+        return candidate.shared ? shared_status[candidate.index] : status[candidate.index];
     }
     std::vector<Candidate> WarmPlan() const {
         std::vector<Candidate> plan;
@@ -326,21 +384,29 @@ struct Profile {
                 if (n != core && std::binary_search(keys.begin(), keys.end(), relative.descriptor))
                     return Miss::OtherCore;
             }
-            if (std::binary_search(catalog->pcs.begin(), catalog->pcs.end(), relative.descriptor & PcMask))
+            if (std::binary_search(catalog->pcs.begin(), catalog->pcs.end(), layout->Pc(relative.descriptor)))
                 return Miss::FpcrVariant;
         }
         return Miss::Unlearned;
     }
 
     void Observe(const Dynarmic::BlockProfile& block) {
-        const auto pc = block.descriptor & PcMask;
+        // Reject invalid state bits before State() masks them away (including single-step).
+        if (!ValidRecord(*layout, Record{block})) {
+            return;
+        }
+        const auto pc = layout->Pc(block.descriptor);
         const bool gameplay = capture_active.load(std::memory_order_relaxed);
-        if (pc < base || !Contains(pc, block.code_bytes)) {
+        if (pc < base || !Contains(CodeStart(pc), block.code_bytes)) {
             miss_counters[core][static_cast<std::size_t>(Miss::OutsideExecutable)].fetch_add(1, std::memory_order_relaxed);
             return;
         }
         Record relative{block};
-        relative.descriptor = (block.descriptor & DescriptorMask) | (pc - base);
+        relative.descriptor = layout->State(block.descriptor) | (pc - base);
+        // Read rejects a whole file over one bad record: never save one.
+        if (!ValidRecord(*layout, relative)) {
+            return;
+        }
         miss_counters[core][static_cast<std::size_t>(Classify(relative))].fetch_add(1, std::memory_order_relaxed);
         relative.gameplay_samples = gameplay ? 1 : 0;
         auto& destination = gameplay ? gameplay_observed : observed;

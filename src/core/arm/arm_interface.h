@@ -26,6 +26,10 @@ class KProcess;
 } // namespace Kernel
 
 namespace Core {
+namespace JitPrewarm {
+class Owner;
+}
+
 using WatchpointArray = std::array<Kernel::DebugWatchpoint, Core::Hardware::NUM_WATCHPOINTS>;
 
 // NOTE: these values match the HaltReason enum in Dynarmic
@@ -100,6 +104,12 @@ public:
     // Debug functionality.
     virtual const Kernel::DebugWatchpoint* HaltedWatchpoint() const = 0;
     virtual void RewindBreakpointInstruction() = 0;
+
+    // JIT profile prewarm (core/arm/jit_prewarm.h). Call once after loading the image,
+    // before any guest core runs. nullptr when this backend has no profile support.
+    virtual JitPrewarm::Owner* LoadPrewarmProfile() {
+        return nullptr;
+    }
 
 protected:
     const Kernel::DebugWatchpoint* MatchingWatchpoint(

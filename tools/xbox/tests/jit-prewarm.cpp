@@ -16,6 +16,8 @@
 // hard; it does not need the frontend logging service or a kernel instance.
 void AssertFatalImpl() { std::abort(); }
 void AssertFailSoftImpl() { std::abort(); }
+void AssertFailedAt(const char*) { std::abort(); }
+void UnreachableAt(const char*) { std::abort(); }
 namespace Common::Log {
 void FmtLogMessageImpl(Class, Level, const char*, unsigned, const char*,
                        fmt::string_view, const fmt::format_args&) {}
@@ -103,13 +105,13 @@ int main() {
     Record r{0x100, learned.code_hash, 8, 7};
     std::vector<Record> records{r};
     std::ostringstream output{std::ios::binary};
-    assert(Write(output, 123, build, 2, records));
+    assert(Write(output, A64Layout, 123, build, 2, records));
     const auto bytes = output.str();
     std::vector<Record> loaded;
     const auto check = [&](const std::string& input, std::uint64_t title = 123,
                            std::uint32_t core = 2) {
         std::istringstream file{input, std::ios::binary};
-        return Read(file, input.size(), title, build, core, loaded);
+        return Read(file, input.size(), A64Layout, title, build, core, loaded);
     };
     assert(check(bytes) && loaded.size() == 1 && loaded[0].code_hash == r.code_hash);
     assert(loaded[0].gameplay_samples == 7);
@@ -149,14 +151,14 @@ int main() {
     Merge(bounded, {});
     assert(bounded.size() == MaxRecords && bounded.back().descriptor == MaxRecords * 4);
     assert(std::is_sorted(bounded.begin(), bounded.end(), [](const auto& a, const auto& b) { return a.descriptor < b.descriptor; }));
-    Profile p;
+    Profile p{A64Layout};
     p.base = 0x1000;
     p.executable_ranges = {{0x1000, 0x1010}, {0x2000, 0x2010}};
     p.observed.reserve(MaxRecords);
-    p.Observe(Record{0x1008 | DescriptorMask, 1, 8});
+    p.Observe(Record{0x1008 | A64Layout.state_mask, 1, 8});
     p.Observe(Record{0x100c, 2, 8}); // Crosses the executable segment.
     p.Observe(Record{0x1800, 2, 4}); // Unmapped hole.
-    assert(p.observed.size() == 1 && p.observed[0].descriptor == (8 | DescriptorMask));
+    assert(p.observed.size() == 1 && p.observed[0].descriptor == (8 | A64Layout.state_mask));
     p.loaded = {{8, 1, 8}, {0x100, 1, 4, 3}};
     p.status = {WarmStatus::Budget, WarmStatus::Accepted};
     assert(p.WarmPlan().size() == 2 && p.WarmPlan()[0].index == 1);
@@ -169,16 +171,16 @@ int main() {
     assert(p.Classify(p.loaded[0]) == Miss::RecordOnly);
     auto changed = p.loaded[0]; changed.code_hash ^= 1;
     assert(p.Classify(changed) == Miss::CodeChanged);
-    auto catalog = std::make_shared<Catalog>();
+    auto catalog = std::make_shared<Catalog>(A64Layout);
     catalog->descriptors[1] = {0x200};
     catalog->Finalize();
     p.catalog = catalog;
     assert(p.Classify(Record{0x200, 1, 4}) == Miss::OtherCore);
-    assert(p.Classify(Record{0x200 | DescriptorMask, 1, 4}) == Miss::FpcrVariant);
+    assert(p.Classify(Record{0x200 | A64Layout.state_mask, 1, 4}) == Miss::FpcrVariant);
     assert(p.Classify(Record{0x300, 1, 4}) == Miss::Unlearned);
     p.observed.resize(MaxRecords - GameplayCapacity);
     capture_active.store(true);
-    p.Observe(Record{0x1008 | DescriptorMask, 1, 8});
+    p.Observe(Record{0x1008 | A64Layout.state_mask, 1, 8});
     capture_active.store(false);
     assert(p.gameplay_observed.size() == 1 && p.gameplay_observed[0].gameplay_samples == 1);
     assert(p.observed.size() == MaxRecords - GameplayCapacity); // Boot saturation preserves T capacity.
@@ -195,7 +197,7 @@ int main() {
     assert(p.Classify(p.shared[0]) == Miss::Recompiled);
     changed = p.shared[0]; changed.code_hash ^= 1;
     assert(p.Classify(changed) == Miss::CodeChanged);
-    Profile inactive; inactive.catalog = catalog;
+    Profile inactive{A64Layout}; inactive.catalog = catalog;
     assert(inactive.PrepareShared() == 0 && inactive.shared.empty());
     // Three distinct production JITs compile concurrently; none executes guest code.
     std::array<Callbacks, 3> parallel_cb;
@@ -256,12 +258,12 @@ int main() {
     auto temp = target;
     temp += ".tmp";
     { std::ofstream file{target, std::ios::binary}; file << "old"; }
-    { std::ofstream file{temp, std::ios::binary}; assert(Write(file, 123, build, 2, records)); }
+    { std::ofstream file{temp, std::ios::binary}; assert(Write(file, A64Layout, 123, build, 2, records)); }
     std::error_code ec;
     std::filesystem::rename(temp, target, ec);
     assert(!ec);
     { std::ifstream file{target, std::ios::binary};
-      assert(Read(file, std::filesystem::file_size(target), 123, build, 2, loaded)); }
+      assert(Read(file, std::filesystem::file_size(target), A64Layout, 123, build, 2, loaded)); }
     std::filesystem::remove(target, ec);
     std::cout << "PASS: production JIT precompile/state/hash/relocation; profile corruption, identity, v1 migration, priority, bounded T recording, miss classification, merge, ranges, shared candidates and parallel owner isolation/unwind\n";
 }
