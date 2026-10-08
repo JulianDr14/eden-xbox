@@ -66,6 +66,7 @@ StagingBufferPool::StagingBufferPool(const Device& device_, Scheduler& scheduler
       region_size{STREAM_BUFFER_SIZE / NUM_SYNCS} {
     stream_buffer = CreateMappedBuffer(device.Get(), stream_buffer_size, D3D12_HEAP_TYPE_UPLOAD,
                                        stream_pointer);
+    stream_charge = Common::MemoryCharge(Common::MemoryAccount::StagingRing, stream_buffer_size);
     constexpr u64 bytes_per_mib = 1024 * 1024;
     LOG_INFO(Render, "D3D12: staging stream ready ({} MiB, {} regions of {} MiB)",
              stream_buffer_size / bytes_per_mib, NUM_SYNCS, region_size / bytes_per_mib);
@@ -127,6 +128,7 @@ bool StagingBufferPool::GuardMemory(const CacheMemorySnapshot& snapshot) {
         *std::max_element(sync_ticks.begin(), sync_ticks.end()) <= scheduler.KnownGpuTick()) {
         const u64 released = stream_buffer_size;
         stream_buffer.Reset();
+        stream_charge.Reset();
         stream_pointer = {};
         stream_buffer_size = region_size = iterator = 0;
         sync_ticks.fill(0);
@@ -142,6 +144,7 @@ bool StagingBufferPool::GuardMemory(const CacheMemorySnapshot& snapshot) {
             stream_buffer = CreateMappedBuffer(device.Get(), wanted, D3D12_HEAP_TYPE_UPLOAD,
                                                stream_pointer);
             stream_buffer_size = wanted;
+            stream_charge = Common::MemoryCharge(Common::MemoryAccount::StagingRing, wanted);
             region_size = wanted / NUM_SYNCS;
             logged_stream_use = false;
             headroom.Created(wanted);
@@ -306,6 +309,9 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .index = unique_ids++,
         .tick = deferred ? std::numeric_limits<u64>::max() : scheduler.CurrentTick(),
         .deferred = deferred,
+        .charge{usage == MemoryUsage::Download ? Common::MemoryAccount::StagingReadback
+                                               : Common::MemoryAccount::StagingUpload,
+                bytes},
     });
     // Every one used to be logged; a loading screen creates thousands of small ones, and the log
     // itself then slowed the frame. Large ones and the first few still are.

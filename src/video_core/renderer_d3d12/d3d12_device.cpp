@@ -14,6 +14,7 @@
 
 #include "common/bug_tracker.h"
 #include "common/logging.h"
+#include "common/memory_ledger.h"
 #include "common/settings.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 
@@ -218,6 +219,11 @@ Device::Device() {
 
     LogCapabilities();
     initial_budget = QueryVideoMemory().Budget;
+    // On a unified architecture (the Xbox) texture and buffer heaps are app commit too.
+    D3D12_FEATURE_DATA_ARCHITECTURE1 arch{};
+    Common::SetGpuMemoryUnified(
+        SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1, &arch, sizeof(arch))) &&
+        arch.UMA);
 }
 
 void Device::LogDebugMessages() {

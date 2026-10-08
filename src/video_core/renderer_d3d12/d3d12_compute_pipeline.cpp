@@ -40,7 +40,7 @@ ComputePipeline::ComputePipeline(const Device& device_, VideoCore::ShaderNotify*
                                  std::vector<u8> dxil_, const Shader::Info& info_,
                                  const PipelineLayout& layout_)
     : device{device_}, unique_hash{unique_hash_}, layout{layout_}, dxil{std::move(dxil_)},
-      info{info_} {
+      dxil_charge{Common::MemoryAccount::ShaderBytecode, dxil.capacity()}, info{info_} {
     std::ranges::copy(info.constant_buffer_used_sizes, uniform_buffer_sizes.begin());
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
@@ -189,6 +189,7 @@ void ComputePipeline::Build() {
         pipeline_state.Reset();
         return;
     }
+    pso_charge = Common::MemoryCharge(Common::MemoryAccount::PipelineStates, 0);
     LOG_INFO(Render, "D3D12: compute pipeline built for {:016x} ({} + {} descriptors)",
              unique_hash, layout.NumResourceDescriptors(), layout.NumSamplerDescriptors());
 }

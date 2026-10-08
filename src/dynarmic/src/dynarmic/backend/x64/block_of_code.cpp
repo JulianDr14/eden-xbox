@@ -7,6 +7,9 @@
  */
 
 #include "dynarmic/backend/x64/block_of_code.h"
+#include "dynarmic/interface/code_memory.h"
+
+#include <atomic>
 
 #ifdef _WIN32
 #    define WIN32_LEAN_AND_MEAN
@@ -60,6 +63,17 @@ static void RaiseJitMemoryFailure(DWORD code, const void* base, size_t size, DWO
 #include "dynarmic/backend/x64/stack_layout.h"
 #include "dynarmic/backend/x64/writable_code_ranges.h"
 #include "dynarmic/interface/jit_profile.h"
+
+namespace Dynarmic {
+namespace {
+/// Committed bytes of every BlockOfCode alive (CommittedCodeBytes).
+std::atomic<size_t> s_committed_code_bytes{0};
+} // anonymous namespace
+
+size_t CommittedCodeBytes() noexcept {
+    return s_committed_code_bytes.load(std::memory_order_relaxed);
+}
+} // namespace Dynarmic
 
 namespace Dynarmic::Backend::X64 {
 
@@ -277,6 +291,13 @@ BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_cod
     GenRunCode(rcp);
 }
 
+BlockOfCode::~BlockOfCode() {
+#ifdef _WIN32
+    // The code region is released with the Xbyak::CodeGenerator base, right after this.
+    s_committed_code_bytes.fetch_sub(committed_size, std::memory_order_relaxed);
+#endif
+}
+
 bool BlockOfCode::HasHostFeature(HostFeature feature) const noexcept {
     return (GetHostFeatures() & feature) == feature;
 }
@@ -394,6 +415,8 @@ void BlockOfCode::EnsureMemoryCommitted([[maybe_unused]] size_t codesize) {
     if (committed_size < size_ + codesize) {
         [[maybe_unused]] const size_t old_committed_size = committed_size;
         committed_size = std::min<size_t>(maxSize_, committed_size + codesize);
+        s_committed_code_bytes.fetch_add(committed_size - old_committed_size,
+                                         std::memory_order_relaxed);
 #    ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
         // W^X: commit read-write only; ProtectMemory() flips pages to RX before execution. Only
         // the pages not committed yet: committing again the ones holding emitted code would make

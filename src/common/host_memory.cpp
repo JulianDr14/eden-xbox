@@ -1714,30 +1714,48 @@ void HostMemory::EnableDirectMappedAddress() {
 #endif
 }
 
+std::optional<u64> EmulatedDramCommittedBytes() {
+#ifdef HOST_MEMORY_USE_FROM_APP
+    if (g_backing_is_file.load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+    if (g_backing_is_section.load(std::memory_order_acquire)) {
+        return g_section_commit_bytes.load(std::memory_order_relaxed);
+    }
+    // Private backing: what is committed of it, page ranges at a time.
+    u8* const base = g_backing_base.load(std::memory_order_acquire);
+    const size_t size = g_backing_size.load(std::memory_order_acquire);
+    if (base == nullptr) {
+        return std::nullopt;
+    }
+    u64 committed = 0;
+    for (u8* address = base; address < base + size;) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(address, &info, sizeof(info)) == 0) {
+            break;
+        }
+        u8* const region_end =
+            (std::min)(static_cast<u8*>(info.BaseAddress) + info.RegionSize, base + size);
+        if (info.State == MEM_COMMIT) {
+            committed += static_cast<u64>(region_end - address);
+        }
+        address = region_end;
+    }
+    return committed;
+#else
+    return std::nullopt;
+#endif
+}
+
 std::string HostMemoryCommitStats() {
 #ifdef HOST_MEMORY_USE_FROM_APP
     if (!g_backing_is_section.load(std::memory_order_acquire)) {
         // Private backing: sum what is committed, to split the app's memory into emulated DRAM
         // and the rest (JIT, GPU, caches).
-        u8* const base = g_backing_base.load(std::memory_order_acquire);
-        const size_t size = g_backing_size.load(std::memory_order_acquire);
-        if (base == nullptr) {
+        if (g_backing_base.load(std::memory_order_acquire) == nullptr) {
             return {};
         }
-        u64 committed = 0;
-        for (u8* address = base; address < base + size;) {
-            MEMORY_BASIC_INFORMATION info{};
-            if (VirtualQuery(address, &info, sizeof(info)) == 0) {
-                break;
-            }
-            u8* const region_end = (std::min)(
-                static_cast<u8*>(info.BaseAddress) + info.RegionSize, base + size);
-            if (info.State == MEM_COMMIT) {
-                committed += static_cast<u64>(region_end - address);
-            }
-            address = region_end;
-        }
-        return "emulated DRAM " + std::to_string(committed >> 20) + " MiB";
+        return "emulated DRAM " + std::to_string(*EmulatedDramCommittedBytes() >> 20) + " MiB";
     }
     if (g_backing_is_file.load(std::memory_order_acquire)) {
         if (const u64 hot_size = g_fastmem_hot_size_actual.load(std::memory_order_acquire);

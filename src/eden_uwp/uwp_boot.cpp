@@ -37,10 +37,12 @@
 #include "common/fs/path_util.h"
 #include "common/host_memory.h"
 #include "common/logging.h"
+#include "common/memory_ledger.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
 #include "common/windows/timer_resolution.h"
 #include "core/arm/cpu_profile.h"
+#include "dynarmic/interface/code_memory.h"
 #include "core/arm/jit_prewarm.h"
 #include "core/core.h"
 #include "core/cpu_manager.h"
@@ -63,6 +65,7 @@
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
 
+#include "eden_uwp/alloc_watch.h"
 #include "eden_uwp/headless_emu_window.h"
 #include "eden_uwp/prewarm_budget.h"
 #include "eden_uwp/uwp_input.h"
@@ -114,6 +117,8 @@ std::atomic<bool> g_fullscreen{};
 std::atomic<int> g_fullscreen_request{-1};
 void WriteDiag(const std::string& msg); // defined with the UWP entry point below
 std::string MemoryReport();             // likewise
+std::string MemoryOwners();             // likewise
+void ApplyProcessMemoryLimit(u32 limit_mib); // likewise
 std::string LargestAllocations();       // likewise
 std::string HeapReport();               // likewise
 bool QueryAppMemory(u64& used, u64& limit);  // likewise
@@ -242,6 +247,9 @@ struct BootConfig {
     bool astc_fresh{};
     /// Played by hand ("play=1"): runs until the app is closed, without frame dumps or draw trace.
     bool play{};
+    /// Every minute of play, the process heaps and the memory map ("memory_audit=1"): what the
+    /// commit no owner accounts for is made of. Walking the heaps locks them for a moment.
+    bool memory_audit{};
     /// Guest memory through the host-mapped arena. Xbox uses a bounded hybrid section; "full" is
     /// diagnostic and falls back to hybrid if the complete mapping cannot be created.
     enum class Fastmem { Off, Auto, Hybrid, Full } fastmem{Fastmem::Off};
@@ -608,6 +616,11 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 }
                 draw_menu();
             }
+            if (config.memory_audit && tick % TICKS_PER_MINUTE == 0) {
+                WriteDiag("heaps: " + HeapReport());
+                WriteDiag("memory map: " + LargestAllocations());
+                WriteDiag("memory by owner: " + MemoryOwners());
+            }
             if (tick % (10 * TICKS_PER_MINUTE) == 0) {
                 WriteDiag("step: playing, " + std::to_string(tick / TICKS_PER_MINUTE) +
                           " min | " + MemoryReport());
@@ -801,6 +814,74 @@ std::string MemoryReport() {
     } catch (...) {
         return "app memory: MemoryManager unavailable";
     }
+}
+
+// The app's commit split by owner: the emulated DRAM, the JIT's code, the renderer's accounts
+// (Common::MemoryLedger) and the rest, which no account covers: driver objects such as compiled
+// PSOs, the smaller GPU resources, the heaps and the executable.
+std::string MemoryOwners() {
+    u64 commit{};
+    try {
+        commit = winrt::Windows::System::MemoryManager::GetAppMemoryReport().TotalCommitUsage();
+    } catch (...) {
+        return "MemoryManager unavailable";
+    }
+    const std::optional<u64> dram = Common::EmulatedDramCommittedBytes();
+    const u64 jit = Dynarmic::CommittedCodeBytes();
+    const u64 known = dram.value_or(0) + jit + Common::MemoryLedgerCommittedBytes();
+    return "emulated DRAM " + (dram ? std::to_string(*dram >> 20) + " MiB" : std::string("n/a")) +
+           ", JIT code " + std::to_string(jit >> 20) + " MiB, " + Common::DescribeMemoryLedger() +
+           "; rest " + std::to_string((commit > known ? commit - known : 0) >> 20) +
+           " MiB of " + std::to_string(commit >> 20) +
+           " MiB commit (driver objects, small GPU resources, heaps, executable)";
+}
+
+// The PC has no app memory limit of its own: memory_limit_mib (boot.cfg) puts the process in a
+// job that refuses commit beyond it, as the Series does, however the app was launched. Applied
+// once per process, since a job's limit cannot be lifted; where the platform's limit is already
+// at or below it (the console), nothing changes.
+void ApplyProcessMemoryLimit(u32 limit_mib) {
+    static u32 applied_mib = 0;
+    if (limit_mib == 0) {
+        return;
+    }
+    if (applied_mib != 0) {
+        if (applied_mib != limit_mib) {
+            WriteDiag("memory limit: kept " + std::to_string(applied_mib) + " MiB; " +
+                      std::to_string(limit_mib) + " MiB needs a new process");
+        }
+        return;
+    }
+    const u64 bytes = u64{limit_mib} << 20;
+    try {
+        const u64 platform = winrt::Windows::System::MemoryManager::AppMemoryUsageLimit();
+        if (platform <= bytes) {
+            WriteDiag("memory limit: the platform's " + std::to_string(platform >> 20) +
+                      " MiB already applies");
+            applied_mib = limit_mib;
+            return;
+        }
+    } catch (...) {
+    }
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    limits.ProcessMemoryLimit = static_cast<SIZE_T>(bytes);
+    const bool ok = job != nullptr &&
+                    SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits,
+                                            sizeof(limits)) &&
+                    AssignProcessToJobObject(job, GetCurrentProcess());
+    const DWORD error = ok ? 0 : GetLastError();
+    if (job != nullptr) {
+        CloseHandle(job); // The process keeps the job alive.
+    }
+    if (!ok) {
+        WriteDiag("memory limit: FAILED to cap the process at " + std::to_string(limit_mib) +
+                  " MiB (error " + std::to_string(error) + ")");
+        return;
+    }
+    applied_mib = limit_mib;
+    WriteDiag("memory limit: process commit capped at " + std::to_string(limit_mib) + " MiB");
 }
 
 // Where the app's memory is: committed bytes by kind over the whole address space, then the
@@ -1661,6 +1742,28 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         } else if (line == "async_shaders=0") {
                             config.async_shaders = false;
                             WriteDiag("boot.cfg: asynchronous shaders off");
+                        } else if (line.starts_with("alloc_watch=")) {
+                            // Byte sizes as the heap report prints them, separated by commas or
+                            // colons (a PowerShell -File argument splits at commas).
+                            std::vector<std::size_t> sizes;
+                            for (std::string_view rest = std::string_view{line}.substr(12);
+                                 !rest.empty();) {
+                                const size_t comma = rest.find_first_of(",:");
+                                const std::string_view item = rest.substr(0, comma);
+                                std::size_t size{};
+                                if (std::from_chars(item.data(), item.data() + item.size(), size)
+                                        .ec == std::errc{}) {
+                                    sizes.push_back(size);
+                                }
+                                rest = comma == std::string_view::npos ? std::string_view{}
+                                                                       : rest.substr(comma + 1);
+                            }
+                            EdenXbox::AllocWatch::Watch(sizes);
+                            WriteDiag("boot.cfg: watching " + std::to_string(sizes.size()) +
+                                      " allocation sizes");
+                        } else if (line == "memory_audit=1") {
+                            config.memory_audit = true;
+                            WriteDiag("boot.cfg: memory audit every minute of play");
                         } else if (line == "play=1") {
                             config.play = true;
                             WriteDiag("boot.cfg: played by hand, no time limit or frame dumps");
@@ -1699,6 +1802,7 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                 } catch (...) {
                     WriteDiag("FAILED resolving Package.InstalledLocation");
                 }
+                ApplyProcessMemoryLimit(config.memory_limit_mib);
                 // Capture any early throw to the diag file instead of a silent exit.
                 try {
                     WriteDiag("calling RunHeadlessBoot");
@@ -1726,6 +1830,12 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                 ::Sleep(50);
                 if (GetTickCount64() >= next_heartbeat) {
                     WriteDiag("heartbeat: boot worker still running | " + MemoryReport());
+                    WriteDiag("memory by owner: " + MemoryOwners());
+                    for (const auto& capture : EdenXbox::AllocWatch::TakeNew()) {
+                        WriteDiag(FormatFrames(
+                            ("alloc watch: " + std::to_string(capture.size) + " bytes from").c_str(),
+                            capture.frames, capture.frame_count));
+                    }
                     next_heartbeat += 10'000;
                 }
             }

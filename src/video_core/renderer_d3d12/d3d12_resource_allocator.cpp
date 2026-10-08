@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/literals.h"
 #include "common/logging.h"
+#include "common/memory_ledger.h"
 #include "video_core/renderer_d3d12/d3d12_resource_allocator.h"
 #include "video_core/renderer_d3d12/d3d12_heap_packing.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
@@ -43,6 +44,7 @@ struct TextureResourceAllocator::State {
         HeapClass heap_class{};
         u64 size{};
         std::map<u64, u64> free_ranges; // offset -> bytes
+        Common::MemoryCharge charge;
     };
 
     mutable std::mutex mutex;
@@ -147,6 +149,7 @@ TextureResourceAllocator::Resource TextureResourceAllocator::Create(
             const HRESULT heap_hr = device.Get()->CreateHeap(&heap_desc, IID_PPV_ARGS(&block.heap));
             if (SUCCEEDED(heap_hr)) {
                 block.free_ranges.emplace(0, wanted);
+                block.charge = Common::MemoryCharge(Common::MemoryAccount::TextureHeaps, wanted);
                 state->heap_bytes += wanted;
                 // Tombstones preserve outstanding Allocation indices. Reuse only slots with
                 // no heap: Trim proves there are no live or pending allocations in that slot.
@@ -274,6 +277,7 @@ void TextureResourceAllocator::TrimEmptyHeaps(bool under_pressure) {
         ++state->trimmed_heaps;
         block.heap.Reset();
         block.free_ranges.clear();
+        block.charge.Reset();
         block.size = 0;
     }
 }

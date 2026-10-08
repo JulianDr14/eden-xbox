@@ -8,6 +8,8 @@
 add_executable(eden-uwp WIN32
     headless_emu_window.h
     uwp_boot.cpp
+    alloc_watch.cpp
+    alloc_watch.h
     uwp_input.cpp
     uwp_input.h
     uwp_library.cpp
@@ -30,9 +32,10 @@ add_executable(eden-uwp WIN32
 
 # core transitively pulls common/video_core/audio_core/hid_core/dynarmic etc.; name the ones we touch
 # directly so the dependency graph is explicit. frontend_common provides PlayTimeManager (pulled by
-# core's NS query service); input_common the virtual_gamepad engine that uwp_input.cpp feeds.
+# core's NS query service); input_common the virtual_gamepad engine that uwp_input.cpp feeds;
+# dynarmic the JIT's committed code size for the diag's memory split.
 target_link_libraries(eden-uwp PRIVATE common core video_core audio_core frontend_common hid_core
-                                        input_common SDL3::SDL3)
+                                        input_common SDL3::SDL3 dynarmic::dynarmic)
 
 # WinRT (CoreApplication, IFrameworkView, ApplicationData) comes from the Store umbrella import lib.
 target_link_libraries(eden-uwp PRIVATE WindowsApp.lib)
