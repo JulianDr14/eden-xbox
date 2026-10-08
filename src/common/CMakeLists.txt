@@ -78,6 +78,8 @@ add_library(
     logging.h
     lz4_compression.cpp
     lz4_compression.h
+    memory_ledger.cpp
+    memory_ledger.h
     math_util.h
     memory_detect.cpp
     memory_detect.h

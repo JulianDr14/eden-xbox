@@ -42,6 +42,7 @@ class BlockOfCode final : public Xbyak::CodeGenerator {
 public:
     BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_code_size, std::function<void(BlockOfCode&)> rcp);
     BlockOfCode(const BlockOfCode&) = delete;
+    ~BlockOfCode();
 
     /// Call when external emitters have finished emitting their preludes.
     void PreludeComplete();

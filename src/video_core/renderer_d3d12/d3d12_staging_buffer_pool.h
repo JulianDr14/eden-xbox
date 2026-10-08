@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "common/memory_ledger.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 #include "video_core/renderer_d3d12/d3d12_memory_guard.h"
 
@@ -78,6 +79,7 @@ private:
         u64 index;
         u64 tick = 0;
         bool deferred{};
+        Common::MemoryCharge charge;
 
         StagingBufferRef Ref() const noexcept {
             return {
@@ -126,6 +128,7 @@ private:
     Scheduler& scheduler;
 
     ComPtr<ID3D12Resource> stream_buffer;
+    Common::MemoryCharge stream_charge;
     std::span<u8> stream_pointer;
     u64 stream_buffer_size;
     u64 region_size;

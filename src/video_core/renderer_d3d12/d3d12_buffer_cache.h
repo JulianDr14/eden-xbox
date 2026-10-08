@@ -7,6 +7,7 @@
 #include <optional>
 #include <vector>
 
+#include "common/memory_ledger.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/buffer_cache/usage_tracker.h"
@@ -55,6 +56,7 @@ private:
     VideoCommon::UsageTracker tracker;
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     u64 state_tick{}; ///< scheduler tick of the list that set state
+    Common::MemoryCharge charge;
 };
 
 /// A buffer bound for a traced draw (RasterizerD3D12::SetDrawTrace), checked against guest memory.

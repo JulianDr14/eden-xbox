@@ -21,10 +21,8 @@ param([int] $TimeoutSec = 75, [switch] $NoBuild, [string] $BootNro, [int] $RunSe
       [switch] $DebugLayer, [string] $Keys, [string] $Firmware, [string] $Game, [string[]] $BootCfg = @(),
       [ValidateRange(0, 1048576)] [int] $MemoryLimitMiB = 5120, [switch] $Library)
 $ErrorActionPreference = 'Stop'
-if ($MemoryLimitMiB -gt 0) {
-    . (Join-Path $PSScriptRoot 'process-memory-limit.ps1')
-}
-# Keep cache policy consistent with the external commit cap. A zero cap opts out.
+# The app caps its own commit at this (a job object, uwp_boot.cpp ApplyProcessMemoryLimit), so every
+# session of the package is limited, also the ones launched by hand. A zero cap opts out.
 $BootCfg = @($BootCfg | Where-Object { $_ -notmatch '^memory_limit_mib=' })
 $BootCfg += "memory_limit_mib=$MemoryLimitMiB"
 if ($Library) { $BootCfg += 'library=1'; $BootCfg += 'play=1' }
@@ -59,17 +57,6 @@ $local = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalSt
 $diag = Join-Path $local 'eden_uwp_diag.txt'
 Remove-Item -LiteralPath $diag -ErrorAction SilentlyContinue
 Start-Process "shell:AppsFolder\$($pkg.PackageFamilyName)!App"
-if ($MemoryLimitMiB -gt 0) {
-    $attachDeadline = (Get-Date).AddSeconds(10)
-    do {
-        $appProcess = Get-Process -Name eden-uwp -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($appProcess) { break }
-        Start-Sleep -Milliseconds 25
-    } while ((Get-Date) -lt $attachDeadline)
-    if (-not $appProcess) { throw 'App did not appear: memory-limited trial was not started.' }
-    Set-EdenProcessMemoryLimit -ProcessId $appProcess.Id -LimitMiB $MemoryLimitMiB
-    Write-Host "PC process commit limit verified: $MemoryLimitMiB MiB (PID $($appProcess.Id)); GPU memory is separate."
-}
 
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 while ((Get-Date) -lt $deadline) {

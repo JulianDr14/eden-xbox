@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "common/memory_ledger.h"
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
@@ -117,10 +118,13 @@ private:
     const u64 unique_hash;
     const PipelineLayout& layout;
     std::vector<u8> dxil;
+    Common::MemoryCharge dxil_charge;
     Shader::Info info;
     VideoCommon::ComputeUniformBufferSizes uniform_buffer_sizes{};
+    Common::MemoryCharge charge{Common::MemoryAccount::Pipelines, sizeof(ComputePipeline)};
 
     ComPtr<ID3D12PipelineState> pipeline_state;
+    Common::MemoryCharge pso_charge;
 
     std::mutex build_mutex;
     std::condition_variable build_condvar;

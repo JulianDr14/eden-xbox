@@ -89,14 +89,17 @@ u32 IndexSize(IndexFormat format) {
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams params)
     : VideoCommon::BufferBase(params), scheduler{&runtime.scheduler},
-      buffer{runtime.CreateDefaultBuffer(4)}, tracker{4096} {}
+      buffer{runtime.CreateDefaultBuffer(4)}, tracker{4096},
+      charge{Common::MemoryAccount::BufferCache, 4} {}
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr, u64 size_bytes, bool)
     : VideoCommon::BufferBase(cpu_addr, size_bytes), scheduler{&runtime.scheduler},
       // Whole 256-byte blocks: a guest cbuf ending with the buffer still fits a CBV.
       buffer{runtime.CreateDefaultBuffer(
           Common::AlignUp(size_bytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT))},
-      tracker{size_bytes} {}
+      tracker{size_bytes},
+      charge{Common::MemoryAccount::BufferCache,
+             Common::AlignUp(size_bytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT)} {}
 
 Buffer::~Buffer() {
     if (scheduler && buffer) {
@@ -115,6 +118,7 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
         tracker = std::move(other.tracker);
         state = other.state;
         state_tick = other.state_tick;
+        charge = std::move(other.charge);
     }
     return *this;
 }

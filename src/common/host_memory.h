@@ -105,4 +105,8 @@ private:
 /// diag. Empty elsewhere.
 std::string HostMemoryCommitStats();
 
+/// Bytes of the emulated DRAM committed in the app (Xbox host memory). Empty where it cannot be
+/// told apart, such as a file-backed section.
+std::optional<u64> EmulatedDramCommittedBytes();
+
 } // namespace Common
