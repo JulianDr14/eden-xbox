@@ -34,6 +34,7 @@ constexpr u32 DESCRIPTOR_RING_SIZE = 256 * 1024;
 std::atomic<u32> traced_frame_override{};
 std::atomic<u32> traced_frame_count{1};
 std::atomic<bool> frame_diagnostics{true};
+std::atomic<u32> trace_requested{};
 
 IUnknown* CoreWindowOf(const Core::Frontend::EmuWindow& emu_window) {
     const auto& info = emu_window.GetWindowInfo();
@@ -49,6 +50,10 @@ IUnknown* CoreWindowOf(const Core::Frontend::EmuWindow& emu_window) {
 void SetTracedFrame(u32 frame, u32 count) {
     traced_frame_override.store(frame, std::memory_order_relaxed);
     traced_frame_count.store(std::max<u32>(count, 1), std::memory_order_relaxed);
+}
+
+void TraceNextFrames(u32 count) {
+    trace_requested.store(std::max<u32>(count, 1), std::memory_order_relaxed);
 }
 
 void SetFrameDiagnostics(bool enabled) {
@@ -167,21 +172,31 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                 if (readback) {
                     WriteFrameDump(*readback, (accelerated_frames - DUMP_FRAME) / DUMP_INTERVAL);
                 }
+                // A trace asked for at run time (a developer hotkey) starts with the next frame,
+                // also in a session played by hand.
+                static bool requested_trace = false;
+                if (const u32 requested = trace_requested.exchange(0, std::memory_order_relaxed)) {
+                    traced_frame_override.store(accelerated_frames + 2, std::memory_order_relaxed);
+                    traced_frame_count.store(requested, std::memory_order_relaxed);
+                    requested_trace = true;
+                }
                 // Every draw of the frame that ends in frame_1.bmp goes to the log, to compare
                 // a console run with a PC run draw by draw.
                 const u32 override_frame = traced_frame_override.load(std::memory_order_relaxed);
                 const u32 traced_frame =
                     override_frame != 0 ? override_frame : DUMP_FRAME + DUMP_INTERVAL;
                 // Played by hand (boot.cfg "play=1"): no frame dumps, no draw trace.
-                if (diagnostics && accelerated_frames == traced_frame - 1) {
+                const bool trace = diagnostics || requested_trace;
+                if (trace && accelerated_frames == traced_frame - 1) {
                     LOG_INFO(Render, "D3D12: tracing the draws of frame {}", traced_frame);
                     // An explicit trace_frame also writes its render targets (trace\*.bmp).
                     rasterizer.SetDrawTrace(true, override_frame != 0);
-                } else if (diagnostics &&
+                } else if (trace &&
                            accelerated_frames ==
                                traced_frame - 1 +
                                    traced_frame_count.load(std::memory_order_relaxed)) {
                     rasterizer.SetDrawTrace(false);
+                    requested_trace = false;
                     LOG_INFO(Render, "D3D12: draw trace of frame {} complete", traced_frame);
                 }
             } else if (const bool has_image = ReadGuestLayer(framebuffer);
