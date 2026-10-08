@@ -28,6 +28,9 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
         return;
     }
     if (!Image::AreCopyCompatible(src, dst)) {
+        if (dst.IsBcDecoded() && CopyBlocksIntoDecoded(dst, src, copies)) {
+            return;
+        }
         // Plain texels on one side, compressed blocks on the other: not copyable.
         WarnOnce(logged_decoded_copy, "copy between a host-decoded and a compressed image ({} -> "
                  "{}) skipped", src.info.format, dst.info.format);
@@ -124,6 +127,135 @@ void TextureCacheRuntime::CopyThroughBuffer(Image& dst, Image& src,
             transfer_buffers.Release(std::move(transfer));
         }
     }
+}
+
+bool TextureCacheRuntime::CopyBlocksIntoDecoded(Image& dst, Image& src,
+                                                std::span<const ImageCopy> copies) {
+    using namespace VideoCore::Surface;
+    // The source's texels are the destination's blocks, as the guest wrote them (each extent is
+    // in source texels, a block each); copied as they are, they would land in a resource of
+    // decoded texels.
+    const PixelFormat block_format = dst.info.format;
+    const u32 block_w = DefaultBlockWidth(block_format);
+    const u32 block_h = DefaultBlockHeight(block_format);
+    const FormatInfo blocks = Format(block_format);
+    if (src.TransferFormat().converted || DefaultBlockWidth(src.info.format) != 1 ||
+        DefaultBlockHeight(src.info.format) != 1 ||
+        BytesPerBlock(src.info.format) != BytesPerBlock(block_format) || !blit_helper ||
+        !blit_helper->IsAvailable() || src.info.num_samples > 1 ||
+        (dst.Handle()->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0) {
+        return false;
+    }
+    static bool logged = false;
+    if (!std::exchange(logged, true)) {
+        LOG_INFO(Render, "D3D12: blocks of {} {}x{} @{:x} decoded on the GPU into {} {}x{}x{} "
+                 "@{:x}", src.info.format, src.info.size.width, src.info.size.height,
+                 src.gpu_addr, dst.info.format, dst.info.size.width, dst.info.size.height,
+                 dst.info.resources.layers, dst.gpu_addr);
+    }
+    ID3D12Device* const device_handle = device.Get();
+    auto* const commands = scheduler.CommandList();
+    const u32 block_bytes = BytesPerBlock(block_format);
+    for (const auto& copy : copies) {
+        const u32 blocks_x = copy.extent.width;
+        const u32 blocks_y = copy.extent.height;
+        if (blocks_x == 0 || blocks_y == 0) {
+            continue;
+        }
+        const u32 level = static_cast<u32>(copy.dst_subresource.base_level);
+        const u32 level_width = std::max(1U, dst.info.size.width >> level);
+        const u32 level_height = std::max(1U, dst.info.size.height >> level);
+        const u32 dst_x = static_cast<u32>(copy.dst_offset.x);
+        const u32 dst_y = static_cast<u32>(copy.dst_offset.y);
+        if (dst_x >= level_width || dst_y >= level_height) {
+            continue;
+        }
+        // Blocks past the level's edge (its last blocks, or the 4x4 block of a 2x2 level)
+        // decode texels the level does not have.
+        const u32 width = std::min(blocks_x * block_w, level_width - dst_x);
+        const u32 height = std::min(blocks_y * block_h, level_height - dst_y);
+        const u32 row_pitch = AlignPitch(blocks_x * block_bytes);
+        const u64 size = static_cast<u64>(row_pitch) * blocks_y;
+        const D3D12_RESOURCE_DESC desc{
+            .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            .Width = blocks_x * block_w,
+            .Height = blocks_y * block_h,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .Format = blocks.resource,
+            .SampleDesc = {.Count = 1},
+        };
+        for (s32 layer = 0; layer < copy.src_subresource.num_layers; ++layer) {
+            // The source's bytes to a buffer, then into a block-compressed texture of their own.
+            ComPtr<ID3D12Resource> decoded;
+            const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_DEFAULT};
+            ThrowIfFailed(device_handle->CreateCommittedResource(
+                              &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                              nullptr, IID_PPV_ARGS(&decoded)),
+                          "Create block decode texture");
+            ComPtr<ID3D12Resource> transfer = transfer_buffers.Acquire(size);
+            D3D12_TEXTURE_COPY_LOCATION footprint{.pResource = transfer.Get(),
+                                                  .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+            footprint.PlacedFootprint.Footprint = {.Format = src.FootprintFormat(),
+                                                   .Width = blocks_x,
+                                                   .Height = blocks_y,
+                                                   .Depth = 1,
+                                                   .RowPitch = row_pitch};
+            src.Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+            const D3D12_TEXTURE_COPY_LOCATION source{
+                .pResource = src.Handle(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .SubresourceIndex = src.Subresource(copy.src_subresource.base_level,
+                                                    copy.src_subresource.base_layer + layer)};
+            const D3D12_BOX box{static_cast<u32>(copy.src_offset.x),
+                                static_cast<u32>(copy.src_offset.y), 0,
+                                static_cast<u32>(copy.src_offset.x) + blocks_x,
+                                static_cast<u32>(copy.src_offset.y) + blocks_y, 1};
+            commands->CopyTextureRegion(&footprint, 0, 0, 0, &source, &box);
+            TransitionBuffer(commands, transfer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                             D3D12_RESOURCE_STATE_COPY_SOURCE);
+            footprint.PlacedFootprint.Footprint.Format = blocks.resource;
+            footprint.PlacedFootprint.Footprint.Width = blocks_x * block_w;
+            footprint.PlacedFootprint.Footprint.Height = blocks_y * block_h;
+            const D3D12_TEXTURE_COPY_LOCATION target{
+                .pResource = decoded.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .SubresourceIndex = 0};
+            commands->CopyTextureRegion(&target, 0, 0, 0, &footprint, nullptr);
+            transfer_buffers.Release(std::move(transfer));
+            TransitionResource(commands, decoded.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+            // Sampling decodes the blocks; drawn texel for texel into the destination's layer.
+            const D3D12_CPU_DESCRIPTOR_HANDLE srv = view_descriptors.Allocate();
+            const D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{
+                .Format = blocks.view,
+                .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
+                .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                .Texture2D = {.MostDetailedMip = 0, .MipLevels = 1}};
+            device_handle->CreateShaderResourceView(decoded.Get(), &srv_desc, srv);
+            const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_descriptors.Allocate();
+            const D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{
+                .Format = dst.ViewFormat(),
+                .ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY,
+                .Texture2DArray = {.MipSlice = level,
+                                   .FirstArraySlice = static_cast<u32>(
+                                       copy.dst_subresource.base_layer + layer),
+                                   .ArraySize = 1}};
+            device_handle->CreateRenderTargetView(dst.Handle(), &rtv_desc, rtv);
+            dst.Transition(D3D12_RESOURCE_STATE_RENDER_TARGET);
+            const VideoCommon::Region2D dst_region{
+                .start = {static_cast<s32>(dst_x), static_cast<s32>(dst_y)},
+                .end = {static_cast<s32>(dst_x + width), static_cast<s32>(dst_y + height)}};
+            const VideoCommon::Region2D src_region{
+                .start = {0, 0}, .end = {static_cast<s32>(width), static_cast<s32>(height)}};
+            blit_helper->BlitColor({rtv, dst.ViewFormat(), 1}, srv,
+                                   blit_helper->NearestSampler(), dst_region, src_region,
+                                   {blocks_x * block_w, blocks_y * block_h});
+            view_descriptors.Free(srv);
+            rtv_descriptors.Free(rtv);
+            scheduler.DeferRelease(std::move(decoded));
+        }
+    }
+    return true;
 }
 
 void TextureCacheRuntime::CopyImageMSAA(Image&, Image&, std::span<const ImageCopy>) {
