@@ -555,6 +555,7 @@ void RasterizerD3D12::TickFrame() {
             snapshot = texture_runtime.BeginMemoryGuardFrame();
         }
         pipeline_cache.GuardMemory(snapshot);
+        pipeline_cache.TickResidency(snapshot, scheduler);
         texture_cache.TickFrame();
         buffer_cache.TickFrame();
     }

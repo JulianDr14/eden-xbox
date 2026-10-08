@@ -5,7 +5,9 @@
 #include <atomic>
 #include <bit>
 #include <exception>
+#include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -31,6 +33,7 @@
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 #include "video_core/renderer_d3d12/d3d12_pipeline_cache.h"
+#include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -403,7 +406,71 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
              caps.vp_and_rt_index_from_any_stage, use_asynchronous_shaders);
 }
 
-PipelineCache::~PipelineCache() = default;
+PipelineCache::~PipelineCache() {
+    if (hot_pipelines_dirty) {
+        SaveHotPipelines();
+        serialization_thread.WaitForRequests();
+    }
+}
+
+void PipelineCache::TickResidency(const CacheMemorySnapshot& snapshot, Scheduler& scheduler) {
+    using Policy = PipelineResidencyPolicy;
+    ++residency_frame;
+    const u64 idle_frames = Policy::IdleFrames(snapshot.app_used, snapshot.app_limit);
+    const size_t checks = (std::min)(Policy::SWEEP_PER_FRAME, residency_sweep.size());
+    for (size_t i = 0; i < checks; ++i) {
+        if (residency_cursor >= residency_sweep.size()) {
+            residency_cursor = 0;
+        }
+        GraphicsPipeline* const pipeline = residency_sweep[residency_cursor++];
+        if (residency_frame - pipeline->LastUsedFrame() > idle_frames &&
+            pipeline->Evict(scheduler)) {
+            ++pipelines_evicted;
+        }
+    }
+    // About a minute between saves: a session closed from the console never reaches the
+    // destructor, and the set changes most at the start.
+    constexpr u64 HOT_SAVE_FRAMES = 60 * 60;
+    if (residency_frame - last_hot_save_frame >= HOT_SAVE_FRAMES) {
+        last_hot_save_frame = residency_frame;
+        const auto resident = Common::ReadMemoryAccount(Common::MemoryAccount::PipelineStates);
+        LOG_INFO(Render,
+                 "D3D12: {} graphics pipelines, {} PSOs resident; {} released and {} rebuilt so "
+                 "far; {} drawn in recent sessions",
+                 residency_sweep.size(), resident.objects, pipelines_evicted, pipelines_woken,
+                 hot_pipelines.Size());
+        if (hot_pipelines_dirty) {
+            SaveHotPipelines();
+        }
+    }
+}
+
+void PipelineCache::SaveHotPipelines() {
+    hot_pipelines_dirty = false;
+    if (hot_pipelines_filename.empty()) {
+        return;
+    }
+    serialization_thread.QueueWork([bytes = hot_pipelines.Serialize(),
+                                    path = hot_pipelines_filename] {
+        // Written aside and renamed over the old one, so a session killed mid-write keeps it.
+        std::filesystem::path temporary = path;
+        temporary += ".tmp";
+        {
+            std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+            file.write(reinterpret_cast<const char*>(bytes.data()),
+                       static_cast<std::streamsize>(bytes.size()));
+            if (!file) {
+                LOG_WARNING(Render, "D3D12: could not write {}", temporary.string());
+                return;
+            }
+        }
+        std::error_code error;
+        std::filesystem::rename(temporary, path, error);
+        if (error) {
+            LOG_WARNING(Render, "D3D12: could not replace {}: {}", path.string(), error.message());
+        }
+    });
+}
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
     if (VideoCommon::GPUThread::HasExceptionReported())
@@ -479,11 +546,20 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         return;
     }
     pipeline_cache_filename = base_dir / "d3d12.bin";
+    hot_pipelines_filename = base_dir / "d3d12_hot.bin";
+    {
+        std::ifstream file(hot_pipelines_filename, std::ios::binary);
+        const std::vector<u8> bytes{std::istreambuf_iterator<char>(file),
+                                    std::istreambuf_iterator<char>()};
+        hot_pipelines.Load(bytes);
+    }
 
     struct {
         std::mutex mutex;
         size_t total{};
         size_t built{};
+        size_t graphics{};   ///< Graphics pipelines read, in file order (HotPipelineSet::Prewarm).
+        size_t prewarmed{};
         bool has_loaded{};
     } state;
 
@@ -508,14 +584,19 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     const auto load_graphics{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
         GraphicsPipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
+        // Every pipeline gets its DXIL; only the hot ones a PSO, the rest when first drawn.
+        const bool build_pso = hot_pipelines.Prewarm(key.Hash(), state.graphics++);
+        state.prewarmed += build_pso ? 1 : 0;
 
-        workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
+        workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback,
+                           build_pso]() mutable {
             ShaderPools pools;
             boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
             }
-            auto pipeline{CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), false)};
+            auto pipeline{
+                CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), false, build_pso)};
 
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
@@ -531,7 +612,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION, load_compute,
                                load_graphics);
 
-    LOG_INFO(Render, "D3D12: {} pipelines in the disk cache", state.total);
+    LOG_INFO(Render,
+             "D3D12: {} pipelines in the disk cache; PSOs at boot for {} of {} graphics pipelines "
+             "({})",
+             state.total, state.prewarmed, state.graphics,
+             hot_pipelines.HasHistory()
+                 ? fmt::format("drawn in the last sessions, {} known", hot_pipelines.Size())
+                 : std::string("no history yet: the first ones of the cache"));
 
     std::unique_lock lock{state.mutex};
     callback(VideoCore::LoadCallbackStage::Build, 0, state.total);
@@ -539,6 +626,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     lock.unlock();
 
     workers.WaitForRequests(stop_loading);
+    residency_sweep.reserve(graphics_cache.size());
+    for (const auto& [key, pipeline] : graphics_cache) {
+        if (pipeline) {
+            residency_sweep.push_back(pipeline.get());
+        }
+    }
 }
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
@@ -548,6 +641,9 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
         // Translating the shaders runs here, on the GPU thread, before the build is queued.
         VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs};
         pipeline = CreateGraphicsPipeline();
+        if (pipeline) {
+            residency_sweep.push_back(pipeline.get());
+        }
     }
     if (!pipeline) {
         // Its shaders failed to recompile or translate (reported once, below): every draw with
@@ -565,9 +661,18 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     return BuiltPipeline(current_pipeline);
 }
 
-GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const noexcept {
+GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) {
+    pipeline->Touch(residency_frame);
+    if (pipeline->MarkDrawn() && hot_pipelines.MarkUsed(pipeline->KeyHash())) {
+        hot_pipelines_dirty = true;
+    }
     if (pipeline->IsBuilt()) {
         return pipeline;
+    }
+    if (pipeline->IsDormant()) {
+        // Its PSO was never built (not drawn in recent sessions) or was released while idle.
+        pipeline->Wake(workers);
+        ++pipelines_woken;
     }
     // Small draws are usually full-screen passes that build textures once: skipping them would
     // lose the texture, so wait for those like Vulkan does.
@@ -584,7 +689,7 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
-    std::span<Shader::Environment* const> envs, bool build_in_parallel) try {
+    std::span<Shader::Environment* const> envs, bool build_in_parallel, bool build_pso) try {
     size_t env_index{0};
     std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
     const bool uses_vertex_a{key.unique_hashes[0] != 0};
@@ -689,27 +794,31 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         const auto cached = linked_shaders.Get(std::move(key), [&] {
             auto compiled = compiler.CompilePipeline(std::span(stages.data(), stages.size()), options,
                                                       trace_pipeline);
-            GraphicsPipeline::DxilStages dxil;
+            ChargedDxilStages dxil;
+            u64 bytes = 0;
             for (size_t i = 0; i < compiled.size(); ++i) {
-                dxil[stage_indices[i]] = std::move(compiled[i].dxil);
+                bytes += compiled[i].dxil.capacity();
+                dxil.stages[stage_indices[i]] = std::move(compiled[i].dxil);
             }
+            dxil.charge = Common::MemoryCharge(Common::MemoryAccount::ShaderBytecode, bytes);
             return dxil;
-        }, [](const GraphicsPipeline::DxilStages& dxil) {
+        }, [](const ChargedDxilStages& dxil) {
             size_t bytes = sizeof(dxil);
-            for (const auto& stage : dxil) {
+            for (const auto& stage : dxil.stages) {
                 bytes += stage.capacity();
             }
             return bytes;
         });
         VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::PipelineCacheResult,
                                    static_cast<u64>(cached.outcome), trace_pipeline);
-        return cached.value;
+        // The pipeline keeps the whole entry, charge included, alive through its stages.
+        return GraphicsPipeline::SharedDxilStages(cached.value, &cached.value->stages);
     };
 
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     return std::make_unique<GraphicsPipeline>(device, texture_runtime, &shader_notify,
                                               thread_worker, key, std::move(compile_dxil), infos,
-                                              layout);
+                                              layout, build_pso);
 
 } catch (const Shader::Exception& exception) {
     BUG_TRACK_KEY(ShaderCompile, key.unique_hashes[1] ^ std::rotl(key.unique_hashes[5], 1),

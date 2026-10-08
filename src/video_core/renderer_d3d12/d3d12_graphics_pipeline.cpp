@@ -26,6 +26,7 @@
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 #include "video_core/renderer_d3d12/d3d12_pipeline_helper.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
+#include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 #include "video_core/renderer_d3d12/diagnostics/d3d12_pipeline_diagnostics.h"
 #include "video_core/shader_notify.h"
@@ -157,14 +158,15 @@ void GraphicsPipelineCacheKey::RefreshStatic(const Maxwell& regs) noexcept {
 }
 
 GraphicsPipeline::GraphicsPipeline(const Device& device_,
-                                   const TextureCacheRuntime& texture_runtime,
+                                   const TextureCacheRuntime& texture_runtime_,
                                    VideoCore::ShaderNotify* shader_notify,
                                    Common::ThreadWorker* worker_thread,
                                    const GraphicsPipelineCacheKey& key_,
                                    std::function<SharedDxilStages(u64)> compile_dxil,
                                    const std::array<const Shader::Info*, NUM_STAGES>& infos,
-                                   const PipelineLayout& layout_)
-    : device{device_}, key{key_}, layout{layout_} {
+                                   const PipelineLayout& layout_, bool build_pso)
+    : device{device_}, texture_runtime{texture_runtime_}, key{key_}, key_hash{key_.Hash()},
+      layout{layout_} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -182,8 +184,8 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
     namespace FT = VideoCore::FrameTrace;
     const u64 trace_pipeline = reinterpret_cast<uintptr_t>(this);
     FT::Mark(FT::Event::PipelineBuildRequested, trace_pipeline, key.Hash());
-    auto func{[this, &texture_runtime, shader_notify, compile_dxil = std::move(compile_dxil),
-               trace_pipeline] {
+    auto func{[this, shader_notify, compile_dxil = std::move(compile_dxil), trace_pipeline,
+               build_pso] {
         FT::Mark(FT::Event::PipelineWorkerBegin, trace_pipeline);
         FT::ScopedSpan worker_span{FT::Event::PipelineWorkerLong, trace_pipeline};
         bool compiled = false;
@@ -200,16 +202,12 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
             LOG_ERROR(Render, "D3D12: building the pipeline for VS {:016x} PS {:016x} failed: {}",
                       key.unique_hashes[1], key.unique_hashes[5], exception.what());
         }
-        if (compiled) {
-            Build(texture_runtime);
-        }
-        {
-            std::scoped_lock lock{build_mutex};
-            // Publish DXIL/PSO to IsBuilt's lock-free fast path as well as WaitBuilt.
-            is_built.store(true, std::memory_order::release);
+        if (compiled && build_pso) {
+            Build();
         }
         FT::Mark(FT::Event::PipelineBuildDone, trace_pipeline, pipeline_state.Get() != nullptr);
-        build_condvar.notify_all();
+        // Without a PSO yet, a pipeline whose DXIL failed is still ready: its draws are skipped.
+        Publish(compiled && !build_pso ? State::Dormant : State::Ready);
         if (shader_notify) {
             shader_notify->MarkShaderComplete();
         }
@@ -222,6 +220,38 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
 }
 
 GraphicsPipeline::~GraphicsPipeline() = default;
+
+void GraphicsPipeline::Publish(State next) {
+    {
+        std::scoped_lock lock{build_mutex};
+        // Publish DXIL/PSO to IsBuilt's lock-free fast path as well as WaitBuilt.
+        build_state.store(next, std::memory_order::release);
+    }
+    build_condvar.notify_all();
+}
+
+void GraphicsPipeline::Wake(Common::ThreadWorker& worker) {
+    State expected = State::Dormant;
+    if (!build_state.compare_exchange_strong(expected, State::Building, std::memory_order::acq_rel)) {
+        return;
+    }
+    worker.QueueWork([this] {
+        Build();
+        Publish(State::Ready);
+    });
+}
+
+bool GraphicsPipeline::Evict(Scheduler& scheduler) {
+    // Only the GPU thread draws with, wakes and evicts pipelines, so a ready one stays ready here.
+    if (build_state.load(std::memory_order::acquire) != State::Ready || !pipeline_state ||
+        !dxil) {
+        return false;
+    }
+    build_state.store(State::Dormant, std::memory_order::release);
+    scheduler.DeferRelease(std::move(pipeline_state));
+    pso_charge.Reset();
+    return true;
+}
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
     transition_keys.push_back(transition->key);
@@ -246,7 +276,9 @@ void GraphicsPipeline::WaitBuilt() {
     VideoCore::FrameTrace::ScopedSpan wait_span{
         VideoCore::FrameTrace::Event::PipelineWaitLong, reinterpret_cast<uintptr_t>(this)};
     std::unique_lock lock{build_mutex};
-    build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
+    build_condvar.wait(lock, [this] {
+        return build_state.load(std::memory_order::relaxed) == State::Ready;
+    });
 }
 
 void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& context,
@@ -438,7 +470,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     }
 }
 
-void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
+void GraphicsPipeline::Build() {
     using VideoCore::Surface::PixelFormatFromDepthFormat;
     using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
 
@@ -606,6 +638,7 @@ void GraphicsPipeline::Build(const TextureCacheRuntime& texture_runtime) {
         pipeline_state.Reset();
         return;
     }
+    pso_charge = Common::MemoryCharge(Common::MemoryAccount::PipelineStates, 0);
     LOG_INFO(Render,
              "D3D12: pipeline built for VS {:016x} PS {:016x} ({} attributes, {} RTs, RT0 {}, "
              "DSV {}, {} + {} descriptors, features VS {:x} PS {:x})",
