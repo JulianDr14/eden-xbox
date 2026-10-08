@@ -66,13 +66,18 @@ bool ReclaimRetiredStaging(Entries& entries, std::size_t& cursor, IsRetired&& re
 }
 
 /// Target size of the staging stream ring. It shrinks immediately with the app's headroom and grows
-/// back one step at a time (0 -> 64 -> 128 -> 256 MiB) only after sustained headroom. Each shrink
+/// back one step at a time (32 -> 64 -> 128 -> 256 MiB) only after sustained headroom. Each shrink
 /// that follows a growth doubles the time required for the next one, so a game living near the
 /// limit settles instead of oscillating.
+///
+/// It never goes below FLOOR_RING. Without a ring every upload, however small, becomes a dedicated
+/// committed buffer of at least 64 KiB: more commit than the ring saved, and about 0.6 ms each.
+/// A game at the limit then created 1400 of them a frame and ran at one frame a second.
 class MemoryGuardPolicy {
 public:
     static constexpr std::uint64_t MiB = MemoryGuard::MiB;
     static constexpr std::uint64_t EMERGENCY_FREE = 32 * MiB; ///< Last resort: drain and release.
+    static constexpr std::uint64_t FLOOR_RING = 32 * MiB;     ///< Kept even in an emergency.
     static constexpr std::uint64_t TIGHT_FREE = 64 * MiB;
     static constexpr std::uint64_t LOW_FREE = 128 * MiB; ///< Also where optional caches trim.
     static constexpr std::uint64_t GROW_HEADROOM = 256 * MiB; ///< Left free after a growth step.
@@ -86,7 +91,7 @@ public:
     };
 
     explicit MemoryGuardPolicy(std::uint64_t max_ring_ = 256 * MiB)
-        : max_ring{max_ring_}, target{max_ring_} {}
+        : max_ring{max_ring_}, floor_ring{(std::min)(FLOOR_RING, max_ring_)}, target{max_ring_} {}
 
     Decision Update(std::uint64_t used, std::uint64_t limit) {
         if (!limit) {
@@ -96,7 +101,7 @@ public:
         }
         const std::uint64_t free = used >= limit ? 0 : limit - used;
         const bool emergency = free <= EMERGENCY_FREE;
-        const std::uint64_t cap = emergency           ? 0
+        const std::uint64_t cap = emergency           ? floor_ring
                                   : free <= TIGHT_FREE ? TIGHT_FREE
                                   : free <= LOW_FREE   ? LOW_FREE
                                                        : max_ring;
@@ -108,7 +113,7 @@ public:
                 grew_last = false;
             }
         } else if (target < max_ring) {
-            const std::uint64_t next = target == 0 ? TIGHT_FREE : (std::min)(target * 2, max_ring);
+            const std::uint64_t next = (std::min)(target * 2, max_ring);
             if (free >= next + GROW_HEADROOM) {
                 if (++healthy_frames >= grow_frames) {
                     target = next;
@@ -126,8 +131,13 @@ public:
         return grow_frames;
     }
 
+    [[nodiscard]] std::uint64_t FloorRing() const noexcept {
+        return floor_ring;
+    }
+
 private:
     std::uint64_t max_ring;
+    std::uint64_t floor_ring;
     std::uint64_t target;
     unsigned healthy_frames{};
     unsigned grow_frames{GROW_FRAMES};
@@ -140,7 +150,8 @@ private:
 ///   2. While Retiring(), the pool hands out no ring memory and releases the ring once the GPU has
 ///      passed every tick that used it (immediately after a drain), then calls OnRetired().
 ///   3. WantedRing: bytes of the replacement ring, or 0. Old and new rings never coexist, and the
-///      replacement needs its size plus RING_MARGIN free. A refused allocation backs off.
+///      replacement needs its size plus RING_MARGIN free, except a floor ring: uploads without one
+///      commit more than it does. A refused allocation backs off.
 class StagingRingController {
 public:
     static constexpr std::uint64_t RING_MARGIN = 64 * MemoryGuard::MiB;
@@ -165,7 +176,9 @@ public:
         Plan plan{
             .previous_target = target,
             .target = decision.stream_bytes,
-            .finish = decision.emergency && ring_bytes != 0 && !emergency_finished,
+            // Draining only speeds up releasing a ring larger than the floor.
+            .finish = decision.emergency && ring_bytes > decision.stream_bytes &&
+                      !emergency_finished,
             .trim = decision.trim,
             .emergency = decision.emergency,
         };
@@ -192,6 +205,9 @@ public:
                                            std::uint64_t limit) const noexcept {
         if (ring_bytes != 0 || target == 0 || retry_frames != 0 || limit == 0) {
             return 0;
+        }
+        if (target <= policy.FloorRing()) {
+            return target;
         }
         const std::uint64_t free = used >= limit ? 0 : limit - used;
         return free >= target + RING_MARGIN ? target : 0;
