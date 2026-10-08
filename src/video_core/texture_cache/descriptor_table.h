@@ -53,9 +53,16 @@ public:
     void Refresh(GPUVAddr gpu_addr, u32 limit) noexcept {
         current_gpu_addr = gpu_addr;
         current_limit = limit;
-        // Mario Brothership reallocates a lot of times, so use aggressive pre-alloc sizes
-        // std::vector<T> by default uses quadratic growth, but that isn't even enough to satisfy brothership
-        const size_t num_descriptors = ((limit + 0x80000) & (~0x7ffff)) + 1;
+        // Some games change the limit very often. Growing to at least twice the capacity keeps the
+        // reallocations few, and sizing by the limit (not a fixed 512K entries, 16 MiB per table)
+        // keeps the tables small for the games that use a few thousand descriptors.
+        const size_t num_descriptors = size_t(limit) + 1;
+        if (num_descriptors > descriptors.capacity()) {
+            const size_t capacity = (std::max)(Common::AlignUp(num_descriptors, 4096),
+                                               descriptors.capacity() * 2);
+            descriptors.reserve(capacity);
+            read_descriptors.reserve(Common::DivCeil(capacity, size_t(64)));
+        }
         size_t old_size = read_descriptors.size();
         read_descriptors.resize(Common::DivCeil(num_descriptors, 64U));
         old_size = (std::min)(old_size, read_descriptors.size());
