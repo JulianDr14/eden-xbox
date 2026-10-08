@@ -6,11 +6,11 @@
 
 #pragma once
 
-#include <condition_variable>
 #include <cstddef>
 #include <memory>
 #include <mutex>
 
+#include "common/wake_flag.h"
 #include "core/arm/arm_interface.h"
 
 namespace Kernel {
@@ -52,6 +52,12 @@ public:
     // Wait for an interrupt.
     void Idle();
 
+    /// How idle cores wait for an interrupt; read when the cores are created. Guest threads hand
+    /// work between cores thousands of times a second (a mutex unlocked on one core wakes its
+    /// waiter on another), so a core that spins briefly before blocking takes the handoff without
+    /// the OS wake latency.
+    static void SetIdleSpinPolicy(Common::SpinPolicy policy);
+
     // Interrupt this core.
     void Interrupt();
 
@@ -67,11 +73,11 @@ public:
 
 private:
     const std::size_t m_core_index;
+    /// Raised by Interrupt, cleared by this core; Idle waits on it.
+    Common::WakeFlag m_interrupt;
     std::mutex m_guard;
-    std::condition_variable m_on_interrupt;
     Core::ArmInterface* m_arm_interface{};
     KThread* m_current_thread{};
-    bool m_is_interrupted{};
     bool m_is_single_core{};
 };
 

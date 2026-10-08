@@ -147,6 +147,10 @@ add_library(
     fs/symlink.h fs/symlink.cpp
     cpu_features.cpp
     cpu_features.h
+    cpu_wait.cpp
+    cpu_wait.h
+    wake_flag.cpp
+    wake_flag.h
     httplib.h
     net/net.h net/net.cpp
     container/unordered_map.h container/unordered_set.h)
