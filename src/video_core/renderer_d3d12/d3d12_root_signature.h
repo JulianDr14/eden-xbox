@@ -106,11 +106,22 @@ private:
     u32 num_samplers{};
 };
 
-/// Bindings one stage takes in the stream above.
-[[nodiscard]] u32 NumStageBindings(const Shader::Info& info);
 /// Binding of a stage's first texture, given the stage's first binding. Texture array elements
-/// follow it consecutively, in descriptor order.
-[[nodiscard]] u32 FirstTextureBinding(const Shader::Info& info, u32 stage_binding);
+/// follow it consecutively, in descriptor order. Info is a Shader::Info or a StageBindings.
+template <typename Info>
+[[nodiscard]] u32 FirstTextureBinding(const Info& info, u32 stage_binding) {
+    return stage_binding + Shader::NumDescriptors(info.constant_buffer_descriptors) +
+           Shader::NumDescriptors(info.storage_buffers_descriptors) +
+           static_cast<u32>(info.texture_buffer_descriptors.size()) +
+           static_cast<u32>(info.image_buffer_descriptors.size());
+}
+
+/// Bindings one stage takes in the stream above.
+template <typename Info>
+[[nodiscard]] u32 NumStageBindings(const Info& info) {
+    return FirstTextureBinding(info, 0) + Shader::NumDescriptors(info.texture_descriptors) +
+           static_cast<u32>(info.image_descriptors.size());
+}
 
 /// Builds and deduplicates guest root signatures. Thread-safe: pipelines are built on workers.
 class RootSignatureCache {

@@ -97,18 +97,6 @@ void AppendKey(std::vector<u32>& key, std::span<const D3D12_DESCRIPTOR_RANGE> ra
 
 } // Anonymous namespace
 
-u32 FirstTextureBinding(const Shader::Info& info, u32 stage_binding) {
-    return stage_binding + Shader::NumDescriptors(info.constant_buffer_descriptors) +
-           Shader::NumDescriptors(info.storage_buffers_descriptors) +
-           static_cast<u32>(info.texture_buffer_descriptors.size()) +
-           static_cast<u32>(info.image_buffer_descriptors.size());
-}
-
-u32 NumStageBindings(const Shader::Info& info) {
-    return FirstTextureBinding(info, 0) + Shader::NumDescriptors(info.texture_descriptors) +
-           static_cast<u32>(info.image_descriptors.size());
-}
-
 RootSignatureCache::RootSignatureCache(const Device& device_) : device{device_} {}
 
 RootSignatureCache::~RootSignatureCache() = default;

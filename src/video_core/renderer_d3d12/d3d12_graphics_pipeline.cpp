@@ -198,7 +198,7 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
             continue;
         }
         has_stage[stage] = true;
-        stage_infos[stage] = *info;
+        stage_infos[stage] = InternStage(*info);
         enabled_uniform_buffer_masks[stage] = info->constant_buffer_mask;
         std::ranges::copy(info->constant_buffer_used_sizes, uniform_buffer_sizes[stage].begin());
         has_images |= !info->image_descriptors.empty();
@@ -326,7 +326,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
         if (!HasStage(stage)) {
             continue;
         }
-        const Shader::Info& info = stage_infos[stage];
+        const StageBindings& info = *stage_infos[stage];
         buffer_cache.UnbindGraphicsStorageBuffers(stage);
         size_t ssbo_index = 0;
         for (const auto& desc : info.storage_buffers_descriptors) {
@@ -349,7 +349,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
         if (!HasStage(stage)) {
             continue;
         }
-        const Shader::Info& info = stage_infos[stage];
+        const StageBindings& info = *stage_infos[stage];
         buffer_cache.UnbindGraphicsTextureBuffers(stage);
         BindStageTextureBuffers(info, texture_cache, texture_buffer_it,
                                 [&](size_t index, ImageView& view,
@@ -402,7 +402,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
             continue;
         }
         buffer_cache.BindHostStageBuffers(stage);
-        const Shader::Info& info = stage_infos[stage];
+        const StageBindings& info = *stage_infos[stage];
         views_it += Shader::NumDescriptors(info.texture_buffer_descriptors);
         views_it += Shader::NumDescriptors(info.image_buffer_descriptors);
         u32 texture_binding = FirstTextureBinding(info, stage_binding);
@@ -513,7 +513,7 @@ void GraphicsPipeline::Build() {
     std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
     for (size_t index = 0; index < state.attributes.size(); ++index) {
         const auto& attribute = state.attributes[index];
-        if (attribute.enabled == 0 || !stage_infos[0].loads.Generic(index)) {
+        if (attribute.enabled == 0 || !stage_infos[0] || !stage_infos[0]->loads.Generic(index)) {
             continue;
         }
         DXGI_FORMAT format = MaxwellToD3D12::VertexFormat(attribute.Type(), attribute.Size());

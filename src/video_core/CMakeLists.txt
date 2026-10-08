@@ -497,6 +497,8 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_fence_manager.h
         renderer_d3d12/d3d12_graphics_pipeline.cpp
         renderer_d3d12/d3d12_graphics_pipeline.h
+        renderer_d3d12/d3d12_stage_bindings.cpp
+        renderer_d3d12/d3d12_stage_bindings.h
         renderer_d3d12/d3d12_linked_shader_cache.h
         renderer_d3d12/d3d12_log.h
         renderer_d3d12/d3d12_indirect_buffer.cpp

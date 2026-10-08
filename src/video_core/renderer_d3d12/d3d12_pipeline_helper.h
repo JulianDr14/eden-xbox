@@ -82,8 +82,9 @@ template <typename Descriptor, typename CbufAddress>
 
 /// Appends the image views (and the samplers of the textures) a stage reads, in the order the
 /// descriptor table expects: texel buffers, image buffers, textures, images.
-template <typename ReadHandle>
-void GatherStageViews(const Shader::Info& info, TextureCache& texture_cache, bool is_compute,
+/// Info is a Shader::Info or the StageBindings a graphics pipeline keeps of one.
+template <typename Info, typename ReadHandle>
+void GatherStageViews(const Info& info, TextureCache& texture_cache, bool is_compute,
                       ReadHandle&& read_handle, ImageViewList& views, SamplerIdList& samplers) {
     const auto add_image = [&](const auto& desc, bool blacklist) {
         for (u32 index = 0; index < desc.count; ++index) {
@@ -112,8 +113,8 @@ void GatherStageViews(const Shader::Info& info, TextureCache& texture_cache, boo
 /// Binds the texel and image buffers of a stage through the buffer cache. bind(index, view,
 /// format, is_written, is_image) forwards to Bind{Graphics,Compute}TextureBuffer. views_it
 /// advances past them.
-template <typename Bind>
-void BindStageTextureBuffers(const Shader::Info& info, TextureCache& texture_cache,
+template <typename Info, typename Bind>
+void BindStageTextureBuffers(const Info& info, TextureCache& texture_cache,
                              const VideoCommon::ImageViewInOut*& views_it, Bind&& bind) {
     size_t index = 0;
     const auto add_buffer = [&](const auto& desc) {
@@ -142,7 +143,8 @@ void BindStageTextureBuffers(const Shader::Info& info, TextureCache& texture_cac
 }
 
 /// Writes the UAV and SRV of every storage image of a stage to the descriptor table.
-inline void PushStorageImages(const Shader::Info& info, TextureCache& texture_cache,
+template <typename Info>
+void PushStorageImages(const Info& info, TextureCache& texture_cache,
                               GuestDescriptorQueue& queue,
                               const VideoCommon::ImageViewInOut*& views_it,
                               ImageTransitionList& transitions) {

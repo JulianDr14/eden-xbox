@@ -902,7 +902,7 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
                             static_cast<u32>(key.state.msaa_mode.Value()));
         // Clip distances the vertex stage writes, and which the guest enables.
         u32 clip_written = 0;
-        const Shader::Info& vs_info = pipeline->StageInfo(0);
+        const StageBindings& vs_info = pipeline->StageInfo(0);
         for (u32 i = 0; i < 8; ++i) {
             const auto attribute = static_cast<Shader::IR::Attribute>(
                 static_cast<u32>(Shader::IR::Attribute::ClipDistance0) + i);

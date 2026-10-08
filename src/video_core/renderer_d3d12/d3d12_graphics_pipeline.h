@@ -24,6 +24,7 @@
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
+#include "video_core/renderer_d3d12/d3d12_stage_bindings.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 
@@ -219,8 +220,9 @@ public:
         return layout;
     }
 
-    [[nodiscard]] const Shader::Info& StageInfo(size_t stage) const noexcept {
-        return stage_infos[stage];
+    [[nodiscard]] const StageBindings& StageInfo(size_t stage) const noexcept {
+        static const StageBindings empty{};
+        return stage_infos[stage] ? *stage_infos[stage] : empty;
     }
 
     [[nodiscard]] bool HasStage(size_t stage) const noexcept {
@@ -249,7 +251,7 @@ private:
     const PipelineLayout& layout;
     SharedDxilStages dxil; ///< Immutable linked bytecode shared across fixed-state PSOs.
     std::array<bool, NUM_STAGES> has_stage{};
-    std::array<Shader::Info, NUM_STAGES> stage_infos;
+    std::array<std::shared_ptr<const StageBindings>, NUM_STAGES> stage_infos;
     std::array<u32, NUM_STAGES> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     bool has_images{};
@@ -267,7 +269,7 @@ private:
     bool drawn{};          ///< GPU thread only.
     Common::MemoryCharge pso_charge; ///< While the PSO is resident.
 
-    /// The object itself, mostly its stages' Shader::Info. Its DXIL is charged where it is shared.
+    /// The object itself. Its DXIL and stage bindings are shared with other pipelines.
     Common::MemoryCharge charge{Common::MemoryAccount::Pipelines, sizeof(GraphicsPipeline)};
 };
 
