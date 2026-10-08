@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <dynarmic/interface/halt_reason.h>
 
 #include "core/arm/arm_interface.h"
@@ -27,6 +29,18 @@ constexpr HaltReason TranslateHaltReason(Dynarmic::HaltReason hr) {
     static_assert(u64(HaltReason::InstructionBreakpoint) == u64(InstructionBreakpoint));
     static_assert(u64(HaltReason::PrefetchAbort) == u64(PrefetchAbort));
     return HaltReason(hr);
+}
+
+/// Per-core JIT code cache size for the JITs created afterwards; 0 keeps the default. A full cache
+/// is cleared at once together with every block's metadata (links, ranges), so a smaller one
+/// bounds the whole JIT's memory at the cost of a recompilation burst each time it fills.
+inline std::atomic<u32> g_jit_code_cache_size{};
+inline void SetJitCodeCacheSize(u32 bytes) {
+    g_jit_code_cache_size.store(bytes, std::memory_order_relaxed);
+}
+inline u32 JitCodeCacheSize(u32 default_bytes) {
+    const u32 bytes = g_jit_code_cache_size.load(std::memory_order_relaxed);
+    return bytes != 0 ? bytes : default_bytes;
 }
 
 } // namespace Core

@@ -42,6 +42,7 @@
 #include "common/settings.h"
 #include "common/windows/timer_resolution.h"
 #include "core/arm/cpu_profile.h"
+#include "core/arm/dynarmic/arm_dynarmic.h"
 #include "dynarmic/interface/code_memory.h"
 #include "core/arm/jit_prewarm.h"
 #include "core/core.h"
@@ -192,6 +193,10 @@ struct BootConfig {
     u32 run_seconds{};
     /// PC test budget; hard process-commit enforcement belongs to local-run.ps1.
     u32 memory_limit_mib{};
+    /// Per-core JIT code cache ("jit_cache_mib="). Full, it is cleared with all the blocks'
+    /// metadata, so it bounds the JIT's memory: a large game compiled 400+ MiB in two minutes on
+    /// the default 512 MiB per core, and 1 GiB with the metadata, without ever releasing any.
+    u32 jit_cache_mib{128};
     /// D3D12 debug layer (renderer_debug); PC only, the console has no SDK layers.
     bool debug_layer{};
     /// With the debug layer, GPU-based validation too ("debug_layer=gbv").
@@ -322,12 +327,14 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                : config.fastmem == BootConfig::Fastmem::Full   ? "full"
                                                                : "hybrid diagnostic") +
               (fastmem_enabled ? " (hot " + std::to_string(config.fastmem_hot_mib) + " MiB)" : "") +
-              ", asynchronous shaders " + (config.async_shaders ? "on" : "off"));
+              ", asynchronous shaders " + (config.async_shaders ? "on" : "off") +
+              ", JIT cache " + std::to_string(config.jit_cache_mib) + " MiB per core");
     D3D12::SetTracedFrame(config.traced_frame, config.traced_frames);
     D3D12::SetFrameDiagnostics(!config.play);
     // The GPU spends the same 5 GiB as the emulated DRAM and the JIT: the texture and buffer
     // caches evict against what the whole app has left, not DXGI's budget.
     g_test_memory_limit = u64{config.memory_limit_mib} << 20;
+    Core::SetJitCodeCacheSize(config.jit_cache_mib << 20);
     D3D12::SetAppMemoryQuery(QueryAppMemory);
     D3D12::SetBcArrayDecode(!config.bc_arrays_native);
     // RGBA8 ASTC made loading frames upload 150-260 MiB at once and the console run out of memory
@@ -1642,6 +1649,16 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                                 config.memory_limit_mib = static_cast<u32>(parsed);
                             } else {
                                 WriteDiag("boot.cfg: invalid memory_limit_mib, ignored");
+                            }
+                        } else if (line.starts_with("jit_cache_mib=")) {
+                            const std::string_view value = std::string_view{line}.substr(14);
+                            u32 parsed{};
+                            const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+                            if (result.ec == std::errc{} && result.ptr == value.data() + value.size() &&
+                                parsed >= 32 && parsed <= 512) {
+                                config.jit_cache_mib = parsed;
+                            } else {
+                                WriteDiag("boot.cfg: invalid jit_cache_mib (32-512), ignored");
                             }
                         } else if (line == "jit_prewarm=record") {
                             config.jit_prewarm = EdenXbox::BootConfig::JitPrewarm::Record;

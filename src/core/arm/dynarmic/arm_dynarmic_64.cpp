@@ -258,7 +258,7 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
 #if defined(ARCHITECTURE_arm64) || defined(__sun__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__OpenBSD__)
     config.code_cache_size = std::uint32_t(128_MiB);
 #else
-    config.code_cache_size = std::uint32_t(512_MiB);
+    config.code_cache_size = JitCodeCacheSize(std::uint32_t(512_MiB));
 #endif
 
     // Allow memory fault handling to work
