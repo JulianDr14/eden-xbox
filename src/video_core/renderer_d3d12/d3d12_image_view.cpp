@@ -47,6 +47,20 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
             return s == Tegra::Texture::SwizzleSource::G ? Tegra::Texture::SwizzleSource::R : s;
         });
     }
+    switch (info.format) {
+    case PixelFormat::B5G6R5_UNORM:
+    case PixelFormat::A1B5G5R5_UNORM:
+    case PixelFormat::A4B4G4R4_UNORM:
+        // Their DXGI format (BaseFormat) has blue in the bits where these hold red: swap them
+        // back when sampling, as the Vulkan backend does (TryTransformSwizzleIfNeeded).
+        std::ranges::transform(swizzle, swizzle.begin(), [](Tegra::Texture::SwizzleSource s) {
+            using enum Tegra::Texture::SwizzleSource;
+            return s == R ? B : s == B ? R : s;
+        });
+        break;
+    default:
+        break;
+    }
     const D3D12_RESOURCE_DESC resource_desc = image->GetDesc();
     const u32 resource_levels = resource_desc.MipLevels;
     const u32 resource_array = resource_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
