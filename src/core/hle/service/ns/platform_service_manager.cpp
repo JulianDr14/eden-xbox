@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <vector>
 #include <boost/container/static_vector.hpp>
 
@@ -87,30 +89,16 @@ struct IPlatformServiceManager::Impl {
     std::array<u8, SHARED_FONT_MEM_SIZE> shared_font;
 };
 
-IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const char* service_name_)
-    : ServiceFramework{system_, service_name_}, impl{std::make_unique<Impl>()} {
-    // clang-format off
-    static const FunctionInfo functions[] = {
-        {0, D<&IPlatformServiceManager::RequestLoad>, "RequestLoad"},
-        {1, D<&IPlatformServiceManager::GetLoadState>, "GetLoadState"},
-        {2, D<&IPlatformServiceManager::GetSize>, "GetSize"},
-        {3, D<&IPlatformServiceManager::GetSharedMemoryAddressOffset>, "GetSharedMemoryAddressOffset"},
-        {4, D<&IPlatformServiceManager::GetSharedMemoryNativeHandle>, "GetSharedMemoryNativeHandle"},
-        {5, D<&IPlatformServiceManager::GetSharedFontInOrderOfPriority>, "GetSharedFontInOrderOfPriority"},
-        {6, D<&IPlatformServiceManager::GetSharedFontInOrderOfPriority>, "GetSharedFontInOrderOfPriorityForSystem"},
-        {100, nullptr, "RequestApplicationFunctionAuthorization"},
-        {101, nullptr, "RequestApplicationFunctionAuthorizationByProcessId"},
-        {102, nullptr, "RequestApplicationFunctionAuthorizationByApplicationId"},
-        {103, nullptr, "RefreshApplicationFunctionBlackListDebugRecord"},
-        {104, nullptr, "RequestApplicationFunctionAuthorizationByProgramId"},
-        {105, nullptr, "GetFunctionBlackListSystemVersionToAuthorize"},
-        {106, nullptr, "GetFunctionBlackListVersion"},
-        {1000, nullptr, "LoadNgWordDataForPlatformRegionChina"},
-        {1001, nullptr, "GetNgWordDataSizeForPlatformRegionChina"},
-    };
-    // clang-format on
-    RegisterHandlers(functions);
-
+/// Decrypted shared fonts, built once and shared by pl:s and pl:u: each copy is 17 MiB.
+std::shared_ptr<IPlatformServiceManager::Impl> IPlatformServiceManager::LoadSharedFonts(
+    Core::System& system) {
+    static std::mutex mutex;
+    static std::weak_ptr<Impl> loaded;
+    std::scoped_lock lock{mutex};
+    if (auto fonts = loaded.lock()) {
+        return fonts;
+    }
+    auto fonts = std::make_shared<Impl>();
     auto& fsc = system.GetFileSystemController();
 
     // Attempt to load shared font data from disk
@@ -151,9 +139,36 @@ IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const ch
                        Common::swap32);
         // Font offset and size do not account for the header
         const FontRegion region{u32(offset + 8), u32((font_data_u32.size() * sizeof(u32)) - 8)};
-        DecryptSharedFont(font_data_u32, impl->shared_font, offset);
-        impl->shared_font_regions.push_back(region);
+        DecryptSharedFont(font_data_u32, fonts->shared_font, offset);
+        fonts->shared_font_regions.push_back(region);
     }
+    loaded = fonts;
+    return fonts;
+}
+
+IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const char* service_name_)
+    : ServiceFramework{system_, service_name_}, impl{LoadSharedFonts(system_)} {
+    // clang-format off
+    static const FunctionInfo functions[] = {
+        {0, D<&IPlatformServiceManager::RequestLoad>, "RequestLoad"},
+        {1, D<&IPlatformServiceManager::GetLoadState>, "GetLoadState"},
+        {2, D<&IPlatformServiceManager::GetSize>, "GetSize"},
+        {3, D<&IPlatformServiceManager::GetSharedMemoryAddressOffset>, "GetSharedMemoryAddressOffset"},
+        {4, D<&IPlatformServiceManager::GetSharedMemoryNativeHandle>, "GetSharedMemoryNativeHandle"},
+        {5, D<&IPlatformServiceManager::GetSharedFontInOrderOfPriority>, "GetSharedFontInOrderOfPriority"},
+        {6, D<&IPlatformServiceManager::GetSharedFontInOrderOfPriority>, "GetSharedFontInOrderOfPriorityForSystem"},
+        {100, nullptr, "RequestApplicationFunctionAuthorization"},
+        {101, nullptr, "RequestApplicationFunctionAuthorizationByProcessId"},
+        {102, nullptr, "RequestApplicationFunctionAuthorizationByApplicationId"},
+        {103, nullptr, "RefreshApplicationFunctionBlackListDebugRecord"},
+        {104, nullptr, "RequestApplicationFunctionAuthorizationByProgramId"},
+        {105, nullptr, "GetFunctionBlackListSystemVersionToAuthorize"},
+        {106, nullptr, "GetFunctionBlackListVersion"},
+        {1000, nullptr, "LoadNgWordDataForPlatformRegionChina"},
+        {1001, nullptr, "GetNgWordDataSizeForPlatformRegionChina"},
+    };
+    // clang-format on
+    RegisterHandlers(functions);
 }
 
 IPlatformServiceManager::~IPlatformServiceManager() = default;
