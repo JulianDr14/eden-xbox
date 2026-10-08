@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -269,5 +270,10 @@ private:
     /// The object itself, mostly its stages' Shader::Info. Its DXIL is charged where it is shared.
     Common::MemoryCharge charge{Common::MemoryAccount::Pipelines, sizeof(GraphicsPipeline)};
 };
+
+/// pso_probe=1 (boot.cfg): measure the driver's commit for each graphics PSO built.
+void SetPsoCostProbe(bool enabled);
+/// The measured cost so far, empty without samples.
+std::string DescribePsoCost();
 
 } // namespace D3D12

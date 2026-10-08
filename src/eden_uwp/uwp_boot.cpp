@@ -53,6 +53,7 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/kernel/svc/svc_debug_string.h" // Kernel::Svc::SetDebugStringObserver
+#include "core/hle/kernel/k_memory_manager.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/service/am/applet_manager.h"
@@ -82,6 +83,8 @@ void SetTracedFrame(u32 frame, u32 count);
 void TraceNextFrames(u32 count);
 void SetDumpedShader(u64 unique_hash);
 void SetFrameDiagnostics(bool enabled);
+void SetPsoCostProbe(bool enabled);      // d3d12_graphics_pipeline.h
+std::string DescribePsoCost();            // likewise
 void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
 void ShowCpuLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
 void ShowGameMenu(VideoCore::RendererBase& renderer, std::string_view title,
@@ -119,6 +122,7 @@ std::atomic<int> g_fullscreen_request{-1};
 void WriteDiag(const std::string& msg); // defined with the UWP entry point below
 std::string MemoryReport();             // likewise
 std::string MemoryOwners();             // likewise
+std::string GuestMemoryReport(Core::System& system); // likewise
 void ApplyProcessMemoryLimit(u32 limit_mib); // likewise
 std::string LargestAllocations();       // likewise
 std::string HeapReport();               // likewise
@@ -628,10 +632,16 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 }
                 draw_menu();
             }
+            if (config.memory_audit && tick % (10 * TICKS_PER_SECOND) == 0) {
+                WriteDiag("guest memory: " + GuestMemoryReport(system));
+            }
             if (config.memory_audit && tick % TICKS_PER_MINUTE == 0) {
                 WriteDiag("heaps: " + HeapReport());
                 WriteDiag("memory map: " + LargestAllocations());
                 WriteDiag("memory by owner: " + MemoryOwners());
+                if (const std::string pso_cost = D3D12::DescribePsoCost(); !pso_cost.empty()) {
+                    WriteDiag(pso_cost);
+                }
             }
             if (tick % (10 * TICKS_PER_MINUTE) == 0) {
                 WriteDiag("step: playing, " + std::to_string(tick / TICKS_PER_MINUTE) +
@@ -846,6 +856,38 @@ std::string MemoryOwners() {
            "; rest " + std::to_string((commit > known ? commit - known : 0) >> 20) +
            " MiB of " + std::to_string(commit >> 20) +
            " MiB commit (driver objects, small GPU resources, heaps, executable)";
+}
+
+// What the guest kernel has handed out against what the emulated DRAM commits. Pages the game
+// freed stay committed on the host until they are allocated again, so the difference is about what
+// decommitting the free pages could return (the kernel's own regions, outside the pools, are small).
+std::string GuestMemoryReport(Core::System& system) {
+    using Pool = Kernel::KMemoryManager::Pool;
+    auto& manager = system.Kernel().MemoryManager();
+    u64 in_use{};
+    std::string pools;
+    constexpr std::array<std::pair<Pool, const char*>, 4> POOLS{{
+        {Pool::Application, "application"},
+        {Pool::Applet, "applet"},
+        {Pool::System, "system"},
+        {Pool::SystemNonSecure, "system non-secure"},
+    }};
+    for (const auto& [pool, name] : POOLS) {
+        const u64 size = manager.GetSize(pool);
+        const u64 free = manager.GetFreeSize(pool);
+        const u64 used = size > free ? size - free : 0;
+        in_use += used;
+        pools += std::string(pools.empty() ? "" : ", ") + name + " " + std::to_string(used >> 20) +
+                 " of " + std::to_string(size >> 20) + " MiB";
+    }
+    const std::optional<u64> committed = Common::EmulatedDramCommittedBytes();
+    if (!committed) {
+        return "in use " + std::to_string(in_use >> 20) + " MiB (" + pools + ")";
+    }
+    return "in use " + std::to_string(in_use >> 20) + " MiB, DRAM committed " +
+           std::to_string(*committed >> 20) + " MiB, freed but committed about " +
+           std::to_string((*committed > in_use ? *committed - in_use : 0) >> 20) + " MiB (" +
+           pools + ")";
 }
 
 // The PC has no app memory limit of its own: memory_limit_mib (boot.cfg) puts the process in a
@@ -1786,6 +1828,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             EdenXbox::AllocWatch::Watch(sizes);
                             WriteDiag("boot.cfg: watching " + std::to_string(sizes.size()) +
                                       " allocation sizes");
+                        } else if (line == "pso_probe=1") {
+                            D3D12::SetPsoCostProbe(true);
+                            WriteDiag("boot.cfg: measuring the driver's commit per graphics PSO");
                         } else if (line == "memory_audit=1") {
                             config.memory_audit = true;
                             WriteDiag("boot.cfg: memory audit every minute of play");

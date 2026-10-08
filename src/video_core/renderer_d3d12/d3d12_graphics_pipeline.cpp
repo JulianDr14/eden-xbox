@@ -7,6 +7,9 @@
 #include <optional>
 #include <cstddef>
 #include <cstring>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #include <boost/container/small_vector.hpp>
 
@@ -33,9 +36,28 @@
 #include "video_core/surface.h"
 #include "video_core/textures/texture.h"
 
+#include <psapi.h>
+
 namespace D3D12 {
 
 namespace {
+
+// pso_probe=1: what the driver commits for each graphics PSO. Creation is serialized and measured
+// by the process's private commit around it; other threads' allocations land in some samples, so
+// the median is the cost and the mean only a check.
+std::atomic<bool> pso_probe_enabled{};
+std::mutex pso_probe_mutex;
+std::vector<s64> pso_probe_samples;
+
+s64 PrivateCommit() {
+    PROCESS_MEMORY_COUNTERS_EX counters{.cb = sizeof(counters)};
+    if (!K32GetProcessMemoryInfo(GetCurrentProcess(),
+                                 reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
+                                 sizeof(counters))) {
+        return 0;
+    }
+    return static_cast<s64>(counters.PrivateUsage);
+}
 
 using Vulkan::FixedPipelineState;
 
@@ -608,8 +630,17 @@ void GraphicsPipeline::Build() {
 
     VideoCore::FrameTrace::ScopedSpan pso_span{
         VideoCore::FrameTrace::Event::PipelinePsoLong, reinterpret_cast<uintptr_t>(this)};
-    const HRESULT hr =
-        device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline_state));
+    HRESULT hr;
+    if (pso_probe_enabled.load(std::memory_order_relaxed)) {
+        std::scoped_lock probe_lock{pso_probe_mutex};
+        const s64 before = PrivateCommit();
+        hr = device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline_state));
+        if (SUCCEEDED(hr) && before != 0) {
+            pso_probe_samples.push_back(PrivateCommit() - before);
+        }
+    } else {
+        hr = device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline_state));
+    }
     pso_span.Finish();
     CheckRemovedAfter(device.Get(), [&] {
         return fmt::format("graphics PSO for VS {:016x} PS {:016x} (HRESULT 0x{:08X})",
@@ -646,6 +677,31 @@ void GraphicsPipeline::Build() {
              static_cast<u32>(desc.RTVFormats[0]), static_cast<u32>(desc.DSVFormat),
              layout.NumResourceDescriptors(), layout.NumSamplerDescriptors(),
              ShaderFeatureFlags(stages[0]), ShaderFeatureFlags(stages[4]));
+}
+
+void SetPsoCostProbe(bool enabled) {
+    pso_probe_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+std::string DescribePsoCost() {
+    std::vector<s64> samples;
+    {
+        std::scoped_lock probe_lock{pso_probe_mutex};
+        samples = pso_probe_samples;
+    }
+    if (samples.empty()) {
+        return {};
+    }
+    std::sort(samples.begin(), samples.end());
+    s64 sum = 0;
+    for (const s64 sample : samples) {
+        sum += sample;
+    }
+    const auto at = [&](size_t percent) { return samples[(samples.size() - 1) * percent / 100] / 1024; };
+    return fmt::format("PSO driver commit over {} builds: median {} KiB, p10 {} KiB, p90 {} KiB, "
+                       "mean {} KiB",
+                       samples.size(), at(50), at(10), at(90),
+                       sum / static_cast<s64>(samples.size()) / 1024);
 }
 
 } // namespace D3D12
