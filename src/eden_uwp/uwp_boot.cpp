@@ -109,6 +109,7 @@ void SetXAudio2ProfileEnabled(bool enabled) noexcept; // audio_core/sink/xaudio2
 
 namespace VideoCommon {
 void SetAstcArrayRecompression(bool enabled) noexcept; // texture_cache/util.h
+void SetOpaqueAstcToBc1(bool enabled) noexcept;        // texture_cache/util.h
 } // namespace VideoCommon
 
 namespace {
@@ -252,6 +253,9 @@ struct BootConfig {
     /// the 5 GiB limit. BC arrays read some layers wrong on the Series (0.2.44), seen with BC4
     /// arrays uploaded by copy; "rgba" stays as the way back if ASTC arrays show it too.
     bool astc_arrays_rgba{};
+    /// ASTC without alpha as BC1, half of BC3 ("astc_opaque=bc1", the default), or as BC3 like
+    /// the rest ("astc_opaque=bc3").
+    bool astc_opaque_bc3{};
     bool astc_verify{};
     bool gpu_failure_probe{};
     bool gpu_removal_probe{};
@@ -350,6 +354,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                                                      ? Settings::AstcRecompression::Uncompressed
                                                      : Settings::AstcRecompression::Bc3);
     VideoCommon::SetAstcArrayRecompression(!config.astc_arrays_rgba);
+    VideoCommon::SetOpaqueAstcToBc1(!config.astc_opaque_bc3);
     // The compute decoder was opt-in until its dispatches set spirv_to_dxil's compute runtime data
     // (0.2.58): 4 minutes of Mario Wonder on the Series decoded no ASTC on the CPU, without
     // corruption or hangs. "astc=bc3" brings back the CPU path.
@@ -1791,6 +1796,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         } else if (line == "astc_arrays=bc3" || line == "astc_arrays=rgba") {
                             config.astc_arrays_rgba = line == "astc_arrays=rgba";
                             WriteDiag("boot.cfg: ASTC arrays " + line.substr(12));
+                        } else if (line == "astc_opaque=bc1" || line == "astc_opaque=bc3") {
+                            config.astc_opaque_bc3 = line == "astc_opaque=bc3";
+                            WriteDiag("boot.cfg: opaque ASTC " + line.substr(12));
                         } else if (line == "astc_fresh=1") {
                             config.astc_fresh = true;
                             WriteDiag("boot.cfg: new ASTC scratch resources for every GPU upload");

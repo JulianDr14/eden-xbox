@@ -71,14 +71,16 @@ struct AstcDecode {
     u32 first_block_row;
 };
 
-/// One horizontal RGBA8 band encoded as BC3 into a raw buffer footprint.
-struct Bc3Encode {
+/// One horizontal RGBA8 band encoded as BC3, or BC1 without its alpha, into a raw buffer
+/// footprint.
+struct BcEncode {
     D3D12_CPU_DESCRIPTOR_HANDLE source;      ///< R8G8B8A8_UNORM Texture2D SRV
     D3D12_GPU_VIRTUAL_ADDRESS destination;   ///< raw buffer UAV
     u32 width;
     u32 height;
     u32 band_height;
     u32 output_row_words;
+    bool bc1;
 };
 
 /// Draws Eden's host blit and clear shaders into guest images: the D3D12 counterpart of Vulkan's
@@ -157,12 +159,12 @@ public:
     [[nodiscard]] bool CanDecodeAstc() const noexcept {
         return astc_available;
     }
-    [[nodiscard]] bool CanEncodeBc3() const noexcept {
+    [[nodiscard]] bool CanEncodeBc() const noexcept {
         return bc3_available;
     }
     /// Records the decode of one level; the caller puts the image in UNORDERED_ACCESS.
     void DecodeAstc(const AstcDecode& decode);
-    void EncodeBc3(const Bc3Encode& encode);
+    void EncodeBc(const BcEncode& encode);
 
 private:
     enum class Kind : u8 {

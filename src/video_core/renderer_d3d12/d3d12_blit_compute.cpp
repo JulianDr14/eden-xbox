@@ -60,7 +60,7 @@ constexpr u32 ASTC_GROUP_SIZE = 8;
 constexpr u32 BC3_CONSTANTS_PARAM = 0;
 constexpr u32 BC3_SOURCE_PARAM = 1;
 constexpr u32 BC3_DESTINATION_PARAM = 2;
-constexpr u32 BC3_CONSTANT_WORDS = 4;
+constexpr u32 BC3_CONSTANT_WORDS = 5;
 constexpr u32 BC3_GROUP_SIZE = 8;
 
 } // Anonymous namespace
@@ -245,7 +245,7 @@ void BlitImageHelper::CreateBc3Pipeline(const ShaderCompiler& compiler) {
                   "CreateComputePipelineState (BC3 encoder)");
 }
 
-void BlitImageHelper::EncodeBc3(const Bc3Encode& encode) {
+void BlitImageHelper::EncodeBc(const BcEncode& encode) {
     if (!bc3_available || encode.width == 0 || encode.band_height == 0) {
         return;
     }
@@ -256,7 +256,8 @@ void BlitImageHelper::EncodeBc3(const Bc3Encode& encode) {
     cmd->SetComputeRootSignature(bc3_root_signature.Get());
     scheduler.SetPipelineState(bc3_pipeline.Get());
     const std::array<u32, BC3_CONSTANT_WORDS> constants{
-        encode.width, encode.height, encode.band_height, encode.output_row_words};
+        encode.width, encode.height, encode.band_height, encode.output_row_words,
+        encode.bc1 ? 2U : 4U};
     cmd->SetComputeRoot32BitConstants(BC3_CONSTANTS_PARAM, BC3_CONSTANT_WORDS, constants.data(), 0);
     cmd->SetComputeRootDescriptorTable(BC3_SOURCE_PARAM, table);
     cmd->SetComputeRootUnorderedAccessView(BC3_DESTINATION_PARAM, encode.destination);

@@ -6,7 +6,9 @@
 // A fast balanced-quality BC3 encoder for the D3D12 ASTC upload path. One invocation encodes one
 // 4x4 block. RGB endpoints are selected along an approximated principal axis and refined after
 // RGB565 quantization; alpha uses the full eight-entry BC4 palette. The output is the exact
-// little-endian 16-byte BC3 block stream expected by CopyTextureRegion.
+// little-endian 16-byte BC3 block stream expected by CopyTextureRegion. With block_words = 2 it
+// writes only the color half, an opaque 8-byte BC1 block: its endpoints are already ordered for
+// BC1's four-color mode.
 
 #ifdef VULKAN
 #define BEGIN_PUSH_CONSTANTS layout(push_constant) uniform PushConstants {
@@ -25,11 +27,12 @@ UNIFORM(0) uint image_width;
 UNIFORM(1) uint image_height;
 UNIFORM(2) uint band_height;
 UNIFORM(3) uint output_row_words;
+UNIFORM(4) uint block_words; // 4 for BC3, 2 for BC1
 END_PUSH_CONSTANTS
 
 layout(binding = 0) uniform sampler2D source_image;
 layout(binding = 1, std430) writeonly restrict buffer OutputBuffer {
-    uvec4 output_blocks[];
+    uint output_words[];
 };
 
 uint Pack565(uvec3 color) {
@@ -244,8 +247,20 @@ void main() {
         color0 = color1;
         color1 = swap;
         color_indices ^= 0x55555555u;
-    } else if (color0 == color1 && color0 != 65535u) {
-        ++color0;
+    } else if (color0 == color1) {
+        // Equal endpoints would select BC1's three-color mode, where index 3 is transparent.
+        if (color0 != 65535u) {
+            ++color0;
+        } else {
+            --color1;
+        }
+    }
+
+    const uint output_word = block.y * output_row_words + block.x * block_words;
+    if (block_words == 2u) {
+        output_words[output_word] = color0 | (color1 << 16u);
+        output_words[output_word + 1u] = color_indices;
+        return;
     }
 
     uint alpha_lo = alpha_max | (alpha_min << 8u);
@@ -275,7 +290,8 @@ void main() {
         PutAlphaIndex(alpha_lo, alpha_hi, i, uint(index));
     }
 
-    const uint output_word = block.y * output_row_words + block.x * 4u;
-    output_blocks[output_word / 4u] = uvec4(alpha_lo, alpha_hi,
-                                            color0 | (color1 << 16u), color_indices);
+    output_words[output_word] = alpha_lo;
+    output_words[output_word + 1u] = alpha_hi;
+    output_words[output_word + 2u] = color0 | (color1 << 16u);
+    output_words[output_word + 3u] = color_indices;
 }
