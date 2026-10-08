@@ -469,8 +469,9 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     if (config.jit_prewarm != BootConfig::JitPrewarm::Off) {
         // All guest cores are still stopped. Each owns a separate JIT; never
         // compile into an instance concurrently with Run or another compiler.
-        if (auto* process = system.ApplicationProcess(); process && process->Is64Bit()) {
-            WriteDiag("step: CPU JIT profile/prewarm starting, " +
+        if (auto* process = system.ApplicationProcess()) {
+            WriteDiag(std::string{"step: CPU JIT profile/prewarm starting ("} +
+                      (process->Is64Bit() ? "A64" : "A32") + "), " +
                       std::to_string(prewarm_budget.MiBPerCore()) + " MiB per core | " +
                       MemoryReport());
             Core::ConfigureApplicationPrewarm(system,

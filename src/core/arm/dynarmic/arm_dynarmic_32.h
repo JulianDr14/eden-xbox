@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include <dynarmic/interface/A32/a32.h>
 #include <dynarmic/interface/code_page.h>
 
@@ -67,6 +69,8 @@ public:
 
     bool IsInThumbMode() const;
 
+    JitPrewarm::Owner* LoadPrewarmProfile() override;
+
     HaltReason RunThread(Kernel::KThread* thread) override;
     HaltReason StepThread(Kernel::KThread* thread) override;
 
@@ -101,6 +105,8 @@ private:
     std::size_t m_core_index{};
 
     std::optional<Dynarmic::A32::Jit> m_jit{};
+    // After m_jit: destroyed first, while it can still detach its observer from the JIT.
+    std::unique_ptr<JitPrewarm::Owner> m_prewarm;
 
     // SVC callback
     u32 m_svc_swi{};

@@ -29,10 +29,6 @@ class KPRocess;
 
 namespace Core {
 
-namespace JitPrewarm {
-struct Profile;
-}
-
 class ArmDynarmic64;
 class DynarmicExclusiveMonitor;
 class System;
@@ -81,10 +77,7 @@ public:
                   DynarmicExclusiveMonitor& exclusive_monitor, std::size_t core_index);
     ~ArmDynarmic64() override;
 
-    // Call once after loading the image, before starting any guest core.
-    void LoadPrewarmProfile();
-    size_t PreparePrewarmCandidates();
-    void PrewarmBlocks(const std::function<void(size_t, size_t)>& progress, size_t code_budget);
+    JitPrewarm::Owner* LoadPrewarmProfile() override;
 
     Architecture GetArchitecture() const override {
         return Architecture::AArch64;
@@ -121,7 +114,8 @@ private:
     std::size_t m_core_index{};
 
     std::optional<Dynarmic::A64::Jit> m_jit{};
-    std::unique_ptr<JitPrewarm::Profile> m_prewarm;
+    // After m_jit: destroyed first, while it can still detach its observer from the JIT.
+    std::unique_ptr<JitPrewarm::Owner> m_prewarm;
 
     // SVC callback
     u32 m_svc{};

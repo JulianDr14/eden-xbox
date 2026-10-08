@@ -9,6 +9,7 @@
 #include "core/arm/dynarmic/arm_dynarmic_32.h"
 #include "core/arm/dynarmic/dynarmic_cp15.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
+#include "core/arm/dynarmic/jit_prewarm_owner.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_process.h"
 
@@ -363,7 +364,21 @@ ArmDynarmic32::ArmDynarmic32(System& system, bool uses_wall_clock, Kernel::KProc
     MakeJit(&page_table_impl);
 }
 
-ArmDynarmic32::~ArmDynarmic32() = default;
+ArmDynarmic32::~ArmDynarmic32() {
+    // Kernel finalization has already stopped the CPU owners.
+    if (m_prewarm) m_prewarm->Save();
+}
+
+JitPrewarm::Owner* ArmDynarmic32::LoadPrewarmProfile() {
+#if defined(ARCHITECTURE_x86_64)
+    if (!m_prewarm) {
+        using Target = JitPrewarm::DynarmicTarget<Dynarmic::A32::Jit, DynarmicCallbacks32>;
+        m_prewarm = JitPrewarm::Owner::Create(m_system, *m_cb->m_process, m_core_index, JitPrewarm::A32Layout,
+                                              std::make_unique<Target>(*m_jit, *m_cb));
+    }
+#endif
+    return m_prewarm.get();
+}
 
 void ArmDynarmic32::SetTpidrroEl0(u64 value) {
     m_cp15->uro = static_cast<u32>(value);
