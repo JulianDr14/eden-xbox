@@ -71,7 +71,9 @@ private:
                                           Set::LanguageCode language_code);
 
     struct Impl;
-    std::unique_ptr<Impl> impl;
+    static std::shared_ptr<Impl> LoadSharedFonts(Core::System& system);
+
+    std::shared_ptr<Impl> impl;
 };
 
 } // namespace NS
