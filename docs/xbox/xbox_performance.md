@@ -3090,3 +3090,32 @@ PASS en i7-9750H (pause). Relevos con 50 µs de trabajo: off 18,8-35,9 µs de so
 relevo (varía con los estados de reposo de la CPU); adaptive 0,53 µs, con 39 992 relevos
 resueltos en spin y 6 bloqueados. Pendiente: FPS en juego en PC y Series, y comprobar en el log
 de la Series qué método elige.
+## Correccion de escritura de archivos (8 oct 2026)
+
+Se observaron escrituras de 2307552 bytes que devolvian cero. El primer harness,
+con un buffer ordinario, reprodujo problemas de modos: la cache RealVfs devolvia
+un objeto Read al abrir Write, y Write|AllowAppend no se traducia correctamente.
+Ahora la cache distingue ruta y OpenMode, y AllowAppend permite extender sin
+forzar append ni truncar; las aperturas Windows comparten lectura/escritura.
+
+La siguiente captura confirmo fallo con modo ReadWrite y errno invalid argument.
+Un harness con HostMemory real del build UWP reprodujo la escritura fallida desde
+paginas sin commit bajo demanda. El I/O kernel no invoca el handler de usuario:
+RealVfs Write copia por CPU a bloques de 64 KiB antes de fwrite en Windows.
+El almacenamiento temporal es acotado y se conservan offsets y short writes.
+
+Fsa IFile devuelve error FS5305 cuando no se escriben todos los bytes, con log de
+ruta/offset/tamanos; ya no devuelve exito tras un assert. Codigo contrastado con
+UnexpectedInLocalFileSystemA en Atmosphere:
+https://github.com/Atmosphere-NX/Atmosphere/blob/master/libraries/libvapours/include/vapours/results/fs_results.hpp
+
+Gate tools/xbox/tests/save-write.cpp PASS con core.lib/common.lib UWP: cuatro
+modos de escritura, permisos separados, offsets sin truncar, persistencia exacta
+tras cerrar/reabrir y rechazo de escritura readonly. Incluye backing HostMemory
+con extremos no cero y paginas intermedias sin tocar: 2307552 bytes verificados.
+Build incremental UWP y enlace final correctos. Prueba de guardado/carga dentro
+de la aplicacion guest y Series pendientes; el harness no certifica ese gate.
+Solo se usaron archivos temporales; no se modificaron partidas del usuario.
+
+Trampa de compilacion: R_THROW no acepta una construccion Result con coma sin
+proteger; usar constexpr Result local para el error FS5305.

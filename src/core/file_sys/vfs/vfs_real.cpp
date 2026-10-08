@@ -5,9 +5,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <cstddef>
+#include <cerrno>
 #include <iterator>
 #include <utility>
+#include <system_error>
 #include "common/assert.h"
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
@@ -46,17 +50,12 @@ bool IsWithinRoot(std::string_view root, std::string_view full_path) {
 }
 
 constexpr FS::FileAccessMode ModeFlagsToFileAccessMode(OpenMode mode) {
-    switch (mode) {
-    case OpenMode::Read:
-        return FS::FileAccessMode::Read;
-    case OpenMode::Write:
-    case OpenMode::ReadWrite:
-    case OpenMode::AllowAppend:
-    case OpenMode::All:
+    // AllowAppend permits extending the file; it does not imply C append mode.
+    // Writes must still honor their explicit offset and preserve existing contents.
+    if (True(mode & OpenMode::Write) || mode == OpenMode::AllowAppend) {
         return FS::FileAccessMode::ReadWrite;
-    default:
-        return {};
     }
+    return FS::FileAccessMode::Read;
 }
 
 } // Anonymous namespace
@@ -97,8 +96,10 @@ VirtualFile RealVfsFilesystem::OpenFileFromEntry(std::string_view path_, std::op
     std::scoped_lock lk{list_lock};
 
     if (auto it = cache.find(path); it != cache.end()) {
-        if (auto file = it->second.lock(); file) {
-            return file;
+        if (auto mode_it = it->second.find(perms); mode_it != it->second.end()) {
+            if (auto file = mode_it->second.lock(); file) {
+                return file;
+            }
         }
     }
 
@@ -110,7 +111,7 @@ VirtualFile RealVfsFilesystem::OpenFileFromEntry(std::string_view path_, std::op
     this->InsertReferenceIntoListLocked(*reference);
 
     auto file = std::make_shared<RealVfsFile>(*this, std::move(reference), path, perms, size, std::move(parent_path));
-    cache[path] = file;
+    cache[path][perms] = file;
 
     return file;
 }
@@ -222,7 +223,8 @@ std::unique_lock<std::mutex> RealVfsFilesystem::RefreshReference(const std::stri
         this->EvictSingleReferenceLocked();
 
         reference.file =
-            FS::FileOpen(path, ModeFlagsToFileAccessMode(perms), FS::FileType::BinaryFile);
+            FS::FileOpen(path, ModeFlagsToFileAccessMode(perms), FS::FileType::BinaryFile,
+                         FS::FileShareFlag::ShareReadWrite);
         if (reference.file) {
             num_open_files++;
         }
@@ -345,7 +347,32 @@ std::size_t RealVfsFile::Write(const u8* data, std::size_t length, std::size_t o
     if (!reference->file || !reference->file->Seek(static_cast<s64>(offset))) {
         return 0;
     }
-    return reference->file->WriteSpan(std::span{data, length});
+    errno = 0;
+    std::size_t written{};
+#ifdef _WIN32
+    // A guest buffer can contain demand-committed pages. A kernel file write cannot
+    // invoke our user-mode fault handler for those pages. Copy through CPU-accessed
+    // memory before passing the buffer to the CRT/OS, with bounded temporary storage.
+    std::array<u8, 64 * 1024> buffer;
+    while (written < length) {
+        const auto chunk = (std::min)(buffer.size(), length - written);
+        std::memcpy(buffer.data(), data + written, chunk);
+        const auto count = reference->file->WriteSpan(std::span<const u8>{buffer.data(), chunk});
+        written += count;
+        if (count != chunk) {
+            break;
+        }
+    }
+#else
+    written = reference->file->WriteSpan(std::span{data, length});
+#endif
+    if (written != length) {
+        const auto ec = std::error_code{errno, std::generic_category()};
+        LOG_ERROR(Common_Filesystem,
+                  "Write failed: path={}, mode={}, offset={}, requested={}, actual={}, error={}",
+                  path, static_cast<u32>(perms), offset, length, written, ec.message());
+    }
+    return written;
 }
 
 bool RealVfsFile::Rename(std::string_view name) {

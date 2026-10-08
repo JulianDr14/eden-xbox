@@ -50,7 +50,7 @@ public:
 
 private:
     using ReferenceListType = Common::IntrusiveListBaseTraits<FileReference>::ListType;
-    std::map<std::string, std::weak_ptr<VfsFile>, std::less<>> cache;
+    std::map<std::string, std::map<OpenMode, std::weak_ptr<VfsFile>>, std::less<>> cache;
     ReferenceListType open_references;
     ReferenceListType closed_references;
     std::mutex list_lock;

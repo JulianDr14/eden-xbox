@@ -7,6 +7,7 @@
 #pragma once
 
 #include "common/overflow.h"
+#include "common/logging.h"
 #include "core/file_sys/errors.h"
 #include "core/file_sys/fs_file.h"
 #include "core/file_sys/fs_filesystem.h"
@@ -147,9 +148,13 @@ private:
     Result DoWrite(s64 offset, const void* buffer, size_t size, const WriteOption& option) {
         const std::size_t written = backend->Write(static_cast<const u8*>(buffer), size, offset);
 
-        ASSERT_MSG(written == size,
-                   "Could not write all bytes to file (requested={:016X}, actual={:016X}).", size,
-                   written);
+        if (written != size) {
+            LOG_ERROR(Service_FS, "File write failed: file={}, offset={}, requested={}, actual={}",
+                      backend->GetFullPath(), offset, size, written);
+            // FS UnexpectedInLocalFileSystemA: never report a failed write as success.
+            constexpr Result write_failure{ErrorModule::FS, 5305};
+            R_THROW(write_failure);
+        }
 
         R_SUCCEED();
     }
