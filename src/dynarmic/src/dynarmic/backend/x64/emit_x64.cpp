@@ -103,7 +103,7 @@ void EmitX64::PushRSBHelper(Xbyak::Reg64 loc_desc_reg, Xbyak::Reg64 index_reg, I
 
     code.mov(index_reg.cvt32(), dword[code.ABI_JIT_PTR + code.GetJitStateInfo().offsetof_rsb_ptr]);
     code.mov(loc_desc_reg, target.Value());
-    patch_information[target].mov_rcx.push_back(code.getCurr());
+    AddPatchSite(target, PatchKind::MovRcx);
     EmitPatchMovRcx(target_code_ptr);
     code.mov(qword[code.ABI_JIT_PTR + index_reg * 8 + code.GetJitStateInfo().offsetof_rsb_location_descriptors], loc_desc_reg);
     code.mov(qword[code.ABI_JIT_PTR + index_reg * 8 + code.GetJitStateInfo().offsetof_rsb_codeptrs], rcx);
@@ -376,31 +376,30 @@ void EmitX64::Patch(const IR::LocationDescriptor& target_desc, CodePtr target_co
     // Patch sites are in blocks already emitted, so behind the write window (paged W^X).
     constexpr size_t MAX_PATCH_SIZE = 32;
 
-    for (CodePtr location : patch_info.jg) {
-        code.MakeWritable(location, MAX_PATCH_SIZE);
-        code.SetCodePtr(location);
-        EmitPatchJg(target_desc, target_code_ptr);
-    }
-
-    for (CodePtr location : patch_info.jz) {
-        code.MakeWritable(location, MAX_PATCH_SIZE);
-        code.SetCodePtr(location);
-        EmitPatchJz(target_desc, target_code_ptr);
-    }
-
-    for (CodePtr location : patch_info.jmp) {
-        code.MakeWritable(location, MAX_PATCH_SIZE);
-        code.SetCodePtr(location);
-        EmitPatchJmp(target_desc, target_code_ptr);
-    }
-
-    for (CodePtr location : patch_info.mov_rcx) {
-        code.MakeWritable(location, MAX_PATCH_SIZE);
-        code.SetCodePtr(location);
-        EmitPatchMovRcx(target_code_ptr);
+    for (const PatchSite site : patch_info) {
+        code.MakeWritable(site.Location(), MAX_PATCH_SIZE);
+        code.SetCodePtr(site.Location());
+        switch (site.Kind()) {
+        case PatchKind::Jg:
+            EmitPatchJg(target_desc, target_code_ptr);
+            break;
+        case PatchKind::Jz:
+            EmitPatchJz(target_desc, target_code_ptr);
+            break;
+        case PatchKind::Jmp:
+            EmitPatchJmp(target_desc, target_code_ptr);
+            break;
+        case PatchKind::MovRcx:
+            EmitPatchMovRcx(target_code_ptr);
+            break;
+        }
     }
 
     code.SetCodePtr(save_code_ptr);
+}
+
+void EmitX64::AddPatchSite(const IR::LocationDescriptor& target_desc, PatchKind kind) {
+    patch_information[target_desc].emplace_back(kind, code.getCurr());
 }
 
 void EmitX64::Unpatch(const IR::LocationDescriptor& target_desc) {

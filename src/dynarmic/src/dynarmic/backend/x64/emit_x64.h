@@ -116,12 +116,26 @@ public:
     virtual bool EmitTerminal(IR::Term::Terminal const& terminal, IR::LocationDescriptor initial_location, bool is_single_step) noexcept = 0;
 
     // Patching
-    struct PatchInformation {
-        boost::container::small_vector<CodePtr, 4> jg; //4*8=32
-        boost::container::small_vector<CodePtr, 4> jz; //4*8=32
-        boost::container::small_vector<CodePtr, 4> jmp; //4*8=32
-        boost::container::small_vector<CodePtr, 4> mov_rcx; //4*8=32
+    enum class PatchKind : std::uint64_t { Jg, Jz, Jmp, MovRcx };
+    /// A site in emitted code that jumps to (or loads) a block's entrypoint, with its kind in the
+    /// top bits of the address (user-mode x64 addresses fit in 48 bits). One map entry per linked
+    /// block: four lists of four inline pointers cost ~230 bytes each, 3 x 109 MiB in a large game.
+    class PatchSite {
+    public:
+        PatchSite(PatchKind kind, CodePtr location) noexcept
+            : bits{reinterpret_cast<std::uint64_t>(location) | (static_cast<std::uint64_t>(kind) << KIND_SHIFT)} {}
+        [[nodiscard]] PatchKind Kind() const noexcept { return static_cast<PatchKind>(bits >> KIND_SHIFT); }
+        [[nodiscard]] CodePtr Location() const noexcept {
+            return reinterpret_cast<CodePtr>(bits & ((std::uint64_t{1} << KIND_SHIFT) - 1));
+        }
+
+    private:
+        static constexpr unsigned KIND_SHIFT = 62;
+        std::uint64_t bits;
     };
+    /// Most blocks are linked from one site, so one is inline.
+    using PatchInformation = boost::container::small_vector<PatchSite, 1>;
+    void AddPatchSite(const IR::LocationDescriptor& target_desc, PatchKind kind);
     void Patch(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr);
     virtual void Unpatch(const IR::LocationDescriptor& target_desc);
     virtual void EmitPatchJg(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr = nullptr) = 0;
