@@ -108,6 +108,10 @@ public:
     void CopyImageMSAA(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
     /// CopyImage between resource formats of different DXGI families: through a buffer.
     void CopyThroughBuffer(Image& dst, Image& src, std::span<const VideoCommon::ImageCopy> copies);
+    /// CopyImage of plain texels holding blocks (a GPU-encoded texture) into a block-compressed
+    /// array the CPU decodes (Image::IsBcDecoded): the GPU decodes them. False if it cannot.
+    bool CopyBlocksIntoDecoded(Image& dst, Image& src,
+                               std::span<const VideoCommon::ImageCopy> copies);
     bool ShouldReinterpret(Image&, Image&) const noexcept { return false; }
     void ReinterpretImage(Image& dst, Image& src,
                           std::span<const VideoCommon::ImageCopy> copies);
