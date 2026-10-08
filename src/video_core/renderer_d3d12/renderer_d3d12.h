@@ -35,6 +35,10 @@ namespace D3D12 {
 /// "trace_frames=").
 void SetTracedFrame(u32 frame, u32 count = 1);
 
+/// Traces the draws of the next `count` presented frames (and writes their render targets), even
+/// in a session played by hand. Any thread.
+void TraceNextFrames(u32 count);
+
 /// Whether presents write frame*.bmp and trace a frame's draws (the default). Off for a session
 /// played by hand (boot.cfg "play=1"). Set before boot.
 void SetFrameDiagnostics(bool enabled);

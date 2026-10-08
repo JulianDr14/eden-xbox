@@ -74,6 +74,7 @@
 namespace D3D12 {
 // renderer_d3d12.h; its includes need Mesa's headers, which only video_core sees.
 void SetTracedFrame(u32 frame, u32 count);
+void TraceNextFrames(u32 count);
 void SetDumpedShader(u64 unique_hash);
 void SetFrameDiagnostics(bool enabled);
 void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
@@ -1417,6 +1418,10 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
             }
             if (developer_hotkeys && key == VirtualKey::T) {
                 if (pressed) VideoCore::FrameTrace::Start(480);
+                return;
+            }
+            if (developer_hotkeys && key == VirtualKey::D) {
+                if (pressed) D3D12::TraceNextFrames(2);
                 return;
             }
             if (key == VirtualKey::Escape) {
