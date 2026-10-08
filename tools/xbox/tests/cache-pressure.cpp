@@ -11,17 +11,17 @@ constexpr u64 MiB = 1024*1024;
 int main() {
     CachePressureController c;
     auto sample = [](u64 free) { return CacheMemorySnapshot{5120*MiB-free,5120*MiB,530*MiB,3447*MiB}; };
-    // A large CPU/JIT allocation is not GPU usage: 600 MiB actual headroom is normal.
-    assert(c.Update(sample(600*MiB)) == CachePressure::Normal);
+    // A large CPU/JIT allocation is not GPU usage: 800 MiB actual headroom is normal.
+    assert(c.Update(sample(800*MiB)) == CachePressure::Normal);
+    assert(c.Update(sample(768*MiB)) == CachePressure::Pressure);
+    assert(c.Update(sample(850*MiB)) == CachePressure::Pressure);
+    assert(c.Update(sample(896*MiB)) == CachePressure::Normal);
+    assert(c.Update(sample(384*MiB)) == CachePressure::Critical);
+    assert(c.Update(sample(480*MiB)) == CachePressure::Critical);
     assert(c.Update(sample(512*MiB)) == CachePressure::Pressure);
-    assert(c.Update(sample(600*MiB)) == CachePressure::Pressure);
-    assert(c.Update(sample(640*MiB)) == CachePressure::Normal);
+    assert(c.Update(sample(192*MiB)) == CachePressure::Emergency);
+    assert(c.Update(sample(240*MiB)) == CachePressure::Emergency);
     assert(c.Update(sample(256*MiB)) == CachePressure::Critical);
-    assert(c.Update(sample(350*MiB)) == CachePressure::Critical);
-    assert(c.Update(sample(384*MiB)) == CachePressure::Pressure);
-    assert(c.Update(sample(128*MiB)) == CachePressure::Emergency);
-    assert(c.Update(sample(180*MiB)) == CachePressure::Emergency);
-    assert(c.Update(sample(192*MiB)) == CachePressure::Critical);
     auto exhausted = sample(0); exhausted.app_used += MiB;
     assert(exhausted.AppFree() == 0);
     assert(c.Update(exhausted) == CachePressure::Emergency);
