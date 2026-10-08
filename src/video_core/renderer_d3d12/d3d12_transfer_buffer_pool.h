@@ -40,6 +40,10 @@ public:
 
     [[nodiscard]] u64 PooledBytes() const;
 
+    /// After the commit limit refused a resource of size bytes: frees what finished work no longer
+    /// needs, so the caller can try once more. False (nothing freed) off the recording thread.
+    bool ReclaimAfterOutOfMemory(u64 size, const char* what);
+
     /// What else to free when the commit limit refuses a buffer, after the pool's own buffers and
     /// the finished work's deferred releases (the texture cache's emptied heaps).
     void SetReclaimer(std::function<void()> reclaimer_) {

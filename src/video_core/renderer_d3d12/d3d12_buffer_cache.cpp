@@ -165,10 +165,25 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, Scheduler& schedul
 
 ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
     // Storage buffers and image buffers are UAVs.
-    return CreateCommittedBuffer(device.Get(), size, D3D12_HEAP_TYPE_DEFAULT,
-                                 D3D12_RESOURCE_STATE_COMMON,
-                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                                 "CreateCommittedResource (buffer cache)");
+    HRESULT hr = S_OK;
+    const auto create = [&] {
+        return CreateCommittedBuffer(device.Get(), size, D3D12_HEAP_TYPE_DEFAULT,
+                                     D3D12_RESOURCE_STATE_COMMON,
+                                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                     "CreateCommittedResource (buffer cache)", &hr);
+    };
+    ComPtr<ID3D12Resource> buffer = create();
+    if (!buffer && hr == E_OUTOFMEMORY &&
+        transfer_buffers.ReclaimAfterOutOfMemory(size, "cached buffer")) {
+        buffer = create();
+        if (buffer) {
+            LOG_INFO(Render, "D3D12: cached buffer created after reclaiming");
+        }
+    }
+    if (!buffer) {
+        ThrowIfFailed(hr, "CreateCommittedResource (buffer cache)");
+    }
+    return buffer;
 }
 
 void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& buffers) noexcept {
