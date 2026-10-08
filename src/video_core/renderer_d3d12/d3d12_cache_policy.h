@@ -17,12 +17,15 @@ public:
     CachePressure Update(const CacheMemorySnapshot& s) {
         constexpr u64 MiB = 1024 * 1024;
         if (s.app_limit) {
+            // A loading screen of a large game added 500 MiB of textures, buffers and DRAM in
+            // ten seconds and exhausted 410 MiB of headroom before the old 256 MiB critical level
+            // could evict the previous area's textures. Each level now starts 50% earlier.
             const u64 free = s.AppFree();
-            auto next = free <= 128*MiB ? CachePressure::Emergency :
-                        free <= 256*MiB ? CachePressure::Critical :
-                        free <= 512*MiB ? CachePressure::Pressure : CachePressure::Normal;
-            const u64 exit = app == CachePressure::Emergency ? 192*MiB :
-                             app == CachePressure::Critical ? 384*MiB : 640*MiB;
+            auto next = free <= 192*MiB ? CachePressure::Emergency :
+                        free <= 384*MiB ? CachePressure::Critical :
+                        free <= 768*MiB ? CachePressure::Pressure : CachePressure::Normal;
+            const u64 exit = app == CachePressure::Emergency ? 256*MiB :
+                             app == CachePressure::Critical ? 512*MiB : 896*MiB;
             if (next >= app || free >= exit) app = next;
         }
         if (s.gpu_budget) {
