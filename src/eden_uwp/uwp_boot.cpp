@@ -567,8 +567,31 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                           " MiB per core for this game's next session");
             }
         };
+        // memory_audit: the heaps and the memory map when the headroom runs low, since the
+        // minute reports miss the few seconds of a load that fill it. Again only after a further
+        // 50 MiB drop (at most every 2 s), or once the headroom has recovered.
+        constexpr u64 LOW_HEADROOM = 150ULL << 20;
+        constexpr u64 LOW_HEADROOM_STEP = 50ULL << 20;
+        u64 low_snapshot_headroom = ~u64{};
+        u32 low_snapshot_tick = 0;
         for (u32 tick = 1;; ++tick) {
             std::this_thread::sleep_for(TICK);
+            if (u64 used{}, limit{}; config.memory_audit && tick % 10 == 0 &&
+                                     QueryAppMemory(used, limit)) {
+                const u64 headroom = limit > used ? limit - used : 0;
+                if (headroom >= 2 * LOW_HEADROOM) {
+                    low_snapshot_headroom = ~u64{};
+                } else if (headroom < LOW_HEADROOM &&
+                           headroom + LOW_HEADROOM_STEP <= low_snapshot_headroom &&
+                           tick - low_snapshot_tick >= 2 * TICKS_PER_SECOND) {
+                    low_snapshot_headroom = headroom;
+                    low_snapshot_tick = tick;
+                    WriteDiag("low headroom " + std::to_string(headroom >> 20) +
+                              " MiB: memory by owner: " + MemoryOwners());
+                    WriteDiag("low headroom heaps: " + HeapReport());
+                    WriteDiag("low headroom memory map: " + LargestAllocations());
+                }
+            }
             if (u64 used{}, limit{}; tick % TICKS_PER_SECOND == 0 && QueryAppMemory(used, limit) &&
                                      prewarm_budget.Observe(limit > used ? limit - used : 0)) {
                 SavePrewarmStep(program_id, static_cast<std::int32_t>(prewarm_budget.Step()));
