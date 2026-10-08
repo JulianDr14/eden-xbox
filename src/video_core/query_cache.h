@@ -218,6 +218,13 @@ public:
         return committed_flushes.front() != nullptr;
     }
 
+    /// Calls func with the query cached at addr (nullptr when there is none) under the cache lock.
+    template <typename Func>
+    decltype(auto) VisitQuery(VAddr addr, Func&& func) {
+        std::unique_lock lock{mutex};
+        return func(TryGet(addr));
+    }
+
     void PopAsyncFlushes() {
         std::unique_lock lock{mutex};
         if (committed_flushes.empty()) {
@@ -398,6 +405,21 @@ public:
         return depth;
     }
 
+    /// The value, once Query has read it.
+    const std::optional<u64>& KnownResult() const noexcept {
+        return result;
+    }
+
+    /// The counter this one continues from, while its value is still unread.
+    const std::shared_ptr<HostCounter>& Dependency() const noexcept {
+        return dependency;
+    }
+
+    /// The value of the dependencies folded into this counter.
+    u64 BaseResult() const noexcept {
+        return base_result;
+    }
+
 protected:
     /// Returns the value of query from the backend API blocking as needed.
     virtual u64 BlockingQuery(bool async = false) const = 0;
@@ -454,6 +476,11 @@ public:
 
     VAddr GetCpuAddr() const noexcept {
         return cpu_addr;
+    }
+
+    /// The counter whose value the guest reads here (nullptr after a reset: the value is zero).
+    const std::shared_ptr<HostCounter>& GetCounter() const noexcept {
+        return counter;
     }
 
     u64 SizeInBytes() const noexcept {

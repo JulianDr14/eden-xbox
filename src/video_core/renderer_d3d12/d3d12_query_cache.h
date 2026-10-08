@@ -7,6 +7,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "video_core/query_cache.h"
@@ -64,6 +65,17 @@ private:
     std::array<TypePool, VideoCore::NumQueryTypes> pools;
 };
 
+/// A guest query report as a value known on the CPU plus the host query slices still counting
+/// into it, so its value can be compared on the GPU instead of read back (ConditionalRendering).
+struct PendingReport {
+    static constexpr size_t MAX_SLICES = 4;
+
+    u64 known{};
+    std::array<std::shared_ptr<HostCounter>, MAX_SLICES> slices{}; ///< newest first
+    size_t num_slices{};
+    bool complete{true}; ///< false when more than MAX_SLICES slices count into it
+};
+
 class QueryCache final
     : public VideoCommon::QueryCacheLegacy<QueryCache, CachedQuery, CounterStream, HostCounter> {
 public:
@@ -75,6 +87,10 @@ public:
     [[nodiscard]] Scheduler& GetScheduler() const noexcept { return scheduler; }
     [[nodiscard]] const std::shared_ptr<QueryPool>& GetPool() const noexcept { return pool; }
     [[nodiscard]] bool AnyCommandQueued() const noexcept;
+
+    /// The report the guest reads at addr, without waiting for the GPU; nullopt when no query is
+    /// cached there (the value is in guest memory).
+    [[nodiscard]] std::optional<PendingReport> PeekReport(VAddr addr);
 
 private:
     RasterizerD3D12& rasterizer;
@@ -91,6 +107,13 @@ public:
                 VideoCore::QueryType type);
     ~HostCounter();
     void EndQuery();
+
+    [[nodiscard]] bool Ended() const noexcept { return ended; }
+    [[nodiscard]] const QueryPool::Slot& Slot() const noexcept { return slot; }
+    [[nodiscard]] D3D12_QUERY_TYPE HostType() const noexcept { return query_type; }
+    /// Bytes ResolveQueryData writes for this query, and where the counted value is in them.
+    [[nodiscard]] u64 ResolvedBytes() const noexcept;
+    [[nodiscard]] u64 ValueOffset() const noexcept;
 
 private:
     u64 BlockingQuery(bool async = false) const override;

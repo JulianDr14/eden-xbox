@@ -74,7 +74,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
                            regs.clear_surface.A;
     const bool use_depth = regs.clear_surface.Z;
     const bool use_stencil = regs.clear_surface.S;
-    if (!use_color && !use_depth && !use_stencil) {
+    if ((!use_color && !use_depth && !use_stencil) || conditional_rendering.SkipsDraws()) {
         return;
     }
     std::scoped_lock lock{texture_cache.mutex};
@@ -141,6 +141,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
         return;
     }
     ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    const ConditionalRendering::Scope predicate{conditional_rendering, cmd};
 
     if (color_target.ptr) {
         const bool full_mask = regs.clear_surface.R && regs.clear_surface.G &&

@@ -20,6 +20,7 @@
 #include "video_core/renderer_d3d12/d3d12_fence_manager.h"
 #include "video_core/renderer_d3d12/d3d12_indirect_buffer.h"
 #include "video_core/renderer_d3d12/d3d12_pipeline_cache.h"
+#include "video_core/renderer_d3d12/d3d12_conditional_rendering.h"
 #include "video_core/renderer_d3d12/d3d12_query_cache.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -94,6 +95,7 @@ public:
     /// Submits between draws once the list being recorded holds many uploads.
     void FlushIfUploadHeavy();
     void TickFrame() override;
+    bool AccelerateConditionalRendering() override;
     bool AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface&,
                                const Tegra::Engines::Fermi2D::Surface&,
                                const Tegra::Engines::Fermi2D::Config&) override;
@@ -245,6 +247,7 @@ private:
     // QueryCache owns the scheduler callback lifetime and clears every submission callback in its
     // destructor. Keep it after the state captured by our reset callback, so it is destroyed first.
     QueryCache query_cache;
+    ConditionalRendering conditional_rendering;
     AccelerateDMA accelerate_dma;
     FenceManager fence_manager;
     bool logged_integer_clear{};

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstddef>
 #include <cstring>
 
 #include "common/logging.h"
@@ -16,19 +17,22 @@ namespace {
 struct QueryInfo {
     D3D12_QUERY_HEAP_TYPE heap;
     D3D12_QUERY_TYPE query;
-    u64 bytes;
+    u64 bytes;        ///< what ResolveQueryData writes
+    u64 value_offset; ///< where the guest's count is in it
 };
 
 QueryInfo GetQueryInfo(VideoCore::QueryType type) {
     switch (type) {
     case VideoCore::QueryType::SamplesPassed:
-        return {D3D12_QUERY_HEAP_TYPE_OCCLUSION, D3D12_QUERY_TYPE_OCCLUSION, sizeof(u64)};
+        return {D3D12_QUERY_HEAP_TYPE_OCCLUSION, D3D12_QUERY_TYPE_OCCLUSION, sizeof(u64), 0};
     case VideoCore::QueryType::PrimitivesGenerated:
         return {D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS, D3D12_QUERY_TYPE_PIPELINE_STATISTICS,
-                sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS)};
+                sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS),
+                offsetof(D3D12_QUERY_DATA_PIPELINE_STATISTICS, CPrimitives)};
     case VideoCore::QueryType::TfbPrimitivesWritten:
         return {D3D12_QUERY_HEAP_TYPE_SO_STATISTICS, D3D12_QUERY_TYPE_SO_STATISTICS_STREAM0,
-                sizeof(D3D12_QUERY_DATA_SO_STATISTICS)};
+                sizeof(D3D12_QUERY_DATA_SO_STATISTICS),
+                offsetof(D3D12_QUERY_DATA_SO_STATISTICS, NumPrimitivesWritten)};
     default:
         UNREACHABLE();
     }
@@ -99,6 +103,31 @@ bool QueryCache::AnyCommandQueued() const noexcept {
     return rasterizer.AnyCommandQueued();
 }
 
+std::optional<PendingReport> QueryCache::PeekReport(VAddr addr) {
+    return VisitQuery(addr, [](CachedQuery* query) -> std::optional<PendingReport> {
+        if (!query) {
+            return std::nullopt;
+        }
+        // The value is the counter's slice plus every slice it continues from (HostCounterBase).
+        PendingReport report;
+        for (std::shared_ptr<HostCounter> counter = query->GetCounter(); counter;) {
+            if (const std::optional<u64>& value = counter->KnownResult()) {
+                report.known += *value;
+                break;
+            }
+            if (report.num_slices == PendingReport::MAX_SLICES || !counter->Ended()) {
+                report.complete = false;
+                break;
+            }
+            report.known += counter->BaseResult();
+            std::shared_ptr<HostCounter> next = counter->Dependency();
+            report.slices[report.num_slices++] = std::move(counter);
+            counter = std::move(next);
+        }
+        return report;
+    });
+}
+
 HostCounter::HostCounter(QueryCache& cache_, std::shared_ptr<HostCounter> dependency_,
                          VideoCore::QueryType type_)
     : HostCounterBase{std::move(dependency_)}, cache{cache_}, type{type_},
@@ -125,6 +154,14 @@ void HostCounter::EndQuery() {
     ended = true;
 }
 
+u64 HostCounter::ResolvedBytes() const noexcept {
+    return GetQueryInfo(type).bytes;
+}
+
+u64 HostCounter::ValueOffset() const noexcept {
+    return GetQueryInfo(type).value_offset;
+}
+
 u64 HostCounter::BlockingQuery([[maybe_unused]] bool async) const {
     if (!ended) {
         const_cast<HostCounter*>(this)->EndQuery();
@@ -136,19 +173,7 @@ u64 HostCounter::BlockingQuery([[maybe_unused]] bool async) const {
     ThrowIfFailed(slot.readback->Map(0, &read_range, &mapped_page), "Map (query readback)");
     const u8* const mapped = static_cast<const u8*>(mapped_page) + slot.offset;
     u64 value{};
-    switch (type) {
-    case VideoCore::QueryType::SamplesPassed:
-        std::memcpy(&value, mapped, sizeof(value));
-        break;
-    case VideoCore::QueryType::PrimitivesGenerated:
-        value = reinterpret_cast<const D3D12_QUERY_DATA_PIPELINE_STATISTICS*>(mapped)->CPrimitives;
-        break;
-    case VideoCore::QueryType::TfbPrimitivesWritten:
-        value = reinterpret_cast<const D3D12_QUERY_DATA_SO_STATISTICS*>(mapped)->NumPrimitivesWritten;
-        break;
-    default:
-        break;
-    }
+    std::memcpy(&value, mapped + ValueOffset(), sizeof(value));
     const D3D12_RANGE written_range{0, 0};
     slot.readback->Unmap(0, &written_range);
     return value;
