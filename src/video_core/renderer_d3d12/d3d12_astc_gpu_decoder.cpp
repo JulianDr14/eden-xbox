@@ -18,7 +18,7 @@
 #include "video_core/surface.h"
 #include "video_core/texture_cache/accelerated_swizzle.h"
 
-// ASTC decoded on the GPU (and recompressed to BC3) on upload.
+// ASTC decoded on the GPU (and recompressed to BC1 or BC3) on upload.
 
 namespace D3D12 {
 
@@ -63,19 +63,19 @@ void TextureCacheRuntime::EnsureAstcRgbaScratch(u32 width, u32 height) {
              static_cast<u64>(astc_rgba_width) * astc_rgba_height * 4 / 1024);
 }
 
-void TextureCacheRuntime::EnsureAstcBc3Scratch(u64 size) {
+void TextureCacheRuntime::EnsureAstcBcScratch(u64 size) {
     size = Common::AlignUp(size, static_cast<u64>(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT));
-    if (astc_bc3_scratch && astc_bc3_size >= size) {
+    if (astc_bc_scratch && astc_bc_size >= size) {
         return;
     }
-    if (astc_bc3_scratch) {
-        scheduler.DeferRelease(std::move(astc_bc3_scratch));
+    if (astc_bc_scratch) {
+        scheduler.DeferRelease(std::move(astc_bc_scratch));
     }
-    astc_bc3_size = std::min(ASTC_BC3_SCRATCH_BUDGET,
+    astc_bc_size = std::min(ASTC_BC_SCRATCH_BUDGET,
                              std::bit_ceil(std::max<u64>(size, 64ULL * 1024)));
-    astc_bc3_scratch = CreateTransferBuffer(device.Get(), astc_bc3_size, true);
-    astc_bc3_state = D3D12_RESOURCE_STATE_COMMON;
-    LOG_INFO(Render, "D3D12: ASTC BC3 scratch {} KiB", astc_bc3_size / 1024);
+    astc_bc_scratch = CreateTransferBuffer(device.Get(), astc_bc_size, true);
+    astc_bc_state = D3D12_RESOURCE_STATE_COMMON;
+    LOG_INFO(Render, "D3D12: ASTC BC scratch {} KiB", astc_bc_size / 1024);
 }
 
 void TextureCacheRuntime::AccelerateImageUpload(
@@ -93,8 +93,10 @@ void TextureCacheRuntime::AccelerateImageUpload(
                  image.info.resources.layers, image.info.resources.levels);
         logged_gpu_astc = true;
     }
-    const bool encode_bc3 = image.TransferFormat().copy_format == PixelFormat::BC3_UNORM;
-    if (!encode_bc3) {
+    const PixelFormat copy_format = image.TransferFormat().copy_format;
+    const bool encode_bc1 = copy_format == PixelFormat::BC1_RGBA_UNORM;
+    const bool encode_bc = encode_bc1 || copy_format == PixelFormat::BC3_UNORM;
+    if (!encode_bc) {
         image.Transition(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
     const u64 base = map.offset;
@@ -137,7 +139,7 @@ void TextureCacheRuntime::AccelerateImageUpload(
 
         const u32 block_width = VideoCore::Surface::DefaultBlockWidth(image.info.format);
         const u32 block_height = VideoCore::Surface::DefaultBlockHeight(image.info.format);
-        if (!encode_bc3) {
+        if (!encode_bc) {
             // Each level has a distinct subresource, so consecutive level dispatches require no
             // UAV barrier. The source is a bounded raw view rather than an unbounded root SRV.
             const D3D12_CPU_DESCRIPTOR_HANDLE uav = view_descriptors.Allocate();
@@ -173,28 +175,29 @@ void TextureCacheRuntime::AccelerateImageUpload(
 
         const u32 mip_width = std::max(1U, image.info.size.width >> swizzle.level);
         const u32 mip_height = std::max(1U, image.info.size.height >> swizzle.level);
-        const u32 bc3_row_pitch = AlignPitch(Common::DivCeil(mip_width, 4U) * 16U);
+        const u32 bc_row_pitch =
+            AlignPitch(Common::DivCeil(mip_width, 4U) * (encode_bc1 ? 8U : 16U));
         const u32 band_alignment = std::lcm(block_height, 4U);
         const u32 rgba_rows = static_cast<u32>(std::max<u64>(
             band_alignment, ASTC_RGBA_SCRATCH_BUDGET / (static_cast<u64>(mip_width) * 4)));
-        const u32 bc3_rows = static_cast<u32>(std::max<u64>(
-            band_alignment, (ASTC_BC3_SCRATCH_BUDGET / bc3_row_pitch) * 4));
-        u32 band_rows = std::min({mip_height, rgba_rows, bc3_rows});
+        const u32 bc_rows = static_cast<u32>(std::max<u64>(
+            band_alignment, (ASTC_BC_SCRATCH_BUDGET / bc_row_pitch) * 4));
+        u32 band_rows = std::min({mip_height, rgba_rows, bc_rows});
         band_rows = std::max(band_alignment, band_rows / band_alignment * band_alignment);
         band_rows = std::min(band_rows, Common::AlignUp(mip_height, band_alignment));
         if (gpu_astc_fresh.load(std::memory_order_relaxed)) {
             if (astc_rgba_scratch) {
                 scheduler.DeferRelease(std::move(astc_rgba_scratch));
             }
-            if (astc_bc3_scratch) {
-                scheduler.DeferRelease(std::move(astc_bc3_scratch));
+            if (astc_bc_scratch) {
+                scheduler.DeferRelease(std::move(astc_bc_scratch));
             }
             astc_rgba_width = astc_rgba_height = 0;
-            astc_bc3_size = 0;
+            astc_bc_size = 0;
         }
         EnsureAstcRgbaScratch(mip_width, band_rows);
-        const u64 bc3_bytes = static_cast<u64>(bc3_row_pitch) * Common::DivCeil(band_rows, 4U);
-        EnsureAstcBc3Scratch(bc3_bytes);
+        const u64 bc_bytes = static_cast<u64>(bc_row_pitch) * Common::DivCeil(band_rows, 4U);
+        EnsureAstcBcScratch(bc_bytes);
 
         // One layer at a time through the same bounded scratch: each layer's blocks start
         // layer_stride bytes after the previous one's, and each is its own subresource.
@@ -263,10 +266,10 @@ void TextureCacheRuntime::AccelerateImageUpload(
                 TransitionBuffer(commands, astc_rgba_scratch.Get(), astc_rgba_state,
                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 astc_rgba_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-                if (astc_bc3_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
-                    TransitionBuffer(commands, astc_bc3_scratch.Get(), astc_bc3_state,
+                if (astc_bc_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+                    TransitionBuffer(commands, astc_bc_scratch.Get(), astc_bc_state,
                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                    astc_bc3_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                    astc_bc_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
                 }
                 const D3D12_CPU_DESCRIPTOR_HANDLE rgba_srv = view_descriptors.Allocate();
                 const D3D12_SHADER_RESOURCE_VIEW_DESC rgba_srv_desc{
@@ -278,24 +281,24 @@ void TextureCacheRuntime::AccelerateImageUpload(
                 };
                 device.Get()->CreateShaderResourceView(astc_rgba_scratch.Get(), &rgba_srv_desc,
                                                        rgba_srv);
-                blit_helper->EncodeBc3({rgba_srv, astc_bc3_scratch->GetGPUVirtualAddress(),
-                                        mip_width, rows, rows,
-                                        bc3_row_pitch / 4});
+                blit_helper->EncodeBc({rgba_srv, astc_bc_scratch->GetGPUVirtualAddress(),
+                                       mip_width, rows, rows, bc_row_pitch / 4, encode_bc1});
                 view_descriptors.Free(rgba_srv);
 
-                TransitionBuffer(commands, astc_bc3_scratch.Get(), astc_bc3_state,
+                TransitionBuffer(commands, astc_bc_scratch.Get(), astc_bc_state,
                                  D3D12_RESOURCE_STATE_COPY_SOURCE);
-                astc_bc3_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
-                if (first_y == 0 && layer == 0 &&
+                astc_bc_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                // The check compares with the CPU's BC3.
+                if (!encode_bc1 && first_y == 0 && layer == 0 &&
                     gpu_astc_verify.fetch_sub(1, std::memory_order_relaxed) > 0) {
                     VerifyGpuAstcBand({.image = image, .map = map, .swizzle = swizzle,
                                        .params = params, .mip_width = mip_width, .rows = rows,
                                        .block_width = block_width, .block_height = block_height,
-                                       .bc3_row_pitch = bc3_row_pitch, .bc3_bytes = bc3_bytes});
+                                       .bc3_row_pitch = bc_row_pitch, .bc3_bytes = bc_bytes});
                 }
                 image.Transition(D3D12_RESOURCE_STATE_COPY_DEST);
                 const D3D12_TEXTURE_COPY_LOCATION src{
-                    .pResource = astc_bc3_scratch.Get(),
+                    .pResource = astc_bc_scratch.Get(),
                     .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
                     .PlacedFootprint = {
                         .Offset = 0,
@@ -303,7 +306,7 @@ void TextureCacheRuntime::AccelerateImageUpload(
                                       .Width = Common::AlignUp(mip_width, 4U),
                                       .Height = Common::AlignUp(rows, 4U),
                                       .Depth = 1,
-                                      .RowPitch = bc3_row_pitch},
+                                      .RowPitch = bc_row_pitch},
                     },
                 };
                 const D3D12_TEXTURE_COPY_LOCATION dst{

@@ -38,7 +38,7 @@ void TextureCacheRuntime::VerifyGpuAstcBand(const AstcVerifyBand& band) {
     auto* const commands = scheduler.CommandList();
     StagingBufferRef readback = DownloadStagingBuffer(bc3_bytes, true);
     commands->CopyBufferRegion(readback.buffer, readback.offset,
-                               astc_bc3_scratch.Get(), 0, bc3_bytes);
+                               astc_bc_scratch.Get(), 0, bc3_bytes);
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT rgba_footprint{};
     u64 rgba_readback_size = 0;
     const D3D12_RESOURCE_DESC rgba_desc = astc_rgba_scratch->GetDesc();

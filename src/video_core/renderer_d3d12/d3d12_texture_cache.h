@@ -171,7 +171,7 @@ private:
     /// SetAstcGpuVerify (diagnostics/d3d12_astc_verify.cpp): reads the band's GPU BC3 and RGBA
     /// back, waits, and logs how they differ from the CPU decoder's.
     void VerifyGpuAstcBand(const AstcVerifyBand& band);
-    void EnsureAstcBc3Scratch(u64 size);
+    void EnsureAstcBcScratch(u64 size);
     /// A blit whose source and destination are the same image (a mip chain built level by level,
     /// a copy between layers or regions): the source region goes through a scratch texture.
     void BlitWithinImage(ImageView& dst, ImageView& src, const Region2D& dst_region,
@@ -199,12 +199,12 @@ private:
     BlitImageHelper* blit_helper{};
     /// Reused by single-layer ASTC uploads. Bands cap the live decode/encode workspace at 40 MiB.
     ComPtr<ID3D12Resource> astc_rgba_scratch;
-    ComPtr<ID3D12Resource> astc_bc3_scratch;
+    ComPtr<ID3D12Resource> astc_bc_scratch;
     D3D12_RESOURCE_STATES astc_rgba_state{D3D12_RESOURCE_STATE_COMMON};
-    D3D12_RESOURCE_STATES astc_bc3_state{D3D12_RESOURCE_STATE_COMMON};
+    D3D12_RESOURCE_STATES astc_bc_state{D3D12_RESOURCE_STATE_COMMON};
     u32 astc_rgba_width{};
     u32 astc_rgba_height{};
-    u64 astc_bc3_size{};
+    u64 astc_bc_size{};
     /// Source copy for BlitWithinImage, kept for the next blit of the same family.
     ComPtr<ID3D12Resource> self_blit_scratch;
     D3D12_RESOURCE_STATES self_blit_state{D3D12_RESOURCE_STATE_COMMON};

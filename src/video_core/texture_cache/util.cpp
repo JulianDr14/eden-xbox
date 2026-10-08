@@ -606,10 +606,24 @@ u32 CalculateUnswizzledSizeBytes(const ImageInfo& info) noexcept {
 
 namespace {
 std::atomic<bool> recompress_astc_arrays{true};
+std::atomic<bool> opaque_astc_to_bc1{false};
 } // Anonymous namespace
 
 void SetAstcArrayRecompression(bool enabled) noexcept {
     recompress_astc_arrays.store(enabled, std::memory_order_relaxed);
+}
+
+void SetOpaqueAstcToBc1(bool enabled) noexcept {
+    opaque_astc_to_bc1.store(enabled, std::memory_order_relaxed);
+}
+
+bool WantsOpaqueAstcScan(const ImageInfo& info) noexcept {
+    return IsPixelFormatASTC(info.format) && opaque_astc_to_bc1.load(std::memory_order_relaxed) &&
+           Settings::values.astc_recompression.GetValue() == Settings::AstcRecompression::Bc3;
+}
+
+void DetectOpaqueAstc(ImageInfo& info, std::span<const u8> guest_blocks) noexcept {
+    info.astc_opaque = !Tegra::Texture::ASTC::MayHaveAlpha(guest_blocks);
 }
 
 Settings::AstcRecompression AstcRecompressionFor(const ImageInfo& info) noexcept {
@@ -617,7 +631,11 @@ Settings::AstcRecompression AstcRecompressionFor(const ImageInfo& info) noexcept
     if (is_array && !recompress_astc_arrays.load(std::memory_order_relaxed)) {
         return Settings::AstcRecompression::Uncompressed;
     }
-    return Settings::values.astc_recompression.GetValue();
+    const Settings::AstcRecompression recompression = Settings::values.astc_recompression.GetValue();
+    if (recompression == Settings::AstcRecompression::Bc3 && info.astc_opaque) {
+        return Settings::AstcRecompression::Bc1;
+    }
+    return recompression;
 }
 
 u32 CalculateConvertedSizeBytes(const ImageInfo& info) noexcept {

@@ -127,7 +127,7 @@ inline std::atomic<bool> gpu_astc_sync{false};
 inline std::atomic<bool> gpu_astc_fresh{false};
 
 constexpr u64 ASTC_RGBA_SCRATCH_BUDGET = 32ULL * 1024 * 1024;
-constexpr u64 ASTC_BC3_SCRATCH_BUDGET = 8ULL * 1024 * 1024;
+constexpr u64 ASTC_BC_SCRATCH_BUDGET = 8ULL * 1024 * 1024;
 
 } // namespace D3D12::TextureDetail
 

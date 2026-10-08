@@ -42,6 +42,8 @@ struct ImageInfo {
     bool forced_flushed = false;
     bool dma_downloaded = false;
     bool is_sparse = false;
+    /// ASTC blocks without alpha, found when the image was made (see SetOpaqueAstcToBc1).
+    bool astc_opaque = false;
 };
 
 } // namespace VideoCommon

@@ -1740,6 +1740,12 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
     }
 
+    if (WantsOpaqueAstcScan(new_info)) {
+        // The format is fixed now: ASTC without alpha becomes BC1, half of BC3.
+        Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> blocks(
+            *gpu_memory, gpu_addr, CalculateGuestSizeInBytes(new_info), &swizzle_data_buffer);
+        DetectOpaqueAstc(new_info, std::span<const u8>{blocks.data(), blocks.size()});
+    }
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
     phase_timer.Lap(VideoCore::Perf::Counter::TextureCacheImageCreateNs);
     Image& new_image = slot_images[new_image_id];

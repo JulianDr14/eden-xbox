@@ -42,8 +42,20 @@ struct OverlapResult {
 /// block-compressed 2D arrays from the wrong place (see renderer_d3d12's DecodedBcFormat).
 void SetAstcArrayRecompression(bool enabled) noexcept;
 
+/// Re-encodes the ASTC images that have no alpha to BC1 instead of BC3 when astc_recompression
+/// asks for BC3: half the memory. Only for backends whose image formats follow
+/// AstcRecompressionFor (D3D12); off by default.
+void SetOpaqueAstcToBc1(bool enabled) noexcept;
+
+/// True when a new ASTC image should be scanned for alpha (DetectOpaqueAstc) before it is made.
+[[nodiscard]] bool WantsOpaqueAstcScan(const ImageInfo& info) noexcept;
+
+/// Sets info.astc_opaque from the image's guest ASTC blocks (Tegra::Texture::ASTC::MayHaveAlpha).
+void DetectOpaqueAstc(ImageInfo& info, std::span<const u8> guest_blocks) noexcept;
+
 /// The ASTC re-encoding this image gets: astc_recompression, unless it is an array kept
-/// uncompressed (SetAstcArrayRecompression).
+/// uncompressed (SetAstcArrayRecompression), and BC1 for BC3 when the image has no alpha
+/// (SetOpaqueAstcToBc1).
 [[nodiscard]] Settings::AstcRecompression AstcRecompressionFor(const ImageInfo& info) noexcept;
 
 [[nodiscard]] u32 CalculateLayerStride(const ImageInfo& info) noexcept;

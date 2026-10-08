@@ -1999,6 +1999,74 @@ static void DecompressBlock(std::span<const u8, 16> inBuf, const u32 blockWidth,
         }
 }
 
+static constexpr bool HasAlphaEndpoints(u32 cem) {
+    // Luminance-alpha (4, 5), RGB scale with alpha (10), RGBA (12, 13) and HDR RGB with alpha
+    // (14, 15). Every other mode decodes alpha as 1.
+    return cem == 4 || cem == 5 || cem == 10 || cem >= 12;
+}
+
+static bool BlockMayHaveAlpha(std::span<const u8, 16> block) {
+    u64 low;
+    u64 high;
+    std::memcpy(&low, block.data(), sizeof(low));
+    std::memcpy(&high, block.data() + sizeof(low), sizeof(high));
+    const u32 mode = static_cast<u32>(low & 0x7FF);
+    if ((mode & 0x1FF) == 0x1FC) {
+        // Void extent: one color for the whole block, alpha in its last 16 bits (UNORM16 in LDR,
+        // FP16 in HDR, which is not looked into).
+        return (mode & 0x200) != 0 || (high >> 56) != 0xFF;
+    }
+    if ((mode & 0xF) == 0) {
+        // Reserved: an error block, usually the zeroed padding of a block-linear image.
+        return false;
+    }
+    const u32 partitions = static_cast<u32>((low >> 11) & 3) + 1;
+    if (partitions == 1) {
+        return HasAlphaEndpoints(static_cast<u32>((low >> 13) & 0xF));
+    }
+    const u32 base_cem = static_cast<u32>((low >> 23) & 0x3F);
+    const u32 base_mode = base_cem & 3;
+    if (base_mode == 0) {
+        return HasAlphaEndpoints(base_cem >> 2);
+    }
+    // Each partition has its own mode, in class base_mode - 1 or base_mode. The bits that do not
+    // fit next to the partition index sit right below the weights, so the weights are measured.
+    InputBitStream stream(block);
+    const TexelWeightParams params = DecodeBlockInfo(stream);
+    if (params.m_bError || params.m_bVoidExtentLDR || params.m_bVoidExtentHDR) {
+        return true;
+    }
+    const u32 weight_bits = params.GetPackedBitSize();
+    const u32 extra_bits = 3 * partitions - 4;
+    if (weight_bits + extra_bits > 128) {
+        return true;
+    }
+    const u32 extra_start = 128 - weight_bits - extra_bits;
+    u32 extra = 0;
+    for (u32 i = 0; i < extra_bits; ++i) {
+        const u32 bit = extra_start + i;
+        extra |= static_cast<u32>(((bit < 64 ? low >> bit : high >> (bit - 64)) & 1) << i);
+    }
+    const u32 cem_bits = ((extra << 6) | base_cem) >> 2;
+    for (u32 i = 0; i < partitions; ++i) {
+        const u32 cem_class = base_mode - 1 + ((cem_bits >> i) & 1);
+        const u32 cem_mode = (cem_bits >> (partitions + 2 * i)) & 3;
+        if (HasAlphaEndpoints(cem_class * 4 + cem_mode)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MayHaveAlpha(std::span<const u8> blocks) {
+    for (size_t offset = 0; offset + 16 <= blocks.size(); offset += 16) {
+        if (BlockMayHaveAlpha(blocks.subspan(offset).first<16>())) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void Decompress(std::span<const uint8_t> data, uint32_t width, uint32_t height, uint32_t depth,
                 uint32_t block_width, uint32_t block_height, std::span<uint8_t> output) {
     const u32 rows = Common::DivideUp(height, block_height);
