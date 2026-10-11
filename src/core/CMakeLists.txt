@@ -712,6 +712,7 @@ add_library(core STATIC
     hle/service/hid/xcd.cpp
     hle/service/hid/xcd.h
     hle/service/hle_ipc.cpp
+    hle/service/pulse_session_graph.h
     hle/service/hle_ipc.h
     hle/service/ipc_helpers.h
     hle/service/kernel_helpers.cpp

@@ -23,6 +23,7 @@
 #include "core/hle/ipc.h"
 #include "core/hle/kernel/k_handle_table.h"
 #include "core/hle/kernel/svc_common.h"
+#include "core/hle/service/pulse_session_graph.h"
 
 union Result;
 
@@ -85,6 +86,10 @@ using SessionRequestHandlerWeakPtr = std::weak_ptr<SessionRequestHandler>;
 using SessionRequestHandlerPtr = std::shared_ptr<SessionRequestHandler>;
 using SessionRequestHandlerFactory = std::function<SessionRequestHandlerPtr()>;
 
+// Stable graph references, including closed domain slots (zero). Cloned sessions must resolve
+// the same manager/handler IDs, rather than manufacturing independent copies of service state.
+using SessionManagerCheckpoint = Pulse::SessionGraph;
+
 /**
  * Manages the underlying HLE requests for a session, and whether (or not) the session should be
  * treated as a domain. This is managed separately from server sessions, as this state is shared
@@ -95,6 +100,14 @@ public:
     explicit SessionRequestManager(Kernel::KernelCore& kernel,
                                    Service::ServerManager& server_manager);
     ~SessionRequestManager();
+
+    // Called with all service requests and domain mutations parked. The graph coordinator must
+    // reject a handler without a registered serializer before assigning it a stable ID.
+    [[nodiscard]] SessionManagerCheckpoint CaptureCheckpoint(
+        const std::function<u64(const SessionRequestHandlerPtr&)>& identify) const;
+    void RestoreCheckpoint(
+        const SessionManagerCheckpoint& state,
+        const std::function<SessionRequestHandlerPtr(u64)>& resolve);
 
     bool IsDomain() const {
         return is_domain;

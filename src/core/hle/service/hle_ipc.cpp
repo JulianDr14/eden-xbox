@@ -40,6 +40,26 @@ SessionRequestManager::SessionRequestManager(Kernel::KernelCore& kernel_,
 
 SessionRequestManager::~SessionRequestManager() = default;
 
+SessionManagerCheckpoint SessionRequestManager::CaptureCheckpoint(
+    const std::function<u64(const SessionRequestHandlerPtr&)>& identify) const {
+    return Pulse::CaptureSessionGraph<SessionRequestHandler>(
+        session_handler, domain_handlers, is_domain, convert_to_domain, is_initialized_for_sm,
+        identify);
+}
+
+void SessionRequestManager::RestoreCheckpoint(
+    const SessionManagerCheckpoint& state,
+    const std::function<SessionRequestHandlerPtr(u64)>& resolve) {
+    auto rebuilt = Pulse::ResolveSessionGraph<SessionRequestHandler>(state, resolve);
+    // Publish only after resolving every reference; callers discard the stopped candidate on
+    // failure, never execute half-restored services or replay a request with external effects.
+    session_handler = std::move(rebuilt.session_handler);
+    domain_handlers = std::move(rebuilt.domain_handlers);
+    is_domain = state.is_domain;
+    convert_to_domain = state.convert_to_domain;
+    is_initialized_for_sm = state.initialized_for_sm;
+}
+
 bool SessionRequestManager::HasSessionRequestHandler(const HLERequestContext& context) const {
     if (IsDomain() && context.HasDomainMessageHeader()) {
         const auto& message_header = context.GetDomainMessageHeader();
