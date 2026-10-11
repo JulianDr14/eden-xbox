@@ -14,38 +14,75 @@
 namespace FileSys {
 
 CNMT::CNMT(VirtualFile file) {
-    if (file->ReadObject(&header) != sizeof(CNMTHeader))
-        return;
-
-    // If type is {Application, Update, AOC} has opt-header.
-    if (header.type >= TitleType::Application && header.type <= TitleType::AOC) {
-        if (file->ReadObject(&opt_header, sizeof(CNMTHeader)) != sizeof(OptionalHeader)) {
-            LOG_WARNING(Loader, "Failed to read optional header.");
-        }
+    if (!file || file->ReadObject(&header) != sizeof(header)) return;
+    const size_t extended_size = header.table_offset;
+    const u64 table_start = sizeof(header) + extended_size;
+    const u64 content_end = table_start + u64{header.number_content_entries} * sizeof(ContentRecord);
+    const u64 end = content_end + u64{header.number_meta_entries} * sizeof(MetaRecord);
+    if (end > file->GetSize() || extended_size > 4096) return;
+    const size_t required = header.type == TitleType::Update ? 0x18 :
+        (header.type == TitleType::Application || header.type == TitleType::AOC ? 0x10 : 0);
+    if (extended_size < required) return;
+    extended_header = file->ReadBytes(extended_size, sizeof(header));
+    if (extended_header.size() != extended_size) return;
+    if (extended_size >= sizeof(opt_header))
+        std::memcpy(&opt_header, extended_header.data(), sizeof(opt_header));
+    content_records.resize(header.number_content_entries);
+    meta_records.resize(header.number_meta_entries);
+    if ((!content_records.empty() && file->ReadArray(content_records.data(), content_records.size(), table_start)
+            != content_records.size() * sizeof(ContentRecord)) ||
+        (!meta_records.empty() && file->ReadArray(meta_records.data(), meta_records.size(), content_end)
+            != meta_records.size() * sizeof(MetaRecord))) {
+        content_records.clear(); meta_records.clear(); return;
     }
-
-    for (u16 i = 0; i < header.number_content_entries; ++i) {
-        auto& next = content_records.emplace_back(ContentRecord{});
-        if (file->ReadObject(&next, sizeof(CNMTHeader) + i * sizeof(ContentRecord) +
-                                        header.table_offset) != sizeof(ContentRecord)) {
-            content_records.erase(content_records.end() - 1);
-        }
-    }
-
-    for (u16 i = 0; i < header.number_meta_entries; ++i) {
-        auto& next = meta_records.emplace_back(MetaRecord{});
-        if (file->ReadObject(&next, sizeof(CNMTHeader) + i * sizeof(MetaRecord) +
-                                        header.table_offset) != sizeof(MetaRecord)) {
-            meta_records.erase(meta_records.end() - 1);
-        }
-    }
+    for (const auto& record : content_records)
+        if (record.type >= ContentRecordType::Count) return;
+    valid = true;
 }
 
 CNMT::CNMT(CNMTHeader header_, OptionalHeader opt_header_,
            std::vector<ContentRecord> content_records_, std::vector<MetaRecord> meta_records_)
-    : header(std::move(header_)), opt_header(std::move(opt_header_)),
-      content_records(std::move(content_records_)), meta_records(std::move(meta_records_)) {}
+    : valid(true), header(std::move(header_)), opt_header(std::move(opt_header_)),
+      content_records(std::move(content_records_)), meta_records(std::move(meta_records_)) {
+    const size_t required = header.type == TitleType::Update ? 0x18 :
+        (header.type >= TitleType::Application && header.type <= TitleType::AOC ? 0x10 : 0);
+    header.table_offset = static_cast<u16>(std::max<size_t>(header.table_offset, required));
+    extended_header.resize(header.table_offset);
+    if (extended_header.size() >= sizeof(opt_header))
+        std::memcpy(extended_header.data(), &opt_header, sizeof(opt_header));
+}
 
+std::optional<PatchMetaExtendedHeader> CNMT::GetPatchHeader() const {
+    if (!valid || header.type != TitleType::Update || extended_header.size() < sizeof(PatchMetaExtendedHeader)) return {};
+    PatchMetaExtendedHeader result{}; std::memcpy(&result, extended_header.data(), sizeof(result)); return result;
+}
+std::optional<AddOnContentMetaExtendedHeader> CNMT::GetAddOnContentHeader() const {
+    if (!valid || header.type != TitleType::AOC || extended_header.size() < 0x10) return {};
+    AddOnContentMetaExtendedHeader result{};
+    std::memcpy(&result, extended_header.data(), std::min(extended_header.size(), sizeof(result))); return result;
+}
+std::optional<u64> CNMT::GetApplicationId() const {
+    if (!valid || (header.type != TitleType::Update && header.type != TitleType::AOC)) return {};
+    return u64{opt_header.title_id};
+}
+u32 CNMT::GetRequiredApplicationVersion() const {
+    if (!valid || extended_header.size() < 0x10) return 0;
+    u32_le value{};
+    const size_t offset = header.type == TitleType::AOC ? 8 : 12;
+    if (header.type != TitleType::AOC && header.type != TitleType::Application) return 0;
+    std::memcpy(&value, extended_header.data() + offset, sizeof(value));
+    return value;
+}
+u32 CNMT::GetRequiredSystemVersion() const {
+    if (!valid || extended_header.size() < 12 ||
+        (header.type != TitleType::Update && header.type != TitleType::Application)) return 0;
+    u32_le value{}; std::memcpy(&value, extended_header.data() + 8, sizeof(value)); return value;
+}
+
+u64 CNMT::GetDataPatchId() const {
+    if (!valid || header.type != TitleType::AOC || extended_header.size() < 0x18) return 0;
+    u64_le value{}; std::memcpy(&value, extended_header.data() + 0x10, sizeof(value)); return value;
+}
 CNMT::~CNMT() = default;
 
 const CNMTHeader& CNMT::GetHeader() const {
@@ -101,18 +138,13 @@ bool CNMT::UnionRecords(const CNMT& other) {
 }
 
 std::vector<u8> CNMT::Serialize() const {
-    const bool has_opt_header =
-        header.type >= TitleType::Application && header.type <= TitleType::AOC;
-    const auto dead_zone = header.table_offset + sizeof(CNMTHeader);
-    std::vector<u8> out(
-        (std::max)(sizeof(CNMTHeader) + (has_opt_header ? sizeof(OptionalHeader) : 0), dead_zone) +
-        content_records.size() * sizeof(ContentRecord) + meta_records.size() * sizeof(MetaRecord));
-    memcpy(out.data(), &header, sizeof(CNMTHeader));
-
-    // Optional Header
-    if (has_opt_header) {
-        memcpy(out.data() + sizeof(CNMTHeader), &opt_header, sizeof(OptionalHeader));
-    }
+    if (!valid) return {};
+    const size_t dead_zone = sizeof(CNMTHeader) + size_t{header.table_offset};
+    std::vector<u8> out(dead_zone + content_records.size() * sizeof(ContentRecord) +
+                        meta_records.size() * sizeof(MetaRecord));
+    std::memcpy(out.data(), &header, sizeof(header));
+    if (!extended_header.empty())
+        std::memcpy(out.data() + sizeof(header), extended_header.data(), extended_header.size());
 
     u64_le offset = header.table_offset;
 

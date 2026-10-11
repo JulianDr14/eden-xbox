@@ -8,6 +8,7 @@
 
 #include <array>
 #include <vector>
+#include <optional>
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/swap.h"
@@ -49,6 +50,13 @@ struct ContentRecord {
     std::array<u8, 0x6> size;
     ContentRecordType type;
     u8 id_offset;
+    // Since 15.0.0 the high byte holds content attributes, not size bits.
+    u8 GetAttributes() const { return size[5]; }
+    u64 GetSize() const {
+        u64 result = 0;
+        for (size_t i = 0; i < 5; ++i) result |= u64{size[i]} << (8 * i);
+        return result;
+    }
 };
 static_assert(sizeof(ContentRecord) == 0x38, "ContentRecord has incorrect size.");
 
@@ -69,6 +77,21 @@ struct OptionalHeader {
 };
 static_assert(sizeof(OptionalHeader) == 0x10, "OptionalHeader has incorrect size.");
 
+struct PatchMetaExtendedHeader {
+    u64_le application_id;
+    u32_le required_system_version;
+    u32_le extended_data_size;
+    u64_le reserved;
+};
+static_assert(sizeof(PatchMetaExtendedHeader) == 0x18);
+struct AddOnContentMetaExtendedHeader {
+    u64_le application_id;
+    u32_le required_application_version;
+    u8 content_accessibilities;
+    std::array<u8, 3> reserved;
+    u64_le data_patch_id;
+};
+static_assert(sizeof(AddOnContentMetaExtendedHeader) == 0x18);
 struct CNMTHeader {
     u64_le title_id;
     u32_le title_version;
@@ -94,6 +117,13 @@ public:
          std::vector<ContentRecord> content_records_, std::vector<MetaRecord> meta_records_);
     ~CNMT();
 
+    bool IsValid() const { return valid; }
+    std::optional<u64> GetApplicationId() const;
+    u32 GetRequiredApplicationVersion() const;
+    u32 GetRequiredSystemVersion() const;
+    u64 GetDataPatchId() const;
+    std::optional<PatchMetaExtendedHeader> GetPatchHeader() const;
+    std::optional<AddOnContentMetaExtendedHeader> GetAddOnContentHeader() const;
     const CNMTHeader& GetHeader() const;
     u64 GetTitleID() const;
     u32 GetTitleVersion() const;
@@ -106,8 +136,10 @@ public:
     std::vector<u8> Serialize() const;
 
 private:
-    CNMTHeader header;
-    OptionalHeader opt_header;
+    bool valid{};
+    CNMTHeader header{};
+    OptionalHeader opt_header{};
+    std::vector<u8> extended_header;
     std::vector<ContentRecord> content_records;
     std::vector<MetaRecord> meta_records;
 

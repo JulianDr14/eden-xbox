@@ -122,14 +122,14 @@ size_t IndirectStorage::Read(u8* buffer, size_t size, size_t offset) const {
         return 0;
     }
 
-    const_cast<IndirectStorage*>(this)->OperatePerEntry<true, true>(
+    const auto result = const_cast<IndirectStorage*>(this)->OperatePerEntry<true, true>(
         offset, size,
         [=](VirtualFile storage, s64 data_offset, s64 cur_offset, s64 cur_size) -> Result {
-            storage->Read(reinterpret_cast<u8*>(buffer) + (cur_offset - offset),
-                          static_cast<size_t>(cur_size), data_offset);
+            R_UNLESS(storage->Read(reinterpret_cast<u8*>(buffer) + (cur_offset - offset),
+                          static_cast<size_t>(cur_size), data_offset) == static_cast<size_t>(cur_size), ResultOutOfRange);
             R_SUCCEED();
         });
 
-    return size;
+    return R_SUCCEEDED(result) ? size : 0;
 }
 } // namespace FileSys

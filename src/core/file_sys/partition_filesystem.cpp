@@ -23,55 +23,52 @@ bool PartitionFilesystem::Header::HasValidMagicValue() const {
 }
 
 PartitionFilesystem::PartitionFilesystem(VirtualFile file) {
-    // At least be as large as the header
-    if (file->GetSize() < sizeof(Header)) {
-        status = Loader::ResultStatus::ErrorBadPFSHeader;
-        return;
-    }
-
-    // For cartridges, HFSs can get very large, so we need to calculate the size up to
-    // the actual content itself instead of just blindly reading in the entire file.
-    if (sizeof(Header) != file->ReadObject(&pfs_header)) {
-        status = Loader::ResultStatus::ErrorBadPFSHeader;
-        return;
-    }
-
-    if (!pfs_header.HasValidMagicValue()) {
-        status = Loader::ResultStatus::ErrorBadPFSHeader;
-        return;
-    }
-
+    status = Loader::ResultStatus::ErrorBadPFSHeader;
+    if (!file || file->GetSize() < sizeof(Header) ||
+        file->ReadObject(&pfs_header) != sizeof(Header) || !pfs_header.HasValidMagicValue()) return;
     is_hfs = pfs_header.magic == Common::MakeMagic('H', 'F', 'S', '0');
-
-    std::size_t entry_size = is_hfs ? sizeof(HFSEntry) : sizeof(PFSEntry);
-    std::size_t metadata_size =
-        sizeof(Header) + (pfs_header.num_entries * entry_size) + pfs_header.strtab_size;
-
-    // Actually read in now...
-    std::vector<u8> file_data = file->ReadBytes(metadata_size);
-    const std::size_t total_size = file_data.size();
-    file_data.push_back(0);
-
-    if (total_size != metadata_size) {
-        status = Loader::ResultStatus::ErrorIncorrectPFSFileSize;
-        return;
-    }
-
-    std::size_t entries_offset = sizeof(Header);
-    std::size_t strtab_offset = entries_offset + (pfs_header.num_entries * entry_size);
-    content_offset = strtab_offset + pfs_header.strtab_size;
-    for (u16 i = 0; i < pfs_header.num_entries; i++) {
-        FSEntry entry;
-
-        memcpy(&entry, &file_data[entries_offset + (i * entry_size)], sizeof(FSEntry));
-        std::string name(
-            reinterpret_cast<const char*>(&file_data[strtab_offset + entry.strtab_offset]));
-
-        offsets.insert_or_assign(name, content_offset + entry.offset);
-        sizes.insert_or_assign(name, entry.size);
-
+    const size_t entry_size = is_hfs ? sizeof(HFSEntry) : sizeof(PFSEntry);
+    // Bound hostile metadata before allocating. Payloads can still exceed 4 GiB.
+    constexpr size_t MaxMetadata = 16 * 1024 * 1024;
+    const u64 metadata_size = sizeof(Header) + u64{pfs_header.num_entries} * entry_size +
+                              u64{pfs_header.strtab_size};
+    if (metadata_size > MaxMetadata || metadata_size > file->GetSize()) return;
+    const auto data = file->ReadBytes(static_cast<size_t>(metadata_size));
+    if (data.size() != metadata_size) return;
+    const size_t strtab = sizeof(Header) + size_t{pfs_header.num_entries} * entry_size;
+    content_offset = static_cast<size_t>(metadata_size);
+    std::vector<std::pair<u64, u64>> ranges;
+    for (u32 i = 0; i < pfs_header.num_entries; ++i) {
+        FSEntry entry{};
+        std::memcpy(&entry, data.data() + sizeof(Header) + i * entry_size, sizeof(entry));
+        const size_t name_offset = entry.strtab_offset;
+        if (name_offset >= pfs_header.strtab_size) return;
+        const char* name_start = reinterpret_cast<const char*>(data.data() + strtab + name_offset);
+        const auto* end = static_cast<const char*>(std::memchr(
+            name_start, 0, size_t{pfs_header.strtab_size} - name_offset));
+        if (!end || end == name_start || end - name_start > 255) return;
+        std::string name{name_start, end};
+        if (name == "." || name == ".." || name.find_first_of("/\\:") != std::string::npos ||
+            offsets.contains(name)) return;
+        const u64 offset = entry.offset, size = entry.size;
+        const u64 available = file->GetSize() - content_offset;
+        if (offset > available || size > available - offset) return;
+        if (is_hfs) {
+            HFSEntry hfs{};
+            std::memcpy(&hfs, data.data() + sizeof(Header) + i * entry_size, sizeof(hfs));
+            if (u64{hfs.hash_region_size} > size) return;
+        }
+        ranges.emplace_back(offset, offset + size);
+        offsets.emplace(name, content_offset + offset);
+        sizes.emplace(name, size);
         pfs_files.emplace_back(std::make_shared<OffsetVfsFile>(
-            file, entry.size, content_offset + entry.offset, std::move(name)));
+            file, size, content_offset + offset, std::move(name)));
+    }
+    std::sort(ranges.begin(), ranges.end());
+    u64 previous_end = 0;
+    for (const auto& [begin, end] : ranges) {
+        if (begin < previous_end && begin != end) return;
+        previous_end = std::max(previous_end, end);
     }
 
     status = Loader::ResultStatus::Success;

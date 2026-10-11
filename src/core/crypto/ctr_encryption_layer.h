@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <mutex>
 #include <array>
 
 #include "core/crypto/aes_util.h"
@@ -26,6 +27,7 @@ private:
     std::size_t base_offset;
 
     // Must be mutable as operations modify cipher contexts.
+    mutable std::mutex mutex;
     mutable AESCipher<Key128> cipher;
     mutable IVData iv{};
 

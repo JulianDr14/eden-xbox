@@ -40,16 +40,24 @@ XCI::XCI(VirtualFile file_, u64 program_id, size_t program_index)
         return;
     }
 
+    if (header.hfs_offset > file->GetSize()) {
+        status = Loader::ResultStatus::ErrorBadPFSHeader;
+        return;
+    }
     PartitionFilesystem main_hfs(std::make_shared<OffsetVfsFile>(
         file, file->GetSize() - header.hfs_offset, header.hfs_offset));
-
-    update_normal_partition_end = main_hfs.GetFileOffsets()["secure"];
 
     if (main_hfs.GetStatus() != Loader::ResultStatus::Success) {
         status = main_hfs.GetStatus();
         return;
     }
 
+    const auto offsets = main_hfs.GetFileOffsets();
+    if (!offsets.contains("secure") || !main_hfs.GetFile("secure")) {
+        status = Loader::ResultStatus::ErrorBadPFSHeader;
+        return;
+    }
+    update_normal_partition_end = offsets.at("secure");
     for (XCIPartition partition :
          {XCIPartition::Update, XCIPartition::Normal, XCIPartition::Secure, XCIPartition::Logo}) {
         const auto partition_idx = static_cast<std::size_t>(partition);

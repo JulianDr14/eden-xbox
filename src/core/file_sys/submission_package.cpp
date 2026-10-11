@@ -196,6 +196,7 @@ void NSP::SetTicketKeys(const std::vector<VirtualFile>& files) {
             continue;
         }
 
+        if (ticket_file->GetSize() > 4096) continue;
         auto ticket = Core::Crypto::Ticket::Read(ticket_file);
         if (!keys.AddTicket(ticket)) {
             LOG_WARNING(Common_Filesystem, "Could not load NSP ticket {}", ticket_file->GetName());
@@ -239,6 +240,7 @@ void NSP::ReadNCAs(const std::vector<VirtualFile>& files) {
             }
 
             const CNMT cnmt(inner_file);
+            if (!cnmt.IsValid()) continue;
 
             ncas[cnmt.GetTitleID()][{cnmt.GetType(), ContentRecordType::Meta}] = nca;
 
@@ -259,7 +261,7 @@ void NSP::ReadNCAs(const std::vector<VirtualFile>& files) {
 
                 auto next_nca = std::make_shared<NCA>(std::move(next_file));
 
-                if (next_nca->GetType() == NCAContentType::Program) {
+                if ((next_nca->GetStatus() == Loader::ResultStatus::Success || next_nca->GetStatus() == Loader::ResultStatus::ErrorMissingBKTRBaseRomFS) && next_nca->GetType() == NCAContentType::Program) {
                     program_status[next_nca->GetTitleId()] = next_nca->GetStatus();
                     program_ids.insert(next_nca->GetTitleId() & 0xFFFFFFFFFFFFF000);
                 }

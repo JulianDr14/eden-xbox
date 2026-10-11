@@ -52,7 +52,8 @@ size_t AesCtrStorage::Read(u8* buffer, size_t size, size_t offset) const {
     ASSERT(Common::IsAligned(size, BlockSize));
 
     // Read the data.
-    m_base_storage->Read(buffer, size, offset);
+    if (m_base_storage->Read(buffer, size, offset) != size) return 0;
+    std::scoped_lock crypto_lock{m_mutex};
 
     // Setup the counter.
     std::array<u8, IvSize> ctr;
@@ -79,6 +80,7 @@ size_t AesCtrStorage::Write(const u8* buffer, size_t size, size_t offset) {
     ASSERT(Common::IsAligned(offset, BlockSize));
     ASSERT(Common::IsAligned(size, BlockSize));
 
+    std::scoped_lock crypto_lock{m_mutex};
     // Setup the counter.
     std::array<u8, IvSize> ctr;
     std::memcpy(ctr.data(), m_iv.data(), IvSize);

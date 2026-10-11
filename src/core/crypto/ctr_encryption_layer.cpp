@@ -19,6 +19,7 @@ std::size_t CTREncryptionLayer::Read(u8* data, std::size_t length, std::size_t o
     if (length == 0)
         return 0;
 
+    std::scoped_lock lock{mutex};
     constexpr std::size_t BlockSize = 0x10;
     constexpr std::size_t MaxChunkSize = 0x10000;
 
@@ -101,6 +102,7 @@ std::size_t CTREncryptionLayer::Read(u8* data, std::size_t length, std::size_t o
 }
 
 void CTREncryptionLayer::SetIV(const IVData& iv_) {
+    std::scoped_lock lock{mutex};
     iv = iv_;
 }
 
