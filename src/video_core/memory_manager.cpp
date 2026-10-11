@@ -390,6 +390,20 @@ void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::siz
 }
 
 void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, const std::size_t size) const {
+    // Most reads (texture and sampler headers, macro parameters) fit in one mapped big page: the
+    // same copy as ReadBlockImpl's first and only step, without walking the page operation.
+    const std::size_t offset = gpu_src_addr & big_page_mask;
+    if (size <= big_page_size - offset && IsWithinGPUAddressRange(gpu_src_addr) &&
+        GetEntry(gpu_src_addr, true) == EntryType::Mapped) [[likely]] {
+        const std::size_t page_index = gpu_src_addr >> big_page_bits;
+        const DAddr dev_addr = (DAddr(big_page_table_dev[page_index]) << cpu_page_bits) + offset;
+        if (IsBigPageContinuous(page_index)) [[likely]] {
+            std::memcpy(dest_buffer, memory.GetPointer<u8>(dev_addr), size);
+        } else {
+            memory.ReadBlockUnsafe(dev_addr, dest_buffer, size);
+        }
+        return;
+    }
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, VideoCommon::CacheType::None, true);
 }
 
