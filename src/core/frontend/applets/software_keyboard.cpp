@@ -4,13 +4,37 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <thread>
 
 #include "common/logging.h"
 #include "common/string_util.h"
+#include "common/settings.h"
 #include "core/frontend/applets/software_keyboard.h"
+#include "core/hle/service/acc/profile_manager.h"
 
 namespace Core::Frontend {
+namespace {
+/// What the stub keyboard types: the game's own initial text when it suggests one (often the
+/// player's name), else the active profile's name, so games never get a fixed "Eden" as the name.
+std::u16string StubKeyboardText(std::u16string_view initial_text, u32 max_text_length) {
+    std::u16string text{initial_text};
+    if (text.empty()) {
+        const Service::Account::ProfileManager profiles{};
+        Service::Account::ProfileBase base{};
+        if (profiles.GetProfileBase(static_cast<std::size_t>(std::clamp<s32>(
+                                        Settings::values.current_user.GetValue(), 0,
+                                        static_cast<s32>(Service::Account::MAX_USERS) - 1)),
+                                    base)) {
+            text = Common::UTF8ToUTF16(Common::StringFromFixedZeroTerminatedBuffer(
+                reinterpret_cast<const char*>(base.username.data()), base.username.size()));
+        }
+    }
+    if (text.empty()) text = u"Eden";
+    if (max_text_length != 0 && text.size() > max_text_length) text.resize(max_text_length);
+    return text;
+}
+} // namespace
 
 SoftwareKeyboardApplet::~SoftwareKeyboardApplet() = default;
 
@@ -68,7 +92,7 @@ void DefaultSoftwareKeyboardApplet::ShowNormalKeyboard() const {
     LOG_WARNING(Service_AM,
                 "(STUBBED) called, backend requested to show the normal software keyboard.");
 
-    SubmitNormalText(u"Eden");
+    SubmitNormalText(StubKeyboardText(parameters.initial_text, parameters.max_text_length));
 }
 
 void DefaultSoftwareKeyboardApplet::ShowTextCheckDialog(
@@ -103,7 +127,9 @@ void DefaultSoftwareKeyboardApplet::ShowInlineKeyboard(
              appear_parameters.key_top_as_floating, appear_parameters.enable_backspace_button,
              appear_parameters.enable_return_button, appear_parameters.disable_cancel_button);
 
-    std::thread([this] { SubmitInlineText(u"Eden"); }).detach();
+    std::thread([this, text = StubKeyboardText({}, appear_parameters.max_text_length)] {
+        SubmitInlineText(text);
+    }).detach();
 }
 
 void DefaultSoftwareKeyboardApplet::HideInlineKeyboard() const {
