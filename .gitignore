@@ -66,3 +66,6 @@ vulkansdk*.exe
 
 # Build-time generated external sources
 externals/generated
+
+# Python bytecode (tools/xbox scripts)
+__pycache__/
