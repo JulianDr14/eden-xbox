@@ -25,6 +25,7 @@
 #include <fstream>
 #include <mutex>
 #include <cstring>
+#include <share.h>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -1123,8 +1124,9 @@ void WriteDiagRaw(const char* line, bool debugger_channel = true) {
     if (g_diag_path.empty()) {
         return;
     }
-    std::FILE* f = nullptr;
-    if (fopen_s(&f, g_diag_path.c_str(), "a") == 0 && f != nullptr) {
+    // Shared, as WriteDiag's stream: fopen_s opens without sharing, so it failed and lost the
+    // crash report whenever another process had the diag open (a tail -F watching it).
+    if (std::FILE* const f = _fsopen(g_diag_path.c_str(), "a", _SH_DENYNO)) {
         std::fputs(line, f);
         std::fclose(f);
     }
