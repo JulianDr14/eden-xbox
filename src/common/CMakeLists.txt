@@ -38,6 +38,10 @@ add_library(
     cityhash.h
     common_funcs.h
     common_types.h
+    pulse_archive.cpp
+    pulse_archive.h
+    pulse_store.cpp
+    pulse_store.h
     concepts.h
     container_hash.h
     demangle.cpp
