@@ -168,9 +168,17 @@ public:
             return this;
         }
         for (size_t i = 0; i < transition_keys.size(); ++i) {
-            if (transition_keys[i] == current_key) {
-                return transitions[i];
+            if (transition_keys[i] != current_key) {
+                continue;
             }
+            GraphicsPipeline* const next = transitions[i];
+            if (i != 0) {
+                // One step forward per hit: the transitions a frame takes most end up first,
+                // where the search compares fewer whole keys before finding them.
+                std::swap(transition_keys[i], transition_keys[i - 1]);
+                std::swap(transitions[i], transitions[i - 1]);
+            }
+            return next;
         }
         return nullptr;
     }
