@@ -318,8 +318,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 setting_row = static_cast<unsigned>((y - ControllerRowTop) / ControllerRowHeight);
                 actions |= Play;
             }
-        } else if (x >= 670 && x < 895 && y >= 43 && y < 87) actions |= AddFolder;
-        else if (x >= 1080 && y >= 43 && y < 87) actions |= Panel;
+        } else if (x >= 839 && x < 1064 && y >= 43 && y < 87) actions |= AddFolder;
+        else if (x >= 1080 && x < 1226 && y >= 43 && y < 87) actions |= Panel;
         else if (!loading && x >= 320 && x < 504 && y >= 334 && y < 380) actions |= Play;
         else if (!loading && x >= 520 && x < 720 && y >= 334 && y < 380) actions |= Options;
         else if (!loading && x >= 58 && x < 1226 && y >= 444 && y < 635) {

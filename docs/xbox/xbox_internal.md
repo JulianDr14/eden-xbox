@@ -2596,3 +2596,8 @@ Se conservan los glyphs nativos para los botones de mando.
 
 Eliminado el contador redundante junto a Configuración; se conserva el indicador
 de posición/total que ya aparece junto a «Tus juegos». Cambio de dibujo solamente.
+
+
+Cabecera: Configuración y Mando agrupados a la derecha, separación de 16 unidades
+del canvas tras retirar el contador. Hitboxes actualizadas al mismo rectángulo
+visual; Mando también limita su borde derecho a 1226.

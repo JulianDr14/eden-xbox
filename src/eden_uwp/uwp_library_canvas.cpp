@@ -123,8 +123,8 @@ public:
                                      D2D1_INTERPOLATION_MODE_LINEAR);
         Text(L"eden", 120, 40, 32, 0xf4f7fa, 140, 48, true);
         Text(Tr(T::LibraryHeading), 266, 54, 16, 0x9ba9ba, 200);
-        Round(670, 43, 225, 44, 14, 0x202b39);
-        ControlPrompt(Navigation::AddFolder, Tr(T::SettingsTitle), 680, 49, 174);
+        Round(839, 43, 225, 44, 14, 0x202b39);
+        ControlPrompt(Navigation::AddFolder, Tr(T::SettingsTitle), 849, 49, 174);
         Round(1080, 43, 146, 44, 14, 0x202b39);
         ControlPrompt(Navigation::Settings, Tr(T::Controller), 1090, 49, 100);
         Round(50, 112, 1176, 1, 0, 0x233142);
