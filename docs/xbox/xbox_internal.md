@@ -2573,3 +2573,12 @@ al cambiar contenido se limpia inmediatamente y se relee en el worker de metadat
 Caché formato v3; v2 se invalida automáticamente. Harness LibraryCache pasa versión,
 actualización, downgrade, vacía, registros antiguos y truncados. Gate visual y de
 update real pendiente. Sin commits, renderer/JIT/memoria ni partidas modificados.
+
+
+## 11 octubre 2026: icono F2 de la biblioteca
+
+La UI referenciaba keyboard_f2.png, pero el PNG faltaba: AssetPrompt mostraba texto
+de respaldo. Añadido el F2 outline original de Kenney Input Prompts 1.5, CC0,
+conservando la licencia existente. SHA256 del F1 del ZIP igual al F1 incluido
+confirma que se usa el mismo conjunto/estilo. package-appx copia Assets de forma
+recursiva: no requiere recompilar el ejecutable. Sin cambios de atajos.

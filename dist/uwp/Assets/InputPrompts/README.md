@@ -11,3 +11,5 @@ Button A/B use the color outline variants; View/Menu use outline variants;
 navigation uses dpad_all/arrows. Other keys use outline variants.
 
 These are Kenney's glyphs, not a claim of Microsoft endorsement or certification.
+
+`keyboard_f2.png` uses the original `keyboard_f2_outline.png`, matching the F1 outline style.
