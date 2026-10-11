@@ -127,7 +127,7 @@ Cutting the per-draw cost of the D3D12 backend is the next target for optimisati
 | App memory | A memory guard that shrinks the caches as the 5120 MiB limit nears, and a ledger of who owns each MiB | See [The memory guard](#the-memory-guard) and [The memory wall](#the-memory-wall) |
 | Textures | ASTC decoded on the GPU into BC3, or BC1 when the texture has no alpha; arrays included | `astc=bc3` keeps the CPU path, `astc_opaque=bc3` keeps every ASTC texture as BC3, `astc_arrays=rgba` keeps arrays in RGBA8 |
 | Audio | XAudio2 2.9 | Same path on PC and Series |
-| Front end | Game library with cover art, in-game menu (View + Menu held), configuration panel | Imports keys and firmware from a folder; games from `LocalState\games` or external folders and USB drives |
+| Front end | Game library with cover art cached on disk, in-game menu (View + Menu held), settings with a System page (user name, languages, region) | English and Spanish interface; imports keys and firmware from a folder; games from `LocalState\games` or external folders and USB drives. See [The front end](#the-front-end) |
 | Input | Xbox controllers, keyboard on PC with rebindable keys | Emulated controller type (Pro, Joy-Cons, handheld) chosen per game; a chosen pad that disconnects is never silently replaced |
 | Recovery | A GPU failure returns to the library instead of killing the app | Still being validated on the Series |
 
@@ -255,14 +255,14 @@ Where things live:
 
 | Path | What |
 | --- | --- |
-| `src/eden_uwp/` | Front end: CoreWindow boot, library, in-game menu, controllers and keyboard, file import, external storage, `eden_uwp_diag.txt` |
+| `src/eden_uwp/` | Front end: CoreWindow boot, library and its metadata cache, in-game menu, settings, interface languages (`locales/`), controllers and keyboard, file import, external storage, `eden_uwp_diag.txt` |
 | `src/dynarmic/` | The JIT, with W^X for the AppContainer, the warm-up profiles and compact block metadata |
 | `src/common/` | Shared pieces this port added to: the memory ledger, the spin-then-block core wait, fiber stacks that grow on demand |
 | `src/video_core/renderer_d3d12/` | The D3D12 renderer: scheduler, buffer and texture caches, pipelines, root signatures, presentation (see [Inside the renderer](#inside-the-renderer)) |
 | `src/shader_recompiler/` | Eden's shader recompiler, with the adjustments the D3D12 profile needs |
 | `tools/xbox/mesa/` | Our additions to Mesa's `spirv_to_dxil` (pipeline linking, integer sampling) |
 | `tools/xbox/` | Build, packaging, local run, Mesa build and crash symbolication scripts |
-| `tools/xbox/tests/` | Standalone tests of the pure policies: memory guard, PSO residency, JIT warm-up, controllers, library |
+| `tools/xbox/tests/` | Standalone tests of the pure policies: memory guard, PSO residency, JIT warm-up, controllers, library, languages, system settings, on-screen keyboard |
 | `dist/uwp/` | App manifest and package assets |
 
 Two runtime DLLs are loaded from the package root: `spirv_to_dxil.dll` (built from Mesa by
@@ -453,6 +453,50 @@ turns the tracker off. To get the files off a console, use the Device Portal fil
   bug does not appear twice.
 - **Tested in isolation.** `tools/xbox/tests/bug-tracker.cpp` covers deduplication, concurrency, the
   queue, classification, the files end to end, and the cost.
+
+### The front end
+
+The library, settings and in-game menu are drawn with Direct2D on the app's own swapchain (the
+in-game menu with the renderer's overlay font), without XAML.
+
+**Cover art and titles are cached.** Reading a game's title and icon means opening the NSP or XCI
+through Eden's loaders, and before that building a `Core::System`. The library used to do it for
+every page it showed. Now each game gets a small record in `LocalCache\library` (title, developer,
+icon, and the file size and date when the game is in internal storage), written atomically. A page
+of covers is a few small file reads; a game is only opened the first time it is seen, when its file
+changes, or after **Settings > System > Clear library cache**. One background worker fills the
+cache in priority order: the visible page and its neighbours first, then every title already
+cached, then the remaining games in short batches that give way as soon as the player changes page.
+
+**Languages.** Every visible string has an id (`src/eden_uwp/localization.h`), and each language is
+one catalog in `src/eden_uwp/locales/`. Catalogs are built at compile time: a missing, repeated or
+empty translation stops the build, so a half-translated screen cannot ship. Placeholders are
+positional (`{0}`), plurals follow the language's CLDR rule, and the interface language is picked
+from Windows' preferred languages with BCP 47 fallback (`es-CO` → `es` → English). English and
+Spanish are complete; adding a language is one catalog file and one line in `locales/registry.cpp`
+(steps in [the front end notes](docs/xbox/xbox_frontend.md)).
+
+**Settings > System.** Each choice is either explicit or **Automatic**, which follows the console
+(or PC) language and home region:
+- *User name*: written to the active profile before the game loads, so games show it. Up to 10
+  characters, as on the Switch.
+- *Emulator language*: English or Spanish.
+- *Game language*: the 18 Switch languages. Automatic picks the variant from the region (Spain's
+  Spanish in Spain, Latin American Spanish elsewhere; American or British English, and so on). A
+  game that lacks the chosen language gets the closest one it declares: the other variant, then
+  English, then any.
+- *Console region*: Americas, Europe, Japan, Australia/New Zealand, China, Korea or Taiwan/Hong
+  Kong.
+
+**Why an on-screen keyboard of our own, and not the system one.** The Xbox system keyboard
+(`InputPane`) attaches to a focused text control. With no XAML there is none: the only route is
+implementing a text control by hand over `CoreTextEditContext`, and even then Microsoft documents
+that overlay UI such as the input pane is not fully supported for full-screen apps like games, and
+`InputPane.TryShow` is only a best effort. The app runs as a full-screen game on the Series, so the
+name field would depend on an overlay that may never show up. The keyboard in `text_entry.h`
+instead behaves the same on the Series and the PC, works with a controller, a mouse or a real
+keyboard, and is a pure class with its own tests. Controls follow the console keyboard: A types,
+X deletes, Y adds a space, View is Shift, Menu confirms and B cancels.
 
 ## Running it on a console
 

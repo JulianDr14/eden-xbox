@@ -572,3 +572,82 @@ La biblioteca muestra `v0.2.73.0` discretamente abajo a la derecha. El texto
 procede de `Package.Current().Id().Version()`, no de una constante duplicada: la
 consulta y el layout DirectWrite se almacenan al crear el canvas y se reutilizan
 al dibujar. Comparte el comportamiento en PC y Series. Gate visual pendiente.
+
+# Caché de la biblioteca, idiomas y Configuración > Sistema (11 oct 2026)
+
+## Caché de títulos y carátulas
+
+`library_cache.h`: un registro por juego en `LocalCache\library\<hash>.bin` (hash FNV-1a de la
+ruta de lanzamiento). Guarda título, desarrollador, el icono tal como lo trae el juego (JPEG,
+máx. 1 MiB), la ruta completa (colisiones de hash = fallo de caché) y dos sellos: tamaño + fecha
+del archivo (solo almacenamiento interno; en USB la consulta brokered por juego costaría más que
+lo que ahorra) y el idioma de juego con el que se leyó el título. Escritura atómica: `.tmp` y
+renombrado. `Limpiar caché de la biblioteca` (Sistema) borra la carpeta.
+
+`ReadLibraryMetadata` consulta la caché primero y solo crea `Core::System` y abre el juego en el
+primer fallo; lo leído se guarda. Un solo worker, por prioridad:
+1. Ventana visible: página actual, siguiente y anterior (15 juegos) con iconos. Fuera de esa
+   ventana se liberan los bytes; el canvas conserva 32 carátulas decodificadas por ruta.
+2. Títulos de toda la biblioteca solo desde caché, en lotes de 64.
+3. Relleno en segundo plano: abre los juegos aún sin caché, 6 por lote, y los guarda.
+
+Los lotes 2 y 3 se interrumpen al cambiar de página y se reanudan desde el primer juego no leído.
+La segunda visita a la biblioteca no abre ningún juego: cada página son lecturas de archivos
+pequeños.
+
+## Idiomas de la interfaz
+
+`localization.h`: cada texto visible tiene un id en `I18n::Text`; cada idioma es un catálogo en
+`locales/<tag>.cpp` construido con `MakeCatalog`, que es `consteval`: un id que falta, repetido o
+vacío **no compila**. Marcadores posicionales `{0}`, `{1}` (la traducción puede reordenarlos);
+plurales con la regla CLDR del idioma (`Plural`). El menú en juego usa la misma traducción
+pasada a `ToOverlayText` (mayúsculas ASCII sin tildes para la fuente 3x5 del overlay).
+
+Negociación BCP 47: preferencias de Windows en orden, recortando subetiquetas
+(`es-CO` -> `es`), inglés si ninguna coincide. Inglés es también el respaldo de cualquier texto
+que falte en un catálogo parcial.
+
+Para agregar un idioma (p. ej. portugués):
+1. Copiar `locales/en.cpp` a `locales/pt.cpp`, renombrar `EnglishCatalog` a `PortugueseCatalog` y
+   traducir. Mientras esté a medias: `MakeCatalog({...}, true)`; lo que falte sale en inglés.
+2. Declararlo en `locales/catalogs.h` y añadir una línea en `locales/registry.cpp`
+   (`{L"pt", L"Português", &PortugueseCatalog, &OneOrOther}`; otra regla de plural si el idioma
+   la necesita).
+3. Añadir el `.cpp` en `src/eden_uwp/CMakeLists.txt`.
+Un texto nuevo: id en `I18n::Text` y su línea en cada catálogo completo (el compilador avisa).
+
+## Configuración > Sistema
+
+Tercera fila de Configuración. Filas: nombre de usuario, idioma del emulador, idioma de los
+juegos, región de la consola y limpiar caché. Cada elección es explícita o **Automático**
+(defecto), que sigue a Windows (`GlobalizationPreferences.Languages` y `HomeGeographicRegion`;
+en la Series, los de la consola) y se muestra como "Automático · Español".
+
+- Idioma de los juegos: la variante sale de la región (`es-ES` -> español de España, resto de
+  `es` -> latinoamericano; `en` de América -> EE. UU., resto -> británico; `fr-CA`, `pt-BR`,
+  `zh-Hant`). Al arrancar, `PickGameLanguage` da al juego el idioma más cercano que declara su
+  NACP: el elegido, su variante, inglés o el primero que tenga. La biblioteca lee los títulos en
+  ese mismo idioma.
+- Región: América para todo el continente, Japón, China, Corea, Taiwán/Hong Kong,
+  Australia/Nueva Zelanda; Europa para el resto, como la consola.
+- Nombre de usuario: teclado en pantalla propio (`text_entry.h`): A escribe, X borra,
+  Y espacio, View mayúsculas, Menú listo, B cancela; ratón y teclado físico también.
+  No se usa el teclado del sistema (`InputPane`): necesita un control de texto con foco y sin
+  XAML habría que implementarlo a mano sobre `CoreTextEditContext`; además Microsoft documenta que
+  el overlay del input pane no está plenamente soportado en apps de pantalla completa como los
+  juegos y que `TryShow` es solo "best effort". Propio: igual en Series y PC y testeable. Máximo 10
+  caracteres como en la Switch. Se aplica al perfil activo (`ProfileManager::SetProfileBase`)
+  antes de `System::Load`; vacío conserva "Eden".
+
+Persistencia en `LocalSettings` (`system_ui_language`, `system_game_language`, `system_region`,
+`system_user_name`; -1 = automático). Lógica pura en `system_settings.h` / `system_page.h`, WinRT
+en `uwp_system_settings.cpp`.
+
+Harness PASS: `localization-catalogs`, `system-settings`, `text-entry`, `library-cache` (con
+`/DEDEN_XBOX_NO_WINRT`) y `game-menu` (ahora con los catálogos). Compilan con `/Zc:preprocessor`
+como el resto de Eden. Build UWP limpio. Pendiente: validar en Series (teclado con mando,
+CJK en los nombres de idioma, tiempos de caché con biblioteca grande).
+
+Fuentes: [GlobalizationPreferences](https://learn.microsoft.com/en-us/uwp/api/Windows.System.UserProfile.GlobalizationPreferences),
+[cadenas de fallback de locale (Firefox)](https://firefox-source-docs.mozilla.org/intl/locale.html),
+[BCP 47](https://www.rfc-editor.org/info/bcp47).
