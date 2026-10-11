@@ -262,6 +262,17 @@ if (ENABLE_LIBUSB)
     add_subdirectory(libusb)
 endif()
 
+# libarchive (read side) and liblzma: the Xbox mod manager opens zip, 7z and rar archives.
+if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    AddJsonPackage(xz)
+    # liblzma only exports its headers on install; the tree uses them from the source.
+    target_include_directories(liblzma INTERFACE
+        $<BUILD_INTERFACE:${xz_SOURCE_DIR}/src/liblzma/api>)
+
+    AddJsonPackage(NAME libarchive DOWNLOAD_ONLY)
+    add_subdirectory(libarchive)
+endif()
+
 # VMA
 AddJsonPackage(vulkan-memory-allocator)
 
