@@ -9,11 +9,13 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core.h"
+#include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
+#include "core/loader/nso.h"
 
 namespace EdenXbox {
 namespace {
@@ -21,7 +23,25 @@ void Apply(LibraryEntry& entry, LibraryCacheRecord&& record, bool icons) {
     if (!record.name.empty()) entry.name = std::move(record.name);
     entry.developer = std::move(record.developer);
     if (icons) entry.icon = std::move(record.icon);
+    entry.program_id = record.program_id;
+    entry.build_id = record.build_id;
     entry.title_loaded = true;
+}
+
+/// The build id of the main module the game boots: its update's when the same file carries one
+/// (as the boot's manual content provider sees it), else the base program's. Zero when unknown.
+std::array<std::uint8_t, 8> ReadMainBuildId(const FileSys::VirtualFile& file, u64 program_id) {
+    std::array<std::uint8_t, 8> build_id{};
+    FileSys::ManualContentProvider provider;
+    if (!provider.AddEntriesFromContainer(file)) return build_id;
+    auto nca = provider.GetEntry(FileSys::GetUpdateTitleID(program_id), FileSys::ContentRecordType::Program);
+    if (!nca || !nca->GetExeFS()) nca = provider.GetEntry(program_id, FileSys::ContentRecordType::Program);
+    if (!nca || !nca->GetExeFS()) return build_id;
+    const auto main = nca->GetExeFS()->GetFile("main");
+    Loader::NSOHeader header{};
+    if (main && main->ReadObject(&header) == sizeof(header))
+        std::copy_n(header.build_id.begin(), build_id.size(), build_id.begin());
+    return build_id;
 }
 } // namespace
 
@@ -72,6 +92,11 @@ void ReadLibraryMetadata(const std::filesystem::path& root, std::vector<LibraryE
             if (loader->ReadIcon(record.icon) != Loader::ResultStatus::Success ||
                 record.icon.size() > LibraryCache::MaxIcon)
                 record.icon.clear();
+            if (loader->ReadProgramId(record.program_id) == Loader::ResultStatus::Success &&
+                entry.relative_path.extension() != L".nro")
+                record.build_id = ReadMainBuildId(file, record.program_id);
+            else
+                record.program_id = 0;
             LOG_INFO(Frontend, "Library metadata: title '{}', icon {} bytes", title, record.icon.size());
             cache.Store(entry.launch_path, stamp, language, record);
             Apply(entry, std::move(record), options.icons);

@@ -25,6 +25,7 @@
 #include <fstream>
 #include <mutex>
 #include <cstring>
+#include <optional>
 #include <share.h>
 #include <span>
 #include <stdexcept>
@@ -33,6 +34,8 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#include <winrt/base.h>
 
 #include "common/bug_tracker.h"
 #include "common/fs/path_util.h"
@@ -62,6 +65,7 @@
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
+#include "core/memory/cheat_engine.h"
 #include "hid_core/hid_core.h"
 #include "video_core/frame_trace.h"
 #include "video_core/gpu.h"
@@ -69,8 +73,13 @@
 #include "video_core/perf_counters.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
+#include "video_core/renderer_d3d12/d3d12_menu_image.h"
 
 #include "eden_uwp/alloc_watch.h"
+#include "eden_uwp/cheats/cheat_session.h"
+#include "eden_uwp/cheats/cheats_page.h"
+#include "eden_uwp/cheats/cheats_view.h"
+#include "eden_uwp/game_menu_surface.h"
 #include "eden_uwp/headless_emu_window.h"
 #include "eden_uwp/prewarm_budget.h"
 #include "eden_uwp/uwp_input.h"
@@ -81,6 +90,7 @@
 #include "eden_uwp/uwp_file_manager.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/uwp_system_settings.h"
+#include "eden_uwp/utf8.h"
 
 namespace D3D12 {
 // renderer_d3d12.h; its includes need Mesa's headers, which only video_core sees.
@@ -92,9 +102,6 @@ void SetPsoCostProbe(bool enabled);      // d3d12_graphics_pipeline.h
 std::string DescribePsoCost();            // likewise
 void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
 void ShowCpuLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t total);
-void ShowGameMenu(VideoCore::RendererBase& renderer, std::string_view title,
-                  std::span<const std::string> items, size_t selected, std::string_view hint);
-void HideGameMenu(VideoCore::RendererBase& renderer);
 void RemoveDeviceForProbe(VideoCore::RendererBase& renderer);
 void SetBcArrayDecode(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuDecode(bool enabled); // d3d12_texture_cache.h
@@ -609,19 +616,54 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         // Q on a keyboard (the PC) ends the session cleanly instead, so the run can be told apart
         // from a crash.
         WriteDiag("step: system.Run() issued, playing until the app is closed | " + MemoryReport());
-        // In-game menu (game_menu.h): the guest pauses while it is open, and the renderer draws it
-        // over the last frame from its own thread.
+        // In-game menu (game_menu.h): the guest pauses while it is open. The frontend draws it with
+        // real text (game_menu_surface.h) and the renderer copies it over the last frame. Its
+        // cheats page changes the running game's cheats at once: the engine reloads them on its
+        // next tick after the guest resumes. Closed, the menu keeps nothing.
         std::optional<GameMenu> menu;
+        std::optional<GameMenuSurface> menu_surface;
+        std::optional<Cheats::CheatSession> cheats;
+        Cheats::CheatsPage cheats_page;
+        std::wstring cheats_notice;
+        std::wstring game_title;
+        const Cheats::CheatGame cheat_game{program_id, system.GetApplicationProcessBuildID()};
+        const auto cheats_on = [&](const Cheats::CheatCatalog& catalog) {
+            std::size_t count = 0;
+            for (const auto category : {Cheats::CheatCategory::Gameplay, Cheats::CheatCategory::Graphics,
+                                        Cheats::CheatCategory::Mine})
+                count += catalog.EnabledCount(category);
+            return count;
+        };
         const auto draw_menu = [&] {
-            const std::vector<std::string> lines = menu->Lines();
-            const size_t selected = menu->Selected();
-            system.GPU().RunOnGpuThread([&] {
-                using I18n::Text;
-                const auto overlay = [](Text id) { return I18n::ToOverlayText(I18n::Tr(id)); };
-                D3D12::ShowGameMenu(system.Renderer(), overlay(Text::MenuTitle), lines, selected,
-                                    "A " + overlay(Text::Select) + "   B " + overlay(Text::Back) +
-                                        "   < > " + overlay(Text::Change));
-            });
+            const auto screen = D3D12::GameMenuScreenSize(system.Renderer());
+            D3D12::MenuImage image;
+            try {
+                image = cheats ? menu_surface->DrawCheats({*cheats, cheats_page, game_title, cheats_notice, true},
+                                                          screen)
+                               : menu_surface->DrawMenu(*menu, game_title, screen);
+            } catch (const winrt::hresult_error& e) {
+                WriteDiag("menu: not drawn: " + winrt::to_string(e.message()));
+                return;
+            }
+            system.GPU().RunOnGpuThread([&] { D3D12::ShowGameMenu(system.Renderer(), std::move(image)); });
+        };
+        // The cheats page's presses, while it is open.
+        const auto cheats_input = [&](MenuAction action) -> std::optional<Cheats::CheatsInput> {
+            using Cheats::CheatsInput;
+            switch (action) {
+            case MenuAction::Up: return CheatsInput::Up;
+            case MenuAction::Down: return CheatsInput::Down;
+            case MenuAction::Left:
+            case MenuAction::PreviousTab: return CheatsInput::PreviousCategory;
+            case MenuAction::Right:
+            case MenuAction::NextTab: return CheatsInput::NextCategory;
+            case MenuAction::Confirm: return CheatsInput::Toggle;
+            case MenuAction::Alternate: return CheatsInput::ToggleAll;
+            case MenuAction::Refresh: return CheatsInput::Refresh;
+            case MenuAction::Back: return CheatsInput::Back;
+            case MenuAction::Toggle: break;
+            }
+            return std::nullopt;
         };
         constexpr auto TICK = std::chrono::milliseconds(20);
         constexpr u32 TICKS_PER_MINUTE = 3000;
@@ -688,9 +730,48 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     const ControllerOptions options = input.Options();
                     menu.emplace(GameMenuSettings{options.style, options.swap_face_buttons,
                                                   options.deadzone, g_can_fullscreen.load(),
-                                                  g_fullscreen.load()});
+                                                  g_fullscreen.load()},
+                                 program_id != 0);
+                    if (game_title.empty()) {
+                        std::string title;
+                        void(system.GetAppLoader().ReadTitle(title));
+                        game_title = Utf8ToUtf16(title);
+                    }
+                    if (program_id != 0)
+                        menu->SetCheatsOn(cheats_on(Cheats::LoadCatalog(
+                            Cheats::TitleLoadDirectory(program_id), cheat_game.build_id)));
+                    try {
+                        menu_surface.emplace();
+                    } catch (const winrt::hresult_error& e) {
+                        WriteDiag("menu: no surface: " + winrt::to_string(e.message()));
+                    }
                     WriteDiag("menu: opened, guest paused | " + MemoryReport());
-                    draw_menu();
+                    if (menu_surface) draw_menu();
+                    continue;
+                }
+                if (cheats && action != MenuAction::Toggle) {
+                    using Cheats::CheatsEffect;
+                    const auto pressed = cheats_input(action);
+                    if (!pressed) continue;
+                    cheats_notice.clear();
+                    const CheatsEffect effect = Cheats::HandleCheatsInput(cheats_page, *cheats, *pressed,
+                                                                          Cheats::CheatsLayout::VisibleRows);
+                    if (effect == CheatsEffect::Changed) {
+                        // Hot: the engine (created now if the game booted without cheats) runs
+                        // the new list from its next tick.
+                        system.EnsureCheatEngine().Reload(cheats->Catalog().Program());
+                        WriteDiag("menu: cheats changed, " + std::to_string(cheats->Catalog().UsedWords()) +
+                                  " VM words");
+                        if (!cheats->Saved()) cheats_notice = I18n::Tr(I18n::Text::CheatsSaveFailed);
+                    } else if (effect == CheatsEffect::OverBudget) {
+                        cheats_notice = I18n::Tr(I18n::Text::CheatsOverBudget);
+                    } else if (effect == CheatsEffect::Refresh) {
+                        cheats->Retry();
+                    } else if (effect == CheatsEffect::Back) {
+                        menu->SetCheatsOn(cheats_on(cheats->Catalog()));
+                        cheats.reset();
+                    }
+                    if (menu_surface) draw_menu();
                     continue;
                 }
                 const GameMenuResult result = menu->Apply(action);
@@ -703,8 +784,17 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     shutdown();
                     return RETURN_TO_LIBRARY;
                 }
+                if (result == GameMenuResult::Cheats) {
+                    cheats.emplace(cheat_game);
+                    cheats->Poll();
+                    cheats_page = {};
+                    Cheats::ClampCheatsPage(cheats_page, cheats->Catalog(), Cheats::CheatsLayout::VisibleRows);
+                    cheats_notice.clear();
+                }
                 if (result == GameMenuResult::Resume) {
                     menu.reset();
+                    menu_surface.reset();
+                    cheats.reset();
                     system.GPU().RunOnGpuThread([&] { D3D12::HideGameMenu(system.Renderer()); });
                     input.SetMenuOpen(false);
                     void(system.Run());
@@ -722,7 +812,12 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     g_fullscreen_request.store(menu->Settings().fullscreen ? 1 : 0);
                 }
 
-                draw_menu();
+                if (menu_surface) draw_menu();
+            }
+            // Cheats the database sent while the page is open join the list.
+            if (cheats && cheats->Poll()) {
+                Cheats::ClampCheatsPage(cheats_page, cheats->Catalog(), Cheats::CheatsLayout::VisibleRows);
+                if (menu_surface) draw_menu();
             }
             if (config.memory_audit && tick % (10 * TICKS_PER_SECOND) == 0) {
                 WriteDiag("guest memory: " + GuestMemoryReport(system));

@@ -44,6 +44,28 @@ add_executable(eden-uwp WIN32
     uwp_system_settings.h
     library_cache.cpp
     library_cache.h
+    atomic_file.h
+    utf8.h
+    # Drawing shared by the library and the in-game menu (real text over the paused game).
+    ui_icon.h
+    ui_painter.cpp
+    ui_painter.h
+    game_menu_surface.cpp
+    game_menu_surface.h
+    # Per-game options and cheats: local files, the online database, hot changes in game.
+    game_options_page.h
+    cheats/cheat_catalog.h
+    cheats/cheat_db.cpp
+    cheats/cheat_db.h
+    cheats/cheat_fetcher.cpp
+    cheats/cheat_fetcher.h
+    cheats/cheat_session.cpp
+    cheats/cheat_session.h
+    cheats/cheat_store.cpp
+    cheats/cheat_store.h
+    cheats/cheats_page.h
+    cheats/cheats_view.cpp
+    cheats/cheats_view.h
 )
 
 # core transitively pulls common/video_core/audio_core/hid_core/dynarmic etc.; name the ones we touch

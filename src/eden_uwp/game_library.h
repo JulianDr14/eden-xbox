@@ -3,7 +3,9 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
 #include <stop_token>
 #include <string>
@@ -19,6 +21,8 @@ struct LibraryEntry {
     bool title_loaded{};    ///< Title and developer known (from the game or the cache).
     std::string launch_path; // Absolute internal path or token-scoped external identity.
     std::wstring source_name;
+    std::uint64_t program_id{};              ///< Known with the title; 0 for homebrew.
+    std::array<std::uint8_t, 8> build_id{}; ///< The main module's, as cheat files are named.
 };
 struct LibraryScan {
     std::vector<LibraryEntry> entries;

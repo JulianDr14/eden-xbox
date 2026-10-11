@@ -5,6 +5,8 @@
 #include <fstream>
 #include <system_error>
 
+#include "eden_uwp/atomic_file.h"
+
 // Host-side tests build this file without WinRT.
 #ifndef EDEN_XBOX_NO_WINRT
 #include <winrt/Windows.Storage.h>
@@ -13,7 +15,7 @@
 namespace EdenXbox {
 namespace {
 constexpr std::uint32_t Magic = 0x434C5845; // "EXLC"
-constexpr std::uint32_t Version = 1;
+constexpr std::uint32_t Version = 2;
 constexpr std::uint32_t MaxText = 512;      // UTF-16 units; NACP names are at most 512 bytes.
 
 struct Header {
@@ -24,8 +26,10 @@ struct Header {
     std::uint32_t name_length;
     std::uint32_t developer_length;
     std::uint32_t icon_size;
+    std::uint64_t program_id;
+    std::array<std::uint8_t, 8> build_id;
 };
-static_assert(sizeof(Header) == 32);
+static_assert(sizeof(Header) == 48);
 
 std::uint64_t Fnv1a(std::string_view text) {
     std::uint64_t hash = 0xcbf29ce484222325ULL;
@@ -44,10 +48,15 @@ bool ReadText(std::ifstream& in, std::uint32_t length, std::wstring& out) {
     return true;
 }
 
-void WriteText(std::ofstream& out, std::wstring_view text) {
-    std::vector<char16_t> units(text.begin(), text.end());
-    out.write(reinterpret_cast<const char*>(units.data()),
-              static_cast<std::streamsize>(units.size() * sizeof(char16_t)));
+void Append(std::string& out, const void* data, std::size_t size) {
+    out.append(static_cast<const char*>(data), size);
+}
+
+void AppendText(std::string& out, std::wstring_view text) {
+    for (const wchar_t c : text) {
+        const auto unit = static_cast<char16_t>(c);
+        Append(out, &unit, sizeof(unit));
+    }
 }
 } // namespace
 
@@ -81,6 +90,8 @@ std::optional<LibraryCacheRecord> LibraryCache::Load(std::string_view launch_pat
         stored_path != launch_path)
         return std::nullopt;
     LibraryCacheRecord record;
+    record.program_id = header.program_id;
+    record.build_id = header.build_id;
     if (!ReadText(in, header.name_length, record.name) ||
         !ReadText(in, header.developer_length, record.developer))
         return std::nullopt;
@@ -94,37 +105,28 @@ std::optional<LibraryCacheRecord> LibraryCache::Load(std::string_view launch_pat
 bool LibraryCache::Store(std::string_view launch_path, std::uint64_t stamp, std::uint32_t language,
                          const LibraryCacheRecord& record) const {
     if (directory.empty() || record.icon.size() > MaxIcon) return false;
-    std::error_code ec;
-    std::filesystem::create_directories(directory, ec);
-    const auto path = RecordPath(launch_path);
-    auto temporary = path;
-    temporary += ".tmp";
-    {
-        std::ofstream out{temporary, std::ios::binary | std::ios::trunc};
-        if (!out) return false;
-        const std::wstring_view name = std::wstring_view{record.name}.substr(0, MaxText);
-        const std::wstring_view developer = std::wstring_view{record.developer}.substr(0, MaxText);
-        const Header header{Magic, Version, stamp, language,
-                            static_cast<std::uint32_t>(name.size()),
-                            static_cast<std::uint32_t>(developer.size()),
-                            static_cast<std::uint32_t>(record.icon.size())};
-        const auto path_size = static_cast<std::uint32_t>(launch_path.size());
-        out.write(reinterpret_cast<const char*>(&header), sizeof(header));
-        out.write(reinterpret_cast<const char*>(&path_size), sizeof(path_size));
-        out.write(launch_path.data(), static_cast<std::streamsize>(launch_path.size()));
-        WriteText(out, name);
-        WriteText(out, developer);
-        out.write(reinterpret_cast<const char*>(record.icon.data()),
-                  static_cast<std::streamsize>(record.icon.size()));
-        if (!out.flush()) {
-            out.close();
-            std::filesystem::remove(temporary, ec);
-            return false;
-        }
-    }
-    std::filesystem::rename(temporary, path, ec);
-    if (ec) std::filesystem::remove(temporary, ec);
-    return !ec;
+    const std::wstring_view name = std::wstring_view{record.name}.substr(0, MaxText);
+    const std::wstring_view developer = std::wstring_view{record.developer}.substr(0, MaxText);
+    const Header header{Magic,
+                        Version,
+                        stamp,
+                        language,
+                        static_cast<std::uint32_t>(name.size()),
+                        static_cast<std::uint32_t>(developer.size()),
+                        static_cast<std::uint32_t>(record.icon.size()),
+                        record.program_id,
+                        record.build_id};
+    const auto path_size = static_cast<std::uint32_t>(launch_path.size());
+    std::string bytes;
+    bytes.reserve(sizeof(header) + sizeof(path_size) + launch_path.size() +
+                  (name.size() + developer.size()) * sizeof(char16_t) + record.icon.size());
+    Append(bytes, &header, sizeof(header));
+    Append(bytes, &path_size, sizeof(path_size));
+    Append(bytes, launch_path.data(), launch_path.size());
+    AppendText(bytes, name);
+    AppendText(bytes, developer);
+    Append(bytes, record.icon.data(), record.icon.size());
+    return WriteFileAtomically(RecordPath(launch_path), bytes);
 }
 
 bool LibraryCache::Clear() const {

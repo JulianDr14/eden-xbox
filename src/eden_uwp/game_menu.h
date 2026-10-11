@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -13,7 +14,11 @@ namespace EdenXbox {
 // The guide button belongs to the system, so the shortcut has to come from game buttons: Switch -
 // and +, which almost no game holds together.
 
-enum class MenuAction : std::uint8_t { Toggle, Up, Down, Left, Right, Confirm, Back };
+/// Presses the open menu receives: the d-pad or left stick, A, B, X (Alternate), Y (Refresh) and
+/// the bumpers.
+enum class MenuAction : std::uint8_t {
+    Toggle, Up, Down, Left, Right, Confirm, Back, Alternate, Refresh, PreviousTab, NextTab,
+};
 
 /// Holds back a lone + or - for a moment, so pressing View and Menu together never reaches the
 /// game as a pause press; both held for HoldMs fire Toggle. A lone press is delivered after
@@ -92,19 +97,32 @@ struct GameMenuSettings {
     bool fullscreen{};
 };
 
-enum class GameMenuResult : std::uint8_t { None, Resume, Library, SettingsChanged, FullScreen };
+enum class GameMenuResult : std::uint8_t { None, Resume, Library, SettingsChanged, FullScreen, Cheats };
 
-/// The menu's items and cursor. Text is in the interface language, as upper-case ASCII for the
-/// renderer's overlay font (I18n::ToOverlayText).
+/// One row as drawn: a label, and the value of a setting (changed with left/right) or of a page.
+struct GameMenuRow {
+    enum class Kind : std::uint8_t { Action, Choice, Page };
+    std::wstring label;
+    std::wstring value;
+    Kind kind{Kind::Action};
+};
+
+/// The menu's items and cursor, with texts in the interface language.
 class GameMenu {
 public:
-    enum Item : std::size_t { Continue, Style, FaceButtons, Deadzone, FullScreen, Library };
+    enum Item : std::size_t { Continue, Cheats, Style, FaceButtons, Deadzone, FullScreen, Library };
 
-    explicit GameMenu(GameMenuSettings settings_) : settings{settings_} {
-        items = {Continue, Style, FaceButtons, Deadzone};
+    /// `cheats`: the game can have cheats (it has a title id), so the menu offers them.
+    explicit GameMenu(GameMenuSettings settings_, bool cheats = false) : settings{settings_} {
+        items = {Continue};
+        if (cheats) items.push_back(Cheats);
+        items.insert(items.end(), {Style, FaceButtons, Deadzone});
         if (settings.can_fullscreen) items.push_back(FullScreen);
         items.push_back(Library);
     }
+
+    /// How many cheats are on, shown on the Cheats row.
+    void SetCheatsOn(std::size_t count) { cheats_on = count; }
 
     GameMenuResult Apply(MenuAction action) {
         switch (action) {
@@ -121,14 +139,19 @@ public:
         case MenuAction::Right:
         case MenuAction::Confirm:
             return Change(action);
+        case MenuAction::Alternate:
+        case MenuAction::Refresh:
+        case MenuAction::PreviousTab:
+        case MenuAction::NextTab:
+            break;
         }
         return GameMenuResult::None;
     }
 
-    [[nodiscard]] std::vector<std::string> Lines() const {
-        std::vector<std::string> lines;
-        for (const Item item : items) lines.push_back(Line(item));
-        return lines;
+    [[nodiscard]] std::vector<GameMenuRow> Rows() const {
+        std::vector<GameMenuRow> rows;
+        for (const Item item : items) rows.push_back(Row(item));
+        return rows;
     }
 
     /// Row of the cursor, as drawn.
@@ -136,35 +159,30 @@ public:
     [[nodiscard]] Item SelectedItem() const { return items[selected]; }
     [[nodiscard]] const GameMenuSettings& Settings() const { return settings; }
 
-    static std::string StyleName(ConsoleControllerStyle style) {
-        // "Automatic (per game)" does not fit the overlay's line; the menu says just "Automatic".
-        return Overlay(style == ConsoleControllerStyle::Auto ? I18n::Text::Automatic
-                                                             : ControllerStyleText(style));
-    }
-
 private:
-    static std::string Overlay(I18n::Text id) { return I18n::ToOverlayText(I18n::Tr(id)); }
-    static std::string Choice(I18n::Text label, const std::string& value) {
-        return Overlay(label) + "  < " + value + " >";
-    }
+    static std::wstring Tr(I18n::Text id) { return std::wstring{I18n::Tr(id)}; }
 
-    std::string Line(Item item) const {
+    GameMenuRow Row(Item item) const {
         using I18n::Text;
+        constexpr auto Choice = GameMenuRow::Kind::Choice;
         switch (item) {
         case Continue:
-            return Overlay(Text::MenuResume);
+            return {Tr(Text::MenuResume)};
+        case Cheats:
+            return {Tr(Text::CheatsTitle), I18n::Plural(Text::CheatsOnOne, Text::CheatsOnOther, cheats_on),
+                    GameMenuRow::Kind::Page};
         case Style:
-            return Choice(Text::ControllerSeenAs, StyleName(settings.style));
+            return {Tr(Text::ControllerSeenAs), Tr(ControllerStyleText(settings.style)), Choice};
         case FaceButtons:
-            return Choice(Text::FaceButtons,
-                          Overlay(settings.swap_face_buttons ? Text::ByPosition : Text::ByLetter));
+            return {Tr(Text::FaceButtons), Tr(settings.swap_face_buttons ? Text::ByPosition : Text::ByLetter),
+                    Choice};
         case Deadzone:
-            return Choice(Text::DeadZone,
-                          std::to_string(static_cast<int>(settings.deadzone * 100 + 0.5f)) + "%");
+            return {Tr(Text::DeadZone), std::to_wstring(static_cast<int>(settings.deadzone * 100 + 0.5f)) + L"%",
+                    Choice};
         case FullScreen:
-            return Choice(Text::MenuFullScreen, Overlay(settings.fullscreen ? Text::Yes : Text::No));
+            return {Tr(Text::MenuFullScreen), Tr(settings.fullscreen ? Text::Yes : Text::No), Choice};
         case Library:
-            return Overlay(Text::MenuBackToHome);
+            return {Tr(Text::MenuBackToHome)};
         }
         return {};
     }
@@ -174,6 +192,8 @@ private:
         switch (SelectedItem()) {
         case Continue:
             return action == MenuAction::Confirm ? GameMenuResult::Resume : GameMenuResult::None;
+        case Cheats:
+            return action == MenuAction::Confirm ? GameMenuResult::Cheats : GameMenuResult::None;
         case Library:
             return action == MenuAction::Confirm ? GameMenuResult::Library : GameMenuResult::None;
         case Style:
@@ -200,5 +220,6 @@ private:
     GameMenuSettings settings;
     std::vector<Item> items;
     std::size_t selected{};
+    std::size_t cheats_on{};
 };
 } // namespace EdenXbox

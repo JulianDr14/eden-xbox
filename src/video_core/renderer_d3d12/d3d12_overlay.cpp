@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <exception>
 #include <optional>
 #include <span>
@@ -13,6 +14,7 @@
 
 #include <fmt/format.h>
 
+#include "common/alignment.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/frame_trace.h"
@@ -256,11 +258,16 @@ void RendererD3D12::DrawShaderIndicator(CommandStream* cmd,
     ClearRects(cmd, rtv, OVERLAY_TEXT, text);
 }
 
-void ShowGameMenu(VideoCore::RendererBase& renderer, std::string_view title,
-                  std::span<const std::string> items, size_t selected, std::string_view hint) {
+std::pair<u32, u32> GameMenuScreenSize(VideoCore::RendererBase& renderer) {
+    if (Settings::values.renderer_backend.GetValue() != Settings::RendererBackend::Direct3D12) {
+        return {};
+    }
+    return static_cast<RendererD3D12&>(renderer).ScreenSize();
+}
+
+void ShowGameMenu(VideoCore::RendererBase& renderer, MenuImage image) {
     if (Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Direct3D12) {
-        static_cast<RendererD3D12&>(renderer).ShowGameMenu(RendererD3D12::GameMenuOverlay{
-            std::string{title}, {items.begin(), items.end()}, selected, std::string{hint}});
+        static_cast<RendererD3D12&>(renderer).ShowGameMenu(std::move(image));
     }
 }
 
@@ -320,7 +327,7 @@ void RendererD3D12::ShowLoadProgress(size_t done, size_t total, std::string_view
     }
 }
 
-void RendererD3D12::ShowGameMenu(std::optional<GameMenuOverlay> menu) {
+void RendererD3D12::ShowGameMenu(std::optional<MenuImage> menu) {
     game_menu = std::move(menu);
     if (present_failed) {
         return;
@@ -334,7 +341,7 @@ void RendererD3D12::ShowGameMenu(std::optional<GameMenuOverlay> menu) {
             frame->Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
             constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
             cmd->ClearRenderTargetView(frame->rtv, black, 0, nullptr);
-            DrawGameMenu(cmd, frame->rtv);
+            DrawGameMenu(cmd, *frame);
         }
         Present(std::move(frame));
     } catch (const std::exception& e) {
@@ -342,53 +349,40 @@ void RendererD3D12::ShowGameMenu(std::optional<GameMenuOverlay> menu) {
     }
 }
 
-void RendererD3D12::DrawGameMenu(CommandStream* cmd,
-                                 D3D12_CPU_DESCRIPTOR_HANDLE rtv) {
-    if (!game_menu) {
+void RendererD3D12::DrawGameMenu(CommandStream* cmd, PresentFrame& frame) {
+    if (!game_menu || game_menu->width == 0 || game_menu->height == 0) {
         return;
     }
-    const LONG screen_width = static_cast<LONG>(swapchain.Width());
-    const LONG screen_height = static_cast<LONG>(swapchain.Height());
-    size_t longest = std::max(game_menu->title.size(), game_menu->hint.size());
-    for (const std::string& item : game_menu->items) {
-        longest = std::max(longest, item.size());
+    // Clipped to the screen; the frontend sizes the image to fit, this only guards a resize.
+    const u32 width = std::min(game_menu->width, swapchain.Width());
+    const u32 height = std::min(game_menu->height, swapchain.Height());
+    const u32 row_pitch = Common::AlignUp(width * 4, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+    // The pool's memory is reused frame after frame: the menu allocates nothing of its own.
+    const StagingBufferRef upload =
+        staging_pool.Request(static_cast<size_t>(row_pitch) * height, MemoryUsage::Upload);
+    for (u32 y = 0; y < height; ++y) {
+        std::memcpy(upload.mapped_span.data() + static_cast<size_t>(y) * row_pitch,
+                    game_menu->pixels.data() + static_cast<size_t>(y) * game_menu->width * 4,
+                    static_cast<size_t>(width) * 4);
     }
-    // Glyphs 5 cells high on rows of 10; shrink the cell until the longest line fits.
-    LONG cell = std::max<LONG>(2, screen_height / 200);
-    while (cell > 2 && TextWidth(longest, cell) + 16 * cell > screen_width * 9 / 10) {
-        --cell;
-    }
-    const LONG row = 10 * cell;
-    const LONG pad = 4 * cell;
-    const LONG width = TextWidth(longest, cell) + 2 * pad;
-    const LONG height = static_cast<LONG>(game_menu->items.size() + 4) * row + 2 * pad;
-    const LONG left = (screen_width - width) / 2;
-    const LONG top = (screen_height - height) / 2;
-    const D3D12_RECT border{left - cell, top - cell, left + width + cell, top + height + cell};
-    const D3D12_RECT panel{left, top, left + width, top + height};
-    ClearRects(cmd, rtv, OVERLAY_ACCENT, {&border, 1});
-    ClearRects(cmd, rtv, OVERLAY_PANEL, {&panel, 1});
-
-    std::vector<D3D12_RECT> title;
-    AppendText(title, game_menu->title, left + pad, top + pad + 2 * cell, cell);
-    ClearRects(cmd, rtv, OVERLAY_ACCENT, title);
-    std::vector<D3D12_RECT> text;
-    std::vector<D3D12_RECT> lit;
-    for (size_t i = 0; i < game_menu->items.size(); ++i) {
-        const LONG y = top + pad + static_cast<LONG>(i + 2) * row;
-        if (i == game_menu->selected) {
-            const D3D12_RECT bar{left + cell, y - 2 * cell, left + width - cell, y + 7 * cell};
-            ClearRects(cmd, rtv, OVERLAY_DIM, {&bar, 1});
-        }
-        AppendText(i == game_menu->selected ? lit : text, game_menu->items[i], left + pad, y,
-                   cell);
-    }
-    std::vector<D3D12_RECT> hint;
-    AppendText(hint, game_menu->hint, left + pad,
-               top + pad + static_cast<LONG>(game_menu->items.size() + 3) * row, cell);
-    ClearRects(cmd, rtv, OVERLAY_TEXT, text);
-    ClearRects(cmd, rtv, OVERLAY_ACCENT, lit);
-    ClearRects(cmd, rtv, OVERLAY_TEXT, hint);
+    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT placed{
+        .Offset = upload.offset,
+        .Footprint = {Swapchain::FORMAT, width, height, 1, row_pitch},
+    };
+    const D3D12_TEXTURE_COPY_LOCATION src{
+        .pResource = upload.buffer,
+        .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+        .PlacedFootprint = placed,
+    };
+    const D3D12_TEXTURE_COPY_LOCATION dst{
+        .pResource = frame.image.Get(),
+        .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        .SubresourceIndex = 0,
+    };
+    frame.Transition(cmd, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmd->CopyTextureRegion(&dst, (swapchain.Width() - width) / 2, (swapchain.Height() - height) / 2,
+                           0, &src, nullptr);
+    frame.Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
 }
 
 } // namespace D3D12

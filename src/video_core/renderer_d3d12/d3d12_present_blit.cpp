@@ -196,7 +196,7 @@ void RendererD3D12::RecordBlit(PresentFrame& frame, D3D12_GPU_DESCRIPTOR_HANDLE 
     cmd->DrawInstanced(3, 1, 0, 0);
     DrawShaderIndicator(cmd, rtv);
     DrawPerformanceOverlay(cmd, rtv);
-    DrawGameMenu(cmd, rtv);
+    DrawGameMenu(cmd, frame);
 }
 
 } // namespace D3D12

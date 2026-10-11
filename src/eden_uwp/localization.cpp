@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cwctype>
 
+#include "eden_uwp/utf8.h"
+
 namespace EdenXbox::I18n {
 namespace {
 std::atomic<const UiLanguage*> current{nullptr};
@@ -23,19 +25,6 @@ const UiLanguage* Find(std::span<const UiLanguage> available, std::wstring_view 
     for (const auto& language : available)
         if (SameTag(language.tag, tag)) return &language;
     return nullptr;
-}
-
-wchar_t FoldAccent(wchar_t c) {
-    switch (c) {
-    case L'Á': case L'À': case L'Â': case L'Ä': case L'á': case L'à': case L'â': case L'ä': return L'A';
-    case L'É': case L'È': case L'Ê': case L'Ë': case L'é': case L'è': case L'ê': case L'ë': return L'E';
-    case L'Í': case L'Ì': case L'Î': case L'Ï': case L'í': case L'ì': case L'î': case L'ï': return L'I';
-    case L'Ó': case L'Ò': case L'Ô': case L'Ö': case L'ó': case L'ò': case L'ô': case L'ö': return L'O';
-    case L'Ú': case L'Ù': case L'Û': case L'Ü': case L'ú': case L'ù': case L'û': case L'ü': return L'U';
-    case L'Ñ': case L'ñ': return L'N';
-    case L'Ç': case L'ç': return L'C';
-    default: return c;
-    }
 }
 } // namespace
 
@@ -98,46 +87,7 @@ std::wstring Plural(Text one, Text other, std::uint64_t count) {
 }
 
 std::string ToUtf8(std::wstring_view text) {
-    std::string out;
-    out.reserve(text.size());
-    for (std::size_t i = 0; i < text.size(); ++i) {
-        char32_t c = text[i];
-        if (c >= 0xD800 && c <= 0xDBFF && i + 1 < text.size() && text[i + 1] >= 0xDC00 &&
-            text[i + 1] <= 0xDFFF) {
-            c = 0x10000 + ((c - 0xD800) << 10) + (text[++i] - 0xDC00);
-        } else if (c >= 0xD800 && c <= 0xDFFF) {
-            c = 0xFFFD; // Lone surrogate.
-        }
-        if (c < 0x80) {
-            out += static_cast<char>(c);
-        } else if (c < 0x800) {
-            out += static_cast<char>(0xC0 | (c >> 6));
-            out += static_cast<char>(0x80 | (c & 0x3F));
-        } else if (c < 0x10000) {
-            out += static_cast<char>(0xE0 | (c >> 12));
-            out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (c & 0x3F));
-        } else {
-            out += static_cast<char>(0xF0 | (c >> 18));
-            out += static_cast<char>(0x80 | ((c >> 12) & 0x3F));
-            out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (c & 0x3F));
-        }
-    }
-    return out;
-}
-
-std::string ToOverlayText(std::wstring_view text) {
-    std::string out;
-    out.reserve(text.size());
-    for (const wchar_t raw : text) {
-        wchar_t c = FoldAccent(raw);
-        if (c >= L'a' && c <= L'z') c = static_cast<wchar_t>(c - L'a' + L'A');
-        const bool drawable = (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') ||
-                              std::wstring_view{L" /.%-:<>"}.find(c) != std::wstring_view::npos;
-        out += drawable ? static_cast<char>(c) : ' ';
-    }
-    return out;
+    return Utf16ToUtf8(text);
 }
 
 } // namespace EdenXbox::I18n

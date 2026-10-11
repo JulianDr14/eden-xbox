@@ -2,12 +2,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <memory>
+#include <string_view>
+#include "eden_uwp/cheats/cheat_session.h"
+#include "eden_uwp/cheats/cheats_page.h"
 #include "eden_uwp/game_library.h"
+#include "eden_uwp/game_options_page.h"
 #include "eden_uwp/system_page.h"
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/uwp_controllers.h"
 #include "eden_uwp/uwp_file_manager.h"
 namespace EdenXbox {
+/// The selected game's options page, when open.
+struct GameOptionsView {
+    const GameOptionsPage& page;
+    const LibraryEntry* game;            ///< nullptr when the page is closed.
+    const Cheats::CheatSession* cheats;  ///< The open cheats page's.
+    const Cheats::CheatsPage& cheats_page;
+    std::wstring_view notice;
+};
 /// Everything one frame of the library shows.
 struct LibraryView {
     const LibraryScan& scan;
@@ -20,6 +32,7 @@ struct LibraryView {
     const ControllerPanel& panel;
     const ConfigurationPanel& configuration;
     const SystemPage& system;
+    const GameOptionsView& game_options;
 };
 class LibraryCanvas {
 public:

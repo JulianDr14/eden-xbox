@@ -619,7 +619,8 @@ void GamepadInput::Run(std::stop_token stop) {
         state.buttons &= ~(Bit(VirtualButton::ButtonPlus) | Bit(VirtualButton::ButtonMinus));
         state.buttons |= (plus ? Bit(VirtualButton::ButtonPlus) : 0) |
                          (minus ? Bit(VirtualButton::ButtonMinus) : 0);
-        // Menu navigation from the d-pad or the left stick, A to choose and B to go back.
+        // Menu navigation from the d-pad or the left stick, A to choose, B to go back, and X, Y
+        // and the bumpers for page actions.
         const auto nav = [&](VirtualButton button, bool stick) {
             return (state.buttons & Bit(button)) != 0 || stick;
         };
@@ -628,15 +629,22 @@ void GamepadInput::Run(std::stop_token stop) {
                          (nav(VirtualButton::ButtonLeft, state.left_x < -0.5f) ? 4U : 0U) |
                          (nav(VirtualButton::ButtonRight, state.left_x > 0.5f) ? 8U : 0U) |
                          (nav(VirtualButton::ButtonA, false) ? 16U : 0U) |
-                         (nav(VirtualButton::ButtonB, false) ? 32U : 0U);
+                         (nav(VirtualButton::ButtonB, false) ? 32U : 0U) |
+                         (nav(VirtualButton::ButtonX, false) ? 64U : 0U) |
+                         (nav(VirtualButton::ButtonY, false) ? 128U : 0U) |
+                         (nav(VirtualButton::TriggerL, false) ? 256U : 0U) |
+                         (nav(VirtualButton::TriggerR, false) ? 512U : 0U);
         const u32 pressed = held & ~menu_held;
         menu_held = held;
         if (toggle || (menu_open.load(std::memory_order_relaxed) && pressed)) {
             std::scoped_lock lock{menu_mutex};
             if (toggle) menu_actions.push_back(MenuAction::Toggle);
             if (menu_open.load(std::memory_order_relaxed)) {
-                constexpr std::array NAV{MenuAction::Up, MenuAction::Down, MenuAction::Left,
-                                         MenuAction::Right, MenuAction::Confirm, MenuAction::Back};
+                constexpr std::array NAV{MenuAction::Up,          MenuAction::Down,
+                                         MenuAction::Left,        MenuAction::Right,
+                                         MenuAction::Confirm,     MenuAction::Back,
+                                         MenuAction::Alternate,   MenuAction::Refresh,
+                                         MenuAction::PreviousTab, MenuAction::NextTab};
                 for (std::size_t i = 0; i < NAV.size(); ++i)
                     if (pressed & (1U << i)) menu_actions.push_back(NAV[i]);
             }

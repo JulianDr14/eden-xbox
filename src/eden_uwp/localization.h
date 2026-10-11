@@ -143,6 +143,37 @@ enum class Text : std::uint16_t {
     MenuFullScreen,
     MenuBackToHome,
 
+    // Game options and cheats
+    Options,
+    GameOptionsTitle,
+    GameOptionsSubtitle,
+    CheatsTitle,
+    CheatsHint,
+    CheatsCategoryGameplay,
+    CheatsCategoryGraphics,
+    CheatsCategoryMine,
+    CheatsLoading,
+    CheatsNone,
+    CheatsOtherBuildsOne,
+    CheatsOtherBuildsOther,
+    CheatsOffline,
+    CheatsSourceChecking,
+    CheatsSourceOnline,
+    CheatsSourceCached,
+    CheatsBudget,
+    CheatsOverBudget,
+    CheatsSaveFailed,
+    CheatsAppliesAtBoot,
+    CheatsAppliesNow,
+    CheatsCredit,
+    CheatsUnavailable,
+    CheatsHomebrew,
+    CheatsOnOne,
+    CheatsOnOther,
+    ToggleCheat,
+    AllCheats,
+    Category,
+
     // Settings home and file manager
     SettingsTitle,
     SettingsSubtitle,
@@ -293,8 +324,5 @@ std::wstring Plural(Text one, Text other, std::uint64_t count);
 
 /// UTF-8 for strings that travel as std::string (worker errors, logs).
 std::string ToUtf8(std::wstring_view text);
-/// Upper-case ASCII for the in-game menu's overlay font: accents are dropped (Á -> A, Ñ -> N) and
-/// characters it cannot draw become spaces.
-std::string ToOverlayText(std::wstring_view text);
 
 } // namespace EdenXbox::I18n

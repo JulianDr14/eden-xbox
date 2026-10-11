@@ -33,10 +33,9 @@ int main() {
     check(Plural(Text::GamesCountOne, Text::GamesCountOther, 1) == L"1 juego");
     check(Plural(Text::GamesCountOne, Text::GamesCountOther, 0) == L"0 juegos");
     check(Format(Text::Importing, {L"3", L"9"}) == L"Importando 3 / 9 archivos...");
-    check(ToOverlayText(L"Región: Año 1 (ok)") == "REGION: ANO 1  OK ");
     SetUiLanguage(*FindUiLanguage(L"en"));
     check(Plural(Text::GamesCountOne, Text::GamesCountOther, 2) == L"2 games");
     check(ToUtf8(L"Ñ€😀") == "\xC3\x91\xE2\x82\xAC\xF0\x9F\x98\x80");
 
-    std::puts("localization: negotiation, catalogs, plurals, placeholders and overlay text PASS");
+    std::puts("localization: negotiation, catalogs, plurals, placeholders and UTF-8 PASS");
 }

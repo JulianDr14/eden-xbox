@@ -10,6 +10,7 @@
 // again, and the game language its title was read in, so changing it refreshes the titles.
 // Writes go to a temporary file renamed over the old one: a crash never leaves half a record.
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -23,6 +24,8 @@ struct LibraryCacheRecord {
     std::wstring name;
     std::wstring developer;
     std::vector<unsigned char> icon; ///< As the game ships it (JPEG), at most MaxIcon bytes.
+    std::uint64_t program_id{};              ///< 0 when unknown (homebrew, unreadable game).
+    std::array<std::uint8_t, 8> build_id{}; ///< The main module's, as cheat files are named.
 };
 
 class LibraryCache {

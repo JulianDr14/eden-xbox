@@ -19,7 +19,10 @@
 #include <winrt/Windows.System.Profile.h>
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.Pickers.h>
+#include "eden_uwp/cheats/cheat_session.h"
+#include "eden_uwp/cheats/cheats_page.h"
 #include "eden_uwp/game_library.h"
+#include "eden_uwp/game_options_page.h"
 #include "eden_uwp/library_cache.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/system_page.h"
@@ -60,6 +63,11 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     bool dirty = true, loading = true, settings = false;
     ConfigurationPanel configuration;
     SystemPage system_page;
+    // The selected game's options (Menu), and its cheats page while open.
+    GameOptionsPage game_options;
+    std::optional<Cheats::CheatSession> cheat_session;
+    Cheats::CheatsPage cheats_page;
+    std::wstring options_notice;
     system_page.settings = LoadSystemSettings();
     system_page.locale = DetectSystemLocale();
     // Titles are read in the game language, so the library shows what the games will.
@@ -84,6 +92,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     auto keyboard_notice_until = std::chrono::steady_clock::time_point{};
     auto controller_notice_until = std::chrono::steady_clock::time_point{};
     auto system_notice_until = std::chrono::steady_clock::time_point{};
+    auto options_notice_until = std::chrono::steady_clock::time_point{};
     // Set by input handlers when the name editor closes: true keeps the name, false discards it.
     std::optional<bool> finish_name_editor;
     auto save_keyboard = [&] {
@@ -106,7 +115,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     size_t fill_cursor = 0;  // Next game the background fill reads into the cache.
     unsigned actions = 0;
     enum : unsigned { Up = 1, Down = 2, Play = 4, Quit = 8, Swap = 16, Zone = 32,
-                      Refresh = 64, Panel = 128, Left = 256, Right = 512, AddFolder = 1024 };
+                      Refresh = 64, Panel = 128, Left = 256, Right = 512, AddFolder = 1024,
+                      Options = 2048, PreviousTab = 4096, NextTab = 8192 };
     using winrt::Windows::Storage::StorageFolder;
     winrt::Windows::Foundation::IAsyncOperation<StorageFolder> picker{nullptr};
     std::future<std::string> validation;
@@ -193,9 +203,12 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         case VirtualKey::Escape: actions |= Quit; break;
         case VirtualKey::Enter: actions |= Play; break;
         case VirtualKey::X: actions |= Swap; break;
-        case VirtualKey::Y: actions |= Zone; break;
+        case VirtualKey::Y:
         case VirtualKey::R: actions |= Refresh; break;
         case VirtualKey::O: actions |= AddFolder; break;
+        case VirtualKey::F2: actions |= Options; break;
+        case VirtualKey::Q: actions |= PreviousTab; break;
+        case VirtualKey::E: actions |= NextTab; break;
         default: break;
         }
         e.Handled(true);
@@ -299,6 +312,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         } else if (x >= 670 && x < 895 && y >= 43 && y < 87) actions |= AddFolder;
         else if (x >= 1080 && y >= 43 && y < 87) actions |= Panel;
         else if (!loading && x >= 320 && x < 504 && y >= 334 && y < 380) actions |= Play;
+        else if (!loading && x >= 520 && x < 720 && y >= 334 && y < 380) actions |= Options;
         else if (!loading && x >= 58 && x < 1226 && y >= 444 && y < 635) {
             const size_t index = selected / PageSize * PageSize + static_cast<size_t>((x - 58) / 232);
             if (index < scan.entries.size()) { selected = index; dirty = true; }
@@ -441,6 +455,9 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         if (!system_page.notice.empty() && now >= system_notice_until) {
             system_page.notice.clear(); dirty = true;
         }
+        if (!options_notice.empty() && now >= options_notice_until) {
+            options_notice.clear(); dirty = true;
+        }
         if (panel.keyboard.capturing && now >= capture_until) {
             panel.keyboard.capturing = false; dirty = true;
         }
@@ -465,7 +482,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             pad = next;
             next_pad_check = now + std::chrono::milliseconds{500};
         }
-        const unsigned context = system_page.name_editor ? 6 : system_page.open ? 5 :
+        const unsigned context = game_options.open ? (cheat_session ? 8 : 7) :
+            system_page.name_editor ? 6 : system_page.open ? 5 :
             panel.keyboard.open ? 3 : panel.expanded ? 2 : settings ? 1 : configuration.open ? 4 : 0;
         if (context != navigation_context) {
             stick_navigation.Reset(); navigation_context = context;
@@ -524,9 +542,11 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                             if (settings) actions |= Swap;
                             else if (!configuration.open) actions |= AddFolder;
                         }
-                        if (hit(GamepadButtons::Y)) actions |= Zone;
-                        if (hit(GamepadButtons::Menu)) actions |= Refresh;
+                        if (hit(GamepadButtons::Y)) actions |= Refresh;
+                        if (hit(GamepadButtons::Menu)) actions |= Options;
                         if (hit(GamepadButtons::View)) actions |= Panel;
+                        if (hit(GamepadButtons::LeftShoulder)) actions |= PreviousTab;
+                        if (hit(GamepadButtons::RightShoulder)) actions |= NextTab;
                     }
                 }
             } catch (...) { pad.reset(); previous = {}; stick_navigation.Reset(); }
@@ -618,6 +638,90 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 send(Play, SystemInput::Confirm);
                 send(Quit, SystemInput::Back);
                 if (!system_page.open) configuration.selected = HomeSystem;
+            }
+            actions = 0;
+        }
+        if (actions & Options && !game_options.open && !settings && !configuration.open &&
+            !panel.keyboard.open && !loading && !picker && !validation.valid() && !scan.entries.empty()) {
+            game_options = {true, selected};
+            options_notice.clear();
+            actions = 0;
+            dirty = true;
+        }
+        if (game_options.open) {
+            // A rescan may have replaced the list under the page.
+            if (game_options.game >= scan.entries.size()) {
+                game_options = {};
+                cheat_session.reset();
+            }
+            if (cheat_session && cheat_session->Poll()) {
+                Cheats::ClampCheatsPage(cheats_page, cheat_session->Catalog(), Cheats::CheatsLayout::VisibleRows);
+                dirty = true;
+            }
+            const auto notify = [&](T text) {
+                options_notice = Tr(text);
+                options_notice_until = now + std::chrono::seconds{4};
+            };
+            if (cheat_session && actions) {
+                using Cheats::CheatsInput;
+                using Cheats::CheatsEffect;
+                const auto send = [&](unsigned bits, CheatsInput input) {
+                    if (!(actions & bits)) return;
+                    switch (Cheats::HandleCheatsInput(cheats_page, *cheat_session, input,
+                                                      Cheats::CheatsLayout::VisibleRows)) {
+                    case CheatsEffect::Changed:
+                        if (!cheat_session->Saved()) notify(T::CheatsSaveFailed);
+                        else options_notice.clear();
+                        break;
+                    case CheatsEffect::OverBudget: notify(T::CheatsOverBudget); break;
+                    case CheatsEffect::Refresh: cheat_session->Retry(); break;
+                    case CheatsEffect::Back:
+                        cheat_session.reset();
+                        game_options.page.reset();
+                        break;
+                    case CheatsEffect::None:
+                    case CheatsEffect::Moved:
+                        break;
+                    }
+                };
+                send(Up, CheatsInput::Up);
+                send(Down, CheatsInput::Down);
+                send(Left | PreviousTab, CheatsInput::PreviousCategory);
+                send(Right | NextTab, CheatsInput::NextCategory);
+                send(Play, CheatsInput::Toggle);
+                send(Swap | AddFolder, CheatsInput::ToggleAll);
+                send(Refresh, CheatsInput::Refresh);
+                if (cheat_session) send(Quit, CheatsInput::Back);
+                dirty = true;
+            } else if (actions) {
+                const auto send = [&](unsigned bit, GameOptionsInput input) {
+                    if (actions & bit) HandleGameOptionsInput(game_options, input);
+                };
+                send(Up, GameOptionsInput::Up);
+                send(Down, GameOptionsInput::Down);
+                send(Play, GameOptionsInput::Confirm);
+                send(Quit, GameOptionsInput::Back);
+                if (game_options.page == GameOption::Cheats) {
+                    // Cheat files are named after the game's title and main build ids, which the
+                    // library reads with the title (uwp_library_metadata.cpp).
+                    const auto& game = scan.entries[game_options.game];
+                    const bool known = std::any_of(game.build_id.begin(), game.build_id.end(),
+                                                   [](std::uint8_t b) { return b != 0; });
+                    if (game.title_loaded && game.program_id == 0) {
+                        notify(T::CheatsHomebrew);
+                        game_options.page.reset();
+                    } else if (!game.title_loaded || !known) {
+                        notify(T::CheatsUnavailable);
+                        game_options.page.reset();
+                    } else {
+                        Cheats::CheatGame cheat_game{game.program_id};
+                        std::copy(game.build_id.begin(), game.build_id.end(), cheat_game.build_id.begin());
+                        cheat_session.emplace(cheat_game);
+                        cheats_page = {};
+                        options_notice.clear();
+                    }
+                }
+                dirty = true;
             }
             actions = 0;
         }
@@ -802,6 +906,10 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                         }
                         found->name = std::move(entry.name);
                         found->developer = std::move(entry.developer);
+                        if (entry.title_loaded) {
+                            found->program_id = entry.program_id;
+                            found->build_id = entry.build_id;
+                        }
                         found->title_loaded |= entry.title_loaded;
                         // The player may have paged on meanwhile: keep icons only inside the window.
                         if (batch.icons && index >= window_first && index < page + 2 * PageSize)
@@ -885,8 +993,11 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             dirty = true;
         }
         if (dirty) {
+            const GameOptionsView options_view{
+                game_options, game_options.open ? &scan.entries[game_options.game] : nullptr,
+                cheat_session ? &*cheat_session : nullptr, cheats_page, options_notice};
             canvas->Draw({scan, selected, loading, settings, setting_row, options, notice, panel,
-                          configuration, system_page});
+                          configuration, system_page, options_view});
             dirty = false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{16});

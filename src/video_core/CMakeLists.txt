@@ -507,6 +507,7 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_indirect_buffer.h
         renderer_d3d12/d3d12_maxwell_to_d3d12.cpp
         renderer_d3d12/d3d12_maxwell_to_d3d12.h
+        renderer_d3d12/d3d12_menu_image.h
         renderer_d3d12/d3d12_overlay.cpp
         renderer_d3d12/d3d12_pipeline_cache.cpp
         renderer_d3d12/d3d12_pipeline_cache.h

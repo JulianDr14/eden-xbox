@@ -14,15 +14,18 @@ int main() {
     const LibraryCache cache{root / "cache"};
 
     const std::string game = "eden-usb:/eden-games-abc/sub/Game.nsp";
-    LibraryCacheRecord record{L"Título ñ", L"Estudio", std::vector<unsigned char>(5000, 0x5A)};
+    LibraryCacheRecord record{L"Título ñ", L"Estudio", std::vector<unsigned char>(5000, 0x5A),
+                              0x0100ABCD00010000ULL, {0x55, 0xEE, 0x1A, 0x69, 0x14, 0x5D, 0xE0, 0x4E}};
     check(!cache.Load(game, 7, 14, true));
     check(cache.Store(game, 7, 14, record));
 
     // Hit with and without the icon; any change of stamp, language or path misses.
     const auto full = cache.Load(game, 7, 14, true);
     check(full && full->name == record.name && full->developer == record.developer && full->icon == record.icon);
+    check(full->program_id == record.program_id && full->build_id == record.build_id);
     const auto texts = cache.Load(game, 7, 14, false);
     check(texts && texts->name == record.name && texts->icon.empty());
+    check(texts->program_id == record.program_id && texts->build_id == record.build_id);
     check(!cache.Load(game, 8, 14, true));
     check(!cache.Load(game, 7, 1, true));
     check(!cache.Load(game + "x", 7, 14, true));
@@ -53,5 +56,5 @@ int main() {
 
     check(cache.Clear() && !std::filesystem::exists(root / "cache"));
     std::filesystem::remove_all(root);
-    std::puts("library cache: hits, misses, replacement, truncation, stamps and clear PASS");
+    std::puts("library cache: hits, identity, misses, replacement, truncation, stamps and clear PASS");
 }
