@@ -123,6 +123,8 @@ public:
 private:
     [[nodiscard]] VirtualDir GetModificationLoadRoot(bool sdmc = false) const;
     [[nodiscard]] std::vector<std::string> GetDisabledAddons() const;
+    /// Mod folders in the order they apply (mod_priority.h); drops null roots.
+    void SortModDirectories(std::vector<VirtualDir>& dirs) const;
     void ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) const;
     [[nodiscard]] std::vector<VirtualFile> CollectPatches(const std::vector<VirtualDir>& patch_dirs,
                                                           const std::string& build_id) const;

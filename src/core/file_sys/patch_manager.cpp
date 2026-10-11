@@ -22,6 +22,7 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/ips_layer.h"
+#include "core/file_sys/mod_priority.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
@@ -194,6 +195,15 @@ std::vector<std::string> PatchManager::GetDisabledAddons() const {
     return disabled;
 }
 
+void PatchManager::SortModDirectories(std::vector<VirtualDir>& dirs) const {
+    auto priority = Settings::values.mod_priority[title_id];
+    if (parent_title_id) {
+        const auto& shared = Settings::values.mod_priority[*parent_title_id];
+        priority.insert(priority.end(), shared.begin(), shared.end());
+    }
+    SortByModPriority(dirs, priority, [](const VirtualDir& dir) { return dir->GetName(); });
+}
+
 VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
     LOG_INFO(Loader, "Patching ExeFS for title_id={:016X}", title_id);
 
@@ -336,9 +346,7 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
         const auto load_patch_dirs = load_dir->GetSubdirectories();
         patch_dirs.insert(patch_dirs.end(), load_patch_dirs.begin(), load_patch_dirs.end());
     }
-
-    std::sort(patch_dirs.begin(), patch_dirs.end(),
-              [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
+    SortModDirectories(patch_dirs);
 
     std::vector<VirtualDir> layers;
     layers.reserve(patch_dirs.size() + 1);
@@ -436,9 +444,10 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         return nso;
     }
 
+    // Patches apply one over the other and the last one wins, so the most important comes last.
     auto patch_dirs = load_dir->GetSubdirectories();
-    std::sort(patch_dirs.begin(), patch_dirs.end(),
-              [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
+    SortModDirectories(patch_dirs);
+    std::reverse(patch_dirs.begin(), patch_dirs.end());
     const auto patches = CollectPatches(patch_dirs, build_id);
 
     auto out = nso;
@@ -479,11 +488,7 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
         return false;
     }
 
-    auto patch_dirs = load_dir->GetSubdirectories();
-    std::sort(patch_dirs.begin(), patch_dirs.end(),
-              [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
-
-    return !CollectPatches(patch_dirs, build_id).empty();
+    return !CollectPatches(load_dir->GetSubdirectories(), build_id).empty();
 }
 
 std::vector<CheatFile> ReadCheatFiles(const VirtualDir& title_load_dir,
@@ -554,12 +559,14 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
     }
 
     const auto disabled = GetDisabledAddons();
-    std::vector<VirtualDir> patch_dirs = load_dir->GetSubdirectories();
+    std::vector<VirtualDir> patch_dirs;
+    if (load_dir != nullptr) {
+        patch_dirs = load_dir->GetSubdirectories();
+    }
     if (std::find(disabled.cbegin(), disabled.cend(), "SDMC") == disabled.cend()) {
         patch_dirs.push_back(sdmc_load_dir);
     }
-    std::sort(patch_dirs.begin(), patch_dirs.end(),
-              [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
+    SortModDirectories(patch_dirs);
 
     std::vector<VirtualDir> layers;
     std::vector<VirtualDir> layers_ext;

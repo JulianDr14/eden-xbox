@@ -944,6 +944,8 @@ struct Values {
 
     // Add-Ons
     std::map<u64, std::vector<std::string>> disabled_addons;
+    // Mod folder names by priority, most important first (core/file_sys/mod_priority.h).
+    std::map<u64, std::vector<std::string>> mod_priority;
 
     // Per-game overrides
     bool use_squashed_iterated_blend;
