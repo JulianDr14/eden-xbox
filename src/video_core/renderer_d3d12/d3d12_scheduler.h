@@ -30,11 +30,13 @@ namespace D3D12 {
 /// Command allocators come from a pool and are reused once the tick they recorded is done: an
 /// allocator must not be reset while the GPU still executes its commands.
 ///
-/// Threading: commands are recorded straight into one D3D12 list, which is not thread-safe, so only
-/// the recording thread (the GPU thread; whoever last asked for CommandList()) may record or flush.
-/// Other threads - Eden's fence thread - may query and wait on ticks: if they wait on work that is
-/// not submitted yet, they block until the recording thread submits it instead of flushing a list
-/// that thread is still writing to.
+/// Threading: only the recording thread (the GPU thread; whoever last asked for CommandList()) may
+/// record or flush. Its calls reach the D3D12 list through a CommandStream, either at once or on
+/// the recorder's worker, which also closes and submits each list (SubmitRecorded): Flush returns
+/// once the submission is recorded, and SubmittedTick() says when it reached the queue. Other
+/// threads - Eden's fence thread - may query and wait on ticks: if they wait on work that is not
+/// flushed yet, they block until the recording thread flushes it instead of flushing a list that
+/// thread is still writing to.
 class Scheduler {
 public:
     explicit Scheduler(Device& device);
@@ -92,6 +94,25 @@ public:
         return tick <= known_gpu_tick.load(std::memory_order_acquire);
     }
 
+    /// The last tick whose list reached the queue. Work submitted to the same queue by another
+    /// thread (the present thread's copy) must wait for it first: a queue runs lists in
+    /// submission order, so submitting first would run before the work it depends on.
+    [[nodiscard]] u64 SubmittedTick() const noexcept {
+        return submitted_tick.load(std::memory_order_acquire);
+    }
+    /// Blocks until tick's list reached the queue; at once without a recording worker.
+    void WaitSubmitted(u64 tick);
+
+    /// Everything recorded up to now has reached the list once IsRecorded(RecordPoint()) holds:
+    /// what the list reads on the CPU when it is called (the RTV/DSV behind a handle) may be
+    /// reused from then on.
+    [[nodiscard]] u64 RecordPoint() const noexcept {
+        return recorder->RecordPoint();
+    }
+    [[nodiscard]] bool IsRecorded(u64 point) const noexcept {
+        return recorder->IsExecuted(point);
+    }
+
     /// Whether the caller is the thread recording into CommandList().
     [[nodiscard]] bool IsRecordingThread() const {
         return recording_thread.load(std::memory_order_relaxed) == std::this_thread::get_id();
@@ -137,6 +158,13 @@ private:
 
     ComPtr<ID3D12CommandAllocator> AcquireAllocator();
 
+    /// Closes the list, submits it to signal tick and resets it for the next one. Recorded by
+    /// Flush, so it runs where the list is recorded (the worker or the recording thread).
+    void SubmitRecorded(ID3D12GraphicsCommandList* list, u64 tick);
+    /// On the worker after a recorded call threw: releases every waiter, so the recording thread
+    /// reaches its next Flush or Wait, which rethrows the error.
+    void ReleaseWaitersAfterError() noexcept;
+
     /// GPU time of every submission, from timestamps at the start and end of its list
     /// (VideoCore::Perf GpuBusyUs). Begin runs on a fresh list, End right before it closes.
     void CreateTimestamps();
@@ -164,13 +192,15 @@ private:
     Device& device;
     ComPtr<ID3D12Fence> fence;
 
+    // Owned by whoever records the list's calls: the worker, or the recording thread without one.
     ComPtr<ID3D12GraphicsCommandList> command_list;
+    ComPtr<ID3D12CommandAllocator> current_allocator;
+    std::deque<PooledAllocator> allocator_pool;
+
     /// Records the calls on command_list (see CommandStream).
     std::optional<ListRecorder> recorder;
     std::optional<CommandStream> stream;
     ID3D12PipelineState* current_pipeline{};
-    ComPtr<ID3D12CommandAllocator> current_allocator;
-    std::deque<PooledAllocator> allocator_pool;
 
     std::mutex release_mutex;
     struct PendingRelease {
@@ -189,6 +219,7 @@ private:
 
     std::atomic<std::thread::id> recording_thread{std::this_thread::get_id()};
     std::atomic<u64> current_tick{1};
+    std::atomic<u64> submitted_tick{0};
     mutable std::atomic<u64> known_gpu_tick{0};
 };
 

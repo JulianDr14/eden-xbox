@@ -299,6 +299,13 @@ public:
         }
     }
 
+    /// Drops what was recorded and not dispatched yet, unrun.
+    void DiscardRecorded() noexcept {
+        if (threaded) {
+            chunk->Discard();
+        }
+    }
+
     /// Executes what is left and stops the worker. Errors are dropped: this runs on teardown.
     void Shutdown() noexcept {
         if (!worker.joinable()) {

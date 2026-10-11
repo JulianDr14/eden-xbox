@@ -4,7 +4,7 @@
 // CommandRecorder gate (the D3D12 command list recording thread): commands and their arrays
 // arrive once and in order across chunks, inline mode runs them at once, record points report
 // what the worker executed, a throwing command stops the worker and is rethrown once, captured
-// objects are destroyed exactly once, and shutdown drains. Prints the recording cost per command.
+// objects are destroyed exactly once, shutdown drains and DiscardRecorded drops the rest. Prints the recording cost per command.
 // Run with build-uwp/diagnostics/command-recorder/run.bat.
 
 #include <windows.h>
@@ -173,6 +173,17 @@ void TestShutdown() {
     }
     Check(log.values.size() == 20'000, "shutdown executes what was recorded");
     Check(live == 0, "executed captures were destroyed");
+
+    Log dropped;
+    {
+        Recorder recorder{&dropped, Threaded()};
+        recorder.Record([](Log* l) { l->values.push_back(4); });
+        recorder.Dispatch();
+        recorder.Record([t = Tracked{live}](Log* l) { l->values.push_back(5); });
+        recorder.DiscardRecorded();
+    }
+    Check(dropped.values.size() == 1 && dropped.values[0] == 4, "dispatched ran, discarded not");
+    Check(live == 0, "discarded captures were destroyed");
     std::cout << "  shutdown PASS\n";
 }
 

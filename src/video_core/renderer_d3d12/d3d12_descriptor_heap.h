@@ -21,11 +21,14 @@ class Scheduler;
 /// RTVs/DSVs of attachments and samplers. Grows in pages; freed slots are reused.
 ///
 /// A slot may be freed as soon as its last use has been recorded: CopyDescriptors and
-/// OMSetRenderTargets read descriptors on the CPU timeline, when they are called.
+/// OMSetRenderTargets read descriptors on the CPU timeline, when they are called. The RTVs and
+/// DSVs are read by list calls, which a recording worker makes later: given the scheduler, a freed
+/// slot is reused only once what was recorded before the free has reached the list.
 class CpuDescriptorAllocator {
 public:
     explicit CpuDescriptorAllocator(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type,
-                                    u32 page_size = 1024);
+                                    u32 page_size = 1024,
+                                    const Scheduler* read_by_list_calls = nullptr);
 
     CpuDescriptorAllocator(const CpuDescriptorAllocator&) = delete;
     CpuDescriptorAllocator& operator=(const CpuDescriptorAllocator&) = delete;
@@ -34,14 +37,23 @@ public:
     void Free(D3D12_CPU_DESCRIPTOR_HANDLE handle);
 
 private:
+    struct PendingFree {
+        u64 record_point;
+        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+    };
+
     void AddPage();
+    /// Moves the slots whose last use reached the list to free_list (under mutex).
+    void ReclaimRecorded();
 
     ID3D12Device* device;
     D3D12_DESCRIPTOR_HEAP_TYPE type;
     u32 page_size;
     u32 stride;
+    const Scheduler* scheduler;
     std::vector<ComPtr<ID3D12DescriptorHeap>> pages;
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> free_list;
+    std::deque<PendingFree> pending_frees; ///< in record point order
     std::mutex mutex;
 };
 

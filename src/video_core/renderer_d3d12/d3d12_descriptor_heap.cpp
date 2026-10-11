@@ -55,9 +55,10 @@ ComPtr<ID3D12DescriptorHeap> CreateHeap(ID3D12Device* device, D3D12_DESCRIPTOR_H
 // --- CpuDescriptorAllocator -------------------------------------------------------------------
 
 CpuDescriptorAllocator::CpuDescriptorAllocator(ID3D12Device* device_,
-                                               D3D12_DESCRIPTOR_HEAP_TYPE type_, u32 page_size_)
+                                               D3D12_DESCRIPTOR_HEAP_TYPE type_, u32 page_size_,
+                                               const Scheduler* read_by_list_calls)
     : device{device_}, type{type_}, page_size{page_size_},
-      stride{device_->GetDescriptorHandleIncrementSize(type_)} {
+      stride{device_->GetDescriptorHandleIncrementSize(type_)}, scheduler{read_by_list_calls} {
     if (page_size == 0) {
         throw std::invalid_argument("D3D12: offline descriptor page size must not be zero");
     }
@@ -65,6 +66,7 @@ CpuDescriptorAllocator::CpuDescriptorAllocator(ID3D12Device* device_,
 
 D3D12_CPU_DESCRIPTOR_HANDLE CpuDescriptorAllocator::Allocate() {
     std::scoped_lock lock{mutex};
+    ReclaimRecorded();
     if (free_list.empty()) {
         AddPage();
     }
@@ -78,7 +80,22 @@ void CpuDescriptorAllocator::Free(D3D12_CPU_DESCRIPTOR_HANDLE handle) {
         return;
     }
     std::scoped_lock lock{mutex};
+    if (scheduler) {
+        // A call recorded before the free may still have to read the descriptor.
+        const u64 point = scheduler->RecordPoint();
+        if (!scheduler->IsRecorded(point)) {
+            pending_frees.push_back({point, handle});
+            return;
+        }
+    }
     free_list.push_back(handle);
+}
+
+void CpuDescriptorAllocator::ReclaimRecorded() {
+    while (!pending_frees.empty() && scheduler->IsRecorded(pending_frees.front().record_point)) {
+        free_list.push_back(pending_frees.front().handle);
+        pending_frees.pop_front();
+    }
 }
 
 void CpuDescriptorAllocator::AddPage() {

@@ -241,6 +241,9 @@ void PresentManager::CopyToSwapchain(PresentFrame& frame) {
                        D3D12_RESOURCE_STATE_PRESENT);
     ThrowIfFailed(copy_list->Close(), "ID3D12GraphicsCommandList::Close (present)");
 
+    // The queue runs lists in submission order, and the frame's rendering may still be on its way
+    // to the queue from the recording worker: the copy must not overtake it.
+    scheduler.WaitSubmitted(frame.render_tick);
     std::scoped_lock lock{device.QueueMutex()};
     ID3D12CommandList* const lists[] = {copy_list.Get()};
     device.Queue()->ExecuteCommandLists(1, lists);
