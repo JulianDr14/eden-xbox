@@ -155,6 +155,7 @@ void RasterizerD3D12::InvalidateGraphicsState() {
 
 void RasterizerD3D12::InvalidateCommandListState() {
     command_state = {};
+    buffer_runtime.InvalidateGeometry();
     state_invalidation_pending = channel_bound;
 }
 

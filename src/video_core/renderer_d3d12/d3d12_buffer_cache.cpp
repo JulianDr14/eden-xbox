@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstring>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "common/alignment.h"
@@ -89,15 +90,15 @@ u32 IndexSize(IndexFormat format) {
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VideoCommon::NullBufferParams params)
     : VideoCommon::BufferBase(params), scheduler{&runtime.scheduler},
-      buffer{runtime.CreateDefaultBuffer(4)}, tracker{4096},
-      charge{Common::MemoryAccount::BufferCache, 4} {}
+      buffer{runtime.CreateDefaultBuffer(4)}, address{buffer ? buffer->GetGPUVirtualAddress() : 0},
+      tracker{4096}, charge{Common::MemoryAccount::BufferCache, 4} {}
 
 Buffer::Buffer(BufferCacheRuntime& runtime, VAddr cpu_addr, u64 size_bytes, bool)
     : VideoCommon::BufferBase(cpu_addr, size_bytes), scheduler{&runtime.scheduler},
       // Whole 256-byte blocks: a guest cbuf ending with the buffer still fits a CBV.
       buffer{runtime.CreateDefaultBuffer(
           Common::AlignUp(size_bytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT))},
-      tracker{size_bytes},
+      address{buffer ? buffer->GetGPUVirtualAddress() : 0}, tracker{size_bytes},
       charge{Common::MemoryAccount::BufferCache,
              Common::AlignUp(size_bytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT)} {}
 
@@ -115,6 +116,7 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
         static_cast<VideoCommon::BufferBase&>(*this) = std::move(other);
         scheduler = other.scheduler;
         buffer = std::move(other.buffer);
+        address = std::exchange(other.address, 0);
         tracker = std::move(other.tracker);
         state = other.state;
         state_tick = other.state_tick;
@@ -410,8 +412,10 @@ void BufferCacheRuntime::BindVertexBuffers(VideoCommon::HostBindings<Buffer>& bi
 }
 
 void BufferCacheRuntime::ApplyGeometry(ID3D12GraphicsCommandList* cmd) {
-    if (pending_index) {
+    if (pending_index && (!applied_index || std::memcmp(&*applied_index, &*pending_index,
+                                                        sizeof(D3D12_INDEX_BUFFER_VIEW)) != 0)) {
         cmd->IASetIndexBuffer(&*pending_index);
+        applied_index = pending_index;
     }
     // One call per run of consecutive slots (usually a single run from slot 0).
     for (u32 mask = pending_vertex_mask; mask != 0;) {

@@ -36,9 +36,9 @@ public:
     Buffer& operator=(Buffer&&) noexcept;
 
     [[nodiscard]] ID3D12Resource* Handle() const noexcept { return buffer.Get(); }
-    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS Address() const noexcept {
-        return buffer ? buffer->GetGPUVirtualAddress() : 0;
-    }
+    /// Read once at creation: GetGPUVirtualAddress is a call into the runtime, and draws take the
+    /// address of every index buffer and persistent uniform buffer they bind.
+    [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS Address() const noexcept { return address; }
     operator ID3D12Resource*() const noexcept { return Handle(); }
     bool IsRegionUsed(u64 offset, u64 size) const noexcept { return tracker.IsUsed(offset, size); }
     void MarkUsage(u64 offset, u64 size) noexcept { tracker.Track(offset, size); }
@@ -53,6 +53,7 @@ public:
 private:
     Scheduler* scheduler{};
     ComPtr<ID3D12Resource> buffer;
+    D3D12_GPU_VIRTUAL_ADDRESS address{};
     VideoCommon::UsageTracker tracker;
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
     u64 state_tick{}; ///< scheduler tick of the list that set state
@@ -152,8 +153,12 @@ public:
         return rewritten_count;
     }
 
-    /// Sets the collected index and vertex buffers on the command list and forgets them.
+    /// Sets the collected index and vertex buffers on the command list and forgets them. An index
+    /// buffer the list already has is not set again.
     void ApplyGeometry(ID3D12GraphicsCommandList* cmd);
+
+    /// A new command list starts without an index buffer.
+    void InvalidateGeometry() noexcept { applied_index.reset(); }
 
     [[nodiscard]] static bool IsEmulatedTopology(PrimitiveTopology topology) noexcept;
 
@@ -174,6 +179,7 @@ private:
     u32 traced_uniforms{};
 
     std::optional<D3D12_INDEX_BUFFER_VIEW> pending_index;
+    std::optional<D3D12_INDEX_BUFFER_VIEW> applied_index; ///< what the command list holds
     std::array<D3D12_VERTEX_BUFFER_VIEW, VideoCommon::NUM_VERTEX_BUFFERS> pending_vertex{};
     u32 pending_vertex_mask{};
     std::optional<u32> rewritten_count;
