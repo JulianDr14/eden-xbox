@@ -461,6 +461,33 @@ void RasterizerD3D12::InvalidateRegion(DAddr address, u64 size, VideoCommon::Cac
     if (True(which & VideoCommon::CacheType::ShaderCache)) pipeline_cache.InvalidateRegion(address, size);
 }
 
+void RasterizerD3D12::InnerInvalidation(
+    std::span<const std::pair<DAddr, std::size_t>> sequences) {
+    // The ranges written through the GPU memory manager since the last draw: one lock per cache
+    // for the batch instead of two per range, with the same caches and setting as the default
+    // per-range InvalidateRegion.
+    if (Settings::values.skip_cpu_inner_invalidation.GetValue()) {
+        return;
+    }
+    {
+        std::scoped_lock lock{texture_cache.mutex};
+        for (const auto& [address, size] : sequences) {
+            if (address && size) texture_cache.WriteMemory(address, size);
+        }
+    }
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        for (const auto& [address, size] : sequences) {
+            if (address && size) buffer_cache.WriteMemory(address, size);
+        }
+    }
+    for (const auto& [address, size] : sequences) {
+        if (!address || !size) continue;
+        query_cache.InvalidateRegion(address, size);
+        pipeline_cache.InvalidateRegion(address, size);
+    }
+}
+
 bool RasterizerD3D12::OnCPUWrite(PAddr address, u64 size) {
     {
         std::scoped_lock lock{buffer_cache.mutex};

@@ -76,6 +76,7 @@ public:
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr, u64) override;
     void InvalidateRegion(DAddr, u64,
                           VideoCommon::CacheType = VideoCommon::CacheType::All) override;
+    void InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) override;
     void OnCacheInvalidation(PAddr, u64) override;
     bool OnCPUWrite(PAddr, u64) override;
     void InvalidateGPUCache() override;
