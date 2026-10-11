@@ -204,8 +204,22 @@ private:
         tracked_entries.GetUnchecked(page_index).cpu_backing_address = address | (asid.id << asid_start_bit);
     }
 
-    std::array<TranslationEntry, 4> t_slot{};
-    u32 cache_cursor = 0;
+    /// The last pages ReadBlock translated, per thread: the GPU thread and the services read
+    /// through it while Map and Unmap run on other threads, and one shared array let a reader
+    /// pair one entry's page with another's pointer.
+    struct TranslationCache {
+        const void* owner{};
+        u64 generation{};
+        std::array<TranslationEntry, 4> slots{};
+        u32 cursor{};
+    };
+    /// This thread's cache, emptied when Map or Unmap ran since it was last filled.
+    TranslationCache& LocalTranslationCache() noexcept;
+    /// Host pointer of the page holding address, through the cache; null when unmapped.
+    u8* CachedPagePointer(DAddr address) noexcept;
+
+    /// Bumped by Map and Unmap, which makes every thread's translation cache stale.
+    std::atomic<u64> translation_generation{1};
     using CounterType = u8;
     using CounterAtomicType = std::atomic_uint8_t;
     static constexpr size_t subentries = 8 / sizeof(CounterType);
