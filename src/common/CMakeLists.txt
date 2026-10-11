@@ -164,7 +164,8 @@ set_source_files_properties(zbic_compression.cpp PROPERTIES
 if(WIN32)
     target_sources(common PRIVATE windows/timer_resolution.cpp
         windows/timer_resolution.h)
-    target_link_libraries(common PRIVATE ntdll)
+    # ntdll: the timer resolution; synchronization: WaitOnAddress (Common::Event::WaitFor).
+    target_link_libraries(common PRIVATE ntdll synchronization)
 endif()
 
 # Structured exception handling (__try) guards its stack unwinds: MSVC and clang-cl only.

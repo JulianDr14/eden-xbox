@@ -22,26 +22,31 @@ class Event {
 public:
     void Set() {
         std::scoped_lock lk{mutex};
-        if (!is_set) {
-            is_set = true;
+        if (!IsSet()) {
+            is_set = 1;
             condvar.notify_one();
+#ifdef _WIN32
+            WakeTimedWaiter();
+#endif
         }
     }
 
     void Wait() {
         std::unique_lock lk{mutex};
-        condvar.wait(lk, [&] { return is_set.load(); });
-        is_set = false;
+        condvar.wait(lk, [&] { return IsSet(); });
+        is_set = 0;
     }
 
+    /// On Windows, accurate to tens of microseconds: it blocks in the OS for most of the time and
+    /// waits the last stretch, shorter than the OS timer resolution, on the CPU. One waiter.
     bool WaitFor(const std::chrono::nanoseconds time);
 
     template<class Clock, class Duration>
     bool WaitUntil(const std::chrono::time_point<Clock, Duration> time) {
         std::unique_lock lk{mutex};
-        if (!condvar.wait_until(lk, time, [this] { return is_set.load(); }))
+        if (!condvar.wait_until(lk, time, [this] { return IsSet(); }))
             return false;
-        is_set = false;
+        is_set = 0;
         return true;
     }
 
@@ -49,15 +54,21 @@ public:
         std::unique_lock lk{mutex};
         // no other action required, since wait loops on the predicate and any lingering signal will
         // get cleared on the first iteration
-        is_set = false;
+        is_set = 0;
     }
 
     [[nodiscard]] bool IsSet() const {
-        return is_set;
+        return is_set.load() != 0;
     }
 
 private:
-    alignas(64) std::atomic<bool> is_set{false};
+#ifdef _WIN32
+    /// WaitFor blocks on is_set itself (WaitOnAddress), not on the condition variable.
+    void WakeTimedWaiter();
+#endif
+
+    /// A word, not a bool, so WaitFor can wait on it in the OS and on the CPU.
+    alignas(64) std::atomic<u32> is_set{0};
     std::condition_variable condvar;
     std::mutex mutex;
 };
