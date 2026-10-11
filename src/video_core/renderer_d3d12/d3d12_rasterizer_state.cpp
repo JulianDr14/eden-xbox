@@ -161,7 +161,11 @@ void RasterizerD3D12::InvalidateCommandListState() {
 
 void RasterizerD3D12::ApplyPendingStateInvalidation() {
     if (state_invalidation_pending && channel_bound) {
-        state_tracker.InvalidateState();
+        // Only what a new command list loses, as Vulkan's scheduler does: the vertex buffers (the
+        // index buffer and everything in command_state is set again anyway) and the state the
+        // pipeline key rereads. Render targets, shaders and descriptors live in the caches and
+        // stay valid; marking them dirty made the next draw resolve them all again.
+        state_tracker.InvalidateCommandBufferState();
         state_invalidation_pending = false;
     }
 }
