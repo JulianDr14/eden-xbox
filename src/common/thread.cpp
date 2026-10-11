@@ -630,6 +630,8 @@ void PollThreadPolicies() {
 #ifdef _WIN32
 namespace {
 
+std::atomic<bool> precise_timer_sleeps{true};
+
 /// How long before a deadline a wait stops sleeping in the OS and waits on the CPU instead: an OS
 /// wake lands on the next timer interrupt, so it can come up to one timer period late.
 std::chrono::nanoseconds PreciseWaitMargin() {
@@ -642,13 +644,69 @@ std::chrono::nanoseconds PreciseWaitMargin() {
 
 } // Anonymous namespace
 
+void SetPreciseTimerSleeps(bool enabled) {
+    precise_timer_sleeps = enabled;
+}
+
+bool IsPreciseTimerSleeps() {
+    return precise_timer_sleeps;
+}
+
 void Event::WakeTimedWaiter() {
     WakeByAddressAll(&is_set);
+    // Pairs with WaitFor's store before it rechecks is_set: either it sees the set or this sees
+    // it asleep. A wake that finds it about to skip the sleep only shortens its next one.
+    if (timer_sleeping.load()) {
+        timer->Wake();
+    }
 }
 
 bool Event::WaitFor(const std::chrono::nanoseconds time) {
     const auto& clock = Common::g_wall_clock;
     const s64 deadline = clock.GetUptime() + static_cast<s64>(clock.NsToTicks(time));
+    if (!timer_slack) {
+        // Starts short, so even waits shorter than a timer tick sleep and teach it the timer's
+        // real lateness, which it then follows; it never exceeds the tick-based wait's margin
+        // below, since a timer that late is no better than ticks.
+        timer_slack.emplace(std::chrono::nanoseconds{100'000}.count(),
+                            std::chrono::nanoseconds{20'000}.count(),
+                            PreciseWaitMargin().count());
+        if (precise_timer_sleeps && Windows::PreciseTimer::IsSupported()) {
+            auto made = std::make_unique<Windows::PreciseTimer>();
+            if (made->IsValid()) {
+                timer = std::move(made);
+            }
+        }
+    }
+    if (timer) {
+        // Sleeps on the timer until its usual lateness before the deadline, re-sleeping after a
+        // wake that did not come from Set, and waits only that last stretch on the CPU.
+        const s64 deadline_ns = (clock.GetTimeNS() + time).count();
+        for (;;) {
+            if (is_set.exchange(0) != 0) {
+                return true;
+            }
+            const s64 now = clock.GetTimeNS().count();
+            const s64 wake_at = deadline_ns - timer_slack->Margin();
+            if (wake_at <= now) {
+                break;
+            }
+            timer_sleeping.store(true);
+            bool woken = true;
+            if (!IsSet()) {
+                woken = timer->Sleep(std::chrono::nanoseconds{wake_at - now});
+            }
+            timer_sleeping.store(false);
+            if (!woken) {
+                timer_slack->Record(clock.GetTimeNS().count() - wake_at);
+            }
+        }
+        if (CpuWaitForBits(is_set, 1, deadline, BestCpuWaitMethod())) {
+            is_set = 0;
+            return true;
+        }
+        return false;
+    }
     const auto margin = PreciseWaitMargin();
     const auto block_until = clock.GetTimeNS() + time - margin;
     // Most of a long wait blocks in the OS on the flag itself, where Set wakes it at once and the

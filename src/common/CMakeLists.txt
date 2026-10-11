@@ -163,7 +163,9 @@ set_source_files_properties(zbic_compression.cpp PROPERTIES
     COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:Clang,GNU>:-Wno-unused-function;-Wno-missing-declarations;-Wno-shadow>;$<$<CXX_COMPILER_ID:MSVC>:/wd4505;/wd5245>")
 
 if(WIN32)
-    target_sources(common PRIVATE windows/timer_resolution.cpp
+    target_sources(common PRIVATE windows/precise_timer.cpp
+        windows/precise_timer.h
+        windows/timer_resolution.cpp
         windows/timer_resolution.h)
     # ntdll: the timer resolution; synchronization: WaitOnAddress (Common::Event::WaitFor).
     target_link_libraries(common PRIVATE ntdll synchronization)

@@ -11,12 +11,25 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
+#ifdef _WIN32
+#include "common/windows/precise_timer.h"
+#endif
 
 namespace Common {
+
+#ifdef _WIN32
+/// Whether Event::WaitFor sleeps on a high-resolution timer where the system has one (the
+/// default) or only on timer ticks, waiting the last tick on the CPU. Read by each Event's first
+/// timed wait.
+void SetPreciseTimerSleeps(bool enabled);
+[[nodiscard]] bool IsPreciseTimerSleeps();
+#endif
 
 class Event {
 public:
@@ -37,8 +50,10 @@ public:
         is_set = 0;
     }
 
-    /// On Windows, accurate to tens of microseconds: it blocks in the OS for most of the time and
-    /// waits the last stretch, shorter than the OS timer resolution, on the CPU. One waiter.
+    /// On Windows, accurate to tens of microseconds: it sleeps on a high-resolution timer until
+    /// shortly before the deadline (by how late that timer has been waking) and waits the rest on
+    /// the CPU; without such timers, the last stretch it waits on the CPU is the OS timer
+    /// resolution. One waiter.
     bool WaitFor(const std::chrono::nanoseconds time);
 
     template<class Clock, class Duration>
@@ -63,12 +78,20 @@ public:
 
 private:
 #ifdef _WIN32
-    /// WaitFor blocks on is_set itself (WaitOnAddress), not on the condition variable.
+    /// WaitFor blocks on is_set itself (WaitOnAddress) or on its timer, not on the condition
+    /// variable.
     void WakeTimedWaiter();
 #endif
 
     /// A word, not a bool, so WaitFor can wait on it in the OS and on the CPU.
     alignas(64) std::atomic<u32> is_set{0};
+#ifdef _WIN32
+    /// WaitFor's timer and how late it wakes (host ticks), made by the first wait; the waiter is
+    /// asleep on it while timer_sleeping.
+    std::unique_ptr<Windows::PreciseTimer> timer;
+    std::optional<Windows::TimerSlack> timer_slack;
+    std::atomic<bool> timer_sleeping{false};
+#endif
     std::condition_variable condvar;
     std::mutex mutex;
 };

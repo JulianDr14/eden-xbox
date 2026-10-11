@@ -13,6 +13,7 @@
 #include "common/logging.h"
 
 #ifdef _WIN32
+#include "common/windows/precise_timer.h"
 #include "common/windows/timer_resolution.h"
 #endif
 
@@ -74,10 +75,19 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
     if (is_multicore) {
         const auto& clock = Common::g_wall_clock;
 #ifdef ARCHITECTURE_x86_64
-        LOG_INFO(Core_Timing, "Host clock: {}, CPU waits: {}",
+#ifdef _WIN32
+        const char* const sleeps =
+            Common::Windows::PreciseTimer::IsSupported()
+                ? (Common::IsPreciseTimerSleeps() ? "high-resolution timer"
+                                                  : "OS timer ticks (high-resolution timer off)")
+                : "OS timer ticks";
+#else
+        const char* const sleeps = "condition variable";
+#endif
+        LOG_INFO(Core_Timing, "Host clock: {}, CPU waits: {}, sleeps: {}",
                  clock.IsNative() ? fmt::format("TSC at {:.1f} MHz", clock.rdtsc_frequency / 1e6)
                                   : std::string{"steady_clock"},
-                 Common::CpuWaitMethodName(Common::BestCpuWaitMethod()));
+                 Common::CpuWaitMethodName(Common::BestCpuWaitMethod()), sleeps);
 #endif
         timer_thread = std::jthread([this](std::stop_token stop_token) {
             Common::SetCurrentThreadName("HostTiming");

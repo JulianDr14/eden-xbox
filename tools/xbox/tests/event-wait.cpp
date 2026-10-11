@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Event::WaitFor gate (the host timing thread's wait): timeouts end on time and never early,
-// a long wait keeps the core mostly free, and Set wakes the waiter in every stage of the wait
-// (blocked, sleeping a tick at a time, waiting on the CPU) without ever being lost.
+// waits of any length keep the core mostly free when high-resolution timers exist (the timer
+// slack it learns follows late wakes up and back down), and Set wakes the waiter in every stage
+// of the wait (asleep on the timer or blocked, waiting on the CPU) without ever being lost.
 // Run with build-uwp/diagnostics/event-wait/run.bat.
 
 #include <windows.h>
@@ -19,6 +20,7 @@
 #include "common/cpu_features.h"
 #include "common/cpu_wait.h"
 #include "common/thread.h"
+#include "common/windows/precise_timer.h"
 #include "common/windows/timer_resolution.h"
 
 // common.lib asserts through these; the harness has no logging backend.
@@ -63,6 +65,25 @@ void TestBasics() {
     Check(!event.WaitFor(1ms), "a consumed event times out again");
 }
 
+void TestTimerSlack() {
+    // In nanoseconds, as Event::WaitFor uses it.
+    Common::Windows::TimerSlack slack{1'250'000, 20'000, 1'250'000};
+    Check(slack.Margin() == 1'250'000, "starts at the initial margin");
+    for (int i = 0; i < 3000; ++i) {
+        slack.Record(50'000);
+    }
+    Check(slack.Margin() >= 50'000 && slack.Margin() < 50'300, "settles on steady lateness");
+    slack.Record(5'000'000);
+    Check(slack.Margin() > 600'000 && slack.Margin() < 700'000,
+          "a late wake raises it halfway to the cap");
+    for (int i = 0; i < 3000; ++i) {
+        slack.Record(0);
+    }
+    Check(slack.Margin() == 20'000, "never below the minimum");
+    slack.Record(-30'000);
+    Check(slack.Margin() == 20'000, "an early wake counts as on time");
+}
+
 void TestTimeouts() {
     Common::Event event;
     const bool native = Common::g_wall_clock.IsNative();
@@ -92,7 +113,10 @@ void TestTimeouts() {
         // A desktop preempts now and then; the typical wait is what the gate holds.
         Check(Percentile(late, 0.9) < 50.0, "a timeout ends within 50 us (p90)");
         Check(Percentile(late, 0.99) < 1500.0, "a timeout ends within 1.5 ms (p99)");
-        if (native && duration >= 5ms) {
+        if (native && Common::Windows::PreciseTimer::IsSupported() && duration >= 700us) {
+            // Only the timer's usual lateness waits on the CPU; the rest sleeps.
+            Check(cpu < 0.35, "a wait sleeps on the timer and leaves the core mostly free");
+        } else if (native && duration >= 5ms) {
             // The last stretch, about one timer tick, waits on the CPU; the rest sleeps.
             Check(cpu < 0.2, "a long wait leaves the core mostly free");
         }
@@ -140,8 +164,8 @@ void TestSetWakes() {
 }
 
 void TestSetNearDeadline() {
-    // A set in the last stretch, while the waiter waits on the CPU (the final timer tick of a
-    // 3 ms wait), is seen at once too.
+    // A set in the last stretch, while the waiter waits on the CPU or sleeps its last short
+    // timer stretch before a 3 ms deadline, is seen at once too.
     Common::Event event;
     std::vector<double> latency;
     for (int i = 0; i < 100; ++i) {
@@ -163,8 +187,12 @@ void TestSetNearDeadline() {
     }
     std::cout << "  set in the last stretch to wake: p50 " << Percentile(latency, 0.5)
               << " us, p99 " << Percentile(latency, 0.99) << " us\n";
-    // A set just before the CPU stretch waits out the current timer tick.
-    Check(Percentile(latency, 0.5) < 20.0, "a set in the last stretch wakes within 20 us (p50)");
+    // Without high-resolution timers, a set just before the CPU stretch waits out the current
+    // timer tick.
+    // Asleep on a high-resolution timer, the wake goes through the OS.
+    const double last_stretch_p50 = Common::Windows::PreciseTimer::IsSupported() ? 100.0 : 20.0;
+    Check(Percentile(latency, 0.5) < last_stretch_p50,
+          "a set in the last stretch wakes at once (p50)");
     Check(Percentile(latency, 0.99) < 1000.0, "a set in the last stretch wakes within 1 ms (p99)");
 }
 
@@ -177,9 +205,11 @@ int main() {
     std::cout << "clock " << (Common::g_wall_clock.IsNative() ? "native TSC" : "steady_clock")
               << " at " << Common::g_wall_clock.rdtsc_frequency / 1e6 << " MHz, CPU waits "
               << Common::CpuWaitMethodName(Common::BestCpuWaitMethod()) << ", timer resolution "
-              << Micros(resolution).count() << " us\n";
+              << Micros(resolution).count() << " us, high-resolution timers "
+              << (Common::Windows::PreciseTimer::IsSupported() ? "yes" : "no") << '\n';
     Check(!Common::g_cpu_caps.invariant_tsc || Common::g_wall_clock.IsNative(),
           "an invariant TSC gives a native clock");
+    TestTimerSlack();
     TestBasics();
     TestTimeouts();
     TestSetWakes();
