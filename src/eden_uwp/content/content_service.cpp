@@ -8,6 +8,8 @@
 #include "common/logging.h"
 #include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
+#include "core/file_sys/control_metadata.h"
+#include "core/file_sys/romfs.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/loader/nso.h"
 #include "core/hle/api_version.h"
@@ -196,7 +198,16 @@ LaunchResolution ResolveLaunchContent(FileSys::VfsFilesystem& vfs, const std::st
         }
     }
     auto main_nca = provider.GetEntry(GetUpdateTitleID(programs.front().title_id), ContentRecordType::Program);
-    if (!main_nca || !main_nca->GetExeFS()) main_nca = provider.GetEntry(programs.front().title_id, ContentRecordType::Program);
+    const bool uses_update = main_nca && main_nca->GetExeFS();
+    const auto control_title = uses_update ? GetUpdateTitleID(programs.front().title_id) : programs.front().title_id;
+    const auto control_nca = provider.GetEntry(control_title, ContentRecordType::Control);
+    if (control_nca && control_nca->GetRomFS()) {
+        const auto directory = ExtractRomFS(control_nca->GetRomFS());
+        const auto control = directory ? directory->GetFile("control.nacp") : nullptr;
+        if (control && control->GetSize() >= sizeof(RawNACP)) result.display_version = NACP{control}.GetVersionString();
+    }
+    // A missing update Control must not label the updated executable with the base version.
+    if (!uses_update) main_nca = provider.GetEntry(programs.front().title_id, ContentRecordType::Program);
     if (main_nca && main_nca->GetExeFS()) {
         const auto main = main_nca->GetExeFS()->GetFile("main");
         Loader::NSOHeader header{};

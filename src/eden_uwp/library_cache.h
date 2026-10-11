@@ -26,6 +26,7 @@ struct LibraryCacheRecord {
     std::vector<unsigned char> icon; ///< As the game ships it (JPEG), at most MaxIcon bytes.
     std::uint64_t program_id{};              ///< 0 when unknown (homebrew, unreadable game).
     std::array<std::uint8_t, 8> build_id{}; ///< The main module's, as cheat files are named.
+    std::wstring display_version; ///< Effective NACP version, e.g. 2.0.0.
 };
 
 class LibraryCache {
@@ -35,7 +36,7 @@ public:
     explicit LibraryCache(std::filesystem::path directory);
 
     /// The record for `launch_path`, if its stamp and language match. Without `with_icon` only the
-    /// texts are read (a header and two strings), for filling in names across the whole library.
+    /// texts are read (a header and three strings), for filling in names across the whole library.
     [[nodiscard]] std::optional<LibraryCacheRecord> Load(std::string_view launch_path,
                                                          std::uint64_t stamp, std::uint32_t language,
                                                          bool with_icon) const;

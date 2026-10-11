@@ -186,3 +186,17 @@ caliente, bytes I/O, pico de memoria y cancelación. Estas mediciones aún no ex
 Gameplay de aceptación en PC/Series es manual hasta Q/menú, sin duración ni entradas
 programadas. Empaquetar/subir versión y archivar símbolos según el ciclo habitual
 solo después de build y gate PC; no se ha certificado ni empaquetado una versión aquí.
+
+
+## Versión visible en la biblioteca (11 octubre 2026)
+
+La ficha principal y cada carátula muestran la cadena de versión NACP del Control
+correspondiente al programa efectivo: update seleccionado o base sin update.
+La resolución comparte proveedor con la selección usada para arranque y Build ID.
+Si el update no tiene Control legible o su resolución falla, se omite la versión;
+no se sustituye por la del base ni se convierte CNMT numérico a una versión comercial.
+Cambiar contenido invalida la versión en pantalla y la caché. El formato de caché
+pasa de v2 a v3 para guardar la cadena; los registros anteriores se releen.
+Harness real de LibraryCache PASS: persistencia con/sin icono, cambio 1.0.0→2.0.0,
+downgrade, versión desconocida vacía, rechazo de formato anterior y truncados.
+Gate visual/manual con NACP reales del base y de un update pendiente.

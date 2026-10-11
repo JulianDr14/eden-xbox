@@ -23,6 +23,7 @@ struct LibraryEntry {
     std::wstring source_name;
     std::uint64_t program_id{};              ///< Known with the title; 0 for homebrew.
     std::array<std::uint8_t, 8> build_id{}; ///< The main module's, as cheat files are named.
+    std::wstring display_version; ///< Effective NACP version, e.g. 2.0.0.
 };
 struct LibraryScan {
     std::vector<LibraryEntry> entries;

@@ -23,6 +23,7 @@ namespace {
 void Apply(LibraryEntry& entry, LibraryCacheRecord&& record, bool icons) {
     if (!record.name.empty()) entry.name = std::move(record.name);
     entry.developer = std::move(record.developer);
+    entry.display_version = std::move(record.display_version);
     if (icons) entry.icon = std::move(record.icon);
     entry.program_id = record.program_id;
     entry.build_id = record.build_id;
@@ -74,8 +75,10 @@ void ReadLibraryMetadata(const std::filesystem::path& root, std::vector<LibraryE
             if (loader->ReadTitle(title) == Loader::ResultStatus::Success && !title.empty())
                 record.name = winrt::to_hstring(title).c_str();
             FileSys::NACP control;
-            if (loader->ReadControlData(control) == Loader::ResultStatus::Success)
+            if (loader->ReadControlData(control) == Loader::ResultStatus::Success) {
                 record.developer = winrt::to_hstring(control.GetDeveloperName()).c_str();
+                record.display_version = winrt::to_hstring(control.GetVersionString()).c_str();
+            }
             if (loader->ReadIcon(record.icon) != Loader::ResultStatus::Success ||
                 record.icon.size() > LibraryCache::MaxIcon)
                 record.icon.clear();
@@ -84,7 +87,10 @@ void ReadLibraryMetadata(const std::filesystem::path& root, std::vector<LibraryE
             {
                 FileSys::ManualContentProvider selected;
                 const auto resolved = Content::ResolveLaunchContent(*system->GetFilesystem(), entry.launch_path, selected, false, stop, Content::ReportedSystemVersion(*system));
-                if (resolved.error == Content::Error::None) record.build_id = resolved.build_id;
+                if (resolved.error == Content::Error::None) {
+                    record.build_id = resolved.build_id;
+                    if (resolved.application) record.display_version = winrt::to_hstring(resolved.display_version).c_str();
+                } else record.display_version.clear();
             }
             else
                 record.program_id = 0;

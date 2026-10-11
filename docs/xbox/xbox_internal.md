@@ -2561,3 +2561,15 @@ ya instalados ni se trasladan duplicados automáticamente. Cambios en español e
 Compilación incremental de sesión, vista y catálogos correcta; gate de claridad
 visual/manual del recorrido nuevo pendiente. No se ha relanzado la app del usuario.
 Diseño y pasos en xbox_content.md. Sin commits ni cambios de renderer/JIT/memoria.
+
+
+## 11 octubre 2026: versión efectiva en la biblioteca
+
+Solicitud del usuario: ver la versión para reconocer visualmente una actualización.
+LibraryEntry y la caché guardan display_version; ResolveLaunchContent lee el NACP
+Control de la misma selección de programa que el Build ID. Update sin Control
+no se etiqueta con la versión base. La ficha y las carátulas muestran la cadena;
+al cambiar contenido se limpia inmediatamente y se relee en el worker de metadatos.
+Caché formato v3; v2 se invalida automáticamente. Harness LibraryCache pasa versión,
+actualización, downgrade, vacía, registros antiguos y truncados. Gate visual y de
+update real pendiente. Sin commits, renderer/JIT/memoria ni partidas modificados.

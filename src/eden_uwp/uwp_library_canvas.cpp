@@ -140,6 +140,8 @@ public:
             Cover(game, 64, 148, 220);
             Text(Tr(configuration.status.keys_ready ? T::ReadyToPlay : T::ImportKeysFirst),
                  320, 149, 16, 0x77e3bd, 700);
+            if (!game.display_version.empty())
+                Text(L"v" + game.display_version, 990, 149, 19, Palette::Accent, 200, 30, true);
             Text(game.name, 320, 184, 42, 0xf4f7fa, 866, 110, true, true);
             Text((game.developer.empty() ? std::wstring{Tr(T::PersonalLibrary)} : game.developer) +
                  (game.source_name.empty() ? L"" : L" · " + game.source_name),
@@ -159,7 +161,9 @@ public:
                 Round(x - 6, 444, 220, 191, 16, i == selected ? 0x77e3bd : 0x202b39);
                 Round(x - 3, 447, 214, 185, 13, i == selected ? 0x203b3a : 0x151e2b);
                 Cover(scan.entries[i], x + 39, 454, 124);
-                Text(scan.entries[i].name, x + 3, 586, 19, 0xf4f7fa, 197, 40, true);
+                Text(scan.entries[i].name, x + 3, 586, 19, 0xf4f7fa, 197, 25, true);
+                if (!scan.entries[i].display_version.empty())
+                    Text(L"v" + scan.entries[i].display_version, x + 3, 611, 14, Palette::Accent, 197, 19);
             }
         }
         ControlPrompt(Navigation::Play, Tr(T::Play), 64, 654, 130);

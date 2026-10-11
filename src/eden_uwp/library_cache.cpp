@@ -15,7 +15,7 @@
 namespace EdenXbox {
 namespace {
 constexpr std::uint32_t Magic = 0x434C5845; // "EXLC"
-constexpr std::uint32_t Version = 2;
+constexpr std::uint32_t Version = 3;
 constexpr std::uint32_t MaxText = 512;      // UTF-16 units; NACP names are at most 512 bytes.
 
 struct Header {
@@ -25,11 +25,12 @@ struct Header {
     std::uint32_t language;
     std::uint32_t name_length;
     std::uint32_t developer_length;
+    std::uint32_t display_version_length;
     std::uint32_t icon_size;
     std::uint64_t program_id;
     std::array<std::uint8_t, 8> build_id;
 };
-static_assert(sizeof(Header) == 48);
+static_assert(sizeof(Header) == 56);
 
 std::uint64_t Fnv1a(std::string_view text) {
     std::uint64_t hash = 0xcbf29ce484222325ULL;
@@ -79,7 +80,7 @@ std::optional<LibraryCacheRecord> LibraryCache::Load(std::string_view launch_pat
     if (!in || !in.read(reinterpret_cast<char*>(&header), sizeof(header))) return std::nullopt;
     if (header.magic != Magic || header.version != Version || header.stamp != stamp ||
         header.language != language || header.name_length > MaxText ||
-        header.developer_length > MaxText || header.icon_size > MaxIcon)
+        header.developer_length > MaxText || header.display_version_length > MaxText || header.icon_size > MaxIcon)
         return std::nullopt;
     // Two games whose paths hash alike: the record also stores its path, compared here.
     std::string stored_path(launch_path.size(), '\0');
@@ -93,7 +94,8 @@ std::optional<LibraryCacheRecord> LibraryCache::Load(std::string_view launch_pat
     record.program_id = header.program_id;
     record.build_id = header.build_id;
     if (!ReadText(in, header.name_length, record.name) ||
-        !ReadText(in, header.developer_length, record.developer))
+        !ReadText(in, header.developer_length, record.developer) ||
+        !ReadText(in, header.display_version_length, record.display_version))
         return std::nullopt;
     if (with_icon && header.icon_size) {
         record.icon.resize(header.icon_size);
@@ -107,24 +109,27 @@ bool LibraryCache::Store(std::string_view launch_path, std::uint64_t stamp, std:
     if (directory.empty() || record.icon.size() > MaxIcon) return false;
     const std::wstring_view name = std::wstring_view{record.name}.substr(0, MaxText);
     const std::wstring_view developer = std::wstring_view{record.developer}.substr(0, MaxText);
+    const auto display_version = std::wstring_view{record.display_version}.substr(0, MaxText);
     const Header header{Magic,
                         Version,
                         stamp,
                         language,
                         static_cast<std::uint32_t>(name.size()),
                         static_cast<std::uint32_t>(developer.size()),
+                        static_cast<std::uint32_t>(display_version.size()),
                         static_cast<std::uint32_t>(record.icon.size()),
                         record.program_id,
                         record.build_id};
     const auto path_size = static_cast<std::uint32_t>(launch_path.size());
     std::string bytes;
     bytes.reserve(sizeof(header) + sizeof(path_size) + launch_path.size() +
-                  (name.size() + developer.size()) * sizeof(char16_t) + record.icon.size());
+                  (name.size() + developer.size() + display_version.size()) * sizeof(char16_t) + record.icon.size());
     Append(bytes, &header, sizeof(header));
     Append(bytes, &path_size, sizeof(path_size));
     Append(bytes, launch_path.data(), launch_path.size());
     AppendText(bytes, name);
     AppendText(bytes, developer);
+    AppendText(bytes, display_version);
     Append(bytes, record.icon.data(), record.icon.size());
     return WriteFileAtomically(RecordPath(launch_path), bytes);
 }

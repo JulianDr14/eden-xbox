@@ -368,6 +368,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         metadata_worker.request_stop();
         for (auto& entry : scan.entries) {
             entry.metadata_loaded = entry.title_loaded = false;
+            entry.display_version.clear();
             std::vector<unsigned char>{}.swap(entry.icon);
         }
         metadata_dirty = true;
@@ -700,7 +701,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                         if (overview) game_options = {};
                         if (changed) {
                             cache.Clear(); metadata = {}; ++generation;
-                            for (auto& e : scan.entries) { e.title_loaded = false; e.metadata_loaded = false; e.build_id = {}; }
+                            for (auto& e : scan.entries) { e.title_loaded = false; e.metadata_loaded = false; e.build_id = {}; e.display_version.clear(); }
                             metadata_dirty = true; names_cursor = fill_cursor = 0;
                         }
                     }
@@ -999,6 +1000,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                         }
                         found->name = std::move(entry.name);
                         found->developer = std::move(entry.developer);
+                        if (entry.title_loaded) found->display_version = std::move(entry.display_version);
                         if (entry.title_loaded) {
                             found->program_id = entry.program_id;
                             found->build_id = entry.build_id;

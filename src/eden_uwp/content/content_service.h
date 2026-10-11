@@ -20,6 +20,7 @@ struct LaunchResolution {
     Error error{};
     std::uint64_t application{};
     std::uint32_t version{};
+    std::string display_version;
     bool managed{};
     std::array<std::uint8_t, 8> build_id{};
     std::vector<Revision> unavailable;
