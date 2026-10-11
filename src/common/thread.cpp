@@ -23,6 +23,9 @@
 #include <windows.h>
 #include "common/string_util.h"
 #include "common/windows/timer_resolution.h"
+#ifdef _MSC_VER
+#include "common/windows/sampling_profiler.h"
+#endif
 #else
 #if defined(__FreeBSD__)
 #include <sys/cpuset.h>
@@ -510,6 +513,8 @@ void SetCurrentThreadName(const char* name) {
         pf(GetCurrentThread(), UTF8ToUTF16W(name).data()); // Windows 10+
     else
         ; // No-op
+    // Named threads are the ones the in-process profiler samples.
+    SamplingProfiler::RegisterCurrentThread(name);
 #elif  defined(__APPLE__)
     pthread_setname_np(name);
 #elif defined(__HAIKU__)

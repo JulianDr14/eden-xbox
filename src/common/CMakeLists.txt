@@ -167,6 +167,12 @@ if(WIN32)
     target_link_libraries(common PRIVATE ntdll)
 endif()
 
+# Structured exception handling (__try) guards its stack unwinds: MSVC and clang-cl only.
+if(MSVC)
+    target_sources(common PRIVATE windows/sampling_profiler.cpp
+        windows/sampling_profiler.h)
+endif()
+
 if(NOT WIN32)
     target_sources(common PRIVATE signal_chain.cpp signal_chain.h)
 endif()
