@@ -84,6 +84,10 @@ public:
     StagingBufferRef UploadStagingBuffer(size_t size, bool deferred = false);
     StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
+    [[nodiscard]] bool CanCheckpointImage(
+        const Image& image, std::span<const VideoCommon::BufferImageCopy> copies) const;
+    [[nodiscard]] std::vector<u8> ReadCheckpointImage(
+        Image& image, std::span<const VideoCommon::BufferImageCopy> copies);
     /// Maintenance readback: false keeps the image until its copy fence completes. CPU-demand
     /// downloads retain their synchronous path. The returned map is pinned until CompleteGcDownload.
     bool PrepareGcDownload(Image& image, std::span<const VideoCommon::BufferImageCopy> copies,

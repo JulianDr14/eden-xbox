@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -208,6 +210,10 @@ class BufferCache : public VideoCommon::ChannelSetupCaches<BufferCacheChannelInf
 
     using Runtime = typename P::Runtime;
     using Buffer = typename P::Buffer;
+    static constexpr bool HAS_CHECKPOINT_READBACK =
+        requires(Runtime& runtime, Buffer& buffer, std::span<u8> bytes) {
+            runtime.ReadCheckpointBuffer(buffer, u64{}, bytes);
+        };
     using Async_Buffer = typename P::Async_Buffer;
     using MemoryTracker = typename P::MemoryTracker;
 
@@ -240,6 +246,11 @@ public:
     bool OnCPUWrite(DAddr device_addr, u64 size);
 
     void DownloadMemory(DAddr device_addr, u64 size);
+
+    // Checkpoint barrier only, with mutex held and all producers parked. The backend's temporary
+    // readback is bounded and cannot retain checkpoint storage in its normal staging pool.
+    void DownloadCheckpointMemory() requires HAS_CHECKPOINT_READBACK;
+    bool HasCheckpointOverlap(const std::function<bool(DAddr, u64)>& predicate) const;
 
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
 

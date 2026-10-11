@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <span>
@@ -124,6 +125,10 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
 
     using Runtime = typename P::Runtime;
     using Image = typename P::Image;
+    static constexpr bool HAS_CHECKPOINT_READBACK =
+        requires(Runtime& runtime, Image& image, std::span<const BufferImageCopy> copies) {
+            runtime.ReadCheckpointImage(image, copies);
+        };
     using ImageAlloc = typename P::ImageAlloc;
     using ImageView = typename P::ImageView;
     using Sampler = typename P::Sampler;
@@ -205,6 +210,13 @@ public:
 
     /// Download contents of host images to guest memory in a region
     void DownloadMemory(DAddr cpu_addr, size_t size);
+
+    // Checkpoint-only, with mutex held and producers parked. Throws before reading any texture
+    // if an authoritative image cannot be downloaded within the operation's scratch budget.
+    void ValidateCheckpointMemory(
+        const std::function<bool(DAddr, u64)>& buffer_overlap = {}) requires HAS_CHECKPOINT_READBACK;
+    void DownloadCheckpointMemory() requires HAS_CHECKPOINT_READBACK;
+    [[nodiscard]] bool IsRegionRegisteredForCheckpoint(DAddr addr, size_t size);
 
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr cpu_addr, u64 size);
 
@@ -305,6 +317,7 @@ private:
 
     /// Refresh the contents (pixel data) of an image
     [[nodiscard]] bool IsDownloadable(const ImageBase& image) const noexcept;
+    [[nodiscard]] Tegra::MemoryManager& CheckpointMemoryForImage(const ImageBase& image);
 
     void RefreshContents(Image& image, ImageId image_id);
 

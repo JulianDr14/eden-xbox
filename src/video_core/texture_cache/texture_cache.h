@@ -8,6 +8,7 @@
 
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <bit>
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
@@ -690,6 +691,74 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
         runtime.Finish();
         SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span,
                      swizzle_data_buffer);
+    }
+}
+
+template <class P>
+Tegra::MemoryManager& TextureCache<P>::CheckpointMemoryForImage(const ImageBase& image) {
+    std::scoped_lock lock{this->config_mutex};
+    for (const auto& [id, space] : this->address_spaces) {
+        if (space.gpu_memory->IsContinuousRange(image.gpu_addr, image.guest_size_bytes) &&
+            space.gpu_memory->GpuToCpuAddress(image.gpu_addr, image.guest_size_bytes) ==
+                image.cpu_addr) {
+            return *space.gpu_memory;
+        }
+    }
+    throw std::runtime_error("Pulse: authoritative texture mapping cannot be reconstructed");
+}
+
+template <class P>
+void TextureCache<P>::ValidateCheckpointMemory(
+    const std::function<bool(DAddr, u64)>& buffer_overlap) requires HAS_CHECKPOINT_READBACK {
+    constexpr auto Unsupported = ImageFlagBits::CpuModified | ImageFlagBits::Converted |
+        ImageFlagBits::Remapped | ImageFlagBits::Sparse | ImageFlagBits::BadOverlap |
+        ImageFlagBits::Alias | ImageFlagBits::Rescaled | ImageFlagBits::IsDecoding;
+    size_t count = 0;
+    for (auto [id, image] : slot_images) {
+        if (False(image->flags & ImageFlagBits::GpuModified)) continue;
+        if (++count > 8192 || True(image->flags & Unsupported) || !IsDownloadable(*image) ||
+            !image->aliased_images.empty() || !image->overlapping_images.empty()) {
+            throw std::runtime_error("Pulse: unsupported authoritative texture state");
+        }
+        if (buffer_overlap && buffer_overlap(image->cpu_addr, image->guest_size_bytes)) {
+            throw std::runtime_error("Pulse: authoritative texture overlaps a cached buffer");
+        }
+        const auto copies = FixSmallVectorADL(FullDownloadCopies(image->info));
+        if (!runtime.CanCheckpointImage(*image, copies)) {
+            throw std::runtime_error("Pulse: texture exceeds bounded readback support");
+        }
+        (void)CheckpointMemoryForImage(*image);
+    }
+}
+
+template <class P>
+bool TextureCache<P>::IsRegionRegisteredForCheckpoint(DAddr address, size_t size) {
+    bool registered = false;
+    ForEachImageInRegion(address, size, [&](ImageId, ImageBase&) { registered = true; });
+    return registered;
+}
+
+template <class P>
+void TextureCache<P>::DownloadCheckpointMemory() requires HAS_CHECKPOINT_READBACK {
+    ValidateCheckpointMemory();
+    std::vector<ImageId> dirty;
+    for (auto [id, image] : slot_images) {
+        if (True(image->flags & ImageFlagBits::GpuModified)) dirty.push_back(id);
+    }
+    std::ranges::sort(dirty, [this](ImageId a, ImageId b) {
+        return slot_images[a].modification_tick < slot_images[b].modification_tick;
+    });
+    Common::ScratchBuffer<u8> scratch;
+    for (const auto id : dirty) {
+        auto& image = slot_images[id];
+        const auto copies = FixSmallVectorADL(FullDownloadCopies(image.info));
+        const auto bytes = runtime.ReadCheckpointImage(image, copies);
+        SwizzleImage(CheckpointMemoryForImage(image), image.gpu_addr, image.info, copies, bytes,
+                     scratch);
+        // Mark clean only after both the fence and the guest write succeeded. A failed operation
+        // never publishes a partial session and does not claim this image is already preserved.
+        image.flags &= ~ImageFlagBits::GpuModified;
+        runtime.CompleteGcDownload(image);
     }
 }
 

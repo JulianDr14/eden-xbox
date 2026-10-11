@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -13,9 +14,11 @@
 
 #include "common/alignment.h"
 #include "common/logging.h"
+#include "common/scope_exit.h"
 #include "video_core/frame_trace.h"
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_barrier_batch.h"
+#include "video_core/renderer_d3d12/d3d12_checkpoint_readback.h"
 #include "video_core/renderer_d3d12/d3d12_blit_image.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/surface.h"
@@ -26,6 +29,52 @@
 namespace D3D12 {
 
 using namespace TextureDetail;
+
+bool TextureCacheRuntime::CanCheckpointImage(
+    const Image& image, std::span<const VideoCommon::BufferImageCopy> copies) const {
+    constexpr u64 Limit = 8ULL * 1024 * 1024;
+    if (image.guest_size_bytes > Limit || image.unswizzled_size_bytes > Limit) return false;
+    std::vector<Image::GcCopy> plan;
+    const u64 size = image.PlanGcDownload(copies, plan);
+    return size != 0 && size <= Limit && !plan.empty();
+}
+
+std::vector<u8> TextureCacheRuntime::ReadCheckpointImage(
+    Image& image, std::span<const VideoCommon::BufferImageCopy> copies) {
+    if (!CanCheckpointImage(image, copies)) {
+        throw std::runtime_error("Pulse: texture requires an unsupported or oversized readback");
+    }
+    std::vector<Image::GcCopy> plan;
+    const u64 size = image.PlanGcDownload(copies, plan);
+    std::vector<u8> result(image.unswizzled_size_bytes);
+    std::span<u8> mapped;
+    auto resource = CreateMappedBuffer(device.Get(), size, D3D12_HEAP_TYPE_READBACK, mapped);
+    auto charge = std::make_shared<Common::MemoryCharge>(Common::MemoryAccount::StagingReadback,
+                                                       Common::AlignUp<u64>(size, 65536));
+    scheduler.DeferRelease(resource, [charge] {});
+    const StagingBufferRef ref{.buffer = resource.Get(), .offset = 0,
+        .mapped_span = mapped, .usage = MemoryUsage::Download, .log2_level = 0,
+        .index = 0, .capacity = size};
+    image.RecordGcDownload(ref, plan);
+    scheduler.Finish();
+    ThrowIfFailed(device.Get()->GetDeviceRemovedReason(), "Pulse texture readback device");
+    const D3D12_RANGE range{0, static_cast<SIZE_T>(size)};
+    void* data{};
+    ThrowIfFailed(resource->Map(0, &range, &data), "Map Pulse texture readback");
+    SCOPE_EXIT {
+        const D3D12_RANGE written{0, 0};
+        resource->Unmap(0, &written);
+    };
+    // Copy tight rows directly into the logical image. No temporary transfer buffers or normal
+    // staging-pool entries survive this operation, and no in-place compaction needs a third copy.
+    const auto* source = static_cast<const u8*>(data);
+    for (const auto& copy : plan) {
+        if (!CopyCheckpointRows({source, static_cast<size_t>(size)}, result, copy.rows)) {
+            throw std::runtime_error("Pulse: invalid texture footprint bounds");
+        }
+    }
+    return result;
+}
 
 
 void SetBcArrayDecode(bool enabled) {

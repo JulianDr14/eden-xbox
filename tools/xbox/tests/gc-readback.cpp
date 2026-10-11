@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <iostream>
 #include <random>
 #include <vector>
 #include "video_core/renderer_d3d12/d3d12_gc_readback.h"
+#include "video_core/renderer_d3d12/d3d12_checkpoint_readback.h"
 using namespace D3D12;
 int main() {
     constexpr u64 cap = 8ULL << 20;
@@ -34,6 +36,14 @@ int main() {
                 }
             }
         }
+        std::vector<u8> checkpoint(expected.size() + 16, 0xee);
+        for (const auto& region : regions) {
+            assert(CopyCheckpointRows(actual, std::span<u8>{checkpoint}.first(expected.size()),
+                                      region));
+        }
+        assert(std::equal(expected.begin(), expected.end(), checkpoint.begin()));
+        assert(std::all_of(checkpoint.begin() + expected.size(), checkpoint.end(),
+                           [](u8 byte) { return byte == 0xee; }));
         for (const auto& region : regions) CompactGcReadback(actual, region);
         assert(std::equal(expected.begin(), expected.end(), actual.begin()));
         assert(std::all_of(actual.begin()+source_end, actual.end(), [](u8 byte){return byte==0xcd;}));
@@ -45,5 +55,24 @@ int main() {
     assert(!PlanGcReadbackRegion(0, 0, 257, 256, 1, 1, cap));
     assert(!PlanGcReadbackRegion(0, 0, 16, 255, 1, 1, cap));
     assert(!PlanGcReadbackRegion(0, 0, 16, 256, 0, 1, cap));
+    std::array<u8, 512> source{}, target{};
+    const auto valid = *PlanGcReadbackRegion(0, 0, 16, 256, 2, 1, cap);
+    assert(CopyCheckpointRows(source, target, valid));
+    target.fill(0xa5);
+    auto invalid = valid;
+    invalid.source_offset = ~u64{0};
+    assert(!CopyCheckpointRows(source, target, invalid));
+    invalid = valid;
+    invalid.tight_offset = ~u64{0};
+    assert(!CopyCheckpointRows(source, target, invalid));
+    invalid = valid;
+    invalid.rows = invalid.depth = ~u32{0};
+    assert(!CopyCheckpointRows(source, target, invalid));
+    invalid = valid;
+    invalid.row_pitch = 0;
+    assert(!CopyCheckpointRows(source, target, invalid));
+    assert(!CopyCheckpointRows(std::span<const u8>{source}.first(511), target, valid));
+    assert(!CopyCheckpointRows(source, std::span<u8>{target}.first(31), valid));
+    assert(std::all_of(target.begin(), target.end(), [](u8 byte) { return byte == 0xa5; }));
     std::cout << "PASS 20000 randomized mip/layer/volume row layouts, overlap, guards, cap and overflow\n";
 }

@@ -408,6 +408,30 @@ void RasterizerD3D12::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
 }
 void RasterizerD3D12::FlushAll() { scheduler.Finish(); }
 
+void RasterizerD3D12::MaterializeCheckpointMemory() {
+    // Do not hold a guest scheduler lock across these waits. This follows the renderer's existing
+    // cache-lock order; callbacks retired by Scheduler must not take either cache mutex.
+    scheduler.Finish();
+    fence_manager.WaitPendingFences(true);
+    std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
+    texture_cache.ValidateCheckpointMemory([this](DAddr address, u64 size) {
+        return buffer_cache.IsRegionRegistered(address, size);
+    });
+    buffer_cache.FlushCachedWrites();
+    // Reject a conflict rather than choose an arbitrary winner for buffer/texture aliases.
+    // The cache readbacks remain separate; cross-cache authority requires a later merge gate.
+    if (buffer_cache.HasCheckpointOverlap([this](DAddr address, u64 size) {
+            return texture_cache.IsRegionRegisteredForCheckpoint(address, size);
+        })) {
+        throw std::runtime_error("Pulse: overlapping authoritative buffer and texture writes");
+    }
+    texture_cache.DownloadCheckpointMemory();
+    buffer_cache.DownloadCheckpointMemory();
+    scheduler.Finish();
+    ThrowIfFailed(query_cache.GetDevice().Get()->GetDeviceRemovedReason(),
+                  "Pulse materialize GPU memory");
+}
+
 void RasterizerD3D12::FlushRegion(DAddr address, u64 size, VideoCommon::CacheType which) {
     if (!address || !size) return;
     if (True(which & VideoCommon::CacheType::TextureCache)) {

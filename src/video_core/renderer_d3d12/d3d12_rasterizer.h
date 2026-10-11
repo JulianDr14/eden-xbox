@@ -70,6 +70,9 @@ public:
     void BindGraphicsUniformBuffer(size_t, u32, GPUVAddr, u32) override;
     void DisableGraphicsUniformBuffer(size_t, u32) override;
     void FlushAll() override;
+    // Memory materialization only, NOT a complete GPU checkpoint. The coordinator must already
+    // have parked CPU/services and drained guest command producers, and call on the GPU thread.
+    void MaterializeCheckpointMemory();
     void FlushRegion(DAddr, u64, VideoCommon::CacheType = VideoCommon::CacheType::All) override;
     bool MustFlushRegion(DAddr, u64,
                          VideoCommon::CacheType = VideoCommon::CacheType::All) override;

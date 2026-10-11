@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <memory>
 #include <numeric>
+#include <stdexcept>
 
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
@@ -194,6 +195,60 @@ void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
     for (auto& interval_set : committed_gpu_modified_ranges) {
         interval_set.Subtract(device_addr, size);
     }
+}
+
+template <class P>
+void BufferCache<P>::DownloadCheckpointMemory() requires HAS_CHECKPOINT_READBACK {
+    constexpr u64 BlockBytes = 1024 * 1024;
+    if (gpu_modified_ranges.Empty()) return;
+    u64 expected_bytes = 0;
+    gpu_modified_ranges.ForEach([&](DAddr begin, DAddr end) {
+        if (memory_tracker.IsRegionCpuModified(begin, end - begin)) {
+            throw std::runtime_error("Pulse: conflicting CPU/GPU buffer writes");
+        }
+        expected_bytes += end - begin;
+    });
+    u64 copied_bytes = 0;
+    std::vector<u8> bytes(BlockBytes);
+    for (auto [id, pointer] : slot_buffers) {
+        Buffer& buffer = *pointer;
+        if (id == NULL_BUFFER_ID) continue;
+        // Iterate without changing the range set: an allocation/readback failure leaves every
+        // dirty range authoritative on the GPU, allowing the caller to retry while paused.
+        gpu_modified_ranges.ForEachInRange(buffer.CpuAddr(), buffer.SizeBytes(),
+            [&](DAddr begin, DAddr end) {
+                begin = std::max(begin, buffer.CpuAddr());
+                end = std::min(end, buffer.CpuAddr() + buffer.SizeBytes());
+                while (begin < end) {
+                    const u64 count = std::min(BlockBytes, end - begin);
+                    auto block = std::span<u8>{bytes}.first(count);
+                    runtime.ReadCheckpointBuffer(buffer, begin - buffer.CpuAddr(), block);
+                    device_memory.WriteBlockUnsafe(begin, block.data(), block.size());
+                    copied_bytes += count;
+                    begin += count;
+                }
+            });
+    }
+    if (copied_bytes != expected_bytes) {
+        throw std::runtime_error("Pulse: dirty buffer range has no unique backing resource");
+    }
+    // The complete pass succeeded. Retire asynchronous downloads before they can overwrite the
+    // materialized guest bytes later. Keep host buffers themselves as derived caches.
+    gpu_modified_ranges.ForEach([&](DAddr begin, DAddr end) {
+        memory_tracker.UnmarkRegionAsGpuModified(begin, end - begin);
+        ClearDownload(begin, end - begin);
+    });
+    gpu_modified_ranges.Clear();
+}
+
+template <class P>
+bool BufferCache<P>::HasCheckpointOverlap(
+    const std::function<bool(DAddr, u64)>& predicate) const {
+    bool overlap = false;
+    gpu_modified_ranges.ForEach([&](DAddr begin, DAddr end) {
+        overlap |= predicate(begin, end - begin);
+    });
+    return overlap;
 }
 
 template <class P>

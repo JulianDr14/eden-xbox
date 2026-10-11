@@ -21,6 +21,36 @@
 
 namespace D3D12 {
 
+void BufferCacheRuntime::ReadCheckpointBuffer(Buffer& buffer, u64 offset,
+                                             std::span<u8> output) {
+    constexpr u64 Limit = 1024 * 1024;
+    if (output.empty() || output.size() > Limit || offset > buffer.SizeBytes() ||
+        output.size() > buffer.SizeBytes() - offset) {
+        throw std::invalid_argument("Pulse: invalid buffer readback range");
+    }
+    std::span<u8> mapped;
+    // Operation-local allocation: unlike Request(), this never becomes a resident pool entry.
+    auto readback = CreateMappedBuffer(device.Get(), output.size(), D3D12_HEAP_TYPE_READBACK,
+                                       mapped);
+    auto charge = std::make_shared<Common::MemoryCharge>(Common::MemoryAccount::StagingReadback,
+                                                       Common::AlignUp<u64>(output.size(), 65536));
+    // Retain before recording the first reference. If recording/Finish fails, the scheduler owns
+    // the resource until its tick retires (or device teardown), rather than leaving a dangling
+    // raw pointer in an unsubmitted command stream.
+    scheduler.DeferRelease(readback, [charge] {});
+    buffer.Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    scheduler.CommandList()->CopyBufferRegion(readback.Get(), 0, buffer.Handle(), offset,
+                                               output.size());
+    scheduler.Finish();
+    ThrowIfFailed(device.Get()->GetDeviceRemovedReason(), "Pulse buffer readback device");
+    const D3D12_RANGE range{0, output.size()};
+    void* data{};
+    ThrowIfFailed(readback->Map(0, &range, &data), "Map Pulse buffer readback");
+    std::memcpy(output.data(), data, output.size());
+    const D3D12_RANGE written{0, 0};
+    readback->Unmap(0, &written);
+}
+
 namespace {
 
 using PrimitiveTopology = Tegra::Engines::Maxwell3D::Regs::PrimitiveTopology;

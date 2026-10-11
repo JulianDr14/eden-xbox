@@ -107,6 +107,7 @@ public:
 
     StagingBufferRef UploadStagingBuffer(size_t size);
     StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
+    void ReadCheckpointBuffer(Buffer& buffer, u64 offset, std::span<u8> output);
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
     bool CanReorderUpload(const Buffer&, std::span<const VideoCommon::BufferCopy>) { return false; }
     void PreCopyBarrier() {}
