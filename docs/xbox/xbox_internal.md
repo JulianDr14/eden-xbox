@@ -2582,3 +2582,11 @@ de respaldo. Añadido el F2 outline original de Kenney Input Prompts 1.5, CC0,
 conservando la licencia existente. SHA256 del F1 del ZIP igual al F1 incluido
 confirma que se usa el mismo conjunto/estilo. package-appx copia Assets de forma
 recursiva: no requiere recompilar el ejecutable. Sin cambios de atajos.
+
+
+## 11 octubre 2026: iconos de teclas O y R
+
+R ya estaba incluido, pero la rama nativa de ControlPrompt no lo utilizaba.
+Añadido O outline original del mismo conjunto Kenney y conectados ambos PNG
+a las acciones de abrir carpeta/refrescar de teclado, sin cambiar bindings.
+Se conservan los glyphs nativos para los botones de mando.

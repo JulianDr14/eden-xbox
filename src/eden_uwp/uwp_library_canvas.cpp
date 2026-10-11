@@ -515,9 +515,14 @@ private:
             {L"xbox_a", L"A", {}}, {L"xbox_dpad", {}, T::DPad}, {L"xbox_view", L"View", {}},
             {L"xbox_menu", L"Menu", {}}, {L"xbox_b", L"B", {}}}};
         const auto index = static_cast<unsigned>(action);
+        if (prompt_family == PromptFamily::Keyboard &&
+            (action == Navigation::AddFolder || action == Navigation::Refresh)) {
+            const bool add = action == Navigation::AddFolder;
+            AssetPrompt(add ? L"keyboard_o" : L"keyboard_r", label, add ? L"O" : L"R", x, y, width, color);
+            return;
+        }
         if (action >= Navigation::AddFolder) {
-            // The package has no glyph for X, Y, the bumpers or these keys: drawn natively, without
-            // a failed WIC open or a glyph depending on the installed font.
+            // Remaining buttons use native glyphs when no packaged image is available.
             const bool pad = prompt_family != PromptFamily::Keyboard;
             const bool colored = prompt_family == PromptFamily::Xbox;
             const auto key = [&](std::wstring_view letter, float left) {
