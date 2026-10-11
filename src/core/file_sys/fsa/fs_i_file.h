@@ -23,6 +23,10 @@ public:
     explicit IFile(VirtualFile backend_) : backend(std::move(backend_)) {}
     virtual ~IFile() {}
 
+    bool CommitForCheckpoint() const {
+        return backend && backend->CommitForCheckpoint();
+    }
+
     Result Read(size_t* out, s64 offset, void* buffer, size_t size, const ReadOption& option) {
         // Check that we have an output pointer
         R_UNLESS(out != nullptr, ResultNullptrArgument);

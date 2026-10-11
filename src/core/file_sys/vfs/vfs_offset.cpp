@@ -14,6 +14,10 @@ OffsetVfsFile::OffsetVfsFile(VirtualFile file_, std::size_t size_, std::size_t o
 
 OffsetVfsFile::~OffsetVfsFile() = default;
 
+bool OffsetVfsFile::CommitForCheckpoint() const {
+    return file && file->CommitForCheckpoint();
+}
+
 std::string OffsetVfsFile::GetName() const {
     return name.empty() ? file->GetName() : name;
 }

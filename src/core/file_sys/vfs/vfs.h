@@ -112,6 +112,13 @@ public:
     // Returns whether or not the file can be read from.
     virtual bool IsReadable() const = 0;
 
+    // All guest/service writers must be parked by the checkpoint coordinator first. This only
+    // commits pending host writes; it does not declare the file or its owner restorable.
+    // Writable backends must explicitly implement durability rather than silently succeed.
+    virtual bool CommitForCheckpoint() const {
+        return !IsWritable();
+    }
+
     // The primary method of reading from the file. Reads length bytes into data starting at offset
     // into file. Returns number of bytes successfully read.
     virtual std::size_t Read(u8* data, std::size_t length, std::size_t offset = 0) const = 0;

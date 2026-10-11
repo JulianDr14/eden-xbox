@@ -83,6 +83,7 @@ class RealVfsFile : public VfsFile {
 
 public:
     bool Commit() const;
+    bool CommitForCheckpoint() const override;
 
     RealVfsFile(RealVfsFilesystem& base, std::unique_ptr<FileReference> reference,
                 const std::string& path, OpenMode perms = OpenMode::Read,

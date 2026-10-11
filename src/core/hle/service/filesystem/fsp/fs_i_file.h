@@ -14,6 +14,12 @@ class IFile final : public ServiceFramework<IFile> {
 public:
     explicit IFile(Core::System& system_, FileSys::VirtualFile file_);
 
+    // Called only after the service barrier; a successful ordinary Flush() is not evidence that
+    // writes have reached durable storage (that SDK entry point is currently a no-op).
+    bool CommitForCheckpoint() const {
+        return backend && backend->CommitForCheckpoint();
+    }
+
 private:
     std::unique_ptr<FileSys::Fsa::IFile> backend;
 

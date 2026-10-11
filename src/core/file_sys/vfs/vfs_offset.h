@@ -25,6 +25,7 @@ public:
     VirtualDir GetContainingDirectory() const override;
     bool IsWritable() const override;
     bool IsReadable() const override;
+    bool CommitForCheckpoint() const override;
     std::size_t Read(u8* data, std::size_t length, std::size_t offset) const override;
     std::size_t Write(const u8* data, std::size_t length, std::size_t offset) override;
     std::optional<u8> ReadByte(std::size_t offset) const override;

@@ -320,6 +320,10 @@ bool RealVfsFile::Commit() const {
     return reference->file && reference->file->Commit();
 }
 
+bool RealVfsFile::CommitForCheckpoint() const {
+    return !IsWritable() || Commit();
+}
+
 bool RealVfsFile::Resize(std::size_t new_size) {
     size.reset();
     auto lk = base.RefreshReference(path, perms, *reference);
