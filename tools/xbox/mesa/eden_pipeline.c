@@ -16,6 +16,7 @@
 #include "nir_builder.h"
 #include "nir_to_dxil.h"
 #include "spirv/nir_spirv.h"
+#include "spirv/spirv_info.h"
 #include "util/blob.h"
 
 #include <stdio.h>
@@ -71,7 +72,16 @@ translate_pipeline(const struct eden_spirv_to_dxil_stage *stages, unsigned count
    /* Each shader keeps a pointer to its compiler options until it is freed. */
    nir_shader_compiler_options nir_options[EDEN_SPIRV_TO_DXIL_MAX_STAGES];
    nir_shader *nir[EDEN_SPIRV_TO_DXIL_MAX_STAGES] = {0};
-   const struct spirv_to_nir_options *spirv_opts = dxil_spirv_nir_get_spirv_options();
+   /* The renderer lets vertex and tessellation stages write Layer and ViewportIndex when D3D12
+    * reports VPAndRTArrayIndexFromAnyShaderFeedingRasterizerSupportedWithoutGSEmulation, but the
+    * capabilities of Mesa's DXIL translator leave ShaderViewportIndexLayerEXT off, so the parser
+    * rejected those shaders ("invalid stage for SpvBuiltInLayer") and their draws were skipped.
+    * nir_to_dxil already maps both outputs and flags the module for them. */
+   struct spirv_capabilities spirv_caps = *dxil_spirv_nir_get_spirv_options()->capabilities;
+   spirv_caps.ShaderViewportIndexLayerEXT = true;
+   struct spirv_to_nir_options spirv_options = *dxil_spirv_nir_get_spirv_options();
+   spirv_options.capabilities = &spirv_caps;
+   const struct spirv_to_nir_options *spirv_opts = &spirv_options;
    const unsigned supported_bit_sizes = 16 | 32 | 64;
    bool success = true;
 
