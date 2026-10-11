@@ -2601,3 +2601,50 @@ de posición/total que ya aparece junto a «Tus juegos». Cambio de dibujo solam
 Cabecera: Configuración y Mando agrupados a la derecha, separación de 16 unidades
 del canvas tras retirar el contador. Hitboxes actualizadas al mismo rectángulo
 visual; Mando también limita su borde derecho a 1226.
+
+## 11 octubre 2026: botones unificados entre biblioteca y juego
+
+Causa: ShowGameLibrary interpretaba las letras físicas directamente, mientras
+ReadGamepad aplicaba controller_swap_face. Ambas rutas usan ahora MapFaceButtons
+con la misma exclusión de mandos Nintendo. La biblioteca mapea los flancos físicos,
+no el estado anterior lógico: cambiar el ajuste con un botón pulsado no crea otra
+acción. A/B y X/Y de las indicaciones del canvas cambian con la configuración,
+incluidos teclado de nombre y paneles. Persistencia LocalSettings existente.
+Build incremental UWP correcto (8 operaciones), diff check correcto. Gate visual
+con ambos modos, cambio durante juego y regreso a biblioteca, y Series pendientes;
+sin commit. No cambia teclado, sincronización ni renderer.
+
+## 11 octubre 2026: estadísticas de rendimiento opcionales
+
+Configuración > Sistema y menú in-game ofrecen «Estadísticas de rendimiento».
+Preferencia global system_show_performance_stats en LocalSettings, false si no
+existe (también al actualizar desde versiones sin esta opción). Ambos menús leen
+el mismo valor; el cambio in-game se aplica al siguiente frame y persiste sin
+modificar el resto de ajustes del sistema. El renderer consulta un bool atómico,
+no WinRT por frame; al ocultar el HUD reinicia su muestra para que reactivarlo no
+mezcle el intervalo oculto. Las rutas present GPU y fallback CPU comparten el gate.
+Se conservan logs, perfilado y avisos de carga/shaders/trazas independientes.
+Sistema compacta sus siete filas en el panel existente, con geometría compartida
+con hit tests; menú in-game mantiene altura dinámica (máximo nueve filas: 690).
+Gate: build incremental UWP correcto; harness desktop MSVC prueba default off,
+toggle por ambos modelos de menú, reapertura del modelo, geometría Sistema y
+regresión de navegación/fullscreen/cheats. El harness con system_page.h necesita
+/Zc:preprocessor por settings_enums.h. Persistencia real tras reiniciar, cambio
+visual durante gameplay y Series pendientes; sin commit ni APPX nuevo aún.
+
+## 11 octubre 2026: orden de configuración e indicadores de desplazamiento (0.2.87.3)
+
+Configuración abre con Sistema seleccionado; orden Sistema, Mando y teclado,
+Gestor de archivos. Volver de una subpantalla conserva la fila correspondiente.
+UiPainter::ScrollIndicator unifica barra proporcional y flechas vectoriales:
+acentuadas si queda contenido en esa dirección; oculto cuando todo cabe. Es un
+indicador pasivo, no un control arrastrable; navegación/selección no cambian.
+Añadido al gestor de archivos, paneles de contenido (updates/DLC, fuentes,
+explorador, preview/resultados), selector de mandos y listas de juegos/descargas/
+variantes de mods. Sustituye flechas aisladas de mods instalados, explorador de
+archivos, contenidos, categorías, cuadrícula de tienda y cheats. Tienda conserva
+flecha inferior durante carga adicional; tamaño de thumb usa capacidad visible,
+no número de elementos de última página. Biblioteca ya muestra posición/total;
+Sistema, teclado por pestañas y menú in-game caben completos: sin barra superflua.
+Build incremental UWP correcto; gate visual y navegación en Series pendientes.
+APPX 0.2.87.3 solicitado, símbolos por versión. Sin commit.

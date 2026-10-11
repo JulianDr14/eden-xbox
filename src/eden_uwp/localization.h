@@ -474,6 +474,8 @@ enum class Text : std::uint16_t {
     ModsUpdated,
     ModsAdult,
     ModsAdultHint,
+    PerformanceStats,
+    PerformanceStatsHint,
     ModsAdultShown,
     ModsAdultHidden,
     MenuModsAtBoot,

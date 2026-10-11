@@ -448,6 +448,8 @@ const Catalog SpanishCatalog = MakeCatalog({
     {Text::ModsDownloadRefused, L"Ese archivo no se puede descargar: el sitio no lo ha verificado."},
     {Text::ModsUpdated, L"Mod actualizado."},
     {Text::ModsAdult, L"Mods para adultos"},
+    {Text::PerformanceStats, L"Estadísticas de rendimiento"},
+    {Text::PerformanceStatsHint, L"Mostrar FPS y estadísticas de CPU/GPU"},
     {Text::ModsAdultHint, L"Muestra en la tienda los mods marcados para adultos, con la etiqueta 18+"},
     {Text::ModsAdultShown, L"Se muestran"},
     {Text::ModsAdultHidden, L"Ocultos"},

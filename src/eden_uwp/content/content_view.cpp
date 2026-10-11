@@ -167,6 +167,8 @@ void DrawContentPanel(UiPainter& paint, const ContentSession& session, std::wstr
         paint.Text((rows[i].checked ? L"[X] " : L"") + rows[i].name, 210, y + 4, 20, Palette::Text, 890, 29, true);
         paint.Text(rows[i].detail, 210, y + 31, 14, Palette::TextHint, 890, 24);
     }
+    paint.ScrollIndicator(1154, 183, 5 * 64 + 58, first,
+                          6, rows.size());
     if (rows.empty()) paint.Text(Tr(T::ContentEmpty), 145, 215, 22, Palette::TextHint, 980);
     if (view.error != Error::None) paint.Text(Tr(ErrorText(view.error)), 145, 580, 17, Palette::Warning, 980, 45, false, true);
     paint.Prompt(L"A", ButtonColor::A, Tr(view.screen == Screen::Result ? T::ContentReturnManager : T::Select), 145, 635);

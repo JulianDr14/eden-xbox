@@ -200,11 +200,9 @@ void DrawTabs(UiPainter& paint, const ModsView& view, float x, float y) {
     }
 }
 
-void DrawScrollMarks(UiPainter& paint, std::size_t first, std::size_t end, std::size_t count, float x, float y) {
-    const float arrows = x + L::Width - L::Margin + 8;
-    if (first > 0) paint.Text(L"▲", arrows, y + L::RowTop - 4, 11, Palette::TextSecondary, 20, 16);
-    if (end < count)
-        paint.Text(L"▼", arrows, y + L::RowTop + L::VisibleRows * L::RowStride - 22, 11, Palette::TextSecondary, 20, 16);
+void DrawScrollMarks(UiPainter& paint, std::size_t first, std::size_t count, float x, float y) {
+    paint.ScrollIndicator(x + L::Width - L::Margin + 14, y + L::RowTop,
+                          L::VisibleRows * L::RowStride - 6, first, L::VisibleRows, count);
 }
 
 void DrawMessage(UiPainter& paint, UiIcon icon, std::wstring_view message, float x, float y) {
@@ -265,7 +263,7 @@ void DrawInstalled(UiPainter& paint, const ModsView& view, float x, float y) {
                        RowWidth - 180 - detail_width, 22);
         paint.Switch(left + RowWidth - 76, top + 14, on, active);
     }
-    DrawScrollMarks(paint, page.first, end, mods.size(), x, y);
+    DrawScrollMarks(paint, page.first, mods.size(), x, y);
 }
 
 /// Under the Installed list: the selected mod in plain words.
@@ -336,7 +334,7 @@ void DrawFiles(UiPainter& paint, const ModsView& view, float x, float y) {
                 paint.Chevron(x + L::Margin + RowWidth - 28, top + L::RowHeight / 2,
                               active ? Palette::Accent : Palette::TextSecondary);
         }
-        DrawScrollMarks(paint, page.first, end, rows.size(), x, y);
+        DrawScrollMarks(paint, page.first, rows.size(), x, y);
     }
     const float top = y + L::Detail;
     const std::wstring where = snapshot.folder.empty() ? std::wstring{Tr(Text::ModsSourcesHint)} : snapshot.folder_name;
@@ -428,10 +426,9 @@ void DrawExplore(UiPainter& paint, const ModsView& view, float x, float y) {
         DrawCard(paint, view, card, i == page.card, gamebanana && installed.contains(card.id),
                  CardX(slot % L::Columns, x), CardY(slot / L::Columns, y));
     }
-    const float arrows = x + L::Width - L::Margin + 8;
-    if (page.card_first > 0) paint.Text(L"▲", arrows, y + L::GridTop, 11, Palette::TextSecondary, 20, 16);
-    if (end < store.cards.size() || store.loading_more)
-        paint.Text(L"▼", arrows, y + L::GridTop + 2 * L::CardHeight, 11, Palette::TextSecondary, 20, 16);
+    paint.ScrollIndicator(x + L::Width - L::Margin + 14, y + L::GridTop,
+                          L::GridRows * L::CardHeight + (L::GridRows - 1) * L::CardGapY, page.card_first,
+                          L::Columns * L::GridRows, store.cards.size(), store.loading_more);
 }
 
 /// Under the grid: where the mods come from and how they are filtered, then the downloads.
@@ -564,6 +561,8 @@ void DrawDetail(UiPainter& paint, const ModsView& view, float x, float y) {
         }
         paint.Text(meta, right + 14, row + 27, 13, color, right_w - 28, 20);
     }
+    paint.ScrollIndicator(right + right_w + 14, top + 330, visible * 56 - 6,
+                          first, visible, detail.files.size());
     if (detail.files.empty())
         paint.Text(Tr(Text::ModsNoFiles), right, top + 336, 15, Palette::TextHint, right_w, 24);
 }
@@ -655,6 +654,8 @@ void DrawGames(UiPainter& paint, const ModsView& view, float x, float y) {
         paint.Text(Utf8ToUtf16(store.games[i].name), left + 68, row + 16, 19, Palette::Text, inner - 90, 28,
                    i == view.page.game);
     }
+    paint.ScrollIndicator(left + inner + 14, top + 52, visible * 68 - 8,
+                          first, visible, store.games.size());
 }
 
 void DrawActions(UiPainter& paint, const ModsView& view, float x, float y) {
@@ -713,10 +714,8 @@ void DrawContents(UiPainter& paint, const ModsView& view, float x, float y) {
         paint.Text(Size(file.bytes), left + inner - 130, row + 11, 15, Palette::TextSecondary, 114, 22, false, false,
                    false, true);
     }
-    const float arrows = left + inner + 8;
-    if (first > 0) paint.Text(L"▲", arrows, top + 108, 11, Palette::TextSecondary, 20, 16);
-    if (end < listing.size())
-        paint.Text(L"▼", arrows, top + 108 + L::SheetRows * 50 - 22, 11, Palette::TextSecondary, 20, 16);
+    paint.ScrollIndicator(left + inner + 14, top + 108, L::SheetRows * 50 - 6,
+                          first, L::SheetRows, listing.size());
 }
 
 /// The store's categories at the level browsed; the one listed is marked.
@@ -784,9 +783,8 @@ void DrawCategories(UiPainter& paint, const ModsView& view, float x, float y) {
         if (shown) paint.Text(L"✓", left + inner - 48, row_y + 17, 20, Palette::Accent, 28, 28, true, false, true);
         else if (nested) paint.Chevron(left + inner - 30, row_y + 31, active ? Palette::Accent : Palette::TextSecondary);
     }
-    const float arrows = left + inner + 8;
-    if (first > 0) paint.Text(L"▲", arrows, top + 52, 11, Palette::TextSecondary, 20, 16);
-    if (end < rows.size()) paint.Text(L"▼", arrows, top + 52 + L::SheetRows * 70 - 22, 11, Palette::TextSecondary, 20, 16);
+    paint.ScrollIndicator(left + inner + 14, top + 52, L::SheetRows * 70 - 8,
+                          first, L::SheetRows, rows.size());
 }
 
 void DrawRemove(UiPainter& paint, const ModsView& view, float x, float y) {
@@ -838,6 +836,8 @@ void DrawVariants(UiPainter& paint, const ModsView& view, float x, float y) {
             paint.Text(Tr(Text::ModsOtherTitle), text_left + paint.MeasureText(detail, 14, false) + 12, row + 38, 14,
                        Palette::Warning, inner - 100 - paint.MeasureText(detail, 14, false), 22);
     }
+    paint.ScrollIndicator(left + inner + 14, top + 84, visible * 76 - 8,
+                          first, visible, candidates.size());
 }
 
 /// The running job, over the list: what it does and, while installing, how far it is.

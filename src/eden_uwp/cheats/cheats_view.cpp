@@ -70,13 +70,9 @@ void DrawList(UiPainter& paint, const CheatCatalog& catalog, const CheatsPage& p
                    on || active ? Palette::Text : Palette::TextHint, row_width - 130, 30, active);
         paint.Switch(left + row_width - 76, top + 9, on, active);
     }
-    // More rows above or below the window.
-    const float arrows = x + L::Width - L::Margin + 8;
-    if (page.first > 0)
-        paint.Text(L"▲", arrows, y + L::RowTop - 4, 11, Palette::TextSecondary, 20, 16);
-    if (end < cheats.size())
-        paint.Text(L"▼", arrows, y + L::RowTop + L::VisibleRows * L::RowStride - 22, 11,
-                   Palette::TextSecondary, 20, 16);
+    paint.ScrollIndicator(x + L::Width - L::Margin + 14, y + L::RowTop,
+                          L::VisibleRows * L::RowStride - (L::RowStride - L::RowHeight),
+                          page.first, L::VisibleRows, cheats.size());
 }
 
 /// Why the list is empty, in its place.

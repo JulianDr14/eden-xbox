@@ -20,6 +20,7 @@
 #include "video_core/frame_trace.h"
 #include "video_core/gpu.h"
 #include "video_core/perf_counters.h"
+#include "video_core/performance_overlay.h"
 #include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/renderer_d3d12.h"
 #include "video_core/shader_notify.h"
@@ -121,6 +122,10 @@ void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t tot
 void RendererD3D12::DrawPerformanceOverlay(CommandStream* cmd,
                                           D3D12_CPU_DESCRIPTOR_HANDLE rtv) {
     auto& hud = performance_overlay;
+    if (!VideoCore::performance_overlay_enabled.load(std::memory_order_relaxed)) {
+        if (hud.sample_time != std::chrono::steady_clock::time_point{}) hud = {};
+        return;
+    }
     const auto now = std::chrono::steady_clock::now();
     const bool first = hud.sample_time == std::chrono::steady_clock::time_point{};
     const double elapsed_ms = std::chrono::duration<double, std::milli>(now - hud.sample_time).count();

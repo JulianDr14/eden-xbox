@@ -55,6 +55,9 @@ public:
     /// The ">" at the end of a row that opens a page.
     void Chevron(float cx, float cy, unsigned color, bool left = false);
     /// A selectable row: background, accent bar when active and the icon in its tile.
+    /// Passive list position: track/thumb and available directions, hidden when everything fits.
+    void ScrollIndicator(float x, float y, float height, std::size_t first,
+                         std::size_t visible, std::size_t count, bool more_below = false);
     void RowFrame(float x, float y, float width, float height, bool active, UiIcon icon);
     void PageHeader(float x, float y, UiIcon icon, std::wstring_view title, std::wstring_view subtitle);
     /// An on/off switch, 52x28 at (x, y).

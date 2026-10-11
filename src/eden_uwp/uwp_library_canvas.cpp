@@ -118,6 +118,9 @@ public:
         if (panel.xbox) prompt_family = PromptFamily::Xbox;
         else if (const auto index = SelectController(panel.devices, options.controller_id))
             prompt_family = panel.devices[*index].pro ? PromptFamily::Nintendo : PromptFamily::Xbox;
+        swap_prompt_faces = false;
+        if (const auto active = SelectController(panel.devices, options.controller_id))
+            swap_prompt_faces = SwapControllerFaceButtons(panel.devices[*active], options.swap_face_buttons);
         target->BeginDraw();
         target->Clear(D2D1::ColorF(0x0b1018));
         if (logo) target->DrawBitmap(logo.Get(), D2D1::RectF(50, 38, 104, 92), 1,
@@ -251,8 +254,10 @@ private:
                 else label = panel.devices[i - 2].name + L" · " +
                     std::wstring{Tr(supported ? (panel.devices[i - 2].wireless ? T::Wireless : T::Usb) :
                                     session ? T::AutomaticOnly : T::NoCompatibleMapping)};
-                Text(label, 665, y + 6, 18, supported ? 0xf4f7fa : 0x9ba9ba, 495, 30);
+                Text(label, 665, y + 6, 18, supported ? 0xf4f7fa : 0x9ba9ba, 480, 30);
             }
+            ScrollIndicator(1187, ControllerChoiceTop, ControllerVisibleChoices * ControllerChoiceHeight,
+                            first, ControllerVisibleChoices, count);
         }
     }
     void DrawKeyboard(const KeyboardEditor& editor) {
@@ -431,6 +436,9 @@ private:
             if (!hint.empty()) Text(hint, layout.x + 72, y + 44, 16, 0xb5c2d0, layout.width - 135, 26);
             Chevron(layout.x + layout.width - 28, y + layout.row_height / 2, active ? 0x77e3bd : 0x9ba9ba);
         }
+        ScrollIndicator(layout.x + layout.width + 14, layout.top,
+                        5 * layout.stride - (layout.stride - layout.row_height), first,
+                        5, count);
         if (!panel.files) {
             Text(Tr(T::EmulatorData), 180, 511, 12, 0x9ba9ba, 190, 26, true);
             Text(Tr(panel.status.keys_ready ? T::KeysReady : T::KeysMissing), 380, 506, 16,
@@ -454,19 +462,19 @@ private:
         PageHeader(L::RowX, 99, ConfigurationIcon::Language, Tr(T::SystemTitle), Tr(T::SystemSubtitle));
         static constexpr std::array<ConfigurationIcon, SystemPage::RowCount> icons{
             ConfigurationIcon::User, ConfigurationIcon::Language, ConfigurationIcon::Controller,
-            ConfigurationIcon::Region, ConfigurationIcon::Mods, ConfigurationIcon::Cache};
+            ConfigurationIcon::Region, ConfigurationIcon::Mods, ConfigurationIcon::Settings, ConfigurationIcon::Cache};
         for (size_t i = 0; i < SystemPage::RowCount; ++i) {
             const auto row = static_cast<SystemPage::Row>(i);
             const float y = L::RowTop + static_cast<float>(i) * L::RowStride;
             const bool active = i == page.selected;
             RowFrame(L::RowX, y, L::RowWidth, L::RowHeight, active, icons[i]);
             Text(Tr(SystemRowTitle(row)), L::RowX + 72, y + 4, 20, 0xf4f7fa, 420, 30, true);
-            Text(Tr(SystemRowHint(row)), L::RowX + 72, y + 31, 15, 0xb5c2d0, 440, 24);
+            Text(Tr(SystemRowHint(row)), L::RowX + 72, y + 28, 15, 0xb5c2d0, 440, 22);
             const unsigned accent = active ? 0x77e3bd : 0x9ba9ba;
             const float right = L::RowX + L::RowWidth - 28;
             const float middle = y + L::RowHeight / 2;
             const bool choice = row == SystemPage::InterfaceLanguage || row == SystemPage::GameLanguage ||
-                                row == SystemPage::Region || row == SystemPage::AdultMods;
+                                row == SystemPage::Region || row == SystemPage::AdultMods || row == SystemPage::PerformanceStats;
             if (choice) {
                 // "< value >": arrows say left/right changes it, as in the controller panel.
                 Chevron(L::RowX + 486, middle, accent, true);
@@ -532,12 +540,12 @@ private:
             float glyphs = 40;
             switch (action) {
             case Navigation::AddFolder:
-                if (pad) ButtonGlyph(L"X", x, y, colored ? ButtonColor::X : ButtonColor::Neutral);
+                if (pad) ButtonGlyph(swap_prompt_faces ? L"Y" : L"X", x, y, colored ? (swap_prompt_faces ? ButtonColor::Y : ButtonColor::X) : ButtonColor::Neutral);
                 else key(L"O", x);
                 break;
             case Navigation::Space:
             case Navigation::Refresh:
-                if (pad) ButtonGlyph(L"Y", x, y, colored ? ButtonColor::Y : ButtonColor::Neutral);
+                if (pad) ButtonGlyph(swap_prompt_faces ? L"X" : L"Y", x, y, colored ? (swap_prompt_faces ? ButtonColor::X : ButtonColor::Y) : ButtonColor::Neutral);
                 else key(action == Navigation::Space ? L"Y" : L"R", x);
                 break;
             default: // Tabs
@@ -582,7 +590,11 @@ private:
             Text(label, x + 40, y + 3, 19, color, width);
             return;
         }
-        const auto& glyph = prompt_family == PromptFamily::Keyboard ? keyboard[index] : xbox[index];
+        const auto physical_index = swap_prompt_faces && action == Navigation::Play
+            ? static_cast<unsigned>(Navigation::Back)
+            : swap_prompt_faces && action == Navigation::Back
+                ? static_cast<unsigned>(Navigation::Play) : index;
+        const auto& glyph = prompt_family == PromptFamily::Keyboard ? keyboard[index] : xbox[physical_index];
         AssetPrompt(glyph.asset, label, glyph.fallback.empty() ? Tr(glyph.name) : glyph.fallback, x, y, width, color);
     }
     /// The game's options, and the option page open over them.
@@ -799,6 +811,7 @@ private:
     ComPtr<ID2D1Bitmap1> logo;
     std::array<ComPtr<ID2D1PathGeometry>, 5> controller_paths;
     PromptFamily prompt_family{PromptFamily::Keyboard};
+    bool swap_prompt_faces{};
     std::filesystem::path asset_root;
     std::unordered_map<std::wstring, ComPtr<ID2D1Bitmap1>> prompts;
     std::unordered_map<unsigned, ComPtr<ID2D1RoundedRectangleGeometry>> masks;

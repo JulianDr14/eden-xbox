@@ -94,6 +94,7 @@
 #include "eden_uwp/localization.h"
 #include "eden_uwp/uwp_software_keyboard.h"
 #include "eden_uwp/uwp_system_settings.h"
+#include "video_core/performance_overlay.h"
 #include "eden_uwp/utf8.h"
 
 namespace D3D12 {
@@ -835,7 +836,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     const ControllerOptions options = input.Options();
                     menu.emplace(GameMenuSettings{options.style, options.swap_face_buttons,
                                                   options.deadzone, g_can_fullscreen.load(),
-                                                  g_fullscreen.load()},
+                                                  g_fullscreen.load(), LoadSystemSettings().show_performance_stats},
                                  program_id != 0);
                     if (game_title.empty()) {
                         std::string title;
@@ -921,6 +922,12 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     options.swap_face_buttons = menu->Settings().swap_face_buttons;
                     options.deadzone = menu->Settings().deadzone;
                     input.SetOptions(options);
+                }
+                if (result == GameMenuResult::PerformanceStatsChanged) {
+                    auto settings = LoadSystemSettings();
+                    settings.show_performance_stats = menu->Settings().show_performance_stats;
+                    if (!SaveSystemSettings(settings)) WriteDiag("menu: statistics preference could not be saved");
+                    VideoCore::performance_overlay_enabled.store(settings.show_performance_stats, std::memory_order_relaxed);
                 }
                 if (result == GameMenuResult::FullScreen) {
                     g_fullscreen_request.store(menu->Settings().fullscreen ? 1 : 0);

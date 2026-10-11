@@ -448,6 +448,8 @@ const Catalog EnglishCatalog = MakeCatalog({
     {Text::ModsDownloadRefused, L"That file can't be downloaded: the site hasn't verified it."},
     {Text::ModsUpdated, L"Mod updated."},
     {Text::ModsAdult, L"Adult mods"},
+    {Text::PerformanceStats, L"Performance statistics"},
+    {Text::PerformanceStatsHint, L"Show FPS and CPU/GPU statistics"},
     {Text::ModsAdultHint, L"List the mods the store rates for adults, marked 18+"},
     {Text::ModsAdultShown, L"Shown"},
     {Text::ModsAdultHidden, L"Hidden"},

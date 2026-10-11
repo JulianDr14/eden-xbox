@@ -172,6 +172,29 @@ void UiPainter::Chevron(float cx, float cy, unsigned color, bool left) {
     surface->DrawLine(D2D1::Point2F(cx + 1 * d, cy), D2D1::Point2F(cx - 4 * d, cy + 5), brush.Get(), 2);
 }
 
+void UiPainter::ScrollIndicator(float x, float y, float height, std::size_t first,
+                                std::size_t visible, std::size_t count, bool more_below) {
+    if (height < 48 || !visible || (!more_below && count <= visible)) return;
+    first = std::min(first, count > visible ? count - visible : std::size_t{0});
+    const bool above = first > 0;
+    const bool below = more_below || visible < count - first;
+    const auto arrow = [&](float cy, bool up, bool available) {
+        brush->SetColor(D2D1::ColorF(available ? Palette::Accent : Palette::Track));
+        const float tip = cy + (up ? -3.0f : 3.0f);
+        const float base = cy + (up ? 3.0f : -3.0f);
+        surface->DrawLine(D2D1::Point2F(x - 4, base), D2D1::Point2F(x, tip), brush.Get(), 2);
+        surface->DrawLine(D2D1::Point2F(x, tip), D2D1::Point2F(x + 4, base), brush.Get(), 2);
+    };
+    arrow(y + 5, true, above);
+    arrow(y + height - 5, false, below);
+    const float track_y = y + 18, track_h = height - 36;
+    const float fraction = count ? std::min(1.0f, static_cast<float>(visible) / count) : 1.0f;
+    const float thumb_h = std::min(track_h, std::max(20.0f, track_h * fraction));
+    const float position = count > visible ? static_cast<float>(first) / (count - visible) : 0.0f;
+    Round(x - 2, track_y, 4, track_h, 2, Palette::Track);
+    Round(x - 3, track_y + (track_h - thumb_h) * position, 6, thumb_h, 3, Palette::Accent);
+}
+
 void UiPainter::RowFrame(float x, float y, float width, float height, bool active, UiIcon icon) {
     Round(x, y, width, height, 12, active ? Palette::RowActive : Palette::Row);
     if (active) Round(x, y + 14, 3, height - 28, 1.5f, Palette::Accent);

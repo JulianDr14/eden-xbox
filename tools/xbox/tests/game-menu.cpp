@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "eden_uwp/game_menu.h"
+#include "eden_uwp/system_page.h"
 
 int main() {
     using namespace EdenXbox;
@@ -68,7 +69,7 @@ int main() {
     // Menu model, in Spanish.
     I18n::SetUiLanguage(*I18n::FindUiLanguage(L"es"));
     GameMenu menu{{ConsoleControllerStyle::Auto, false, 0.12f}};
-    check(menu.Rows().size() == 5 && menu.SelectedItem() == GameMenu::Continue);
+    check(menu.Rows().size() == 6 && menu.SelectedItem() == GameMenu::Continue);
     check(menu.Apply(MenuAction::Confirm) == GameMenuResult::Resume);
     check(menu.Apply(MenuAction::Back) == GameMenuResult::Resume);
     check(menu.Apply(MenuAction::Toggle) == GameMenuResult::Resume);
@@ -99,7 +100,7 @@ int main() {
     // A game with a title id offers its cheats, second, with how many are on.
     GameMenu with_cheats{{ConsoleControllerStyle::Auto, false, 0.12f}, true};
     with_cheats.SetCheatsOn(3);
-    check(with_cheats.Rows().size() == 6);
+    check(with_cheats.Rows().size() == 7);
     check(with_cheats.Rows()[1].kind == GameMenuRow::Kind::Page && with_cheats.Rows()[1].value == L"3 activos");
     check(with_cheats.Apply(MenuAction::Down) == GameMenuResult::None && with_cheats.SelectedItem() == GameMenu::Cheats);
     check(with_cheats.Apply(MenuAction::Right) == GameMenuResult::None);
@@ -109,7 +110,8 @@ int main() {
 
     // PC: full screen sits above "back to the library"; the Series menu never shows it.
     GameMenu pc{{ConsoleControllerStyle::Auto, false, 0.12f, true, false}};
-    check(pc.Rows().size() == 6 && pc.Rows()[4].label == L"Pantalla completa" && pc.Rows()[4].value == L"No");
+    check(pc.Rows().size() == 7 && pc.Rows()[4].label == L"Pantalla completa" && pc.Rows()[4].value == L"No");
+    pc.Apply(MenuAction::Up);
     pc.Apply(MenuAction::Up);
     pc.Apply(MenuAction::Up);
     check(pc.SelectedItem() == GameMenu::FullScreen && pc.Selected() == 4);
@@ -119,5 +121,27 @@ int main() {
     // The same menu follows the interface language.
     I18n::SetUiLanguage(*I18n::FindUiLanguage(L"en"));
     check(pc.Rows()[0].label == L"Resume" && pc.Rows()[4].label == L"Full screen" && pc.Rows()[4].value == L"No");
+    // Both entry points start off and toggle the same persisted setting model.
+    SystemPage system_page;
+    check(!system_page.settings.show_performance_stats);
+    system_page.selected = SystemPage::PerformanceStats;
+    check(HandleSystemInput(system_page, SystemInput::Confirm) == SystemPageEffect::Changed);
+    check(system_page.settings.show_performance_stats);
+    check(HandleSystemInput(system_page, SystemInput::Left) == SystemPageEffect::Changed);
+    check(!system_page.settings.show_performance_stats);
+    check(SystemPageLayout::RowTop + (SystemPage::RowCount - 1) * SystemPageLayout::RowStride +
+          SystemPageLayout::RowHeight < SystemPageLayout::Notice);
+    GameMenu stats_menu{{}};
+    check(!stats_menu.Settings().show_performance_stats);
+    stats_menu.Apply(MenuAction::Up);
+    stats_menu.Apply(MenuAction::Up);
+    check(stats_menu.SelectedItem() == GameMenu::PerformanceStats);
+    check(stats_menu.Apply(MenuAction::Confirm) == GameMenuResult::PerformanceStatsChanged);
+    check(stats_menu.Settings().show_performance_stats);
+    auto saved = stats_menu.Settings();
+    GameMenu reopened{saved};
+    check(reopened.Settings().show_performance_stats);
+    check(stats_menu.Apply(MenuAction::Right) == GameMenuResult::PerformanceStatsChanged);
+    check(!stats_menu.Settings().show_performance_stats);
     std::puts("game menu: combo hold/stagger/tap/held passthrough, navigation, settings and cheats PASS");
 }

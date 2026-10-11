@@ -30,6 +30,23 @@ struct ControllerDevice {
     explicit operator bool() const;
 };
 ControllerReading ReadController(const ControllerDevice& device);
+// Involution: maps physical labels to Switch labels, and logical prompts back to physical labels.
+inline winrt::Windows::Gaming::Input::GamepadButtons MapFaceButtons(
+    winrt::Windows::Gaming::Input::GamepadButtons buttons, bool by_position) {
+    using B = winrt::Windows::Gaming::Input::GamepadButtons;
+    if (!by_position) return buttons;
+    const auto face = B::A | B::B | B::X | B::Y;
+    auto mapped = buttons & ~face;
+    if ((buttons & B::A) != B::None) mapped |= B::B;
+    if ((buttons & B::B) != B::None) mapped |= B::A;
+    if ((buttons & B::X) != B::None) mapped |= B::Y;
+    if ((buttons & B::Y) != B::None) mapped |= B::X;
+    return mapped;
+}
+inline bool SwapControllerFaceButtons(const ControllerDevice& device, bool by_position) {
+    return by_position && device.pad && !device.nintendo;
+}
+
 // UI-thread discovery; rate limited, asynchronous and PC-only.
 void RefreshProControllers();
 bool RunProControllerDecoderSelfTest();

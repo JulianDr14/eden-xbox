@@ -513,7 +513,10 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             try {
                 const auto reading = ReadController(*pad).gamepad;
                 const auto buttons = reading.Buttons;
-                const auto edges = buttons & ~previous;
+                // Track physical edges before mapping: changing the option while holding a
+                // button must not synthesize a second press of its new logical counterpart.
+                const auto edges = MapFaceButtons(buttons & ~previous,
+                    SwapControllerFaceButtons(*pad, options.swap_face_buttons));
                 previous = buttons;
                 auto hit = [&](GamepadButtons b) { return (edges & b) == b; };
                 // The d-pad takes precedence; do not combine opposite directions.
@@ -964,7 +967,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         }
         if (actions & Panel && !configuration.open) { settings = !settings; panel.keyboard.open = panel.keyboard.capturing = false; panel.expanded = false; dirty = true; }
         if (actions & AddFolder && !settings && !picker && !configuration.busy && !validation.valid()) {
-            configuration.open = true; configuration.files = false; configuration.selected = HomeFiles;
+            configuration.open = true; configuration.files = false; configuration.selected = HomeSystem;
             configuration.notice.clear(); refresh_setup(); dirty = true;
         }
         if (configuration.open && !settings && !picker && !configuration.busy) {

@@ -143,21 +143,12 @@ void ApplyKeyboard(PadState& state) {
 PadState ReadGamepad(const ControllerDevice& pad, const ControllerOptions& options) {
     const auto full = ReadController(pad);
     const auto& reading = full.gamepad;
+    const auto buttons = MapFaceButtons(reading.Buttons,
+        SwapControllerFaceButtons(pad, options.swap_face_buttons));
     PadState state{};
     for (const GamepadMapping& mapping : GAMEPAD_MAPPINGS) {
-        if ((reading.Buttons & mapping.xbox) == mapping.xbox) {
-            auto button = mapping.button;
-            // A Nintendo pad already reads by letter, which is also its position.
-            if (options.swap_face_buttons && pad.pad && !pad.nintendo) {
-                switch (button) {
-                case VirtualButton::ButtonA: button = VirtualButton::ButtonB; break;
-                case VirtualButton::ButtonB: button = VirtualButton::ButtonA; break;
-                case VirtualButton::ButtonX: button = VirtualButton::ButtonY; break;
-                case VirtualButton::ButtonY: button = VirtualButton::ButtonX; break;
-                default: break;
-                }
-            }
-            state.buttons |= Bit(button);
+        if ((buttons & mapping.xbox) == mapping.xbox) {
+            state.buttons |= Bit(mapping.button);
         }
     }
     if (full.home) state.buttons |= Bit(VirtualButton::ButtonHome);
