@@ -20,6 +20,7 @@
 #include "eden_uwp/game_options_page.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/ui_painter.h"
+#include "eden_uwp/text_entry_panel.h"
 #include "eden_uwp/ui_text.h"
 #include "eden_uwp/uwp_input.h"
 
@@ -476,63 +477,23 @@ private:
         ControlPrompt(Navigation::Back, Tr(T::Back), L::RowX + L::RowWidth - 230, L::Footer, 150);
     }
     void DrawNameEditor(const SystemPage& page) {
-        using K = TextEntryLayout;
-        const auto& editor = *page.name_editor;
+        using L = SystemPageLayout;
+        using K = TextEntryPanelLayout;
         brush->SetColor(D2D1::ColorF(0, 0, 0, 0.86f));
         target->FillRectangle(D2D1::RectF(0, 0, 1280, 720), brush.Get());
-        Round(150, 70, 980, 610, 22, 0x111923);
-        Text(Tr(T::UserName), K::Left, 96, 28, 0xf4f7fa, 600, 44, true);
-        Text(Tr(T::NameEditorHint), K::Left, 140, 16, 0x91a3b8, 700, 26);
-        // The text box: value, caret after it, and how much room is left.
-        const float box_width = K::KeyX(TextEntry::Columns - 1) + K::KeyWidth - K::Left;
-        Round(K::Left, 184, box_width, 64, 14, 0x182331);
-        Round(K::Left, 246, box_width, 2, 1, 0x77e3bd);
-        const auto& value = editor.Value();
-        Text(value, K::Left + 22, 194, 28, 0xf4f7fa, box_width - 150, 44, true);
-        const float caret = K::Left + 22 + std::min(MeasureText(value, 28, true), box_width - 150);
-        Round(caret + 2, 199, 2, 34, 1, 0x77e3bd);
-        Text(std::to_wstring(value.size()) + L" / " + std::to_wstring(editor.MaxLength()),
-             K::Left + box_width - 132, 202, 18, 0x91a3b8, 110, 30, false, false, false, true);
-        if (!page.editor_notice.empty()) Text(page.editor_notice, K::Left, 262, 16, 0xf3ba6a, box_width, 26);
-        for (size_t row = 0; row < TextEntry::CharacterRows; ++row) {
-            for (size_t column = 0; column < TextEntry::Columns; ++column) {
-                const bool active = editor.Row() == row && editor.Column() == column;
-                const float x = K::KeyX(column), y = K::KeyY(row);
-                Round(x, y, K::KeyWidth, K::KeyHeight, 10, active ? 0x77e3bd : 0x1b2736);
-                const wchar_t c = editor.Character(row, column);
-                Text(std::wstring(1, c), x, y, 22, active ? 0x102921 : 0xe3eaf2, K::KeyWidth, K::KeyHeight,
-                     true, false, true);
-            }
-        }
-        for (size_t key = 0; key < TextEntry::ActionCount; ++key) {
-            const auto action = TextEntry::ActionAt(key * 2);
-            const bool active = editor.Row() == TextEntry::CharacterRows && editor.Column() / 2 == key;
-            const bool latched = (action == TextEntry::Action::Shift && editor.Shifted()) ||
-                                 (action == TextEntry::Action::Symbols && editor.ShowingSymbols());
-            const float x = K::KeyX(key * 2), y = K::KeyY(TextEntry::CharacterRows);
-            const float width = K::KeyWidth * 2 + K::Gap;
-            const unsigned idle = action == TextEntry::Action::Done ? 0x20342f : latched ? 0x304c46 : 0x263445;
-            Round(x, y, width, K::KeyHeight, 10, active ? 0x77e3bd : idle);
-            T label = T::DoneKey;
-            switch (action) {
-            case TextEntry::Action::Shift:   label = T::ShiftKey; break;
-            case TextEntry::Action::Symbols: label = editor.ShowingSymbols() ? T::LettersKey : T::SymbolsKey; break;
-            case TextEntry::Action::Space:   label = T::SpaceKey; break;
-            case TextEntry::Action::Delete:  label = T::DeleteKey; break;
-            case TextEntry::Action::Done:    label = T::DoneKey; break;
-            }
-            Text(Tr(label), x, y, 18, active ? 0x102921 : latched ? 0x95ebca : 0xe3eaf2, width, K::KeyHeight,
-                 true, false, true);
-        }
-        const float footer = 632;
+        Round(L::EditorX, L::EditorY, K::Width, K::Height, 22, 0x111923);
+        DrawTextEntryPanel(*this, {*page.name_editor, Tr(T::UserName), Tr(T::NameEditorHint), page.editor_notice},
+                           L::EditorX, L::EditorY);
+        const float left = L::EditorX + K::Left;
+        const float footer = L::EditorY + K::Footer;
         if (prompt_family == PromptFamily::Keyboard) {
-            Text(Tr(T::NameEditorKeyboardHelp), K::Left, footer + 6, 15, 0x7f91a6, box_width, 24);
+            Text(Tr(T::NameEditorKeyboardHelp), left, footer + 6, 15, 0x7f91a6, K::BoxWidth, 24);
         } else {
-            ControlPrompt(Navigation::Play, Tr(T::TypeKey), K::Left, footer, 140);
-            ControlPrompt(Navigation::AddFolder, Tr(T::DeleteKey), K::Left + 190, footer, 140);
-            ControlPrompt(Navigation::Space, Tr(T::SpaceKey), K::Left + 380, footer, 140);
-            ControlPrompt(Navigation::Options, Tr(T::DoneKey), K::Left + 570, footer, 140);
-            ControlPrompt(Navigation::Back, Tr(T::Cancel), K::Left + 760, footer, 140);
+            ControlPrompt(Navigation::Play, Tr(T::TypeKey), left, footer, 140);
+            ControlPrompt(Navigation::AddFolder, Tr(T::DeleteKey), left + 190, footer, 140);
+            ControlPrompt(Navigation::Space, Tr(T::SpaceKey), left + 380, footer, 140);
+            ControlPrompt(Navigation::Options, Tr(T::DoneKey), left + 570, footer, 140);
+            ControlPrompt(Navigation::Back, Tr(T::Cancel), left + 760, footer, 140);
         }
     }
     void ControlPrompt(Navigation action, std::wstring_view label, float x, float y,

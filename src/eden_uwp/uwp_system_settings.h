@@ -19,7 +19,7 @@ SystemLocale DetectSystemLocale();
 /// language for the frontend, and Eden's system language and region for the next game.
 ResolvedSystem ApplySystemSettings();
 
-/// Renames the active profile to the saved user name, before a game starts. Returns false when
-/// nothing was saved or the profile could not be written.
+/// Renames the active profile to the saved user name (the default one when none is saved), before
+/// a game starts. Returns false when the profile could not be written.
 bool ApplyUserName(Service::Account::ProfileManager& profiles, std::wstring_view name);
 } // namespace EdenXbox

@@ -22,6 +22,7 @@
 #include "common/common_types.h"
 #include "eden_uwp/controller_style.h"
 #include "eden_uwp/game_menu.h"
+#include "eden_uwp/text_entry.h"
 
 namespace Core::HID {
 class HIDCore;
@@ -52,6 +53,17 @@ void RequestQuit();
 [[nodiscard]] bool QuitRequested();
 /// Escape on the keyboard: open or close the in-game menu (game_menu.h).
 void RequestGameMenu();
+
+/// A real key while a game's on-screen keyboard is up: a typed character or a command.
+struct TextEntryKey {
+    wchar_t character{};
+    std::optional<TextEntry::Command> command;
+};
+/// While active, the real keyboard types into the game's keyboard instead of driving the pad.
+void SetTextEntryActive(bool active);
+[[nodiscard]] bool TextEntryActive();
+void PushTextEntryKey(TextEntryKey key);
+[[nodiscard]] std::vector<TextEntryKey> TakeTextEntryKeys();
 
 struct ControllerOptions {
     bool swap_face_buttons{}; // Xbox A/B/X/Y -> Switch B/A/Y/X (physical positions).

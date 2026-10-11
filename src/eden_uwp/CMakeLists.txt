@@ -40,6 +40,12 @@ add_executable(eden-uwp WIN32
     system_settings.h
     system_page.h
     text_entry.h
+    text_entry_panel.cpp
+    text_entry_panel.h
+    # The keyboard games open to ask for text, over the running game.
+    game_keyboard.h
+    uwp_software_keyboard.cpp
+    uwp_software_keyboard.h
     uwp_system_settings.cpp
     uwp_system_settings.h
     library_cache.cpp

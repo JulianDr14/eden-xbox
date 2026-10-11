@@ -263,6 +263,11 @@ enum class Text : std::uint16_t {
     DeleteKey,
     DoneKey,
 
+    // Keyboard a game opens
+    TextInputTitle,
+    TextInputTooShort,
+    TextInputConfirmAgain,
+
     Count
 };
 inline constexpr std::size_t TextCount = static_cast<std::size_t>(Text::Count);

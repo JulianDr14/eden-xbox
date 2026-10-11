@@ -331,6 +331,34 @@ void RequestGameMenu() {
     game_menu_requested.store(true, std::memory_order_relaxed);
 }
 
+namespace {
+std::atomic<bool> text_entry_active{};
+std::mutex text_entry_mutex;
+std::vector<TextEntryKey> text_entry_keys;
+} // namespace
+
+void SetTextEntryActive(bool active) {
+    text_entry_active.store(active, std::memory_order_relaxed);
+    if (active) ResetKeyboardKeys(); // Nothing held reaches the game while typing.
+    std::scoped_lock lock{text_entry_mutex};
+    text_entry_keys.clear();
+}
+
+bool TextEntryActive() {
+    return text_entry_active.load(std::memory_order_relaxed);
+}
+
+void PushTextEntryKey(TextEntryKey key) {
+    if (!TextEntryActive()) return;
+    std::scoped_lock lock{text_entry_mutex};
+    text_entry_keys.push_back(key);
+}
+
+std::vector<TextEntryKey> TakeTextEntryKeys() {
+    std::scoped_lock lock{text_entry_mutex};
+    return std::exchange(text_entry_keys, {});
+}
+
 std::optional<InputStep> ParseInputStep(std::string_view spec) {
     InputStep step{.duration_ms = DEFAULT_STEP_MS, .text = std::string{spec}};
     const std::size_t first = spec.find(':');

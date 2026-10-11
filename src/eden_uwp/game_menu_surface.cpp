@@ -15,6 +15,7 @@
 #include "eden_uwp/cheats/cheats_view.h"
 #include "eden_uwp/game_menu.h"
 #include "eden_uwp/localization.h"
+#include "eden_uwp/text_entry_panel.h"
 #include "eden_uwp/ui_painter.h"
 
 namespace EdenXbox {
@@ -144,6 +145,21 @@ struct GameMenuSurface::Impl : UiPainter {
         Prompt(L"B", ButtonColor::B, I18n::Tr(Text::Back), x, L::Footer);
     }
 
+    void DrawKeyboard(const TextEntryPanelView& view, bool can_cancel) {
+        using K = TextEntryPanelLayout;
+        DrawTextEntryPanel(*this, view, 0, 0);
+        // The pad as the console's keyboard: A types, X deletes, Y adds a space; the bumpers stand
+        // in for + and -, which the game menu's shortcut holds.
+        float x = K::Left;
+        const float y = K::Footer;
+        x += Prompt(L"A", ButtonColor::A, I18n::Tr(Text::TypeKey), x, y);
+        x += Prompt(L"X", ButtonColor::X, I18n::Tr(Text::DeleteKey), x, y);
+        x += Prompt(L"Y", ButtonColor::Y, I18n::Tr(Text::SpaceKey), x, y);
+        x += Prompt(L"LB", ButtonColor::Neutral, I18n::Tr(Text::ShiftKey), x, y);
+        x += Prompt(L"RB", ButtonColor::Neutral, I18n::Tr(Text::DoneKey), x, y);
+        if (can_cancel) Prompt(L"B", ButtonColor::B, I18n::Tr(Text::Cancel), x, y);
+    }
+
     ComPtr<IWICImagingFactory> wic;
     ComPtr<ID2D1Factory> d2d;
     ComPtr<IDWriteFactory> text_factory;
@@ -165,6 +181,12 @@ D3D12::MenuImage GameMenuSurface::DrawMenu(const GameMenu& menu, std::wstring_vi
 D3D12::MenuImage GameMenuSurface::DrawCheats(const Cheats::CheatsView& view, std::pair<u32, u32> screen) {
     using L = Cheats::CheatsLayout;
     return impl->Render(L::Width, L::Height, screen, [&] { impl->DrawCheats(view); });
+}
+
+D3D12::MenuImage GameMenuSurface::DrawKeyboard(const TextEntryPanelView& view, bool can_cancel,
+                                              std::pair<u32, u32> screen) {
+    using K = TextEntryPanelLayout;
+    return impl->Render(K::Width, K::Height, screen, [&] { impl->DrawKeyboard(view, can_cancel); });
 }
 
 } // namespace EdenXbox

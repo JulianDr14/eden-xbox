@@ -12,6 +12,7 @@
 #include "eden_uwp/localization.h"
 #include "eden_uwp/system_settings.h"
 #include "eden_uwp/text_entry.h"
+#include "eden_uwp/text_entry_panel.h"
 
 namespace EdenXbox {
 
@@ -162,15 +163,9 @@ struct SystemPageLayout {
     static constexpr float PanelX = 140, PanelY = 72, PanelWidth = 1000, PanelHeight = 612;
     static constexpr float RowX = 180, RowWidth = 920, RowTop = 214, RowStride = 76, RowHeight = 66;
     static constexpr float Notice = 594, Footer = 630;
-};
-
-/// On-screen keyboard geometry: ten 82x54 keys with 8-unit gaps, centered.
-struct TextEntryLayout {
-    static constexpr float KeyWidth = 82, KeyHeight = 54, Gap = 8;
-    static constexpr float Left = (1280 - (TextEntry::Columns * KeyWidth + (TextEntry::Columns - 1) * Gap)) / 2;
-    static constexpr float Top = 318;
-    static constexpr float KeyX(std::size_t column) { return Left + column * (KeyWidth + Gap); }
-    static constexpr float KeyY(std::size_t row) { return Top + row * (KeyHeight + Gap); }
+    /// The name editor's keyboard panel (text_entry_panel.h), centered on the screen.
+    static constexpr float EditorX = (1280 - TextEntryPanelLayout::Width) / 2;
+    static constexpr float EditorY = (720 - TextEntryPanelLayout::Height) / 2;
 };
 
 } // namespace EdenXbox

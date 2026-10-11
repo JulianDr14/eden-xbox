@@ -147,16 +147,21 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     auto keyboard = window.KeyDown(winrt::auto_revoke, [&](auto&&, KeyEventArgs const& e) {
         if (e.KeyStatus().WasKeyDown) return;
         if (system_page.name_editor) {
-            auto& editor = *system_page.name_editor;
+            using Command = TextEntry::Command;
+            std::optional<Command> command;
             switch (e.VirtualKey()) {
-            case VirtualKey::Escape: finish_name_editor = false; break;
-            case VirtualKey::Enter: finish_name_editor = true; break;
-            case VirtualKey::Back: editor.Backspace(); break;
-            case VirtualKey::Up: editor.Move(0, -1); break;
-            case VirtualKey::Down: editor.Move(0, 1); break;
-            case VirtualKey::Left: editor.Move(-1, 0); break;
-            case VirtualKey::Right: editor.Move(1, 0); break;
+            case VirtualKey::Escape: command = Command::Cancel; break;
+            case VirtualKey::Enter: command = Command::Done; break;
+            case VirtualKey::Back: command = Command::Delete; break;
+            case VirtualKey::Up: command = Command::Up; break;
+            case VirtualKey::Down: command = Command::Down; break;
+            case VirtualKey::Left: command = Command::Left; break;
+            case VirtualKey::Right: command = Command::Right; break;
             default: break; // Characters arrive through CharacterReceived.
+            }
+            if (command) {
+                const auto result = system_page.name_editor->Apply(*command);
+                if (result != TextEntry::Result::None) finish_name_editor = result == TextEntry::Result::Done;
             }
             dirty = true;
             e.Handled(true);
@@ -220,12 +225,10 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         const float x = static_cast<float>((p.X * dpi - (width - 1280 * scale) / 2) / scale);
         const float y = static_cast<float>((p.Y * dpi - (height - 720 * scale) / 2) / scale);
         if (system_page.name_editor) {
-            using K = TextEntryLayout;
-            const float column = (x - K::Left) / (K::KeyWidth + K::Gap);
-            const float row = (y - K::Top) / (K::KeyHeight + K::Gap);
-            if (column >= 0 && row >= 0 && column < TextEntry::Columns && row < TextEntry::Rows) {
+            using L = SystemPageLayout;
+            if (const auto key = TextEntryPanelLayout::KeyAt(x - L::EditorX, y - L::EditorY)) {
                 auto& editor = *system_page.name_editor;
-                editor.Focus(static_cast<size_t>(row), static_cast<size_t>(column));
+                editor.Focus(key->first, key->second);
                 if (editor.Press() == TextEntry::Result::Done) finish_name_editor = true;
                 system_page.editor_notice.clear();
                 dirty = true;
@@ -514,19 +517,28 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 if (hit(GamepadButtons::DPadLeft)) directions |= Left;
                 if (hit(GamepadButtons::DPadRight)) directions |= Right;
                 if (system_page.name_editor) {
-                    // Like the console's keyboard: A types, X deletes, Y adds a space, Menu is done,
-                    // View is Shift and B leaves without saving.
+                    // Like the console's keyboard: A types, X deletes, Y adds a space, Menu (or RB)
+                    // is done, View (or LB) is Shift and B leaves without saving. The bumpers are
+                    // what a game's keyboard uses, where + and - belong to the game menu.
+                    using Command = TextEntry::Command;
                     auto& editor = *system_page.name_editor;
-                    if (directions & Up) editor.Move(0, -1);
-                    if (directions & Down) editor.Move(0, 1);
-                    if (directions & Left) editor.Move(-1, 0);
-                    if (directions & Right) editor.Move(1, 0);
-                    if (hit(GamepadButtons::A) && editor.Press() == TextEntry::Result::Done) finish_name_editor = true;
-                    if (hit(GamepadButtons::X)) editor.Backspace();
-                    if (hit(GamepadButtons::Y)) editor.Type(L' ');
-                    if (hit(GamepadButtons::View)) editor.ToggleShift();
-                    if (hit(GamepadButtons::Menu)) finish_name_editor = true;
-                    if (hit(GamepadButtons::B)) finish_name_editor = false;
+                    const std::pair<bool, Command> presses[] = {
+                        {(directions & Up) != 0, Command::Up},
+                        {(directions & Down) != 0, Command::Down},
+                        {(directions & Left) != 0, Command::Left},
+                        {(directions & Right) != 0, Command::Right},
+                        {hit(GamepadButtons::A), Command::Press},
+                        {hit(GamepadButtons::X), Command::Delete},
+                        {hit(GamepadButtons::Y), Command::Space},
+                        {hit(GamepadButtons::View) || hit(GamepadButtons::LeftShoulder), Command::Shift},
+                        {hit(GamepadButtons::Menu) || hit(GamepadButtons::RightShoulder), Command::Done},
+                        {hit(GamepadButtons::B), Command::Cancel},
+                    };
+                    for (const auto& [pressed, command] : presses) {
+                        if (!pressed || finish_name_editor) continue;
+                        const auto result = editor.Apply(command);
+                        if (result != TextEntry::Result::None) finish_name_editor = result == TextEntry::Result::Done;
+                    }
                     if (directions || edges != GamepadButtons::None) {
                         system_page.editor_notice.clear();
                         dirty = true;

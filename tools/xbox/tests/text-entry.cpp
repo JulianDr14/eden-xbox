@@ -57,5 +57,19 @@ int main() {
     check(emoji.Value() == L"A");
     check(TextEntry{L"ABCDEFGHIJKL", 10}.Value() == L"ABCDEFGHIJ");
 
+    // Commands, as every input source sends them.
+    using Command = TextEntry::Command;
+    TextEntry commands{L"Ab", 4};
+    check(commands.Apply(Command::Space) == TextEntry::Result::None && commands.Value() == L"Ab ");
+    check(commands.Apply(Command::Delete) == TextEntry::Result::None && commands.Value() == L"Ab");
+    commands.Apply(Command::Shift);
+    check(commands.Shifted());
+    commands.Apply(Command::Down);
+    check(commands.Row() == 2);
+    check(commands.Apply(Command::Done) == TextEntry::Result::Done);
+    check(commands.Apply(Command::Cancel) == TextEntry::Result::Cancel);
+    commands.SetValue(L"ABCDEF");
+    check(commands.Value() == L"ABCD");
+
     std::puts("text entry: typing, shift, symbols, navigation, actions and limits PASS");
 }

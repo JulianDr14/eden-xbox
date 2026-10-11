@@ -89,8 +89,9 @@ ResolvedSystem ApplySystemSettings() {
 }
 
 bool ApplyUserName(Service::Account::ProfileManager& profiles, std::wstring_view name) {
-    const auto clean = SanitizeUserName(name);
-    if (clean.empty()) return false;
+    // No saved name is the default one: a profile renamed before goes back to it.
+    auto clean = SanitizeUserName(name);
+    if (clean.empty()) clean = DefaultUserName;
     const auto index = static_cast<std::size_t>(std::clamp<s32>(
         Settings::values.current_user.GetValue(), 0, static_cast<s32>(Service::Account::MAX_USERS) - 1));
     const auto uuid = profiles.GetUser(index);

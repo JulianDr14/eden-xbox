@@ -241,5 +241,8 @@ const Catalog EnglishCatalog = MakeCatalog({
     {Text::SpaceKey, L"Space"},
     {Text::DeleteKey, L"Delete"},
     {Text::DoneKey, L"Done"},
+    {Text::TextInputTitle, L"Enter text"},
+    {Text::TextInputTooShort, L"Type at least {0} characters."},
+    {Text::TextInputConfirmAgain, L"Press Done again to confirm."},
 });
 } // namespace EdenXbox::I18n

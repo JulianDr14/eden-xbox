@@ -12,7 +12,7 @@
 // WinRT IFrameworkView wrapper is the UWP entry point that drives it.
 //
 // JIT-LIVENESS CONTRACT (agreed with AGENT QA for the GATE-2 checklist): GATE 2 means "Eden executed
-// guest code via the JIT", not "the process didn't crash". The homebrew NRO (NO keys/firmware/ROM —
+// guest code via the JIT", not "the process didn't crash". The homebrew NRO (NO keys/firmware/ROM â€”
 // house rule) issues svcOutputDebugString with the exact sentinel below; Eden's SVC handler logs
 // OutputDebugString, so observing this line is positive proof the JIT decoded + executed guest code.
 
@@ -63,6 +63,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/service/am/applet_manager.h"
+#include "core/hle/service/am/frontend/applets.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
 #include "core/memory/cheat_engine.h"
@@ -89,6 +90,7 @@
 #include "eden_uwp/uwp_rom_storage.h"
 #include "eden_uwp/uwp_file_manager.h"
 #include "eden_uwp/localization.h"
+#include "eden_uwp/uwp_software_keyboard.h"
 #include "eden_uwp/uwp_system_settings.h"
 #include "eden_uwp/utf8.h"
 
@@ -489,6 +491,16 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     if (ApplyUserName(system.GetProfileManager(), LoadSystemSettings().user_name)) {
         WriteDiag("step: profile name from Settings > System");
     }
+    // Played by hand, a game asking for text gets the on-screen keyboard (uwp_software_keyboard.h);
+    // unattended runs keep the core's stand-in, which answers on its own.
+    EdenXbox::UwpSoftwareKeyboard* keyboard_applet = nullptr;
+    if (config.play) {
+        auto keyboard = std::make_unique<EdenXbox::UwpSoftwareKeyboard>();
+        keyboard_applet = keyboard.get();
+        Service::AM::Frontend::FrontendAppletSet applets; // The others stay the core's.
+        applets.software_keyboard = std::move(keyboard);
+        system.SetFrontendAppletSet(std::move(applets));
+    }
     if (const auto file = system.GetFilesystem()->OpenFile(nro_path, FileSys::OpenMode::Read);
         file != nullptr && manual_provider.AddEntriesFromContainer(file)) {
         WriteDiag("step: game contents registered");
@@ -537,7 +549,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         }
     });
 
-    // Start the GPU host thread (null renderer — no device) and release the CPU manager.
+    // Start the GPU host thread (null renderer â€” no device) and release the CPU manager.
     system.GPU().Start();
     WriteDiag("step: GPU host thread started");
     system.GetCpuManager().OnGpuReady();
@@ -622,6 +634,13 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         // next tick after the guest resumes. Closed, the menu keeps nothing.
         std::optional<GameMenu> menu;
         std::optional<GameMenuSurface> menu_surface;
+        // A keyboard the game opened (game_keyboard.h): drawn on the same surface as the menu, over
+        // the running game. The menu opens on top of it and gives it back when it closes.
+        GameKeyboard game_keyboard;
+        bool keyboard_shown = false;
+        struct TextEntryOff {
+            ~TextEntryOff() { SetTextEntryActive(false); }
+        } text_entry_off;
         std::optional<Cheats::CheatSession> cheats;
         Cheats::CheatsPage cheats_page;
         std::wstring cheats_notice;
@@ -640,12 +659,62 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
             try {
                 image = cheats ? menu_surface->DrawCheats({*cheats, cheats_page, game_title, cheats_notice, true},
                                                           screen)
-                               : menu_surface->DrawMenu(*menu, game_title, screen);
+                        : menu ? menu_surface->DrawMenu(*menu, game_title, screen)
+                               : menu_surface->DrawKeyboard(game_keyboard.View(), game_keyboard.CanCancel(), screen);
             } catch (const winrt::hresult_error& e) {
                 WriteDiag("menu: not drawn: " + winrt::to_string(e.message()));
                 return;
             }
             system.GPU().RunOnGpuThread([&] { D3D12::ShowGameMenu(system.Renderer(), std::move(image)); });
+        };
+        // Shows, redraws or hides the game's keyboard after it changed (unless the menu covers it).
+        const auto sync_keyboard = [&] {
+            const bool open = game_keyboard.IsOpen();
+            const bool was_shown = std::exchange(keyboard_shown, open);
+            if (menu) return;
+            if (open) {
+                if (!was_shown) {
+                    input.SetMenuOpen(true);
+                    SetTextEntryActive(true);
+                    WriteDiag("keyboard: shown over the game");
+                }
+                if (!menu_surface) {
+                    try {
+                        menu_surface.emplace();
+                    } catch (const winrt::hresult_error& e) {
+                        WriteDiag("keyboard: no surface: " + winrt::to_string(e.message()));
+                    }
+                }
+                if (menu_surface) draw_menu();
+            } else if (was_shown) {
+                SetTextEntryActive(false);
+                menu_surface.reset();
+                system.GPU().RunOnGpuThread([&] { D3D12::HideGameMenu(system.Renderer()); });
+                input.SetMenuOpen(false);
+                WriteDiag("keyboard: closed");
+            }
+        };
+        const auto keyboard_press = [&](std::optional<KeyboardReply> reply) {
+            if (reply && keyboard_applet) keyboard_applet->Reply(*reply);
+            sync_keyboard();
+        };
+        // The pad on the game's keyboard; the bumpers stand in for + and -, which the menu holds.
+        const auto keyboard_command = [](MenuAction action) -> std::optional<TextEntry::Command> {
+            using Command = TextEntry::Command;
+            switch (action) {
+            case MenuAction::Up: return Command::Up;
+            case MenuAction::Down: return Command::Down;
+            case MenuAction::Left: return Command::Left;
+            case MenuAction::Right: return Command::Right;
+            case MenuAction::Confirm: return Command::Press;
+            case MenuAction::Back: return Command::Cancel;
+            case MenuAction::Alternate: return Command::Delete;
+            case MenuAction::Refresh: return Command::Space;
+            case MenuAction::PreviousTab: return Command::Shift;
+            case MenuAction::NextTab: return Command::Done;
+            case MenuAction::Toggle: break;
+            }
+            return std::nullopt;
         };
         // The cheats page's presses, while it is open.
         const auto cheats_input = [&](MenuAction action) -> std::optional<Cheats::CheatsInput> {
@@ -722,11 +791,28 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 LOG_INFO(Frontend, "Headless boot: session closed with Q.");
                 return 0;
             }
+            if (keyboard_applet) {
+                bool changed = false;
+                for (const KeyboardEvent& event : keyboard_applet->TakeEvents())
+                    changed |= game_keyboard.Apply(event);
+                if (changed || game_keyboard.IsOpen() != keyboard_shown) sync_keyboard();
+                for (const TextEntryKey& key : TakeTextEntryKeys()) {
+                    if (menu || !game_keyboard.IsOpen()) break;
+                    keyboard_press(key.command ? game_keyboard.Handle(*key.command)
+                                               : game_keyboard.Type(key.character));
+                }
+            }
             for (const MenuAction action : input.TakeMenuActions()) {
+                if (!menu && action != MenuAction::Toggle && game_keyboard.IsOpen()) {
+                    if (const auto command = keyboard_command(action))
+                        keyboard_press(game_keyboard.Handle(*command));
+                    continue;
+                }
                 if (!menu) {
                     if (action != MenuAction::Toggle) continue;
                     void(system.Pause());
                     input.SetMenuOpen(true);
+                    SetTextEntryActive(false); // The real keyboard drives the menu.
                     const ControllerOptions options = input.Options();
                     menu.emplace(GameMenuSettings{options.style, options.swap_face_buttons,
                                                   options.deadzone, g_can_fullscreen.load(),
@@ -793,10 +879,17 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 }
                 if (result == GameMenuResult::Resume) {
                     menu.reset();
-                    menu_surface.reset();
                     cheats.reset();
-                    system.GPU().RunOnGpuThread([&] { D3D12::HideGameMenu(system.Renderer()); });
-                    input.SetMenuOpen(false);
+                    if (game_keyboard.IsOpen() && menu_surface) {
+                        // The game's keyboard was under the menu: it comes back.
+                        SetTextEntryActive(true);
+                        draw_menu();
+                    } else {
+                        menu_surface.reset();
+                        system.GPU().RunOnGpuThread([&] { D3D12::HideGameMenu(system.Renderer()); });
+                        input.SetMenuOpen(false);
+                        keyboard_shown = false;
+                    }
                     void(system.Run());
                     WriteDiag("menu: closed, guest running");
                     break;
@@ -906,7 +999,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
 // ============================================================================================
 // UWP entry point: a CoreApplication IFrameworkView whose Run() drives RunHeadlessBoot() against the
 // homebrew NRO bundled in the package install location (Package.InstalledLocation\boot.nro). Reading
-// the fixed GATE-2 payload from the read-only install dir keeps the MSIX self-contained — no
+// the fixed GATE-2 payload from the read-only install dir keeps the MSIX self-contained â€” no
 // Device-Portal file-push or LocalState chicken-and-egg. (Eden's log still writes to the writable
 // LocalFolder; see common/fs/path_util.cpp under YUZU_UWP_APPCONTAINER.)
 // ============================================================================================
@@ -1741,6 +1834,24 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         const auto on_key = [&library_active, developer_hotkeys](Windows::System::VirtualKey key, bool pressed) {
             if (library_active) return;
             using Windows::System::VirtualKey;
+            if (EdenXbox::TextEntryActive()) {
+                // A game's keyboard is up: keys edit its text (characters arrive through
+                // CharacterReceived) and nothing reaches the game.
+                using Command = EdenXbox::TextEntry::Command;
+                std::optional<Command> command;
+                switch (key) {
+                case VirtualKey::Escape: command = Command::Cancel; break;
+                case VirtualKey::Enter: command = Command::Done; break;
+                case VirtualKey::Back: command = Command::Delete; break;
+                case VirtualKey::Up: command = Command::Up; break;
+                case VirtualKey::Down: command = Command::Down; break;
+                case VirtualKey::Left: command = Command::Left; break;
+                case VirtualKey::Right: command = Command::Right; break;
+                default: break;
+                }
+                if (pressed && command) EdenXbox::PushTextEntryKey({.command = command});
+                return;
+            }
             if (developer_hotkeys && key == VirtualKey::Q) {
                 if (pressed) EdenXbox::RequestQuit();
                 return;
@@ -1769,6 +1880,12 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
         });
         window.KeyUp([on_key](auto&&, KeyEventArgs const& args) {
             on_key(args.VirtualKey(), false);
+            args.Handled(true);
+        });
+        window.CharacterReceived([](auto&&, CharacterReceivedEventArgs const& args) {
+            if (!EdenXbox::TextEntryActive()) return;
+            const auto c = static_cast<wchar_t>(args.KeyCode());
+            if (c >= 0x20 && c != 0x7F) EdenXbox::PushTextEntryKey({.character = c});
             args.Handled(true);
         });
 

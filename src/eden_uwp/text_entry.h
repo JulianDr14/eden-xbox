@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// On-screen keyboard for short texts (the user name), driven by a gamepad, a mouse or a real
-// keyboard. The library draws on its own swapchain without XAML, so there is no text box for the
-// system keyboard to attach to; this keeps text entry identical on the Series and the PC.
+// On-screen keyboard for short texts, driven by a gamepad, a mouse or a real keyboard: the user
+// name in the library and every text a game asks for (uwp_software_keyboard.h). The frontend
+// draws on its own swapchain without XAML, so there is no text box for the system keyboard to
+// attach to; this keeps text entry identical on the Series and the PC. The model knows nothing of
+// where it is drawn (text_entry_panel.h) or which button does what (Command).
 //
 // Five rows of ten columns. The first four hold characters; the last holds five wide action keys
 // (Shift, symbols, Space, Delete, Done), two columns each, so moving up and down keeps the column.
@@ -25,6 +27,8 @@ public:
     enum class Action : std::uint8_t { Shift, Symbols, Space, Delete, Done };
     static constexpr std::size_t ActionCount = 5;
     enum class Result : std::uint8_t { None, Done, Cancel };
+    /// What every input source maps to, so a pad, a real keyboard and a pointer act alike.
+    enum class Command : std::uint8_t { Up, Down, Left, Right, Press, Delete, Space, Shift, Done, Cancel };
 
     TextEntry() = default;
     TextEntry(std::wstring initial, std::size_t max_length_)
@@ -63,6 +67,30 @@ public:
         case Action::Done:    return Result::Done;
         }
         return Result::None;
+    }
+
+    Result Apply(Command command) {
+        switch (command) {
+        case Command::Up:     Move(0, -1); break;
+        case Command::Down:   Move(0, 1); break;
+        case Command::Left:   Move(-1, 0); break;
+        case Command::Right:  Move(1, 0); break;
+        case Command::Press:  return Press();
+        case Command::Delete: Backspace(); break;
+        case Command::Space:  Type(L' '); break;
+        case Command::Shift:  ToggleShift(); break;
+        case Command::Done:   return Result::Done;
+        case Command::Cancel: return Result::Cancel;
+        }
+        return Result::None;
+    }
+
+    /// Replaces the text (a game changed it), keeping the length limit.
+    void SetValue(std::wstring text) {
+        value = std::move(text);
+        if (value.size() <= max_length) return;
+        value.resize(max_length);
+        if (!value.empty() && value.back() >= 0xD800 && value.back() <= 0xDBFF) value.pop_back();
     }
 
     /// Typed on a real keyboard or produced by a key: printable characters only.

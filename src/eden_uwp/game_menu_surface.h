@@ -16,6 +16,7 @@
 namespace EdenXbox {
 
 class GameMenu;
+struct TextEntryPanelView;
 namespace Cheats {
 struct CheatsView;
 }
@@ -31,6 +32,8 @@ public:
     D3D12::MenuImage DrawMenu(const GameMenu& menu, std::wstring_view game, std::pair<u32, u32> screen);
     /// The cheats page.
     D3D12::MenuImage DrawCheats(const Cheats::CheatsView& view, std::pair<u32, u32> screen);
+    /// The keyboard a game opened (game_keyboard.h); B's prompt only when the game lets it cancel.
+    D3D12::MenuImage DrawKeyboard(const TextEntryPanelView& view, bool can_cancel, std::pair<u32, u32> screen);
 
 private:
     struct Impl;
