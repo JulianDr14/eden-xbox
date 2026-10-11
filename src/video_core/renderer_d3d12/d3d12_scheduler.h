@@ -11,11 +11,13 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "video_core/renderer_d3d12/d3d12_command_stream.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 
 namespace D3D12 {
@@ -41,10 +43,11 @@ public:
     Scheduler(const Scheduler&) = delete;
     Scheduler& operator=(const Scheduler&) = delete;
 
-    /// The list recording work for CurrentTick(). Marks the caller as the recording thread.
-    [[nodiscard]] ID3D12GraphicsCommandList* CommandList() {
+    /// Records work for CurrentTick() into the direct list. Marks the caller as the recording
+    /// thread.
+    [[nodiscard]] CommandStream* CommandList() {
         recording_thread.store(std::this_thread::get_id(), std::memory_order_relaxed);
-        return command_list.Get();
+        return &*stream;
     }
 
     /// Graphics and compute share one PSO binding on a direct list. All users, including internal
@@ -162,6 +165,9 @@ private:
     ComPtr<ID3D12Fence> fence;
 
     ComPtr<ID3D12GraphicsCommandList> command_list;
+    /// Records the calls on command_list (see CommandStream).
+    std::optional<ListRecorder> recorder;
+    std::optional<CommandStream> stream;
     ID3D12PipelineState* current_pipeline{};
     ComPtr<ID3D12CommandAllocator> current_allocator;
     std::deque<PooledAllocator> allocator_pool;

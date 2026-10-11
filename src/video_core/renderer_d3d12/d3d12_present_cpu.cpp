@@ -173,7 +173,7 @@ void RendererD3D12::ScaleGuestImage(const Tegra::FramebufferConfig& framebuffer,
 }
 
 void RendererD3D12::RecordUpload(const StagingBufferRef& upload) {
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     D3D12_RESOURCE_BARRIER barrier = TransitionBarrier(guest_texture.Get(),
                                                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                                 D3D12_RESOURCE_STATE_COPY_DEST);
@@ -191,7 +191,7 @@ void RendererD3D12::RecordUpload(const StagingBufferRef& upload) {
 }
 
 void RendererD3D12::RecordCopy(const StagingBufferRef& upload, PresentFrame& frame) {
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     frame.Transition(cmd, D3D12_RESOURCE_STATE_COPY_DEST);
     const D3D12_TEXTURE_COPY_LOCATION dst{
         .pResource = frame.image.Get(),

@@ -108,14 +108,14 @@ public:
 
 private:
     /// The frontend menu, centered over back buffer rtv (in RENDER_TARGET state), if open.
-    void DrawGameMenu(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
+    void DrawGameMenu(CommandStream* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
     /// While pipelines build (VideoCore::ShaderNotify), a small panel in the bottom-right corner
     /// of back buffer rtv (in RENDER_TARGET state): three dots that cycle and the shader count.
-    void DrawShaderIndicator(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
+    void DrawShaderIndicator(CommandStream* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
     /// Cached performance panel; samples process CPU and completed queue timestamps at 2 Hz.
-    void DrawPerformanceOverlay(ID3D12GraphicsCommandList* cmd,
+    void DrawPerformanceOverlay(CommandStream* cmd,
                                 D3D12_CPU_DESCRIPTOR_HANDLE rtv);
-    void DrawTraceIndicator(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
+    void DrawTraceIndicator(CommandStream* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
     /// Builds the blit root signature and PSO from translated SPIR-V; false (logged) on failure.
     bool CreateBlitPipeline();
     /// (Re)creates the guest texture and its SRV for a new size.

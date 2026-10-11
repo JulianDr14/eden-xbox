@@ -143,7 +143,7 @@ PendingReport ConditionalRendering::Report(GPUVAddr address, Tegra::MemoryManage
 }
 
 void ConditionalRendering::Predicate(const HostCounter& slice, bool render_if_zero) {
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     const u64 tick = scheduler.CurrentTick();
     // Earlier predicated draws have read the buffer when this resolve overwrites it: SetPredication
     // takes the value when it executes, and the barrier orders the write after those reads.
@@ -161,7 +161,7 @@ void ConditionalRendering::Predicate(const HostCounter& slice, bool render_if_ze
     mode = Mode::Predicated;
 }
 
-void ConditionalRendering::Bind(ID3D12GraphicsCommandList* cmd) {
+void ConditionalRendering::Bind(CommandStream* cmd) {
     const u64 tick = scheduler.CurrentTick();
     if (predicate_tick != tick) {
         TransitionResource(cmd, predicate.Get(), D3D12_RESOURCE_STATE_COMMON,

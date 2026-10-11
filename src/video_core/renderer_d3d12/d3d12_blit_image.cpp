@@ -238,7 +238,7 @@ ID3D12PipelineState* BlitImageHelper::Pipeline(Kind kind, const Target& target, 
 
 void BlitImageHelper::Begin(ID3D12PipelineState* pipeline, const Target& target, bool is_depth,
                             const D3D12_RECT& rect) {
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
     cmd->SetDescriptorHeaps(2, heaps);
     cmd->SetGraphicsRootSignature(root_signature.Get());
@@ -289,7 +289,7 @@ void BlitImageHelper::Blit(Kind kind, const Target& dst, D3D12_CPU_DESCRIPTOR_HA
         sampler_heap.GetTable({&sampler.key, 1}, {&sampler.handle, 1});
 
     Begin(pipeline, dst, kind == Kind::BlitDepth, rect);
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     // full_screen_triangle.vert computes texcoord = (x, y) / 2 * scale + offset with Vulkan's
     // clip space, where y = 0 is the top of the viewport; D3D12's y = 0 is the bottom, so the
     // vertical mapping is mirrored here: v' = (1 - v), hence scale -sy and offset oy + sy.
@@ -350,7 +350,7 @@ void BlitImageHelper::ClearDepthStencil(const Target& dst, bool clear_depth, f32
         return;
     }
     Begin(pipeline, dst, true, rect);
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     const std::array<f32, PUSH_CONSTANT_WORDS> push{depth, 0.0f, 0.0f, 0.0f};
     cmd->SetGraphicsRoot32BitConstants(PUSH_CONSTANTS_PARAM, PUSH_CONSTANT_WORDS, push.data(), 0);
     cmd->OMSetStencilRef(stencil_value);

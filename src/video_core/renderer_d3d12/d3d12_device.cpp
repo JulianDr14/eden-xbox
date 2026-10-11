@@ -16,6 +16,7 @@
 #include "common/logging.h"
 #include "common/memory_ledger.h"
 #include "common/settings.h"
+#include "video_core/renderer_d3d12/d3d12_command_stream.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 
 namespace D3D12 {
@@ -109,7 +110,7 @@ void TraceGpuOperation(std::string description) {
         fmt::format("seq={} {}", sequence, description);
 }
 
-void MarkGpuCommands(ID3D12GraphicsCommandList* cmd, const char* kind, u64 first, u64 second) {
+void MarkGpuCommands(CommandStream* cmd, const char* kind, u64 first, u64 second) {
     if (!dred_enabled) return;
     // PIX marker format 0: a wide string, which DRED keeps as the breadcrumb context.
     wchar_t text[64];

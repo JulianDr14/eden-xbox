@@ -140,7 +140,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
     if (rect.right <= rect.left || rect.bottom <= rect.top) {
         return;
     }
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     const ConditionalRendering::Scope predicate{conditional_rendering, cmd};
 
     if (color_target.ptr) {

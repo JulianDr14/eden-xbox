@@ -217,7 +217,7 @@ void RasterizerD3D12::RecordDraw(const GraphicsPipeline& pipeline,
                                  const DrawParams& params,
                                  Maxwell::PrimitiveTopology topology) {
     BindDrawState(pipeline, bindings, framebuffer, params, topology);
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     VideoCore::Perf::Add(VideoCore::Perf::Counter::Draws, 1);
     const ConditionalRendering::Scope predicate{conditional_rendering, cmd};
     if (params.is_indexed) {
@@ -269,7 +269,7 @@ void RasterizerD3D12::DispatchCompute() {
         }
         indirect_range = indirect_args.Allocate(INDIRECT_DISPATCH_WORDS * sizeof(u32));
         buffer->Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
-        ID3D12GraphicsCommandList* const copy_cmd = scheduler.CommandList();
+        CommandStream* const copy_cmd = scheduler.CommandList();
         for (u32 copy = 0; copy < 2; ++copy) {
             copy_cmd->CopyBufferRegion(
                 indirect_range->buffer,
@@ -292,7 +292,7 @@ void RasterizerD3D12::DispatchCompute() {
         }
     }
 
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     if (!command_state.heaps_bound) {
         ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
         cmd->SetDescriptorHeaps(2, heaps);

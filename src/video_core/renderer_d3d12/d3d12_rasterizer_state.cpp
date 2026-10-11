@@ -25,7 +25,7 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
                                     Maxwell::PrimitiveTopology topology) {
     const auto& regs = maxwell3d->regs;
     const PipelineLayout& layout = pipeline.Layout();
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
 
     if (!command_state.heaps_bound) {
         ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
@@ -100,7 +100,7 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
     command_state.valid = true;
 }
 
-void RasterizerD3D12::SetGraphicsRootArguments(ID3D12GraphicsCommandList* cmd,
+void RasterizerD3D12::SetGraphicsRootArguments(CommandStream* cmd,
                                                const PipelineLayout& layout,
                                                const PipelineBindings& bindings,
                                                const DrawParams& params) {
@@ -170,7 +170,7 @@ void RasterizerD3D12::ApplyPendingStateInvalidation() {
     }
 }
 
-RasterizerD3D12::ViewportState RasterizerD3D12::UpdateViewports(ID3D12GraphicsCommandList* cmd) {
+RasterizerD3D12::ViewportState RasterizerD3D12::UpdateViewports(CommandStream* cmd) {
     std::array<D3D12_VIEWPORT, Maxwell::NumViewports> viewports{};
     const ViewportState state = ComputeViewports(viewports);
     cmd->RSSetViewports(static_cast<UINT>(viewports.size()), viewports.data());
@@ -236,7 +236,7 @@ RasterizerD3D12::ViewportState RasterizerD3D12::ComputeViewports(
     return state;
 }
 
-void RasterizerD3D12::UpdateScissors(ID3D12GraphicsCommandList* cmd) {
+void RasterizerD3D12::UpdateScissors(CommandStream* cmd) {
     std::array<D3D12_RECT, Maxwell::NumViewports> scissors{};
     for (size_t index = 0; index < scissors.size(); ++index) {
         scissors[index] = ScissorRect(index);

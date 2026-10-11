@@ -166,15 +166,15 @@ private:
     void InvalidateGraphicsState();
     /// Sets the root constants, tables and integer sampler CBV of a draw that differ from the
     /// ones the command list holds for the bound root signature.
-    void SetGraphicsRootArguments(ID3D12GraphicsCommandList* cmd, const PipelineLayout& layout,
+    void SetGraphicsRootArguments(CommandStream* cmd, const PipelineLayout& layout,
                                   const PipelineBindings& bindings, const DrawParams& params);
     void ApplyPendingStateInvalidation();
     /// Indirect draws of topologies rewritten on the CPU: reads the arguments and draws directly.
     void DrawIndirectOnCpu(const IndirectParams& params);
     [[nodiscard]] ViewportState ComputeViewports(
         std::array<D3D12_VIEWPORT, Maxwell::NumViewports>& viewports) const;
-    ViewportState UpdateViewports(ID3D12GraphicsCommandList* cmd);
-    void UpdateScissors(ID3D12GraphicsCommandList* cmd);
+    ViewportState UpdateViewports(CommandStream* cmd);
+    void UpdateScissors(CommandStream* cmd);
     [[nodiscard]] D3D12_RECT ScissorRect(size_t index) const;
     void QueryFallback(GPUVAddr, VideoCommon::QueryType, VideoCommon::QueryPropertiesFlags, u32);
 

@@ -31,9 +31,10 @@ namespace D3D12 {
             .UAV = {.pResource = resource}};
 }
 
-/// Records one transition of every subresource of resource.
-inline void TransitionResource(ID3D12GraphicsCommandList* commands, ID3D12Resource* resource,
-                               D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+/// Records one transition of every subresource of resource, on a CommandStream or a list.
+template <typename Commands>
+void TransitionResource(Commands* commands, ID3D12Resource* resource,
+                        D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
     const D3D12_RESOURCE_BARRIER barrier = TransitionBarrier(resource, before, after);
     commands->ResourceBarrier(1, &barrier);
 }

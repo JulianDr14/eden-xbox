@@ -27,7 +27,7 @@ namespace {
 
 /// spirv_to_dxil's compute runtime data (group counts, base group zero). Root constants a
 /// dispatch does not set are undefined: they keep whatever the previous signature left there.
-void SetComputeRuntimeData(ID3D12GraphicsCommandList* cmd, UINT param,
+void SetComputeRuntimeData(CommandStream* cmd, UINT param,
                            const std::array<u32, 3>& groups) {
     dxil_spirv_compute_runtime_data data{};
     data.group_count_x = groups[0];
@@ -174,7 +174,7 @@ void BlitImageHelper::DecodeAstc(const AstcDecode& decode) {
     const D3D12_GPU_DESCRIPTOR_HANDLE destination{
         table.ptr + descriptor_ring.Stride(),
     };
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
     cmd->SetDescriptorHeaps(2, heaps);
     cmd->SetComputeRootSignature(astc_root_signature.Get());
@@ -250,7 +250,7 @@ void BlitImageHelper::EncodeBc(const BcEncode& encode) {
         return;
     }
     const D3D12_GPU_DESCRIPTOR_HANDLE table = descriptor_ring.Upload({&encode.source, 1});
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
     cmd->SetDescriptorHeaps(2, heaps);
     cmd->SetComputeRootSignature(bc3_root_signature.Get());
@@ -272,7 +272,7 @@ void BlitImageHelper::DispatchPack(ID3D12PipelineState* pipeline, const DepthSte
     if (groups_x == 0 || groups_y == 0) {
         return;
     }
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     cmd->SetComputeRootSignature(pack_root_signature.Get());
     scheduler.SetPipelineState(pipeline);
     const std::array<u32, PACK_CONSTANT_WORDS> constants{

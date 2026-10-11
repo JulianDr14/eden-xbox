@@ -17,6 +17,7 @@
 
 namespace D3D12 {
 
+class CommandStream;
 class Scheduler;
 class BufferCacheRuntime;
 class GuestDescriptorQueue;
@@ -155,7 +156,7 @@ public:
 
     /// Sets the collected index and vertex buffers on the command list and forgets them. An index
     /// buffer the list already has is not set again.
-    void ApplyGeometry(ID3D12GraphicsCommandList* cmd);
+    void ApplyGeometry(CommandStream* cmd);
 
     /// A new command list starts without an index buffer.
     void InvalidateGeometry() noexcept { applied_index.reset(); }

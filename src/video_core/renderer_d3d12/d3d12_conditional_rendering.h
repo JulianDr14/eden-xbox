@@ -4,6 +4,7 @@
 #pragma once
 
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/renderer_d3d12/d3d12_command_stream.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 
 namespace Tegra {
@@ -45,7 +46,7 @@ public:
     /// Predicates the guest draw or clear recorded while it lives.
     class [[nodiscard]] Scope {
     public:
-        Scope(ConditionalRendering& owner, ID3D12GraphicsCommandList* cmd)
+        Scope(ConditionalRendering& owner, CommandStream* cmd)
             : list{owner.mode == Mode::Predicated ? cmd : nullptr} {
             if (list) {
                 owner.Bind(list);
@@ -60,7 +61,7 @@ public:
         Scope& operator=(const Scope&) = delete;
 
     private:
-        ID3D12GraphicsCommandList* list;
+        CommandStream* list;
     };
 
 private:
@@ -70,7 +71,7 @@ private:
     PendingReport Report(GPUVAddr address, Tegra::MemoryManager& gpu_memory);
     /// Draws render only when slice counted zero (or only when it did not).
     void Predicate(const HostCounter& slice, bool render_if_zero);
-    void Bind(ID3D12GraphicsCommandList* cmd);
+    void Bind(CommandStream* cmd);
 
     Scheduler& scheduler;
     QueryCache& query_cache;

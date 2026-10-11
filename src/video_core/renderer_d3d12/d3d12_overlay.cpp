@@ -93,7 +93,7 @@ void AppendText(std::vector<D3D12_RECT>& rects, std::string_view text, LONG x, L
     }
 }
 
-void ClearRects(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+void ClearRects(CommandStream* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
                 const std::array<float, 4>& color, std::span<const D3D12_RECT> rects) {
     if (!rects.empty()) {
         cmd->ClearRenderTargetView(rtv, color.data(), static_cast<UINT>(rects.size()),
@@ -116,7 +116,7 @@ void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t tot
     }
 }
 
-void RendererD3D12::DrawPerformanceOverlay(ID3D12GraphicsCommandList* cmd,
+void RendererD3D12::DrawPerformanceOverlay(CommandStream* cmd,
                                           D3D12_CPU_DESCRIPTOR_HANDLE rtv) {
     auto& hud = performance_overlay;
     const auto now = std::chrono::steady_clock::now();
@@ -177,7 +177,7 @@ void RendererD3D12::DrawPerformanceOverlay(ID3D12GraphicsCommandList* cmd,
     DrawTraceIndicator(cmd, rtv);
 }
 
-void RendererD3D12::DrawTraceIndicator(ID3D12GraphicsCommandList* cmd,
+void RendererD3D12::DrawTraceIndicator(CommandStream* cmd,
                                       D3D12_CPU_DESCRIPTOR_HANDLE rtv) {
     using VideoCore::FrameTrace::CaptureState;
     const auto status = VideoCore::FrameTrace::GetCaptureStatus();
@@ -217,7 +217,7 @@ void RendererD3D12::DrawTraceIndicator(ID3D12GraphicsCommandList* cmd,
                hud.trace_text);
 }
 
-void RendererD3D12::DrawShaderIndicator(ID3D12GraphicsCommandList* cmd,
+void RendererD3D12::DrawShaderIndicator(CommandStream* cmd,
                                         D3D12_CPU_DESCRIPTOR_HANDLE rtv) {
     const int building = gpu.ShaderNotify().ShadersBuilding();
     if (building <= 0) {
@@ -287,7 +287,7 @@ void RendererD3D12::ShowLoadProgress(size_t done, size_t total, std::string_view
     last_load_present = now;
     try {
         FrameLease frame = present_manager.AcquireFrame();
-        ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+        CommandStream* const cmd = scheduler.CommandList();
         frame->Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv = frame->rtv;
         constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -330,7 +330,7 @@ void RendererD3D12::ShowGameMenu(std::optional<GameMenuOverlay> menu) {
         // The guest is paused: blit its last frame again (the menu is drawn with it), or show the
         // menu on black when that frame is not a GPU image.
         if (!blit_ready || !last_framebuffer || !CompositeAccelerated(*last_framebuffer, *frame)) {
-            ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+            CommandStream* const cmd = scheduler.CommandList();
             frame->Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
             constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
             cmd->ClearRenderTargetView(frame->rtv, black, 0, nullptr);
@@ -342,7 +342,7 @@ void RendererD3D12::ShowGameMenu(std::optional<GameMenuOverlay> menu) {
     }
 }
 
-void RendererD3D12::DrawGameMenu(ID3D12GraphicsCommandList* cmd,
+void RendererD3D12::DrawGameMenu(CommandStream* cmd,
                                  D3D12_CPU_DESCRIPTOR_HANDLE rtv) {
     if (!game_menu) {
         return;

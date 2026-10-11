@@ -90,7 +90,7 @@ void RasterizerD3D12::DrawIndirect() {
         record[4] = draw;
     }
     const IndirectArgumentRing::Range range = indirect_args.Upload(indirect_words);
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     buffer->Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
     for (u32 draw = 0; draw < draw_count; ++draw) {
         const u64 src = offset + draw * guest_stride;

@@ -572,7 +572,7 @@ void Image::InitializePlacedResource() {
     auto* const commands = runtime->scheduler.CommandList();
     commands->ResourceBarrier(2, barriers);
     // The heap range may hold another resource's data; RT/DS metadata must be initialized.
-    commands->DiscardResource(resource.Get(), nullptr);
+    commands->DiscardResource(resource.Get());
     state = target;
     ++write_version;
 }

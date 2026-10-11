@@ -131,7 +131,7 @@ void Buffer::Transition(D3D12_RESOURCE_STATES next) {
     }
     const u64 tick = scheduler->CurrentTick();
     const D3D12_RESOURCE_STATES current = state_tick == tick ? state : D3D12_RESOURCE_STATE_COMMON;
-    ID3D12GraphicsCommandList* const cmd = scheduler->CommandList();
+    CommandStream* const cmd = scheduler->CommandList();
     if (current == next) {
         if (next == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
             // Orders the previous draw's or dispatch's writes before this one.
@@ -411,7 +411,7 @@ void BufferCacheRuntime::BindVertexBuffers(VideoCommon::HostBindings<Buffer>& bi
     }
 }
 
-void BufferCacheRuntime::ApplyGeometry(ID3D12GraphicsCommandList* cmd) {
+void BufferCacheRuntime::ApplyGeometry(CommandStream* cmd) {
     if (pending_index && (!applied_index || std::memcmp(&*applied_index, &*pending_index,
                                                         sizeof(D3D12_INDEX_BUFFER_VIEW)) != 0)) {
         cmd->IASetIndexBuffer(&*pending_index);

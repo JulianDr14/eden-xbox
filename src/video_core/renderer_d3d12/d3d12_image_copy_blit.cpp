@@ -424,7 +424,7 @@ void TextureCacheRuntime::BlitWithinImage(ImageView& dst, ImageView& src,
     const u32 width = static_cast<u32>(right - left);
     const u32 height = static_cast<u32>(bottom - top);
     EnsureSelfBlitScratch(image.ResourceFormat(), width, height);
-    ID3D12GraphicsCommandList* const commands = scheduler.CommandList();
+    CommandStream* const commands = scheduler.CommandList();
     image.Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
     TransitionSelfBlitScratch(D3D12_RESOURCE_STATE_COPY_DEST);
     const D3D12_TEXTURE_COPY_LOCATION image_source{

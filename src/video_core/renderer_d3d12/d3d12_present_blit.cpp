@@ -156,7 +156,7 @@ bool RendererD3D12::CompositeAccelerated(const Tegra::FramebufferConfig& framebu
 void RendererD3D12::RecordBlit(PresentFrame& frame, D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
                                D3D12_GPU_DESCRIPTOR_HANDLE sampler_table,
                                const std::array<float, 4>& tex_scale_offset) {
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     frame.Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = frame.rtv;

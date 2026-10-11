@@ -16,6 +16,7 @@
 #include "common/bug_tracker.h"
 #include "common/settings.h"
 #include "video_core/renderer_d3d12/d3d12_blit_image.h"
+#include "video_core/renderer_d3d12/d3d12_command_stream.h"
 #include "video_core/renderer_d3d12/d3d12_log.h"
 #include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
@@ -60,7 +61,7 @@ inline ComPtr<ID3D12Resource> CreateTransferBuffer(ID3D12Device* device, u64 siz
                                  "Create texture transfer buffer");
 }
 
-inline void TransitionBuffer(ID3D12GraphicsCommandList* commands, ID3D12Resource* buffer,
+inline void TransitionBuffer(CommandStream* commands, ID3D12Resource* buffer,
                              D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
     TransitionResource(commands, buffer, before, after);
 }
@@ -68,7 +69,7 @@ inline void TransitionBuffer(ID3D12GraphicsCommandList* commands, ID3D12Resource
 /// DEFAULT-heap buffers (the buffer cache's) are implicitly promoted by copies; hand them back in
 /// COMMON, the state the buffer cache assumes, so its next promotion is legal. UPLOAD/READBACK
 /// buffers can never change state.
-inline void DecayIfDefault(ID3D12GraphicsCommandList* commands, ID3D12Resource* buffer,
+inline void DecayIfDefault(CommandStream* commands, ID3D12Resource* buffer,
                            D3D12_RESOURCE_STATES promoted) {
     if (HeapType(buffer) == D3D12_HEAP_TYPE_DEFAULT) {
         TransitionBuffer(commands, buffer, promoted, D3D12_RESOURCE_STATE_COMMON);

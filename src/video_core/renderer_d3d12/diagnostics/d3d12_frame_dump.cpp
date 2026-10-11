@@ -23,7 +23,7 @@ using namespace PresentDetail;
 
 StagingBufferRef RendererD3D12::RecordFrameReadback(PresentFrame& frame) {
     StagingBufferRef readback = staging_pool.Request(upload_size, MemoryUsage::Download, true);
-    ID3D12GraphicsCommandList* const cmd = scheduler.CommandList();
+    CommandStream* const cmd = scheduler.CommandList();
     // Left in COPY_SOURCE: the state the present manager wants it in.
     frame.Transition(cmd, D3D12_RESOURCE_STATE_COPY_SOURCE);
     const D3D12_TEXTURE_COPY_LOCATION src{

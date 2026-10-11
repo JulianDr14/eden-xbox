@@ -18,6 +18,7 @@ namespace D3D12 {
 
 class CpuDescriptorAllocator;
 class PresentManager;
+class CommandStream;
 class Scheduler;
 
 /// An image the renderer composites one frame into, sized and formatted like the back buffers.
@@ -32,7 +33,7 @@ struct PresentFrame {
     u32 index{};
 
     /// Records a transition to next on cmd unless image is already there.
-    void Transition(ID3D12GraphicsCommandList* cmd, D3D12_RESOURCE_STATES next);
+    void Transition(CommandStream* cmd, D3D12_RESOURCE_STATES next);
 };
 
 /// A frame lent to the renderer: it goes back to the pool when the lease ends without a Present

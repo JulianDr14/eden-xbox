@@ -17,7 +17,7 @@
 
 namespace D3D12 {
 
-void PresentFrame::Transition(ID3D12GraphicsCommandList* cmd, D3D12_RESOURCE_STATES next) {
+void PresentFrame::Transition(CommandStream* cmd, D3D12_RESOURCE_STATES next) {
     if (state != next) {
         TransitionResource(cmd, image.Get(), state, next);
         state = next;

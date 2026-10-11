@@ -56,6 +56,8 @@ Scheduler::Scheduler(Device& device_) : device{device_} {
                                          current_allocator.Get(), nullptr,
                                          IID_PPV_ARGS(&command_list)),
                   "CreateCommandList");
+    recorder.emplace(command_list.Get(), ListRecorder::Options{});
+    stream.emplace(*recorder);
     CreateTimestamps();
     BeginTimestamp();
 }
@@ -102,7 +104,7 @@ void Scheduler::BeginTimestamp() {
     }
     timestamp_slot = timestamp_next;
     timestamp_next = (timestamp_next + 1) % TIMESTAMP_SLOTS;
-    command_list->EndQuery(timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, timestamp_slot * 2);
+    stream->EndQuery(timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, timestamp_slot * 2);
     timestamp_open = true;
 }
 
@@ -110,11 +112,10 @@ void Scheduler::EndTimestamp(u64 tick) {
     if (!timestamp_open) {
         return;
     }
-    command_list->EndQuery(timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-                           timestamp_slot * 2 + 1);
-    command_list->ResolveQueryData(timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-                                   timestamp_slot * 2, 2, timestamp_readback.Get(),
-                                   timestamp_slot * 2 * sizeof(u64));
+    stream->EndQuery(timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, timestamp_slot * 2 + 1);
+    stream->ResolveQueryData(timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                             timestamp_slot * 2, 2, timestamp_readback.Get(),
+                             timestamp_slot * 2 * sizeof(u64));
     std::scoped_lock lock{timestamp_mutex};
     pending_timestamps.emplace_back(tick, timestamp_slot);
 }
