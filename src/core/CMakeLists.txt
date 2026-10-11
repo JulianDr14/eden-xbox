@@ -46,6 +46,7 @@ add_library(core STATIC
     debugger/gdbstub_arch.h
     device_memory.cpp
     device_memory.h
+    pulse_machine_state.h
     device_memory_manager.h
     device_memory_manager.inc
     file_sys/bis_factory.cpp

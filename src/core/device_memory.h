@@ -6,10 +6,15 @@
 
 #pragma once
 
+#include <span>
+
 #include "common/host_memory.h"
 #include "common/typed_address.h"
 
 namespace Core {
+namespace Pulse {
+class PhysicalTransfer;
+}
 
 namespace DramMemoryMap {
 enum : u64 {
@@ -26,6 +31,12 @@ public:
 
     DeviceMemory& operator=(const DeviceMemory&) = delete;
     DeviceMemory(const DeviceMemory&) = delete;
+
+    // Caller must hold the checkpoint barrier and supply only guest allocations.
+    void ReadCheckpointMemory(const Pulse::PhysicalTransfer& transfer, u64 offset,
+                              std::span<u8> output) const;
+    void WriteCheckpointMemory(const Pulse::PhysicalTransfer& transfer, u64 offset,
+                               std::span<const u8> input);
 
     template <typename T>
     Common::PhysicalAddress GetPhysicalAddr(const T* ptr) const {
