@@ -234,6 +234,8 @@ void RasterizerD3D12::DispatchCompute() {
     VideoCore::Perf::ScopedNsTimer dispatch_timer{VideoCore::Perf::Counter::DispatchNs};
     SCOPE_EXIT {
         FlushIfUploadHeavy();
+        // As after a draw: a guest core waiting on a flush is not held up by a compute batch.
+        gpu.TickWork();
     };
     gpu_memory->FlushCaching();
     ApplyPendingStateInvalidation();
