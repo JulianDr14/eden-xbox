@@ -25,6 +25,7 @@ detalle técnico está en [`docs/xbox/xbox_internal.md`](docs/xbox/xbox_internal
 ## En qué punto estamos (actualízalo al avanzar)
 | Fase | Estado |
 |---|---|
+| Pulse: sesiones persistentes | Base experimental de archivo/storage (11 oct 2026): bloques 1MiB LZ4/CRC, cuota y publicación FromApp; harness desktop y objetos UWP correctos. NO hay captura/restauración guest ni UI; barrera/continuaciones/serializadores y gates AppContainer/Series pendientes. Sin commit; `docs/xbox/xbox_pulse.md` |
 | Boot en consola (JIT con W^X, AppContainer) | ✅ Gate 2 |
 | 1: device, swapchain y framebuffer por CPU | ✅ Gate 3, commit `cc2ea38d9` |
 | 2: shaders SPIR-V→DXIL, blit por GPU | ✅ Gate 4 en la Series (0.2.7.0); **sin commit** |

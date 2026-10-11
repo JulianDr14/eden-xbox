@@ -2648,3 +2648,49 @@ no número de elementos de última página. Biblioteca ya muestra posición/tota
 Sistema, teclado por pestañas y menú in-game caben completos: sin barra superflua.
 Build incremental UWP correcto; gate visual y navegación en Series pendientes.
 APPX 0.2.87.3 solicitado, símbolos por versión. Sin commit.
+
+## Pulse: base experimental de persistencia (11 oct 2026)
+
+Petición del usuario: varias sesiones por juego/usuario que sobrevivan reinicio,
+guardado automático al volver a biblioteca, descarte explícito sin tocar saves.
+Cuota configurable20GiB, sin borrado automático; conservar incompatibles; local
+primero. No cambiar el nombre del emulador. Diseño/inventario y evidencia en
+[`xbox_pulse.md`](xbox_pulse.md).
+
+Implementados `common/pulse_archive` y `common/pulse_store`: bloques1MiB,
+cero/raw/LZ4, CRCs, identidad, límites, cancelación, publicación por temporal,
+verificación completa, FlushFileBuffers y APIs FromApp. Admisión cuenta anterior
+ytemporales, máximo escrito acotado/reserva1GiB. Claves derivadas de program/user.
+100roundtrips delcodec y100publicaciones, erroresinyectados y5terminaciones de
+proceso (incluida escritura parcial) pasan enMSVCdesktop. UWPStoreCRT compila
+ambosobjetos. Runner `tools/xbox/tests/run-pulse.cmd` reproducible conCPM existente.
+No son100restauracionesguest; AppContainer/Series/corteelectrico/discofisicolleno
+pendientes. Presupuesto32MiB total no certificado: codec propio~2MiB; falta GPU.
+
+Bloqueadores confirmados: KThread conservaFiber; KSynchronizationObject::Wait
+ponewait_queue/nodos enpila; arbiter/condition/lightIPC/sleep/excepcion tambien
+necesitancontinuacionesreconstruibles. Pause solo detieneTiming/kernel; D3D12
+FlushAll solo scheduler.Finish yno descarga todoGPUdirty. No serializar punteros
+nativos/pilas, no cancelar esperas para fingir captura. Falta inventarioexhaustivo,
+barrera, serializadoresCPU/memoria/kernel/servicios/timing/GPU/audio, consumo,
+catalogo yUI. Pulse NO guarda/restaura juegos todavia; feature no activada.
+5120proceso/256staging/115prewarm conservados. Sin lanzamiento/buildcompleto,
+sincommit nipush; no enviarnadaEden.
+
+### Pulse: catálogo y consumo, continuación del 11 oct 2026
+
+Store ahora lista cabeceras de 136 bytes, identidad/CRC, fecha y tamaño, sin
+descomprimir estados. RestoreAndConsume valida completo antes de callbacks,
+reconstruye mediante segunda pasada y mueve a `.consumed` antes de que el
+llamador pueda ejecutar guest. Cancelación/fallo exige destruir el candidato.
+Descarte elimina también la captura consumida, sin tocar partidas normales.
+Gates desktop ampliados a siete terminaciones reales de procesos, incluyendo
+antes/después de consumir; identidad/corrupción antes de callbacks, cancelación,
+fallos y separación por juego/usuario. Son pruebas sintéticas de bytes: NO
+restauran un guest. Objetos Store CRT/UWP pasan; sin link, AppContainer ni Series.
+
+Trampa nueva: registered_objects del kernel puede tener dangling y el registro
+ocurre durante construcción; Close destruye antes de desregistrar. Su mutex no
+es barrera de vida útil. No recorrerlo como grafo serializable sin congelar
+propietarios/raíces y controlar referencias. Fases0/2/3/4 siguen pendientes;
+detalle actualizado en xbox_pulse.md. Sin commit ni cambio de nombre.

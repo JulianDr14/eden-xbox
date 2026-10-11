@@ -11,6 +11,8 @@ La rama de trabajo es `xbox`; las reglas del proyecto están en [AGENTS.md](../.
 
 ## Diseño y funciones
 
+- [Pulse: sesiones persistentes](xbox_pulse.md): diseño, bloqueadores del núcleo y base experimental de archivos; todavía sin restauración de juegos.
+
 - [Direct3D 12, fase 3](xbox_d3d12_phase3.md): scheduler, recursos, cachés y fences.
 - [Direct3D 12, fase 4](xbox_d3d12_phase4.md): pipelines y shaders del guest.
 - [Audio XAudio2](xbox_audio.md): salida de audio para PC y Series.
