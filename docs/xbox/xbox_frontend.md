@@ -775,9 +775,11 @@ todo lo demás:
 
 Pestañas (LB/RB) *Instalados* y *Archivos*. En *Instalados*: número de prioridad, nombre, partes
 (archivos del juego, ejecutable, parches, cheats) y aviso de conflicto o versión; **A** activa,
-**X** levanta el mod para moverlo con arriba/abajo (el de arriba gana), **Y** opciones (mover,
-desinstalar con confirmación). Debajo, en palabras: «Gana a X en 14 archivos» / «X le gana 3
-archivos: súbelo para que gane él». Cabecera: activos, conflictos y espacio libre. Un trabajo
+**X** levanta el mod para moverlo con arriba/abajo (el de arriba gana), **Y** opciones (ver sus
+archivos, mover, desinstalar con confirmación). Debajo, en palabras: «Gana a X en 14 archivos» /
+«X le gana 3 archivos: súbelo para que gane él»; sin conflictos, qué cambia: «Cambia 14 archivos
+del juego: a.bars, b.szs, c.szs…» (los más grandes de romfs y exefs). *Ver sus archivos* lista cada
+archivo con su carpeta y tamaño, y recuerda que solo cuentan los que el juego ya tiene. Cabecera: activos, conflictos y espacio libre. Un trabajo
 (leer, instalar, desinstalar) corre en un hilo y muestra su progreso en MB; **B** lo cancela sin
 dejar nada a medias.
 
@@ -801,6 +803,14 @@ Tercera pestaña, *Explorar*, entre *Instalados* y *Archivos*:
   - El listado es `Mod/Index` paginado (16 por página, carga al acercarse al final). Se puede
     ordenar por más descargados, recientes, actualizados o gustados, y buscar por nombre
     (`_aFilters[Generic_Name]=contains,…`).
+  - **Categorías** (botón Menú, o *Y > Categoría*): `Mod/Categories` del juego, anidadas
+    (`_idCategoryRow`), con su número de mods; **A** baja a las de dentro, **X** lista una sin
+    bajar, **B** sube. Filtran con `_aFilters[Generic_Category]` (incluye las de dentro) y se
+    combinan con la búsqueda y el orden.
+  - Con los mods para adultos activados, las categorías empiezan por **+18**. El sitio filtra por
+    una sola clasificación (`Generic_ContentRatings`), así que se piden `nu`, `pn`, `sa` y `st`
+    (hasta 4 páginas de 16 cada una) y se juntan sin repetidos, ordenadas en local (las vistas
+    hacen de descargas, que el listado no trae).
   - La ficha (`Mod/<id>/ProfilePage`) muestra galería (LB/RB), descripción (HTML a texto), números
     y **todos sus archivos**, con tamaño, fecha y descargas.
   - Solo se descargan los archivos con antivirus `clean` y análisis `ok`.

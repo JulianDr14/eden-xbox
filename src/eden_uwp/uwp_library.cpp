@@ -817,6 +817,10 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                     case Kind::FindGame: mod_session->FindGame(I18n::ToUtf8(command.text)); break;
                     case Kind::PickGame: mod_session->PickGame(command.index); break;
                     case Kind::CancelDownloads: mod_session->CancelDownloads(); break;
+                    case Kind::Categories: mod_session->OpenCategories(); break;
+                    case Kind::EnterCategory: mod_session->EnterCategory(command.index); break;
+                    case Kind::LeaveCategory: mod_session->LeaveCategory(); break;
+                    case Kind::PickCategory: mod_session->PickCategory(command.index); break;
                     case Kind::Close:
                         mod_session.reset();
                         game_options.page.reset();

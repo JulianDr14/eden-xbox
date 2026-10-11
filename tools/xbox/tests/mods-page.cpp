@@ -49,15 +49,29 @@ int main() {
               "one mod cannot move");
     }
     {
-        // Actions: Move enters moving; Remove asks first, and B there keeps the mod.
+        // Actions: the files first; Move enters moving; Remove asks first, and B there keeps the mod.
         ModsPage page;
         page.selected = 3;
         HandleModsInput(page, counts, In::Menu);
         Check(page.screen == ModsScreen::Actions, "actions");
         HandleModsInput(page, counts, In::Confirm);
+        Check(page.screen == ModsScreen::Contents && page.line == 0, "contents");
+        // The files scroll a row at a time, no further than the last screenful.
+        ModsCounts many = counts;
+        many.contents = ModsLayout::SheetRows + 2;
+        Check(Is(HandleModsInput(page, many, In::Up), Kind::None), "contents top");
+        HandleModsInput(page, many, In::Down);
+        HandleModsInput(page, many, In::Down);
+        Check(Is(HandleModsInput(page, many, In::Down), Kind::None) && page.line == 2, "contents bottom");
+        HandleModsInput(page, many, In::Back);
+        Check(page.screen == ModsScreen::List, "contents closed");
+        HandleModsInput(page, counts, In::Menu);
+        HandleModsInput(page, counts, In::Down);
+        HandleModsInput(page, counts, In::Confirm);
         Check(page.screen == ModsScreen::List && page.moving, "action move");
         page.moving = false;
         HandleModsInput(page, counts, In::Menu);
+        HandleModsInput(page, counts, In::Down);
         HandleModsInput(page, counts, In::Down);
         HandleModsInput(page, counts, In::Confirm);
         Check(page.screen == ModsScreen::Remove, "confirm remove");
@@ -101,12 +115,13 @@ int main() {
         Check(page.screen == ModsScreen::List && page.chosen.empty(), "cancel variants");
     }
     {
-        // Actions with an update: Update comes first and opens the update's page.
+        // Actions with an update: Update comes after the files and opens the update's page.
         ModsPage page;
         page.selected = 2;
         ModsCounts update = counts;
         update.update = true;
         HandleModsInput(page, update, In::Menu);
+        HandleModsInput(page, update, In::Down);
         Check(Is(HandleModsInput(page, update, In::Confirm), Kind::Update, 2) && page.screen == ModsScreen::Detail,
               "update");
         Check(Is(HandleModsInput(page, update, In::Back), Kind::CloseDetail) && page.tab == ModsTab::Installed,
@@ -145,9 +160,14 @@ int main() {
         ModsCounts store = counts;
         store.store = {true, true, true};
         store.search = L"fps";
-        Check(StoreActions(store.store).size() == 6, "all options");
+        Check(StoreActions(store.store).size() == 7, "all options");
         Check(StoreActions({false, false, false}).size() == 2, "CNX: search and source");
         HandleModsInput(page, store, In::Menu);
+        Check(Is(HandleModsInput(page, store, In::Confirm), Kind::Categories) && page.screen == ModsScreen::Categories,
+              "category opens the sheet");
+        HandleModsInput(page, store, In::Back);
+        HandleModsInput(page, store, In::Menu);
+        HandleModsInput(page, store, In::Down);
         Check(Is(HandleModsInput(page, store, In::Confirm), Kind::Sort) && page.screen == ModsScreen::StoreMenu,
               "sort in place");
         HandleModsInput(page, store, In::Down);
@@ -159,8 +179,43 @@ int main() {
         Check(done.kind == Kind::Search && done.text == L"fp" && page.screen == ModsScreen::List && !page.keyboard,
               "Menu finishes the search");
         HandleModsInput(page, store, In::Menu);
-        page.menu = 5;
+        page.menu = 6;
         Check(Is(HandleModsInput(page, store, In::Confirm), Kind::CancelDownloads), "cancel downloads");
+    }
+    {
+        // Categories: the Menu button opens them; A goes down into one with others under it, X lists
+        // it as it is, B goes up a level and closes at the top; A on the rest lists it.
+        ModsPage page;
+        page.tab = ModsTab::Explore;
+        ModsCounts store = counts;
+        store.cards = 4;
+        Check(Is(HandleModsInput(page, store, In::Start), Kind::Categories) && page.screen == ModsScreen::Categories,
+              "menu opens categories");
+        store.category_nested = {false, false, true, false}; // All, 18+, a nested one, a leaf.
+        HandleModsInput(page, store, In::Down);
+        HandleModsInput(page, store, In::Down);
+        Check(Is(HandleModsInput(page, store, In::Confirm), Kind::EnterCategory, 2) && page.category == 0 &&
+                  page.screen == ModsScreen::Categories,
+              "down a level");
+        store.category_top = false;
+        store.category_nested = {false, true, false};
+        HandleModsInput(page, store, In::Down);
+        Check(Is(HandleModsInput(page, store, In::Alternate), Kind::PickCategory, 1) && page.screen == ModsScreen::List,
+              "X lists a nested one");
+        HandleModsInput(page, store, In::Start);
+        Check(Is(HandleModsInput(page, store, In::Back), Kind::LeaveCategory), "up a level");
+        store.category_top = true;
+        store.category_nested = {false, false, true, false};
+        HandleModsInput(page, store, In::Up);
+        Check(Is(HandleModsInput(page, store, In::Confirm), Kind::PickCategory, 3) && page.screen == ModsScreen::List &&
+                  page.card == 0,
+              "a leaf is listed");
+        HandleModsInput(page, store, In::Start);
+        Check(Is(HandleModsInput(page, store, In::Back), Kind::Moved) && page.screen == ModsScreen::List,
+              "B closes at the top");
+        ModsCounts cnx = store;
+        cnx.store.gamebanana = false;
+        Check(Is(HandleModsInput(page, cnx, In::Start), Kind::None), "CNX has no categories");
     }
     {
         // A game the store cannot match: A types its name, the results are picked from.

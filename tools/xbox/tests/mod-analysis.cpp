@@ -50,6 +50,14 @@ int main() {
     Check(contents.build_ids.size() == 3, "build ids");
     Check(contents.bytes == 5 + 2 + 5 + 25 + 3, "bytes");
     Check(InspectFolder(root / "missing").files.empty(), "missing folder");
+    Check(contents.listing.size() == 7 && contents.listing.front().path == "RomFS/Model/Sea.bfres" &&
+              contents.listing.front().bytes == 5,
+          "every file, as written");
+    // The largest files the game gets, by name; cheats and readmes are not among them.
+    Check(MainFiles(contents.listing, 2) == std::vector<std::string>{"fps.pchtxt", "Sea.bfres"},
+          "main files");
+    Check(MainFiles({{"readme.txt", 99}, {"romfs/a/b.szs", 1}}, 3) == std::vector<std::string>{"b.szs"},
+          "a readme is not a main file");
 
     Check(CheckCompat(contents, "FEDCBA9876543210") == Compat::Matches, "matches");
     Check(CheckCompat(contents, "0000000000000000") == Compat::OtherVersion, "other version");

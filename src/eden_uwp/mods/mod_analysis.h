@@ -27,6 +27,27 @@ inline Compat CheckCompat(const ModContents& contents, std::string_view game_bui
     return Compat::OtherVersion;
 }
 
+/// The names of the `count` largest files a mod gives the game (its romfs and exefs, not its
+/// readme or cheats), largest first: what tells the player what it changes.
+inline std::vector<std::string> MainFiles(const std::vector<ModFileEntry>& listing, std::size_t count) {
+    const auto lowered = [](std::string_view text) {
+        std::string out{text};
+        for (auto& c : out) c = c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+        return out;
+    };
+    std::vector<const ModFileEntry*> game;
+    for (const auto& file : listing) {
+        const auto top = lowered(file.path.substr(0, file.path.find('/')));
+        if (top == "romfs" || top == "romfslite" || top == "romfs_ext" || top == "exefs") game.push_back(&file);
+    }
+    std::stable_sort(game.begin(), game.end(),
+                     [](const ModFileEntry* a, const ModFileEntry* b) { return a->bytes > b->bytes; });
+    std::vector<std::string> names;
+    for (std::size_t i = 0; i < game.size() && names.size() < count; ++i)
+        names.push_back(game[i]->path.substr(game[i]->path.rfind('/') + 1));
+    return names;
+}
+
 /// Two active mods that replace the same game files.
 struct Conflict {
     std::size_t other{};  ///< Index of the other mod.

@@ -128,6 +128,11 @@ public:
     void SwitchSource() { store.SwitchSource(); }
     void FindGame(std::string name) { store.FindGame(std::move(name)); }
     void PickGame(std::size_t index) { store.PickGame(index); }
+    void OpenCategories() { store.OpenCategories(); }
+    [[nodiscard]] std::vector<CategoryRow> CategoryRows() const { return store.CategoryRows(); }
+    void EnterCategory(std::size_t row) { store.EnterCategory(row); }
+    void LeaveCategory() { store.LeaveCategory(); }
+    void PickCategory(std::size_t row) { store.PickCategory(row); }
     void OpenDetail(std::size_t card) { store.OpenDetail(card); }
     void OpenUpdate(std::size_t index);
     void CloseDetail() { store.CloseDetail(); }

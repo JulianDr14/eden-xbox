@@ -84,6 +84,7 @@ ModSummary Summary(const json& item) {
     if (const auto pictures = Pictures(item, {"_sFile220"}); !pictures.empty()) mod.thumbnail = pictures.front();
     mod.likes = Int(item, "_nLikeCount");
     mod.views = Int(item, "_nViewCount");
+    mod.added = Int(item, "_tsDateAdded");
     mod.modified = std::max(Int(item, "_tsDateModified"), Int(item, "_tsDateUpdated"));
     // "show" is for everyone; "warn" and "hide" are what the site keeps behind its adult filter.
     const auto visibility = Str(item, "_sInitialVisibility");
@@ -246,12 +247,21 @@ std::string SearchGamesUrl(std::string_view name) {
            PercentEncode(name);
 }
 
-std::string ModListUrl(std::int64_t game, Sort sort, unsigned page, std::string_view search) {
+std::string ModListUrl(std::int64_t game, Sort sort, unsigned page, std::string_view search,
+                       std::int64_t category, std::string_view rating) {
     std::string url = std::string{Api} + "Mod/Index?_nPage=" + std::to_string(std::max(page, 1u)) +
                       "&_nPerpage=" + std::to_string(PageSize) +
                       "&_aFilters%5BGeneric_Game%5D=" + std::to_string(game) +
                       "&_sSort=" + std::string{SortNames[static_cast<std::size_t>(sort) % SortCount]};
     if (!search.empty()) url += "&_aFilters%5BGeneric_Name%5D=contains," + PercentEncode(search);
+    if (category > 0) url += "&_aFilters%5BGeneric_Category%5D=" + std::to_string(category);
+    if (!rating.empty()) url += "&_aFilters%5BGeneric_ContentRatings%5D=" + PercentEncode(rating);
+    return url;
+}
+
+std::string CategoriesUrl(std::int64_t game, std::int64_t parent) {
+    std::string url = std::string{Api} + "Mod/Categories?_sSort=a_to_z&_bShowEmpty=false&";
+    url += parent > 0 ? "_idCategoryRow=" + std::to_string(parent) : "_idGameRow=" + std::to_string(game);
     return url;
 }
 
@@ -293,6 +303,39 @@ std::optional<ModList> ParseModList(std::string_view text) {
     // A short page is the last one, whatever the metadata says.
     if (list.mods.size() < PageSize) list.complete = true;
     return list;
+}
+
+std::optional<std::vector<Category>> ParseCategories(std::string_view text) {
+    // The only answer that is an array, not an object: errors still come as objects.
+    const json root = json::parse(text, nullptr, false);
+    if (!root.is_array()) return std::nullopt;
+    std::vector<Category> categories;
+    for (const auto& item : root) {
+        if (!item.is_object()) continue;
+        Category category{Int(item, "_idRow"), Str(item, "_sName"), Int(item, "_nItemCount"),
+                          Int(item, "_nCategoryCount") > 0};
+        if (category.id > 0 && !category.name.empty() && category.mods > 0) categories.push_back(std::move(category));
+    }
+    return categories;
+}
+
+std::vector<ModSummary> MergeLists(const std::vector<ModList>& lists, Sort sort) {
+    std::vector<ModSummary> mods;
+    for (const auto& list : lists)
+        for (const auto& mod : list.mods)
+            if (std::none_of(mods.begin(), mods.end(), [&](const ModSummary& m) { return m.id == mod.id; }))
+                mods.push_back(mod);
+    const auto key = [sort](const ModSummary& mod) {
+        switch (sort) {
+        case Sort::Popular: return mod.views;
+        case Sort::Newest: return mod.added;
+        case Sort::Updated: return mod.modified;
+        case Sort::Liked: return mod.likes;
+        }
+        return mod.views;
+    };
+    std::stable_sort(mods.begin(), mods.end(), [&](const ModSummary& a, const ModSummary& b) { return key(a) > key(b); });
+    return mods;
 }
 
 std::optional<ModDetail> ParseModDetail(std::string_view text) {

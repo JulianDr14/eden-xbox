@@ -77,8 +77,12 @@ ModContents InspectFolder(const fs::path& folder) {
     ModContents contents;
     std::error_code ec;
     ForEachFile(folder, [&](const fs::path& path, const std::string&) {
-        contents.bytes += fs::file_size(path, ec);
+        const auto bytes = fs::file_size(path, ec);
+        contents.bytes += ec ? 0 : bytes;
+        contents.listing.push_back({Utf8(path.lexically_relative(folder)), ec ? 0 : bytes});
     });
+    std::sort(contents.listing.begin(), contents.listing.end(),
+              [](const ModFileEntry& a, const ModFileEntry& b) { return a.path < b.path; });
     for (const auto name : {"romfs", "romfslite"}) {
         const auto romfs = Child(folder, name);
         if (romfs.empty()) continue;

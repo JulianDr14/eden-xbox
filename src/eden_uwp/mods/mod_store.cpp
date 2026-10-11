@@ -23,6 +23,8 @@ constexpr std::uint64_t PictureBudget = 64ull << 20;
 constexpr int CnxRecheckMinutes = 60;
 /// A new page loads when the cursor gets this close to the end of the list (two grid rows).
 constexpr std::size_t LoadAhead = 8;
+/// The adult list is merged from one list per rating, read whole up to this many pages each.
+constexpr unsigned AdultPages = 4;
 
 fs::path PicturesFolder() {
     const auto folder = Web::CacheFolder() / "pictures";
@@ -119,6 +121,7 @@ void ModStore::Restart() {
     state.loading_more = false;
     state.status = StoreStatus::Loading;
     if (state.source == StoreSource::Cnx) LoadCnx();
+    else if (state.game && state.adult) LoadAdult();
     else if (state.game) LoadPage();
     else LookUpGame(game_name, true);
 }
@@ -155,6 +158,10 @@ void ModStore::PickGame(std::size_t index) {
     if (index >= state.games.size()) return;
     state.game = state.games[index];
     state.games.clear();
+    // Categories belong to a game.
+    state.category.clear();
+    state.adult = false;
+    category_cache.clear();
     SaveGame();
     if (state.source == StoreSource::GameBanana) Restart();
 }
@@ -174,7 +181,8 @@ void ModStore::SaveGame() const {
 void ModStore::LoadPage() {
     if (state.loading_more || state.complete || !state.game) return;
     state.loading_more = true;
-    const auto url = GB::ModListUrl(state.game->id, state.sort, pages + 1, state.search);
+    const auto category = state.category.empty() ? 0 : state.category.back().id;
+    const auto url = GB::ModListUrl(state.game->id, state.sort, pages + 1, state.search, category);
     Post([this, url, gen = generation](std::stop_token stop) -> Change {
         const auto body = Web::Get(url, stop);
         auto list = body ? GB::ParseModList(*body) : std::nullopt;
@@ -200,6 +208,121 @@ void ModStore::LoadPage() {
             else LoadPage(); // A page of hidden mods only: the next may have some to show.
         };
     });
+}
+
+void ModStore::LoadAdult() {
+    const auto game = state.game->id;
+    Post([this, game, sort = state.sort, search = state.search, gen = generation](std::stop_token stop) -> Change {
+        std::vector<GB::ModList> lists;
+        bool reached = false;
+        for (const auto rating : GB::AdultRatings) {
+            for (unsigned page = 1; page <= AdultPages && !stop.stop_requested(); ++page) {
+                const auto body = Web::Get(GB::ModListUrl(game, sort, page, search, 0, rating), stop);
+                auto list = body ? GB::ParseModList(*body) : std::nullopt;
+                if (!list) break;
+                reached = true;
+                const bool last = list->complete;
+                lists.push_back(std::move(*list));
+                if (last) break;
+            }
+        }
+        auto mods = GB::MergeLists(lists, sort);
+        return [this, mods = std::move(mods), reached, gen] {
+            if (gen != generation) return;
+            state.complete = true;
+            if (!reached) {
+                state.status = StoreStatus::Offline;
+                return;
+            }
+            for (const auto& mod : mods)
+                state.cards.push_back({mod.id, mod.name, mod.author, mod.category, {}, mod.thumbnail, mod.likes,
+                                       mod.views, true, false});
+            state.status = state.cards.empty() ? StoreStatus::Empty : StoreStatus::Ready;
+        };
+    });
+}
+
+void ModStore::OpenCategories() {
+    state.browse = state.category;
+    // The sheet opens among the shown category's siblings, so another is one press away.
+    if (!state.browse.empty() && !state.browse.back().nested) state.browse.pop_back();
+    LoadCategories();
+}
+
+void ModStore::LoadCategories() {
+    state.categories.clear();
+    state.categories_failed = false;
+    state.categories_loading = false;
+    categories_of = -1;
+    const std::int64_t parent = state.browse.empty() ? 0 : state.browse.back().id;
+    if (const auto kept = category_cache.find(parent); kept != category_cache.end()) {
+        state.categories = kept->second;
+        return;
+    }
+    if (!state.game) {
+        state.categories_failed = true;
+        return;
+    }
+    state.categories_loading = true;
+    categories_of = parent;
+    Post([this, game = state.game->id, parent](std::stop_token stop) -> Change {
+        const auto body = Web::Get(GB::CategoriesUrl(game, parent), stop);
+        auto categories = body ? GB::ParseCategories(*body) : std::nullopt;
+        return [this, categories = std::move(categories), parent] {
+            if (categories) category_cache[parent] = *categories;
+            if (categories_of != parent) return; // The sheet moved on.
+            categories_of = -1;
+            state.categories_loading = false;
+            if (categories) state.categories = *categories;
+            else state.categories_failed = true;
+        };
+    }, true);
+}
+
+std::vector<CategoryRow> ModStore::CategoryRows() const {
+    std::vector<CategoryRow> rows;
+    if (state.categories_loading || state.categories_failed) return rows;
+    rows.push_back({CategoryRow::Kind::All});
+    if (state.browse.empty() && show_sensitive) rows.push_back({CategoryRow::Kind::Adult});
+    for (std::size_t i = 0; i < state.categories.size(); ++i) rows.push_back({CategoryRow::Kind::Category, i});
+    return rows;
+}
+
+void ModStore::EnterCategory(std::size_t row) {
+    const auto rows = CategoryRows();
+    if (row >= rows.size() || rows[row].kind != CategoryRow::Kind::Category) return;
+    const auto& category = state.categories[rows[row].index];
+    if (!category.nested) return;
+    state.browse.push_back(category);
+    LoadCategories();
+}
+
+bool ModStore::LeaveCategory() {
+    if (state.browse.empty()) return false;
+    state.browse.pop_back();
+    LoadCategories();
+    return true;
+}
+
+void ModStore::PickCategory(std::size_t row) {
+    const auto rows = CategoryRows();
+    if (row >= rows.size()) return;
+    auto category = state.browse;
+    bool adult = false;
+    switch (rows[row].kind) {
+    case CategoryRow::Kind::All: break;
+    case CategoryRow::Kind::Adult: adult = true; break;
+    case CategoryRow::Kind::Category: category.push_back(state.categories[rows[row].index]); break;
+    }
+    categories_of = -1;
+    const auto same = [](const std::vector<GB::Category>& a, const std::vector<GB::Category>& b) {
+        return std::equal(a.begin(), a.end(), b.begin(), b.end(),
+                          [](const GB::Category& x, const GB::Category& y) { return x.id == y.id; });
+    };
+    if (adult == state.adult && same(category, state.category)) return;
+    state.category = std::move(category);
+    state.adult = adult;
+    Restart();
 }
 
 void ModStore::LoadCnx() {

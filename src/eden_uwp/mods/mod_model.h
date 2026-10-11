@@ -54,12 +54,19 @@ struct ModRecord {
     bool operator==(const ModRecord&) const = default;
 };
 
+/// One file of an installed mod.
+struct ModFileEntry {
+    std::string path; ///< Relative to the mod's folder ('/'-separated, as written).
+    std::uint64_t bytes{};
+};
+
 /// What an installed folder holds, read from disk.
 struct ModContents {
     std::uint8_t parts{};             ///< ModPart bits.
     std::vector<std::string> build_ids; ///< Game versions its patches and cheats target (16 hex).
     std::vector<std::string> files;   ///< Game paths it replaces ("romfs/...", "exefs/main"), lower case.
     std::uint64_t bytes{};
+    std::vector<ModFileEntry> listing; ///< Every file of the folder, sorted by path.
 };
 
 /// Whether a mod's code patches or cheats fit the version of the game that is installed.

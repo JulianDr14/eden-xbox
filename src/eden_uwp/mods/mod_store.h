@@ -63,6 +63,14 @@ struct StoreDetail {
     std::int64_t downloads{};
 };
 
+/// A row of the categories sheet: everything at this level, the adult list (at the top level, when
+/// adult mods are shown), or one category.
+struct CategoryRow {
+    enum class Kind : std::uint8_t { All, Adult, Category };
+    Kind kind{};
+    std::size_t index{}; ///< Category: its place in StoreState::categories.
+};
+
 /// An installed mod that has a newer file at its source.
 struct ModUpdate {
     StoreSource source{};
@@ -74,6 +82,9 @@ struct StoreState {
     StoreSource source{StoreSource::GameBanana};
     GameBanana::Sort sort{GameBanana::Sort::Popular};
     std::string search;
+    /// The category the list shows, with the ones above it (empty: all of them).
+    std::vector<GameBanana::Category> category;
+    bool adult{}; ///< The list shows the mods rated for adults, of every category.
     std::optional<GameBanana::Game> game;
     std::vector<GameBanana::Game> games; ///< A game search's results, to pick from.
     bool searching_games{};
@@ -87,6 +98,11 @@ struct StoreState {
     bool detail_failed{};
     std::string replace; ///< The installed mod's folder the open detail updates.
     std::map<std::string, ModUpdate> updates; ///< By installed folder.
+    // The categories sheet: the level browsed (the categories above it) and its categories.
+    std::vector<GameBanana::Category> browse;
+    std::vector<GameBanana::Category> categories;
+    bool categories_loading{};
+    bool categories_failed{};
 };
 
 class ModStore {
@@ -114,6 +130,16 @@ public:
     void Search(std::string text);
     void SwitchSource();
     void FindGame(std::string name);
+    /// The categories sheet opens on the level of the category shown.
+    void OpenCategories();
+    /// The sheet's rows at the level browsed.
+    [[nodiscard]] std::vector<CategoryRow> CategoryRows() const;
+    /// Row `row` has categories under it: the sheet goes down to them.
+    void EnterCategory(std::size_t row);
+    /// The sheet goes up a level; false at the top.
+    bool LeaveCategory();
+    /// The list shows row `row`'s mods.
+    void PickCategory(std::size_t row);
     void PickGame(std::size_t index);
     void OpenDetail(std::size_t card);
     /// Opens the source of an installed mod that has an update, to pick the new file.
@@ -133,6 +159,8 @@ private:
     void LookUpGame(std::string name, bool pick);
     void LoadPage();
     void LoadCnx();
+    void LoadAdult();
+    void LoadCategories();
     void LoadDetail(std::int64_t id, StoreCard card, std::string replace);
     void SaveGame() const;
 
@@ -145,6 +173,8 @@ private:
     unsigned generation{};        ///< Bumped whenever the list starts over.
     unsigned pages{};
     std::int64_t detail_id{-1};
+    std::map<std::int64_t, std::vector<GameBanana::Category>> category_cache; ///< By parent (0: the top).
+    std::int64_t categories_of{-1}; ///< The parent whose categories the sheet waits for.
     std::mutex mutex;
     std::vector<Change> changes;
     ThumbnailCache pictures;

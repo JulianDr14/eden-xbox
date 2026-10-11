@@ -67,6 +67,14 @@ constexpr std::string_view Detail = R"({
          "_sAnalysisResult": "ok", "_sAvResult": "pending"}
     ]})";
 
+// Mod/Categories: an array (trimmed); empty categories are left out.
+constexpr std::string_view Categories = R"([
+    {"_idRow": 10527, "_sName": "Skins", "_nItemCount": 2970, "_nCategoryCount": 5, "_bIsObsolete": false},
+    {"_idRow": 26513, "_sName": "Code Patches", "_nItemCount": "105", "_nCategoryCount": 0},
+    {"_idRow": 36000, "_sName": "Empty", "_nItemCount": 0, "_nCategoryCount": 0},
+    {"_sName": "No id", "_nItemCount": 3}
+])";
+
 constexpr std::string_view CnxIndex = R"({
     "translations": {
         "One Two": {"enabled": true, "link": "https://github.com/x/releases/download/a/0100000000ABC000.zip",
@@ -93,7 +101,26 @@ int main() {
               "https://gamebanana.com/apiv11/Mod/Index?_nPage=2&_nPerpage=16&_aFilters%5BGeneric_Game%5D=6376"
               "&_sSort=Generic_MostLiked&_aFilters%5BGeneric_Name%5D=contains,60%20fps",
           "list url");
+    Check(GB::ModListUrl(6376, GB::Sort::Popular, 1, "", 10527) ==
+              "https://gamebanana.com/apiv11/Mod/Index?_nPage=1&_nPerpage=16&_aFilters%5BGeneric_Game%5D=6376"
+              "&_sSort=Generic_MostDownloaded&_aFilters%5BGeneric_Category%5D=10527",
+          "category url");
+    Check(GB::ModListUrl(6376, GB::Sort::Newest, 1, "", 0, "st").ends_with(
+              "&_sSort=Generic_Newest&_aFilters%5BGeneric_ContentRatings%5D=st"),
+          "rating url");
+    Check(GB::CategoriesUrl(6376, 0) ==
+              "https://gamebanana.com/apiv11/Mod/Categories?_sSort=a_to_z&_bShowEmpty=false&_idGameRow=6376",
+          "top categories url");
+    Check(GB::CategoriesUrl(6376, 10527).ends_with("&_idCategoryRow=10527"), "subcategories url");
     Check(GB::ModDetailUrl(5) == "https://gamebanana.com/apiv11/Mod/5/ProfilePage", "detail url");
+
+    // Categories.
+    const auto categories = GB::ParseCategories(Categories);
+    Check(categories && categories->size() == 2, "categories parsed, empty and nameless skipped");
+    Check((*categories)[0].name == "Skins" && (*categories)[0].nested && (*categories)[0].mods == 2970,
+          "nested category");
+    Check((*categories)[1].mods == 105 && !(*categories)[1].nested, "count given as text");
+    Check(!GB::ParseCategories(R"({"_sErrorCode":"INPUT_ERRORS"})"), "categories error refused");
 
     // Games and picking one.
     const auto games = GB::ParseGames(Games);
@@ -117,6 +144,18 @@ int main() {
     Check(!first.sensitive && list->mods[1].sensitive && list->mods[2].sensitive && !list->mods[3].sensitive,
           "hidden and warned mods are sensitive; mild ratings are not");
     Check(list->total == 634 && list->complete, "a short page is the last");
+
+    // Lists merged: each mod once, in the order asked for.
+    GB::ModList a, b;
+    a.mods = {{.id = 1, .likes = 5, .views = 10, .added = 300}, {.id = 2, .likes = 9, .views = 50, .added = 100}};
+    b.mods = {{.id = 2, .likes = 9, .views = 50, .added = 100}, {.id = 3, .likes = 1, .views = 30, .added = 200}};
+    const auto ids = [](const std::vector<GB::ModSummary>& mods) {
+        std::vector<std::int64_t> out;
+        for (const auto& mod : mods) out.push_back(mod.id);
+        return out;
+    };
+    Check(ids(GB::MergeLists({a, b}, GB::Sort::Popular)) == std::vector<std::int64_t>{2, 3, 1}, "merged by views");
+    Check(ids(GB::MergeLists({a, b}, GB::Sort::Newest)) == std::vector<std::int64_t>{1, 3, 2}, "merged by date");
 
     // One mod.
     const auto detail = GB::ParseModDetail(Detail);

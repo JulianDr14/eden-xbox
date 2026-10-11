@@ -77,6 +77,33 @@ Text SourceText(StoreSource source) {
     return source == StoreSource::Cnx ? Text::ModsSourceCnx : Text::ModsSourceGameBanana;
 }
 
+/// The category the store lists, as a path ("Skins › Characters").
+std::wstring CategoryLabel(const StoreState& store) {
+    if (store.adult) return std::wstring{Tr(Text::ModsCategoryAdult)};
+    if (store.category.empty()) return std::wstring{Tr(Text::ModsCategoryAll)};
+    std::wstring label;
+    for (const auto& category : store.category) {
+        if (!label.empty()) label += L" › ";
+        label += Utf8ToUtf16(category.name);
+    }
+    return label;
+}
+
+/// "Changes 14 game files: a.szs, b.bars, c.szs…", naming the largest; empty for a mod of patches
+/// or cheats only.
+std::wstring ChangesLine(const ModContents& contents) {
+    const auto count = contents.files.size();
+    if (count == 0) return {};
+    constexpr std::size_t named = 3;
+    std::wstring names;
+    for (const auto& name : MainFiles(contents.listing, named)) {
+        if (!names.empty()) names += L", ";
+        names += Utf8ToUtf16(name);
+    }
+    if (count > named) names += L"…";
+    return I18n::Format(count == 1 ? Text::ModsChangesOne : Text::ModsChangesOther, {std::to_wstring(count), names});
+}
+
 std::size_t ActiveCount(const std::vector<InstalledMod>& mods) {
     return static_cast<std::size_t>(
         std::count_if(mods.begin(), mods.end(), [](const InstalledMod& m) { return m.record.enabled; }));
@@ -272,7 +299,14 @@ void DrawInstalledDetail(UiPainter& paint, const ModsView& view, float x, float 
         line = Tr(mod.compat == Compat::Matches ? Text::ModsForThisVersion : Text::ModsNoConflicts);
         color = Palette::Accent;
     }
-    paint.Text(line, left, top, 16, color, RowWidth, 24);
+    // Then what it changes, which the conflicts already speak of when there are some.
+    if (const auto changes = ChangesLine(mod.contents); !changes.empty() && (line.empty() || color == Palette::Accent)) {
+        const float status = line.empty() ? 0 : paint.MeasureText(line + Dot, 16, false);
+        if (!line.empty()) paint.Text(line + Dot, left, top, 16, color, RowWidth, 24);
+        paint.Text(changes, left + status, top, 16, Palette::Text, RowWidth - status, 24);
+    } else {
+        paint.Text(line, left, top, 16, color, RowWidth, 24);
+    }
     std::wstring origin = Origin(mod.record.source);
     if (!mod.record.source.version.empty() && mod.record.source.kind == SourceKind::GameBanana)
         origin += Dot + I18n::Format(Text::ModsVersion, {Utf8ToUtf16(mod.record.source.version)});
@@ -363,7 +397,10 @@ void DrawExplore(UiPainter& paint, const ModsView& view, float x, float y) {
             DrawMessage(paint, UiIcon::Mods, I18n::Format(Text::ModsStoreOffline, {Tr(SourceText(store.source))}), x, y);
             return;
         case StoreStatus::Empty:
-            DrawMessage(paint, UiIcon::Mods, Tr(store.search.empty() ? Text::ModsStoreEmpty : Text::ModsStoreNoResults), x, y);
+            DrawMessage(paint, UiIcon::Mods,
+                        Tr(store.search.empty() && store.category.empty() && !store.adult ? Text::ModsStoreEmpty
+                                                                                           : Text::ModsStoreNoResults),
+                        x, y);
             return;
         case StoreStatus::NoGame:
             DrawMessage(paint, UiIcon::Game, I18n::Format(Text::ModsStoreNoGame, {view.game}), x, y);
@@ -405,6 +442,7 @@ void DrawExploreFooter(UiPainter& paint, const ModsView& view, float x, float y)
     std::wstring line{Tr(SourceText(store.source))};
     if (store.source == StoreSource::GameBanana) {
         if (store.game) line += Dot + Utf8ToUtf16(store.game->name);
+        if (store.adult || !store.category.empty()) line += Dot + CategoryLabel(store);
         line += Dot;
         line += Tr(SortText(store.sort));
     }
@@ -549,6 +587,10 @@ void DrawStoreMenu(UiPainter& paint, const ModsView& view, float x, float y) {
         Text label{};
         std::wstring value;
         switch (actions[i]) {
+        case StoreAction::Category:
+            label = Text::ModsStoreCategory;
+            value = CategoryLabel(store);
+            break;
         case StoreAction::Sort:
             label = Text::ModsStoreSort;
             value = Tr(SortText(store.sort));
@@ -631,6 +673,7 @@ void DrawActions(UiPainter& paint, const ModsView& view, float x, float y) {
         Text label{};
         UiIcon icon{};
         switch (actions[i]) {
+        case ModAction::Contents: label = Text::ModsActionContents; icon = UiIcon::Folder; break;
         case ModAction::Update: label = Text::ModsActionUpdate; icon = UiIcon::Archive; break;
         case ModAction::Move: label = Text::ModsActionMove; icon = UiIcon::Mods; break;
         case ModAction::Remove: label = Text::ModsActionRemove; icon = UiIcon::Remove; break;
@@ -638,6 +681,112 @@ void DrawActions(UiPainter& paint, const ModsView& view, float x, float y) {
         paint.RowFrame(left, row, width - 60, 54, active, icon);
         paint.Text(Tr(label), left + 68, row + 13, 19, Palette::Text, width - 140, 28, active);
     }
+}
+
+/// Every file of the selected mod, with its size; the largest stand out.
+void DrawContents(UiPainter& paint, const ModsView& view, float x, float y) {
+    const auto& mods = view.session.View().mods;
+    if (view.page.selected >= mods.size()) return;
+    const auto& mod = mods[view.page.selected];
+    const auto& listing = mod.contents.listing;
+    constexpr float width = 900, height = 600;
+    Sheet(paint, x, y, width, height);
+    const float left = x + (L::Width - width) / 2 + 30;
+    const float top = y + (L::Height - height) / 2 + 24;
+    const float inner = width - 60;
+    paint.Text(Utf8ToUtf16(mod.record.name), left, top, 22, Palette::Text, inner, 32, true);
+    paint.Text(I18n::Plural(Text::ModsFilesOne, Text::ModsFilesOther, listing.size()) + Dot + Size(mod.contents.bytes),
+               left, top + 36, 15, Palette::TextSecondary, inner, 22);
+    paint.Text(Tr(Text::ModsContentsHint), left, top + 60, 14, Palette::TextHint, inner, 40, false, true);
+    const std::size_t first = std::min(view.page.line, listing.size());
+    const std::size_t end = std::min(listing.size(), first + L::SheetRows);
+    for (std::size_t i = first; i < end; ++i) {
+        const auto& file = listing[i];
+        const float row = top + 108 + static_cast<float>(i - first) * 50;
+        paint.Round(left, row, inner, 44, 10, Palette::Row);
+        const auto slash = file.path.rfind('/');
+        const std::wstring folder = slash == std::string::npos ? L"" : Utf8ToUtf16(file.path.substr(0, slash + 1));
+        const float folder_w = folder.empty() ? 0 : paint.MeasureText(folder, 16, false);
+        if (!folder.empty()) paint.Text(folder, left + 16, row + 10, 16, Palette::TextSecondary, inner - 150, 24);
+        paint.Text(Utf8ToUtf16(file.path.substr(slash == std::string::npos ? 0 : slash + 1)), left + 16 + folder_w,
+                   row + 10, 16, Palette::Text, std::max(inner - 150 - folder_w, 60.0f), 24, true);
+        paint.Text(Size(file.bytes), left + inner - 130, row + 11, 15, Palette::TextSecondary, 114, 22, false, false,
+                   false, true);
+    }
+    const float arrows = left + inner + 8;
+    if (first > 0) paint.Text(L"▲", arrows, top + 108, 11, Palette::TextSecondary, 20, 16);
+    if (end < listing.size())
+        paint.Text(L"▼", arrows, top + 108 + L::SheetRows * 50 - 22, 11, Palette::TextSecondary, 20, 16);
+}
+
+/// The store's categories at the level browsed; the one listed is marked.
+void DrawCategories(UiPainter& paint, const ModsView& view, float x, float y) {
+    const auto& store = view.session.Store();
+    const auto rows = view.session.CategoryRows();
+    constexpr float width = 760, height = 600;
+    Sheet(paint, x, y, width, height);
+    const float left = x + (L::Width - width) / 2 + 30;
+    const float top = y + (L::Height - height) / 2 + 24;
+    const float inner = width - 60;
+    std::wstring title{Tr(Text::ModsCategoriesTitle)};
+    for (const auto& category : store.browse) title += L" › " + Utf8ToUtf16(category.name);
+    paint.Text(title, left, top, 22, Palette::Text, inner, 32, true);
+    if (rows.empty()) {
+        const auto text = store.categories_failed
+                              ? I18n::Format(Text::ModsStoreOffline, {Tr(Text::ModsSourceGameBanana)})
+                              : std::wstring{Tr(Text::ModsCategoriesLoading)};
+        paint.Text(text, left, top + 220, 18, Palette::TextHint, inner, 60, false, true, true);
+        return;
+    }
+    const auto& page = view.page;
+    const std::size_t cursor = std::min(page.category, rows.size() - 1);
+    const std::size_t first = cursor >= L::SheetRows ? cursor + 1 - L::SheetRows : 0;
+    const std::size_t end = std::min(rows.size(), first + L::SheetRows);
+    for (std::size_t i = first; i < end; ++i) {
+        const auto& row = rows[i];
+        const float row_y = top + 52 + static_cast<float>(i - first) * 70;
+        const bool active = i == cursor;
+        paint.Round(left, row_y, inner, 62, 12, active ? Palette::RowActive : Palette::Row);
+        if (active) paint.Round(left, row_y + 16, 3, 30, 1.5f, Palette::Accent);
+        std::wstring name, meta;
+        bool nested = false, shown = false;
+        switch (row.kind) {
+        case CategoryRow::Kind::All:
+            name = store.browse.empty() ? std::wstring{Tr(Text::ModsCategoryAll)}
+                                        : I18n::Format(Text::ModsCategoryAllOf, {Utf8ToUtf16(store.browse.back().name)});
+            shown = !store.adult && store.category.size() == store.browse.size() &&
+                    std::equal(store.browse.begin(), store.browse.end(), store.category.begin(),
+                               [](const auto& a, const auto& b) { return a.id == b.id; });
+            break;
+        case CategoryRow::Kind::Adult:
+            name = Tr(Text::ModsCategoryAdult);
+            meta = Tr(Text::ModsCategoryAdultHint);
+            shown = store.adult;
+            break;
+        case CategoryRow::Kind::Category: {
+            const auto& category = store.categories[row.index];
+            name = Utf8ToUtf16(category.name);
+            meta = I18n::Plural(Text::ModsModsOne, Text::ModsModsOther, static_cast<std::uint64_t>(category.mods));
+            nested = category.nested;
+            shown = !store.adult && !store.category.empty() && store.category.back().id == category.id;
+            break;
+        }
+        }
+        float text_left = left + 20;
+        if (row.kind == CategoryRow::Kind::Adult) {
+            Chip(paint, Tr(Text::ModsSensitive), left + 18, row_y + 20, Palette::Warning, Palette::OnAccent);
+            text_left += paint.MeasureText(Tr(Text::ModsSensitive), 13, true) + 28;
+        }
+        paint.Text(name, text_left, row_y + (meta.empty() ? 17 : 6), 19, shown ? Palette::Accent : Palette::Text,
+                   inner - (text_left - left) - 60, 28, active || shown);
+        if (!meta.empty())
+            paint.Text(meta, text_left, row_y + 34, 14, Palette::TextSecondary, inner - (text_left - left) - 60, 22);
+        if (shown) paint.Text(L"✓", left + inner - 48, row_y + 17, 20, Palette::Accent, 28, 28, true, false, true);
+        else if (nested) paint.Chevron(left + inner - 30, row_y + 31, active ? Palette::Accent : Palette::TextSecondary);
+    }
+    const float arrows = left + inner + 8;
+    if (first > 0) paint.Text(L"▲", arrows, top + 52, 11, Palette::TextSecondary, 20, 16);
+    if (end < rows.size()) paint.Text(L"▼", arrows, top + 52 + L::SheetRows * 70 - 22, 11, Palette::TextSecondary, 20, 16);
 }
 
 void DrawRemove(UiPainter& paint, const ModsView& view, float x, float y) {
@@ -772,6 +921,8 @@ void DrawModsPanel(UiPainter& paint, const ModsView& view, float x, float y) {
     case ModsScreen::StoreMenu: DrawStoreMenu(paint, view, x, y); break;
     case ModsScreen::Keyboard: DrawKeyboard(paint, view, x, y); break;
     case ModsScreen::Games: DrawGames(paint, view, x, y); break;
+    case ModsScreen::Contents: DrawContents(paint, view, x, y); break;
+    case ModsScreen::Categories: DrawCategories(paint, view, x, y); break;
     case ModsScreen::Detail: case ModsScreen::List: break;
     }
 }
@@ -801,6 +952,15 @@ std::vector<ModsPrompt> ModsPrompts(const ModSession& session, const ModsPage& p
     case ModsScreen::Games:
         if (store.games.empty()) return {{B::X, Text::ModsPromptSearch}, {B::B, Text::Back}};
         return {{B::A, Text::Select}, {B::X, Text::ModsPromptSearch}, {B::B, Text::Back}};
+    case ModsScreen::Contents: return {{B::B, Text::Back}};
+    case ModsScreen::Categories: {
+        const auto rows = session.CategoryRows();
+        if (rows.empty()) return {{B::B, Text::Back}};
+        const auto& row = rows[std::min(page.category, rows.size() - 1)];
+        const bool nested = row.kind == CategoryRow::Kind::Category && store.categories[row.index].nested;
+        if (nested) return {{B::A, Text::ModsPromptOpen}, {B::X, Text::ModsPromptListAll}, {B::B, Text::Back}};
+        return {{B::A, Text::Select}, {B::B, Text::Back}};
+    }
     case ModsScreen::List: break;
     }
     if (page.moving) return {{B::A, Text::ModsPromptDrop}};
@@ -813,6 +973,7 @@ std::vector<ModsPrompt> ModsPrompts(const ModSession& session, const ModsPage& p
         else if (store.status == StoreStatus::NoGame) prompts.push_back({B::A, Text::ModsPromptFindGame});
         else if (store.status == StoreStatus::Offline) prompts.push_back({B::A, Text::ModsPromptRetry});
         prompts.push_back({B::X, Text::ModsPromptSearch});
+        if (store.source == StoreSource::GameBanana) prompts.push_back({B::Menu, Text::ModsPromptCategories});
         prompts.push_back({B::Y, Text::ModsPromptOptions});
         prompts.push_back({B::Bumpers, Text::ModsPromptTab});
         prompts.push_back({B::B, Text::Back});
@@ -848,6 +1009,10 @@ ModsCounts CountsFor(const ModSession& session, const ModsPage& page, std::wstri
         counts.detail_images = store.detail->images.size();
     }
     counts.games = store.searching_games ? 0 : store.games.size();
+    if (page.selected < state.mods.size()) counts.contents = state.mods[page.selected].contents.listing.size();
+    for (const auto& row : session.CategoryRows())
+        counts.category_nested.push_back(row.kind == CategoryRow::Kind::Category && store.categories[row.index].nested);
+    counts.category_top = store.browse.empty();
     counts.store = {store.source == StoreSource::GameBanana, !store.search.empty(), !session.Downloads().empty()};
     counts.search = Utf8ToUtf16(store.search);
     counts.game_name = std::wstring{game_name};

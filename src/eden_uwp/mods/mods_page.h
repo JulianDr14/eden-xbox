@@ -5,10 +5,11 @@
 // The mods page of a game, opened from its options in the library. Three tabs:
 //  - Installed: the game's mods in priority order. A turns one on or off; X picks it up to move it
 //    with Up and Down (the higher one wins the files both change); Y opens what else can be done
-//    with it (update, move, uninstall).
+//    with it (see its files, update, move, uninstall).
 //  - Explore: GameBanana's mods for the game (or the CNX index's) in a grid of pictures. A opens a
 //    mod's page: its pictures, description and files, where A downloads the file under the cursor.
-//    X searches; Y changes the order, the source, or the game it is matched to.
+//    X searches; the Menu button picks a category; Y changes the order, the category, the source,
+//    or the game it is matched to.
 //  - Files: the archives (.zip, .7z, .rar) in the folders the player gave the app, internal storage
 //    first. A opens a folder or an archive; when an archive holds several mods (variants), the
 //    player ticks which to install.
@@ -39,6 +40,8 @@ struct ModsLayout {
     static constexpr float PictureHeight = 131;
     /// The text entry panel, drawn over the page.
     static constexpr std::size_t SearchLength = 40;
+    /// Rows the contents and categories sheets show at once.
+    static constexpr std::size_t SheetRows = 7;
 };
 
 enum class ModsTab : std::uint8_t { Installed, Explore, Files };
@@ -53,13 +56,16 @@ enum class ModsScreen : std::uint8_t {
     StoreMenu, ///< The store's options.
     Keyboard,  ///< Typing a search, or a game's name.
     Games,     ///< Picking the game the store lists mods for.
+    Contents,  ///< The files of an installed mod.
+    Categories, ///< Picking the category the store lists.
 };
 
 /// Rows of the Actions sheet; Update only when the mod has one.
-enum class ModAction : std::uint8_t { Update, Move, Remove };
+enum class ModAction : std::uint8_t { Contents, Update, Move, Remove };
 
 inline std::vector<ModAction> InstalledActions(bool update) {
     std::vector<ModAction> actions;
+    actions.push_back(ModAction::Contents);
     if (update) actions.push_back(ModAction::Update);
     actions.push_back(ModAction::Move);
     actions.push_back(ModAction::Remove);
@@ -74,10 +80,11 @@ struct StoreFlags {
 };
 
 /// Rows of the store's options.
-enum class StoreAction : std::uint8_t { Sort, Search, ClearSearch, Source, ChangeGame, CancelDownloads };
+enum class StoreAction : std::uint8_t { Category, Sort, Search, ClearSearch, Source, ChangeGame, CancelDownloads };
 
 inline std::vector<StoreAction> StoreActions(const StoreFlags& flags) {
     std::vector<StoreAction> actions;
+    if (flags.gamebanana) actions.push_back(StoreAction::Category);
     if (flags.gamebanana) actions.push_back(StoreAction::Sort);
     actions.push_back(StoreAction::Search);
     if (flags.search) actions.push_back(StoreAction::ClearSearch);
@@ -104,6 +111,8 @@ struct ModsPage {
     std::size_t image{};    ///< Detail: the picture shown.
     std::size_t menu{};     ///< StoreMenu: the cursor.
     std::size_t game{};     ///< Games: the cursor.
+    std::size_t line{};     ///< Contents: the first file shown.
+    std::size_t category{}; ///< Categories: the cursor.
     std::optional<TextEntry> keyboard;
     KeyboardFor keyboard_for{KeyboardFor::Search};
     ModsScreen keyboard_return{ModsScreen::List}; ///< Where Back leaves the keyboard to.
@@ -145,6 +154,10 @@ struct ModsCommand {
         PickGame,    ///< The store lists game `index`'s mods.
         CancelDownloads,
         Retry,       ///< Ask the store again after it could not be reached.
+        Categories,  ///< Open the categories sheet.
+        EnterCategory, ///< Go down to the categories under row `index`.
+        LeaveCategory, ///< Go up a level of categories.
+        PickCategory,  ///< The store lists row `index`'s mods.
     };
     Kind kind{Kind::None};
     std::size_t index{};
@@ -165,6 +178,10 @@ struct ModsCounts {
     std::size_t detail_files{};
     std::size_t detail_images{};
     std::size_t games{};      ///< A game search's results.
+    std::size_t contents{};   ///< Files of the selected installed mod.
+    /// The categories sheet's rows: whether each has categories under it.
+    std::vector<bool> category_nested;
+    bool category_top{true};  ///< The sheet shows the top level.
     StoreFlags store{};
     std::wstring search;    ///< The current search, to edit.
     std::wstring game_name; ///< The game's name, to look it up by.
@@ -206,6 +223,52 @@ namespace ModsPageDetail {
 
 inline void Step(std::size_t& cursor, std::size_t size, bool up) {
     if (size) cursor = (cursor + (up ? size - 1 : 1)) % size;
+}
+
+inline ModsCommand OpenCategories(ModsPage& page) {
+    page.screen = ModsScreen::Categories;
+    page.category = 0;
+    return {ModsCommand::Kind::Categories};
+}
+
+inline ModsCommand HandleCategories(ModsPage& page, const ModsCounts& counts, ModsInput input) {
+    using Kind = ModsCommand::Kind;
+    const std::size_t rows = counts.category_nested.size();
+    page.category = rows ? std::min(page.category, rows - 1) : 0;
+    switch (input) {
+    case ModsInput::Up: case ModsInput::Down:
+        Step(page.category, rows, input == ModsInput::Up);
+        return {Kind::Moved};
+    case ModsInput::Confirm: {
+        if (page.category >= rows) return {};
+        const std::size_t row = page.category;
+        if (counts.category_nested[row]) {
+            page.category = 0;
+            return {Kind::EnterCategory, row};
+        }
+        page.screen = ModsScreen::List;
+        page.card = page.card_first = 0;
+        return {Kind::PickCategory, row};
+    }
+    case ModsInput::Alternate:
+        // X lists a category that has others under it, without going down.
+        if (page.category >= rows) return {};
+        page.screen = ModsScreen::List;
+        page.card = page.card_first = 0;
+        return {Kind::PickCategory, page.category};
+    case ModsInput::Back:
+        if (!counts.category_top) {
+            page.category = 0;
+            return {Kind::LeaveCategory};
+        }
+        page.screen = ModsScreen::List;
+        return {Kind::Moved};
+    case ModsInput::Start: case ModsInput::Menu:
+        page.screen = ModsScreen::List;
+        return {Kind::Moved};
+    default:
+        return {};
+    }
 }
 
 inline void OpenKeyboard(ModsPage& page, KeyboardFor purpose, std::wstring_view text) {
@@ -274,6 +337,8 @@ inline ModsCommand HandleStoreMenu(ModsPage& page, const ModsCounts& counts, Mod
         return {};
     }
     switch (actions[page.menu]) {
+    case StoreAction::Category:
+        return OpenCategories(page);
     case StoreAction::Sort:
         // The order changes in place, so pressing again goes through them all.
         page.card = page.card_first = 0;
@@ -343,6 +408,9 @@ inline ModsCommand HandleExplore(ModsPage& page, const ModsCounts& counts, ModsI
         page.screen = ModsScreen::StoreMenu;
         page.menu = 0;
         return {Kind::Moved};
+    case ModsInput::Start:
+        if (!counts.store.gamebanana) return {};
+        return OpenCategories(page);
     default:
         return {};
     }
@@ -366,6 +434,10 @@ inline ModsCommand HandleModsInput(ModsPage& page, const ModsCounts& counts, Mod
             return {Kind::Moved};
         case ModsInput::Confirm:
             switch (actions[page.action]) {
+            case ModAction::Contents:
+                page.screen = ModsScreen::Contents;
+                page.line = 0;
+                return {Kind::Moved};
             case ModAction::Update:
                 page.screen = ModsScreen::Detail;
                 page.file = page.image = 0;
@@ -434,6 +506,27 @@ inline ModsCommand HandleModsInput(ModsPage& page, const ModsCounts& counts, Mod
         default:
             return {};
         }
+    case ModsScreen::Contents: {
+        // The list scrolls a row at a time; it has no cursor.
+        const std::size_t last = counts.contents > ModsLayout::SheetRows ? counts.contents - ModsLayout::SheetRows : 0;
+        switch (input) {
+        case ModsInput::Up:
+            if (page.line == 0) return {};
+            --page.line;
+            return {Kind::Moved};
+        case ModsInput::Down:
+            if (page.line >= last) return {};
+            ++page.line;
+            return {Kind::Moved};
+        case ModsInput::Back: case ModsInput::Confirm:
+            page.screen = ModsScreen::List;
+            return {Kind::Moved};
+        default:
+            return {};
+        }
+    }
+    case ModsScreen::Categories:
+        return HandleCategories(page, counts, input);
     case ModsScreen::StoreMenu:
         return HandleStoreMenu(page, counts, input);
     case ModsScreen::Keyboard:

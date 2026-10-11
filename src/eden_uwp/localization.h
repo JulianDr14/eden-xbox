@@ -477,6 +477,23 @@ enum class Text : std::uint16_t {
     ModsAdultShown,
     ModsAdultHidden,
     MenuModsAtBoot,
+    ModsActionContents,
+    ModsChangesOne,
+    ModsChangesOther,
+    ModsFilesOne,
+    ModsFilesOther,
+    ModsContentsHint,
+    ModsStoreCategory,
+    ModsCategoriesTitle,
+    ModsCategoryAll,
+    ModsCategoryAllOf,
+    ModsCategoryAdult,
+    ModsCategoryAdultHint,
+    ModsModsOne,
+    ModsModsOther,
+    ModsCategoriesLoading,
+    ModsPromptCategories,
+    ModsPromptListAll,
 
 
     Count
