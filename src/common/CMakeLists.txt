@@ -153,6 +153,7 @@ add_library(
     cpu_wait.h
     wake_flag.cpp
     wake_flag.h
+    spsc_wake_queue.h
     httplib.h
     net/net.h net/net.cpp
     container/unordered_map.h container/unordered_set.h)
