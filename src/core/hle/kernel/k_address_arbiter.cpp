@@ -122,10 +122,26 @@ bool UpdateIfEqual(KernelCore& kernel, s32* out, KProcessAddress address, s32 va
     return true;
 }
 
-class ThreadQueueImplForKAddressArbiter final : public KThreadQueue {
+class ThreadQueueImplForKAddressArbiter : public KThreadQueue {
 public:
     explicit ThreadQueueImplForKAddressArbiter(KernelCore& kernel, KAddressArbiter::ThreadTree* t)
         : KThreadQueue(kernel), m_tree(t) {}
+
+    ThreadWaitCheckpoint CaptureCheckpoint(const IdentifyWaitObject&, const KThread* thread) const override {
+        if (!thread || !thread->IsWaitingForAddressArbiter()) {
+            throw std::runtime_error("Pulse: address arbiter wait has no tree");
+        }
+        ThreadWaitCheckpoint state{CheckpointWaitKind::AddressArbiter, 0, {},
+                                   thread->GetAddressArbiterKey(), 0};
+        u64 visited{};
+        for (const auto& waiter : *m_tree) {
+            if (++visited > 65536) throw std::runtime_error("Pulse: address arbiter wait limit");
+            if (&waiter == thread) return state;
+            if (waiter.GetAddressArbiterKey() == state.address &&
+                waiter.GetPriority() == thread->GetPriority()) ++state.ordinal;
+        }
+        throw std::runtime_error("Pulse: address arbiter waiter is not linked");
+    }
 
     void CancelWait(KernelCore& kernel, KThread* waiting_thread, Result wait_result, bool cancel_timer_task) override {
         if (waiting_thread->IsWaitingForAddressArbiter() &&
@@ -143,11 +159,64 @@ public:
         KThreadQueue::CancelWait(kernel, waiting_thread, wait_result, cancel_timer_task);
     }
 
-private:
+protected:
     KAddressArbiter::ThreadTree* m_tree{};
 };
 
+class RestoredAddressArbiterWait final : public ThreadQueueImplForKAddressArbiter {
+public:
+    RestoredAddressArbiterWait(KernelCore& kernel, KAddressArbiter::ThreadTree* tree,
+                              const ThreadWaitCheckpoint& state)
+        : ThreadQueueImplForKAddressArbiter(kernel, tree), m_address(state.address),
+          m_ordinal(state.ordinal) {}
+
+    ~RestoredAddressArbiterWait() override {
+        ASSERT(!m_thread || !m_thread->IsWaitingForAddressArbiter());
+    }
+
+    void LinkCheckpointWait(KThread* thread) override {
+        ASSERT(!m_thread);
+        u64 ordinal{};
+        u64 visited{};
+        for (const auto& waiter : *m_tree) {
+            if (++visited > 65536) throw std::runtime_error("Pulse: address arbiter wait limit");
+            if (waiter.GetAddressArbiterKey() == m_address &&
+                waiter.GetPriority() == thread->GetPriority()) ++ordinal;
+        }
+        if (ordinal != m_ordinal) {
+            throw std::invalid_argument("Pulse: address arbiter wait restore order");
+        }
+        // The decrement/condition check already happened before capture. Rebuild
+        // only the wait; replaying it would change guest memory a second time.
+        thread->SetAddressArbiter(m_tree, m_address);
+        m_tree->insert(*thread);
+        m_thread = thread;
+    }
+
+    void AbandonCheckpointWait(KernelCore& kernel, KThread* thread) override {
+        if (m_thread && thread->IsWaitingForAddressArbiter()) {
+            m_tree->erase(m_tree->iterator_to(*thread));
+            thread->ClearAddressArbiter();
+        }
+        KThreadQueue::AbandonCheckpointWait(kernel, thread);
+    }
+
+private:
+    u64 m_address;
+    u64 m_ordinal;
+    KThread* m_thread{};
+};
+
 } // namespace
+
+std::unique_ptr<KThreadQueue> KAddressArbiter::CreateCheckpointWait(
+    KernelCore& kernel, const ThreadWaitCheckpoint& state) {
+    ValidateWaitCheckpoint(state);
+    if (state.kind != CheckpointWaitKind::AddressArbiter) {
+        throw std::invalid_argument("Pulse: wrong address arbiter continuation kind");
+    }
+    return std::make_unique<RestoredAddressArbiterWait>(kernel, &m_tree, state);
+}
 
 Result KAddressArbiter::Signal(uint64_t addr, s32 count) {
     // Perform signaling.

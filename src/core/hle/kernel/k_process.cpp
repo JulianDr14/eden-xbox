@@ -26,6 +26,14 @@
 
 namespace Kernel {
 
+std::unique_ptr<KThreadQueue> KProcess::CreateCheckpointAddressWait(
+    KernelCore& kernel, const ThreadWaitCheckpoint& state) {
+    if (!GetPageTable().Contains(KProcessAddress{state.address}, sizeof(s32))) {
+        throw std::invalid_argument("Pulse: arbiter address is outside the restored process");
+    }
+    return m_address_arbiter.CreateCheckpointWait(kernel, state);
+}
+
 namespace {
 
 Result TerminateChildren(KernelCore& kernel, KProcess* process, const KThread* thread_to_not_terminate) {

@@ -529,6 +529,7 @@ PROLOGUE_CPP = """
 #include "core/arm/arm_interface.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/svc.h"
 
 namespace Kernel::Svc {
@@ -567,6 +568,7 @@ EPILOGUE_CPP = """
 void Call(Core::System& system, u32 imm) {
     auto& kernel = system.Kernel();
     auto& process = GetCurrentProcess(kernel);
+    GetCurrentThread(kernel).GetStackParameters().current_svc_id = static_cast<u8>(imm);
     std::array<uint64_t, 8> args;
     kernel.CurrentPhysicalCore().SaveSvcArguments(process, args);
     LOG_TRACE(Kernel_SVC, "#{:#x} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x} [6]={:#x}",

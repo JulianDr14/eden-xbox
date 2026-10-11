@@ -20,10 +20,24 @@ namespace Kernel {
 
 namespace {
 
-class ThreadQueueImplForKSynchronizationObjectWait final : public KThreadQueueWithoutEndWait {
+class ThreadQueueImplForKSynchronizationObjectWait : public KThreadQueueWithoutEndWait {
 public:
     ThreadQueueImplForKSynchronizationObjectWait(KernelCore& kernel, KSynchronizationObject** o, KSynchronizationObject::ThreadListNode* n, s32 c)
         : KThreadQueueWithoutEndWait(kernel), m_objects(o), m_nodes(n), m_count(c) {}
+
+    ThreadWaitCheckpoint CaptureCheckpoint(const IdentifyWaitObject& identify, const KThread*) const override {
+        if (!identify || m_count < 0 || m_count > Svc::ArgumentHandleCountMax) {
+            throw std::invalid_argument("Pulse: invalid synchronization waiter");
+        }
+        ThreadWaitCheckpoint state{CheckpointWaitKind::Synchronization, 0, {}};
+        state.objects.reserve(m_count);
+        for (s32 i = 0; i < m_count; ++i) {
+            const auto id = identify(m_objects[i]);
+            if (!id) throw std::runtime_error("Pulse: synchronization object has no serializer");
+            state.objects.push_back({id, m_objects[i]->GetCheckpointWaitOrdinal(&m_nodes[i])});
+        }
+        return state;
+    }
 
     void NotifyAvailable(KernelCore& kernel, KThread* waiting_thread, KSynchronizationObject* signaled_object, Result wait_result) override {
         if (VideoCore::FrameTrace::TracksGuest(waiting_thread->GetThreadId())) {
@@ -65,13 +79,107 @@ public:
         KThreadQueue::CancelWait(kernel, waiting_thread, wait_result, cancel_timer_task);
     }
 
-private:
+protected:
     KSynchronizationObject** m_objects;
     KSynchronizationObject::ThreadListNode* m_nodes;
     s32 m_count;
 };
 
+class RestoredSynchronizationWait final : public ThreadQueueImplForKSynchronizationObjectWait {
+public:
+    RestoredSynchronizationWait(KernelCore& kernel, const ThreadWaitCheckpoint& state,
+                                const ResolveWaitObject& resolve)
+        : ThreadQueueImplForKSynchronizationObjectWait(kernel, nullptr, nullptr, 0),
+          m_kernel(kernel) {
+        ValidateWaitCheckpoint(state);
+        if (state.kind != CheckpointWaitKind::Synchronization || !resolve) {
+            throw std::invalid_argument("Pulse: invalid synchronization continuation");
+        }
+        m_objects = m_owned_objects.data();
+        m_nodes = m_owned_nodes.data();
+        m_count = static_cast<s32>(state.objects.size());
+        // Resolve the full graph before acquiring references or linking nodes.
+        for (s32 i = 0; i < m_count; ++i) {
+            m_objects[i] = resolve(state.objects[i].id);
+            if (!m_objects[i]) throw std::invalid_argument("Pulse: unresolved wait object");
+            for (s32 j = 0; j < i; ++j) {
+                if ((state.objects[i].id == state.objects[j].id) != (m_objects[i] == m_objects[j])) {
+                    throw std::invalid_argument("Pulse: inconsistent wait object identity");
+                }
+            }
+            m_ordinals[i] = state.objects[i].ordinal;
+        }
+        for (s32 i = 0; i < m_count; ++i) {
+            if (!m_objects[i]->Open(kernel)) {
+                ReleaseCheckpointReferences(kernel);
+                throw std::invalid_argument("Pulse: dead synchronization object");
+            }
+            ++m_opened;
+        }
+    }
+
+    ~RestoredSynchronizationWait() override {
+        ASSERT(!m_linked);
+        ReleaseCheckpointReferences(m_kernel);
+    }
+
+    void LinkCheckpointWait(KThread* thread) override {
+        ASSERT(!m_linked);
+        // The graph coordinator restores waits in their original order. Reject
+        // an incorrect order instead of silently changing wakeup FIFO semantics.
+        for (s32 i = 0; i < m_count; ++i) {
+            auto ordinal = m_objects[i]->GetCheckpointWaitOrdinal(nullptr);
+            for (s32 j = 0; j < i; ++j) ordinal += m_objects[j] == m_objects[i];
+            if (ordinal != m_ordinals[i]) {
+                throw std::invalid_argument("Pulse: synchronization wait restore order");
+            }
+        }
+        for (s32 i = 0; i < m_count; ++i) {
+            m_nodes[i] = {nullptr, thread};
+            m_objects[i]->LinkNode(&m_nodes[i]);
+        }
+        m_linked = true;
+    }
+
+    void NotifyAvailable(KernelCore& kernel, KThread* thread,
+                         KSynchronizationObject* object, Result result) override {
+        ThreadQueueImplForKSynchronizationObjectWait::NotifyAvailable(kernel, thread, object, result);
+        m_linked = false;
+    }
+
+    void CancelWait(KernelCore& kernel, KThread* thread, Result result, bool cancel_timer) override {
+        ThreadQueueImplForKSynchronizationObjectWait::CancelWait(kernel, thread, result, cancel_timer);
+        m_linked = false;
+    }
+
+    void ReleaseCheckpointReferences(KernelCore& kernel) override {
+        ASSERT(!m_linked);
+        while (m_opened > 0) m_objects[--m_opened]->Close(kernel);
+    }
+
+    void AbandonCheckpointWait(KernelCore& kernel, KThread* thread) override {
+        if (m_linked) {
+            for (s32 i = 0; i < m_count; ++i) m_objects[i]->UnlinkNode(&m_nodes[i]);
+            m_linked = false;
+        }
+        KThreadQueue::AbandonCheckpointWait(kernel, thread);
+    }
+
+private:
+    KernelCore& m_kernel;
+    std::array<KSynchronizationObject*, Svc::ArgumentHandleCountMax> m_owned_objects{};
+    std::array<KSynchronizationObject::ThreadListNode, Svc::ArgumentHandleCountMax> m_owned_nodes{};
+    std::array<u64, Svc::ArgumentHandleCountMax> m_ordinals{};
+    s32 m_opened{};
+    bool m_linked{};
+};
+
 } // namespace
+
+std::unique_ptr<KThreadQueue> CreateCheckpointSynchronizationWait(
+    KernelCore& kernel, const ThreadWaitCheckpoint& state, const ResolveWaitObject& resolve) {
+    return std::make_unique<RestoredSynchronizationWait>(kernel, state, resolve);
+}
 
 void KSynchronizationObject::Finalize(KernelCore& kernel) {
     this->OnFinalizeSynchronizationObject();

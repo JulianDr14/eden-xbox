@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "core/hle/kernel/k_condition_variable.h"
@@ -27,6 +29,9 @@ public:
 
     explicit KAddressArbiter(Core::System& system);
     ~KAddressArbiter();
+
+    std::unique_ptr<KThreadQueue> CreateCheckpointWait(KernelCore& kernel,
+                                                     const ThreadWaitCheckpoint& state);
 
     Result SignalToAddress(uint64_t addr, Svc::SignalType type, s32 value, s32 count) {
         switch (type) {

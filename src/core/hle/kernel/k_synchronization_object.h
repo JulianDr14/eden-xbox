@@ -7,6 +7,7 @@
 #pragma once
 
 #include <vector>
+#include <stdexcept>
 
 #include "core/hle/kernel/k_auto_object.h"
 #include "core/hle/result.h"
@@ -34,6 +35,19 @@ public:
     virtual bool IsSignaled(KernelCore& kernel) const = 0;
 
     std::vector<KThread*> GetWaitingThreadsForDebugging(KernelCore& kernel) const;
+
+    // Checkpoint barrier must be held. Preserve actual list order, including
+    // duplicate objects in a single WaitSynchronization request.
+    u64 GetCheckpointWaitOrdinal(const ThreadListNode* target) const {
+        u64 ordinal{};
+        for (auto* node = m_thread_list_head; node; node = node->next) {
+            if (ordinal >= 65536) throw std::runtime_error("Pulse: synchronization list limit");
+            if (node == target) return ordinal;
+            ++ordinal;
+        }
+        if (target) throw std::runtime_error("Pulse: missing synchronization wait node");
+        return ordinal;
+    }
 
     void LinkNode(ThreadListNode* node_) {
         // Link the node to the list.

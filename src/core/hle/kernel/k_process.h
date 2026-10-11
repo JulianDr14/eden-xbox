@@ -489,6 +489,9 @@ public:
         R_RETURN(m_address_arbiter.WaitForAddress(address, arb_type, value, timeout));
     }
 
+    std::unique_ptr<KThreadQueue> CreateCheckpointAddressWait(
+        KernelCore& kernel, const ThreadWaitCheckpoint& state);
+
     Result GetThreadList(KernelCore& kernel, s32* out_num_threads, KProcessAddress out_thread_ids, s32 max_out_count);
 
     static void Switch(KernelCore& kernel, KProcess* cur_process, KProcess* next_process);

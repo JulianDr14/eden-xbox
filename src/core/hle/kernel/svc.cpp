@@ -11,6 +11,7 @@
 #include "core/arm/arm_interface.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/svc.h"
 
 namespace Kernel::Svc {
@@ -2499,6 +2500,7 @@ static void Call64(Core::System& system, u32 imm, std::span<uint64_t, 8> args) {
 void Call(Core::System& system, u32 imm) {
     auto& kernel = system.Kernel();
     auto& process = GetCurrentProcess(kernel);
+    GetCurrentThread(kernel).GetStackParameters().current_svc_id = static_cast<u8>(imm);
     std::array<uint64_t, 8> args;
     kernel.CurrentPhysicalCore().SaveSvcArguments(process, args);
     //kernel.EnterSVCProfile();

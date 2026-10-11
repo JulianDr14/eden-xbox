@@ -8,6 +8,7 @@
 
 #include "core/hle/kernel/k_scheduler.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/pulse_wait_state.h"
 
 namespace Kernel {
 
@@ -25,6 +26,17 @@ public:
     virtual void NotifyAvailable(KernelCore& kernel, KThread* waiting_thread, KSynchronizationObject* signaled_object, Result wait_result);
     virtual void EndWait(KernelCore& kernel, KThread* waiting_thread, Result wait_result);
     virtual void CancelWait(KernelCore& kernel, KThread* waiting_thread, Result wait_result, bool cancel_timer_task);
+
+    // No host stack is captured. Unsupported queue implementations fail closed.
+    virtual ThreadWaitCheckpoint CaptureCheckpoint(const IdentifyWaitObject&, const KThread*) const {
+        throw std::runtime_error("Pulse: kernel wait continuation is not reconstructible");
+    }
+    virtual void LinkCheckpointWait(KThread*) {
+        throw std::runtime_error("Pulse: kernel wait queue cannot be reconstructed");
+    }
+    virtual void ReleaseCheckpointReferences(KernelCore&) {}
+    // Discard of a fresh reconstruction must not make its guest thread runnable.
+    virtual void AbandonCheckpointWait(KernelCore& kernel, KThread* thread);
 
 private:
     KHardwareTimer* m_hardware_timer{};

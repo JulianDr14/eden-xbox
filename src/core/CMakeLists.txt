@@ -333,6 +333,7 @@ add_library(core STATIC
     hle/kernel/k_thread_local_page.h
     hle/kernel/k_thread_queue.cpp
     hle/kernel/k_thread_queue.h
+    hle/kernel/pulse_wait_state.h
     hle/kernel/k_timer_task.h
     hle/kernel/k_trace.h
     hle/kernel/k_transfer_memory.cpp

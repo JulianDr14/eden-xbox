@@ -75,6 +75,8 @@ void CpuManager::MultiCoreRunGuestThread(Kernel::KernelCore& kernel) {
     auto* thread = Kernel::GetCurrentThreadPointer(kernel);
     kernel.CurrentScheduler()->OnThreadStart(kernel);
 
+    thread->CompleteRestoredWait(kernel);
+
     while (true) {
         auto* physical_core = &kernel.CurrentPhysicalCore();
         while (!physical_core->IsInterrupted()) {
@@ -106,6 +108,7 @@ void CpuManager::MultiCoreRunIdleThread(Kernel::KernelCore& kernel) {
 void CpuManager::SingleCoreRunGuestThread(Kernel::KernelCore& kernel) {
     auto* thread = Kernel::GetCurrentThreadPointer(kernel);
     kernel.CurrentScheduler()->OnThreadStart(kernel);
+    thread->CompleteRestoredWait(kernel);
 
     while (true) {
         auto* physical_core = &kernel.CurrentPhysicalCore();

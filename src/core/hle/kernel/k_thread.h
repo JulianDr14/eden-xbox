@@ -10,6 +10,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <memory>
 #include <span>
 #include <string>
 #include <utility>
@@ -28,6 +29,7 @@
 #include "core/hle/kernel/k_typed_address.h"
 #include "core/hle/kernel/k_worker_task.h"
 #include "core/hle/kernel/slab_helpers.h"
+#include "core/hle/kernel/pulse_wait_state.h"
 #include "core/hle/kernel/svc_common.h"
 #include "core/hle/kernel/svc_types.h"
 #include "core/hle/result.h"
@@ -264,6 +266,16 @@ public:
     }
 
     std::shared_ptr<Common::Fiber>& GetHostContext();
+
+    // Capture with all producers parked. Restore only into a fresh, unscheduled
+    // user thread; the coordinator must have rebuilt the process/object graph.
+    ThreadWaitCheckpoint CaptureWaitCheckpoint(const IdentifyWaitObject& identify) const;
+    void RestoreWaitCheckpoint(KernelCore& kernel, const ThreadWaitCheckpoint& state,
+                               const ResolveWaitObject& resolve);
+    void CompleteRestoredWait(KernelCore& kernel);
+    bool HasRestoredWaitContinuation() const noexcept {
+        return m_checkpoint_wait_kind != CheckpointWaitKind::None;
+    }
 
     ThreadState GetState() const {
         return m_thread_state.load(std::memory_order_relaxed) & ThreadState::Mask;
@@ -923,6 +935,9 @@ private:
 
     // For emulation
     std::shared_ptr<Common::Fiber> m_host_context{};
+    // Allocated only by restore; ordinary waits retain their existing fast path.
+    std::unique_ptr<KThreadQueue> m_checkpoint_wait_queue{};
+    CheckpointWaitKind m_checkpoint_wait_kind{};
     ThreadType m_thread_type{};
     StepState m_step_state{};
     bool m_dummy_thread_runnable{true};

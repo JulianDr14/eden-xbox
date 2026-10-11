@@ -10,6 +10,12 @@
 
 namespace Kernel {
 
+void KThreadQueue::AbandonCheckpointWait(KernelCore&, KThread* thread) {
+    if (m_hardware_timer && thread->GetTime() > 0) m_hardware_timer->CancelTask(thread);
+    thread->ClearWaitQueue();
+    thread->ClearCancellable();
+}
+
 void KThreadQueue::NotifyAvailable(KernelCore& kernel, KThread* waiting_thread, KSynchronizationObject* signaled_object, Result wait_result) {
     UNREACHABLE();
 }

@@ -88,6 +88,9 @@ namespace Kernel {
         public:
             explicit ThreadQueueImplForKThreadSleep(KernelCore& kernel)
                 : KThreadQueueWithoutEndWait(kernel) {}
+            ThreadWaitCheckpoint CaptureCheckpoint(const IdentifyWaitObject&, const KThread*) const override {
+                return {CheckpointWaitKind::Sleep, 0, {}};
+            }
         };
 
         class ThreadQueueImplForKThreadSetProperty final : public KThreadQueue {
@@ -185,6 +188,8 @@ namespace Kernel {
 
         // Initialize sleeping queue.
         m_wait_queue = nullptr;
+        m_checkpoint_wait_queue.reset();
+        m_checkpoint_wait_kind = CheckpointWaitKind::None;
 
         // Set suspend flags.
         m_suspend_request_flags = 0;
@@ -381,6 +386,16 @@ namespace Kernel {
         }
 
         // Release host emulation members.
+        if (m_checkpoint_wait_queue) {
+            if (m_wait_queue == m_checkpoint_wait_queue.get()) {
+                KScopedSchedulerLock sl(kernel);
+                m_checkpoint_wait_queue->AbandonCheckpointWait(kernel, this);
+            }
+            ASSERT(m_wait_queue == nullptr);
+            m_checkpoint_wait_queue->ReleaseCheckpointReferences(kernel);
+            m_checkpoint_wait_queue.reset();
+            m_checkpoint_wait_kind = CheckpointWaitKind::None;
+        }
         m_host_context.reset();
 
         // Perform inherited finalization.
@@ -1400,6 +1415,86 @@ namespace Kernel {
 
     std::shared_ptr<Common::Fiber>& KThread::GetHostContext() {
         return m_host_context;
+    }
+
+    ThreadWaitCheckpoint KThread::CaptureWaitCheckpoint(const IdentifyWaitObject& identify) const {
+        if (m_thread_type != ThreadType::User || GetState() != ThreadState::Waiting ||
+            !m_wait_queue) {
+            throw std::runtime_error("Pulse: thread is not at a supported guest SVC wait");
+        }
+        auto state = m_wait_queue->CaptureCheckpoint(identify, this);
+        const auto svc = static_cast<Svc::SvcId>(m_stack_parameters.current_svc_id);
+        if ((state.kind == CheckpointWaitKind::Sleep && svc != Svc::SvcId::SleepThread) ||
+            (state.kind == CheckpointWaitKind::Synchronization &&
+             svc != Svc::SvcId::WaitSynchronization) ||
+            (state.kind == CheckpointWaitKind::AddressArbiter && svc != Svc::SvcId::WaitForAddress)) {
+            throw std::runtime_error("Pulse: nested or unsupported SVC continuation");
+        }
+        state.deadline = GetTime();
+        ValidateWaitCheckpoint(state);
+        return state;
+    }
+
+    void KThread::RestoreWaitCheckpoint(KernelCore& kernel, const ThreadWaitCheckpoint& state,
+                                        const ResolveWaitObject& resolve) {
+        ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
+        ValidateWaitCheckpoint(state);
+        if (m_thread_type != ThreadType::User || GetState() != ThreadState::Initialized ||
+            m_wait_queue || m_checkpoint_wait_queue || GetTime() != 0) {
+            throw std::invalid_argument("Pulse: wait restore requires a fresh user thread");
+        }
+        std::unique_ptr<KThreadQueue> queue;
+        switch (state.kind) {
+        case CheckpointWaitKind::Sleep:
+            queue = std::make_unique<ThreadQueueImplForKThreadSleep>(kernel);
+            break;
+        case CheckpointWaitKind::Synchronization:
+            queue = CreateCheckpointSynchronizationWait(kernel, state, resolve);
+            break;
+        case CheckpointWaitKind::AddressArbiter:
+            queue = m_parent->CreateCheckpointAddressWait(kernel, state);
+            break;
+        default:
+            throw std::invalid_argument("Pulse: unsupported wait restore kind");
+        }
+        if (state.deadline > 0) queue->SetHardwareTimer(&kernel.HardwareTimer());
+        m_checkpoint_wait_queue = std::move(queue);
+        m_checkpoint_wait_kind = state.kind;
+        m_stack_parameters.current_svc_id = static_cast<u8>(state.kind == CheckpointWaitKind::Sleep ?
+            Svc::SvcId::SleepThread : state.kind == CheckpointWaitKind::Synchronization ?
+            Svc::SvcId::WaitSynchronization : Svc::SvcId::WaitForAddress);
+        SetSyncedIndex(-1);
+        try {
+            if (state.kind != CheckpointWaitKind::Sleep) {
+                m_checkpoint_wait_queue->LinkCheckpointWait(this);
+                if (state.kind == CheckpointWaitKind::Synchronization) SetCancellable();
+            }
+            BeginWait(kernel, m_checkpoint_wait_queue.get());
+            SetWaitReasonForDebugging(state.kind == CheckpointWaitKind::Sleep ?
+                ThreadWaitReasonForDebugging::Sleep : state.kind == CheckpointWaitKind::Synchronization ?
+                ThreadWaitReasonForDebugging::Synchronization : ThreadWaitReasonForDebugging::Arbitration);
+            if (state.deadline > 0) kernel.HardwareTimer().RegisterAbsoluteTask(this, state.deadline);
+        } catch (...) {
+            if (GetState() == ThreadState::Waiting) CancelWait(kernel, ResultCancelled, true);
+            m_checkpoint_wait_queue.reset();
+            m_checkpoint_wait_kind = CheckpointWaitKind::None;
+            throw;
+        }
+    }
+
+    void KThread::CompleteRestoredWait(KernelCore& kernel) {
+        if (m_checkpoint_wait_kind == CheckpointWaitKind::None) return;
+        ASSERT(this == GetCurrentThreadPointer(kernel));
+        ASSERT(m_wait_queue == nullptr && GetState() == ThreadState::Runnable);
+        std::array<u64, 8> arguments{};
+        kernel.CurrentPhysicalCore().SaveSvcArguments(*m_parent, arguments);
+        const auto result = m_checkpoint_wait_kind == CheckpointWaitKind::Synchronization &&
+            GetWaitResult() == ResultSessionClosed ? ResultSuccess : GetWaitResult();
+        CompleteWaitArguments(m_checkpoint_wait_kind, result.raw, GetSyncedIndex(), arguments);
+        kernel.CurrentPhysicalCore().LoadSvcArguments(*m_parent, arguments);
+        m_checkpoint_wait_queue->ReleaseCheckpointReferences(kernel);
+        m_checkpoint_wait_queue.reset();
+        m_checkpoint_wait_kind = CheckpointWaitKind::None;
     }
 
     void SetCurrentThread(KernelCore& kernel, KThread* thread) {
