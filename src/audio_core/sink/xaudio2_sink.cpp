@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <span>
+#include <stdexcept>
 #include <thread>
 
 #include <objbase.h>
@@ -144,6 +145,28 @@ public:
             state = StreamState::Stopped;
         }
         pacer.Reset();
+        wake_cv.notify_all();
+    }
+
+    void BeginCheckpoint() {
+        std::unique_lock lock{wake_mutex};
+        if (checkpoint_requested || state == StreamState::Finalizing) {
+            throw std::logic_error("Pulse: audio worker unavailable for checkpoint");
+        }
+        checkpoint_requested = true;
+        wake_cv.notify_all();
+        wake_cv.wait(lock, [this] {
+            return checkpoint_parked || state == StreamState::Finalizing;
+        });
+        if (!checkpoint_parked) {
+            checkpoint_requested = false;
+            throw std::runtime_error("Pulse: audio stream closed during checkpoint");
+        }
+    }
+
+    void EndCheckpoint() noexcept {
+        std::scoped_lock lock{wake_mutex};
+        checkpoint_requested = false;
         wake_cv.notify_all();
     }
 
@@ -281,10 +304,21 @@ private:
         auto next_profile = std::chrono::steady_clock::now() + ProfilePeriod;
 
         while (!stop_token.stop_requested()) {
+            if (checkpoint_requested.load(std::memory_order_acquire)) {
+                std::unique_lock lock{wake_mutex};
+                checkpoint_parked = true;
+                wake_cv.notify_all();
+                wake_cv.wait(lock, stop_token, [this] {
+                    return !checkpoint_requested.load() || state == StreamState::Finalizing;
+                });
+                checkpoint_parked = false;
+                continue;
+            }
             if (paused || state == StreamState::Stopped) {
                 std::unique_lock lock{wake_mutex};
                 wake_cv.wait(lock, stop_token,
-                             [this] { return !paused.load() || state == StreamState::Finalizing; });
+                             [this] { return !paused.load() || checkpoint_requested.load() ||
+                                             state == StreamState::Finalizing; });
                 continue;
             }
             if (state == StreamState::Finalizing) {
@@ -352,6 +386,7 @@ private:
             std::unique_lock lock{wake_mutex};
             wake_cv.wait_for(lock, stop_token, std::chrono::milliseconds{10}, [this] {
                 return free_slots.load(std::memory_order_acquire) != 0 || paused.load() ||
+                       checkpoint_requested.load() ||
                        state.load() == StreamState::Failed ||
                        state.load() == StreamState::Finalizing;
             });
@@ -381,11 +416,56 @@ private:
     std::condition_variable_any wake_cv;
     std::mutex wake_mutex;
     std::mutex voice_mutex;
+    std::atomic<bool> checkpoint_requested{};
+    bool checkpoint_parked{}; // protected by wake_mutex
     std::jthread worker;
     RealtimePacer pacer;
 };
 
 } // Anonymous namespace
+
+void XAudio2Sink::BeginCheckpoint() {
+    std::scoped_lock lock{mutex};
+    if (checkpoint_active) throw std::logic_error("Pulse: audio checkpoint already active");
+    for (const auto& stream : sink_streams) {
+        if (stream->GetStreamType() == StreamType::In) {
+            throw std::runtime_error("Pulse: audio input checkpoint is not supported");
+        }
+    }
+    size_t parked = 0;
+    try {
+        for (const auto& stream : sink_streams) {
+            static_cast<XAudio2SinkStream&>(*stream).BeginCheckpoint();
+            ++parked;
+        }
+        // StopEngine waits for the audio processing thread to become idle. Stop() on a source
+        // voice alone does not provide this callback barrier. Queued PCM remains owned by it.
+        if (engine) engine->StopEngine();
+        checkpoint_active = true;
+    } catch (...) {
+        for (size_t i = 0; i < parked; ++i) {
+            static_cast<XAudio2SinkStream&>(*sink_streams[i]).EndCheckpoint();
+        }
+        throw;
+    }
+}
+
+void XAudio2Sink::EndCheckpoint() noexcept {
+    std::scoped_lock lock{mutex};
+    if (!checkpoint_active) return;
+    if (engine) {
+        const HRESULT result = engine->StartEngine();
+        if (FAILED(result)) {
+            failed = true;
+            LOG_ERROR(Audio_Sink, "XAudio2: resume after Pulse failed (HRESULT {:#010x})",
+                      static_cast<u32>(result));
+        }
+    }
+    for (const auto& stream : sink_streams) {
+        static_cast<XAudio2SinkStream&>(*stream).EndCheckpoint();
+    }
+    checkpoint_active = false;
+}
 
 void SetXAudio2ProfileEnabled(const bool enabled) noexcept {
     profile_enabled.store(enabled, std::memory_order_relaxed);
@@ -482,6 +562,9 @@ void XAudio2Sink::Shutdown() {
 SinkStream* XAudio2Sink::AcquireSinkStream(Core::System& system, const u32 system_channels_,
                                            const std::string& name, const StreamType type) {
     std::scoped_lock lock{mutex};
+    if (checkpoint_active) {
+        throw std::logic_error("Pulse: cannot create an audio stream during checkpoint");
+    }
     system_channels = system_channels_;
     SinkStreamPtr stream;
     if (type == StreamType::In) {

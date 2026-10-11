@@ -88,6 +88,10 @@ public:
         return paused;
     }
 
+    StreamType GetStreamType() const noexcept {
+        return type;
+    }
+
     /**
      * Get the number of system channels in this stream.
      *
