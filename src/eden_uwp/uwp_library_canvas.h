@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <memory>
+#include "eden_uwp/content/content_session.h"
 #include <string_view>
 #include "eden_uwp/cheats/cheat_session.h"
 #include "eden_uwp/cheats/cheats_page.h"
@@ -19,6 +20,7 @@ struct GameOptionsView {
     const Cheats::CheatSession* cheats;  ///< The open cheats page's.
     const Cheats::CheatsPage& cheats_page;
     std::wstring_view notice;
+    const Content::ContentSession* content{};
 };
 /// Everything one frame of the library shows.
 struct LibraryView {
@@ -33,6 +35,7 @@ struct LibraryView {
     const ConfigurationPanel& configuration;
     const SystemPage& system;
     const GameOptionsView& game_options;
+    bool missing_content{};
 };
 class LibraryCanvas {
 public:

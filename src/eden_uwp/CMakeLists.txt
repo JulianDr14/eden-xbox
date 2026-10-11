@@ -59,6 +59,12 @@ add_executable(eden-uwp WIN32
     game_menu_surface.cpp
     game_menu_surface.h
     # Per-game options and cheats: local files, the online database, hot changes in game.
+    content/content_model.h
+    content/content_inspector.cpp
+    content/content_store.cpp
+    content/content_service.cpp
+    content/content_session.cpp
+    content/content_view.cpp
     game_options_page.h
     cheats/cheat_catalog.h
     cheats/cheat_db.cpp

@@ -17,6 +17,7 @@
 #include <winrt/Windows.Storage.AccessCache.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Storage.Search.h>
+#include <winrt/Windows.Storage.FileProperties.h>
 #include "common/logging.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/loader/nro.h"
@@ -29,6 +30,7 @@ using winrt::Windows::Storage::AccessCache::StorageApplicationPermissions;
 constexpr unsigned PageSize = 64;
 constexpr unsigned MaxSources = 16;
 constexpr unsigned MaxEntries = 10000;
+std::atomic<bool> storage_read_failure{};
 constexpr unsigned ReadChunk = 1024 * 1024;
 
 void EnsureStorageApartment() {
@@ -151,10 +153,12 @@ public:
         } catch (const winrt::hresult_error& e) {
             LogReadFailure(static_cast<unsigned>(e.code().value));
         }
+        if (done != length) LogReadFailure(ERROR_READ_FAULT);
         return done;
     }
 private:
     void LogReadFailure(unsigned error) const {
+        storage_read_failure.store(true);
         if (!failed.exchange(true))
             LOG_ERROR(Frontend, "ROM storage: read failed error={} path={} (USB removed/permission?)",
                       error, path);
@@ -340,7 +344,52 @@ void ScanFolder(StorageFolder folder, const std::string& token, const std::wstri
 }
 } // namespace
 
-std::string RememberGameFolder(const StorageFolder& folder) {
+bool ConsumeStorageReadFailure() { return storage_read_failure.exchange(false); }
+std::uint64_t StorageFileStamp(std::string_view path) {
+    const auto parsed = ParseStoragePath(path);
+    if (!parsed) {
+        std::error_code ec;
+        const auto value = std::filesystem::last_write_time(std::filesystem::u8path(path), ec);
+        return ec ? 0 : static_cast<std::uint64_t>(value.time_since_epoch().count());
+    }
+    try {
+        EnsureStorageApartment();
+        const auto slash = parsed->relative.rfind('/');
+        const auto parent = slash == std::string::npos ? "" : parsed->relative.substr(0, slash);
+        const auto name = slash == std::string::npos ? parsed->relative : parsed->relative.substr(slash + 1);
+        const auto file = ResolveFolder(*parsed, parent).GetFileAsync(winrt::to_hstring(name)).get();
+        return static_cast<std::uint64_t>(file.GetBasicPropertiesAsync().get().DateModified().time_since_epoch().count());
+    } catch (...) { return 0; }
+}
+std::vector<StorageBrowserEntry> BrowseStorageFolder(std::string_view path, std::stop_token stop) {
+    std::vector<StorageBrowserEntry> result;
+    const auto parsed = ParseStoragePath(path);
+    if (!parsed) return result;
+    EnsureStorageApartment();
+    const auto folder = ResolveFolder(*parsed, parsed->relative);
+    for (unsigned start = 0; start < 10000 && !stop.stop_requested(); start += PageSize) {
+        const auto items = folder.GetItemsAsync(start, PageSize).get();
+        for (const auto& item : items) {
+            const auto name = winrt::to_string(item.Name());
+            const auto child = parsed->relative.empty() ? name : parsed->relative + "/" + name;
+            if (!ValidStorageRelative(child)) continue;
+            const bool directory = item.IsOfType(StorageItemTypes::Folder);
+            if (!directory) {
+                auto ext = std::filesystem::u8path(name).extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+                if (ext != ".nsp" && ext != ".xci" && ext != ".nca" && ext != ".nsz" && ext != ".xcz") continue;
+            }
+            result.push_back({MakeStoragePath(parsed->token, child), std::wstring{item.Name()}, directory});
+        }
+        if (items.Size() < PageSize) break;
+    }
+    std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+        return a.folder != b.folder ? a.folder > b.folder : a.name < b.name;
+    });
+    return result;
+}
+
+std::string RememberFolder(const StorageFolder& folder, std::string_view prefix) {
     EnsureStorageApartment();
     auto list = StorageApplicationPermissions::FutureAccessList();
     unsigned count = 0;
@@ -348,7 +397,7 @@ std::string RememberGameFolder(const StorageFolder& folder) {
     const auto path = folder.Path();
     for (const auto& entry : list.Entries()) {
         const auto existing = winrt::to_string(entry.Token);
-        if (!existing.starts_with("eden-games-")) continue;
+        if (!existing.starts_with(prefix)) continue;
         ++count;
         // Reauthorizing the same path updates its token rather than duplicating games.
         try {
@@ -361,7 +410,7 @@ std::string RememberGameFolder(const StorageFolder& folder) {
         if (count >= MaxSources) throw std::runtime_error(I18n::ToUtf8(I18n::Tr(I18n::Text::FolderLimit)));
         GUID guid{};
         winrt::check_hresult(CoCreateGuid(&guid));
-        token = "eden-games-";
+        token = prefix;
         const auto* bytes = reinterpret_cast<const unsigned char*>(&guid);
         constexpr char hex[] = "0123456789abcdef";
         for (size_t i = 0; i < sizeof(guid); ++i) { token += hex[bytes[i] >> 4]; token += hex[bytes[i] & 15]; }
@@ -370,6 +419,18 @@ std::string RememberGameFolder(const StorageFolder& folder) {
     return token;
 }
 
+std::string RememberGameFolder(const StorageFolder& folder) { return RememberFolder(folder, "eden-games-"); }
+std::string RememberContentFolder(const StorageFolder& folder) { return RememberFolder(folder, "eden-content-"); }
+std::vector<StorageBrowserEntry> ContentFolderSources() {
+    EnsureStorageApartment(); std::vector<StorageBrowserEntry> result;
+    for (const auto& entry : StorageApplicationPermissions::FutureAccessList().Entries()) {
+        const auto token = winrt::to_string(entry.Token);
+        if (!token.starts_with("eden-games-") && !token.starts_with("eden-content-")) continue;
+        const auto name = std::filesystem::path{std::wstring{entry.Metadata}}.filename().wstring();
+        result.push_back({MakeStoragePath(token), name.empty() ? L"USB" : name, true});
+    }
+    return result;
+}
 LibraryScan ScanExternalGameFolders(std::stop_token stop) {
     EnsureStorageApartment();
     LibraryScan result;

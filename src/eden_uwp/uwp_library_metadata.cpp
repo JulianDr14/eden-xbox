@@ -3,6 +3,7 @@
 #include "eden_uwp/uwp_library_metadata.h"
 #include "eden_uwp/storage_path.h"
 #include "eden_uwp/uwp_rom_storage.h"
+#include "eden_uwp/content/content_service.h"
 #include "eden_uwp/uwp_file_manager.h"
 #include <memory>
 #include <winrt/base.h>
@@ -28,25 +29,11 @@ void Apply(LibraryEntry& entry, LibraryCacheRecord&& record, bool icons) {
     entry.title_loaded = true;
 }
 
-/// The build id of the main module the game boots: its update's when the same file carries one
-/// (as the boot's manual content provider sees it), else the base program's. Zero when unknown.
-std::array<std::uint8_t, 8> ReadMainBuildId(const FileSys::VirtualFile& file, u64 program_id) {
-    std::array<std::uint8_t, 8> build_id{};
-    FileSys::ManualContentProvider provider;
-    if (!provider.AddEntriesFromContainer(file)) return build_id;
-    auto nca = provider.GetEntry(FileSys::GetUpdateTitleID(program_id), FileSys::ContentRecordType::Program);
-    if (!nca || !nca->GetExeFS()) nca = provider.GetEntry(program_id, FileSys::ContentRecordType::Program);
-    if (!nca || !nca->GetExeFS()) return build_id;
-    const auto main = nca->GetExeFS()->GetFile("main");
-    Loader::NSOHeader header{};
-    if (main && main->ReadObject(&header) == sizeof(header))
-        std::copy_n(header.build_id.begin(), build_id.size(), build_id.begin());
-    return build_id;
-}
 } // namespace
 
 void ReadLibraryMetadata(const std::filesystem::path& root, std::vector<LibraryEntry>& entries,
                          const LibraryCache& cache, MetadataOptions options, std::stop_token stop) {
+    Content::Catalog catalog; Content::DefaultStore().Load(catalog);
     const auto language = static_cast<std::uint32_t>(options.language);
     // NACP::GetLanguageEntry reads the title in Eden's system language. Only one metadata worker
     // runs at a time and the guest is not running, so setting it here races with nothing.
@@ -57,7 +44,7 @@ void ReadLibraryMetadata(const std::filesystem::path& root, std::vector<LibraryE
     bool have_keys = false;
     for (auto& entry : entries) {
         if (stop.stop_requested()) break;
-        const auto stamp = IsStoragePath(entry.launch_path) ? 0 : LibraryCache::StampFor(root / entry.relative_path);
+        const auto stamp = (IsStoragePath(entry.launch_path) ? 0 : LibraryCache::StampFor(root / entry.relative_path)) ^ (catalog.generation * 0x9e3779b97f4a7c15ULL);
         if (auto record = cache.Load(entry.launch_path, stamp, language, options.icons)) {
             Apply(entry, std::move(*record), options.icons);
             continue;
@@ -94,7 +81,11 @@ void ReadLibraryMetadata(const std::filesystem::path& root, std::vector<LibraryE
                 record.icon.clear();
             if (loader->ReadProgramId(record.program_id) == Loader::ResultStatus::Success &&
                 entry.relative_path.extension() != L".nro")
-                record.build_id = ReadMainBuildId(file, record.program_id);
+            {
+                FileSys::ManualContentProvider selected;
+                const auto resolved = Content::ResolveLaunchContent(*system->GetFilesystem(), entry.launch_path, selected, false, stop, Content::ReportedSystemVersion(*system));
+                if (resolved.error == Content::Error::None) record.build_id = resolved.build_id;
+            }
             else
                 record.program_id = 0;
             LOG_INFO(Frontend, "Library metadata: title '{}', icon {} bytes", title, record.icon.size());

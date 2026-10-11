@@ -35,7 +35,7 @@ inline std::optional<StoragePath> ParseStoragePath(std::string_view path) {
     path.remove_prefix(StoragePrefix.size());
     const auto slash = path.find('/');
     const auto token = path.substr(0, slash);
-    if (!token.starts_with("eden-games-") || token.size() > 100) return {};
+    if ((!token.starts_with("eden-games-") && !token.starts_with("eden-content-")) || token.size() > 100) return {};
     for (const unsigned char c : token)
         if (!(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') &&
             !(c >= '0' && c <= '9') && c != '-') return {};

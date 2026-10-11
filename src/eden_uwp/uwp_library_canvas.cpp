@@ -18,6 +18,7 @@
 #include "eden_uwp/cheats/cheats_view.h"
 #include "eden_uwp/game_library.h"
 #include "eden_uwp/game_options_page.h"
+#include "eden_uwp/content/content_view.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/ui_painter.h"
 #include "eden_uwp/text_entry_panel.h"
@@ -178,7 +179,8 @@ public:
             else DrawConfiguration(configuration);
             if (view.system.open && view.system.name_editor) DrawNameEditor(view.system);
         }
-        if (view.game_options.game) DrawGameOptions(view.game_options);
+        if (view.game_options.game || view.game_options.content) DrawGameOptions(view.game_options);
+        if (view.missing_content) Content::DrawMissingContent(*this);
         winrt::check_hresult(target->EndDraw());
         winrt::check_hresult(swapchain->Present(1, 0));
     }
@@ -411,11 +413,13 @@ private:
                 hint = Tr(i == HomeFiles ? T::FileManagerHint : i == HomeControllers ? T::ControllersHint : T::SystemHint);
             } else {
                 icon = i == 0 ? ConfigurationIcon::Folder : i == 1 ? ConfigurationIcon::Key :
-                       i == 2 ? ConfigurationIcon::Firmware : ConfigurationIcon::Remove;
+                       i == 2 ? ConfigurationIcon::Firmware : i < 5 ? ConfigurationIcon::Folder : ConfigurationIcon::Remove;
                 if (i == 0) title = Tr(T::AddGamesFolder);
                 else if (i == 1) title = Tr(T::ImportKeys);
                 else if (i == 2) title = Tr(T::ImportFirmware);
-                else title = I18n::Format(T::RemoveFolder, {panel.status.sources[i - 3].name});
+                else if (i == 3) title = Tr(T::ContentUpdates);
+                else if (i == 4) title = Tr(T::ContentDlc);
+                else title = I18n::Format(T::RemoveFolder, {panel.status.sources[i - 5].name});
             }
             RowFrame(layout.x, y, layout.width, layout.row_height, active, icon);
             Text(title, layout.x + 72, y + (panel.files ? 10.0f : 12.0f), panel.files ? 20.0f : 22.0f,
@@ -574,6 +578,7 @@ private:
     }
     /// The game's options, and the option page open over them.
     void DrawGameOptions(const GameOptionsView& view) {
+        if (view.content) { Content::DrawContentPanel(*this, *view.content, view.game ? view.game->name : Tr(T::ContentOverview)); return; }
         const LibraryEntry& game = *view.game;
         Round(0, 0, 1280, 720, 0, Palette::Backdrop);
         if (view.page.page == GameOption::Cheats && view.cheats) {

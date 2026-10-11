@@ -27,7 +27,7 @@ struct ConfigurationPanel {
 /// Rows of the settings home, in order.
 enum ConfigurationHomeRow : size_t { HomeFiles, HomeControllers, HomeSystem, HomeRowCount };
 inline size_t ConfigurationRowCount(const ConfigurationPanel& panel) {
-    return panel.files ? 3 + panel.status.sources.size() : HomeRowCount;
+    return panel.files ? 5 + panel.status.sources.size() : HomeRowCount;
 }
 inline size_t ConfigurationFirstRow(const ConfigurationPanel& panel) {
     return (panel.selected / 5) * 5;

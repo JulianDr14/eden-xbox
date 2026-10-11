@@ -88,6 +88,7 @@
 #include "eden_uwp/keyboard_bindings.h"
 #include "eden_uwp/uwp_library.h"
 #include "eden_uwp/uwp_rom_storage.h"
+#include "eden_uwp/content/content_service.h"
 #include "eden_uwp/uwp_file_manager.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/uwp_software_keyboard.h"
@@ -505,6 +506,15 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         file != nullptr && manual_provider.AddEntriesFromContainer(file)) {
         WriteDiag("step: game contents registered");
     }
+    const auto content = Content::ResolveLaunchContent(*system.GetFilesystem(), nro_path, manual_provider,
+                                                       Content::ConsumeAllowMissing(nro_path), {}, Content::ReportedSystemVersion(system));
+    if (content.error != Content::Error::None) {
+        WriteDiag("content: launch blocked error=" + std::to_string(static_cast<int>(content.error)));
+        shutdown(); return 16;
+    }
+    if (content.managed)
+        system.GetContentProviderUnion().SetApplicationContentOverride(content.application, &manual_provider);
+    ConsumeStorageReadFailure();
     WriteDiag("step: filesystem factories created");
 
     // As yuzu_cmd. Without the Application applet id, AM never sends the focus messages and a game
@@ -778,6 +788,10 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                           std::to_string(prewarm_budget.MiBPerCore()) +
                           " MiB per core for this game's next session | " + MemoryReport());
             }
+            if (ConsumeStorageReadFailure()) {
+                WriteDiag("content: storage read failed; closing guest for library recovery");
+                shutdown(); return 16;
+            }
             if (g_gpu_command_failed.load(std::memory_order_acquire)) {
                 WriteDiag("GPU command failed; shutting down game for library recovery | " + MemoryReport());
                 shutdown();
@@ -937,6 +951,10 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                   " s | " + MemoryReport());
         for (u32 second = 1; second <= config.run_seconds; ++second) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (ConsumeStorageReadFailure()) {
+                WriteDiag("content: storage read failed; closing guest for library recovery");
+                shutdown(); return 16;
+            }
             if (g_gpu_command_failed.load(std::memory_order_acquire)) {
                 WriteDiag("GPU command failed during timed gate | " + MemoryReport());
                 shutdown();
@@ -2252,6 +2270,11 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
             if (show_library && boot_status.load() == 2) {
                 library_error = EdenXbox::I18n::ToUtf8(EdenXbox::I18n::Tr(EdenXbox::I18n::Text::GameLoadFailed));
                 WriteDiag("boot load failed; returning to library for recovery");
+                continue;
+            }
+            if (show_library && boot_status.load() == 16) {
+                library_error = EdenXbox::I18n::ToUtf8(EdenXbox::I18n::Tr(EdenXbox::I18n::Text::ContentUnavailable));
+                WriteDiag("content/storage failure handled; returning to library");
                 continue;
             }
             if (show_library && boot_status.load() == 15) {

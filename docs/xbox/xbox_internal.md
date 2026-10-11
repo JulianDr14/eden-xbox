@@ -2547,3 +2547,17 @@ Solo se usaron archivos temporales; no se modificaron partidas del usuario.
 
 Trampa de compilacion: R_THROW no acepta una construccion Result con coma sin
 proteger; usar constexpr Result local para el error FS5305.
+
+
+## 11 octubre 2026: simplificación del gestor de contenido
+
+La revisión manual del usuario detectó un flujo confuso: LB/RB cambiaba el destino
+sin un paso explícito, A marcaba archivos sin avanzar y al terminar se volvía a la
+lista sin un resultado persistente. Se sustituye por almacenamiento → archivos →
+revisión/confirmación → resultado. A revisa directamente un archivo; Y es opcional
+para lotes. El resultado usa registros persistidos para mostrar la ubicación y
+activación reales, incluidos duplicados y lotes parciales. No se cambian archivos
+ya instalados ni se trasladan duplicados automáticamente. Cambios en español e inglés.
+Compilación incremental de sesión, vista y catálogos correcta; gate de claridad
+visual/manual del recorrido nuevo pendiente. No se ha relanzado la app del usuario.
+Diseño y pasos en xbox_content.md. Sin commits ni cambios de renderer/JIT/memoria.

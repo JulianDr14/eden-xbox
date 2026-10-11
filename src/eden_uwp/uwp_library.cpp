@@ -23,6 +23,7 @@
 #include "eden_uwp/cheats/cheats_page.h"
 #include "eden_uwp/game_library.h"
 #include "eden_uwp/game_options_page.h"
+#include "eden_uwp/content/content_view.h"
 #include "eden_uwp/library_cache.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/system_page.h"
@@ -30,6 +31,9 @@
 #include "eden_uwp/uwp_library_metadata.h"
 #include "eden_uwp/uwp_system_settings.h"
 #include "common/logging.h"
+#include "core/file_sys/common_funcs.h"
+#include "core/core.h"
+#include "core/hle/service/filesystem/filesystem.h"
 
 namespace EdenXbox {
 namespace {
@@ -65,6 +69,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     SystemPage system_page;
     // The selected game's options (Menu), and its cheats page while open.
     GameOptionsPage game_options;
+    std::unique_ptr<Content::ContentSession> content_session;
+    bool missing_content = false;
     std::optional<Cheats::CheatSession> cheat_session;
     Cheats::CheatsPage cheats_page;
     std::wstring options_notice;
@@ -252,7 +258,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             e.Handled(true);
             return;
         }
-        if (configuration.open && !settings) {
+        if (configuration.open && !settings && !content_session) {
             const auto layout = GetConfigurationLayout(configuration);
             if (y >= layout.footer - 7 && y < layout.footer + 40 &&
                 x >= layout.x + layout.width - 230 && x < layout.x + layout.width) actions |= Quit;
@@ -551,7 +557,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                         actions |= directions;
                         if (hit(GamepadButtons::A)) actions |= Play;
                         if (hit(GamepadButtons::X)) {
-                            if (settings) actions |= Swap;
+                            if (settings || content_session || missing_content) actions |= Swap;
                             else if (!configuration.open) actions |= AddFolder;
                         }
                         if (hit(GamepadButtons::Y)) actions |= Refresh;
@@ -575,6 +581,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 try {
                     auto folder = picker.GetResults();
                     if (folder && picker_kind == 0) start_scan(folder);
+                    else if (folder && picker_kind == 3 && content_session) content_session->AuthorizeFolder(folder);
                     else if (folder) {
                         configuration.busy = true;
                         configuration.notice.clear();
@@ -599,13 +606,21 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 stick_navigation.Reset();
             }
         }
+        if (missing_content) {
+            if (actions & Quit) { missing_content = false; actions = 0; }
+            else if (actions & Swap) { Content::AllowMissingForNextLaunch(selected_path); return selected_path; }
+            else if (actions & Play) missing_content = false;
+            else actions = 0;
+            dirty = true;
+        }
         if (validation.valid()) {
             actions = 0;
             if (validation.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
                 try {
                     const auto error = validation.get();
                     if (error.empty()) return selected_path;
-                    notice = Wide(error);
+                    if (error == "content-missing") missing_content = true;
+                    else notice = Wide(error);
                 } catch (const std::exception& e) { notice = Wide(e.what()); }
                 dirty = true;
             }
@@ -662,7 +677,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         }
         if (game_options.open) {
             // A rescan may have replaced the list under the page.
-            if (game_options.game >= scan.entries.size()) {
+            if (!content_session && game_options.game >= scan.entries.size()) {
                 game_options = {};
                 cheat_session.reset();
             }
@@ -674,7 +689,36 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 options_notice = Tr(text);
                 options_notice_until = now + std::chrono::seconds{4};
             };
-            if (cheat_session && actions) {
+            if (content_session) {
+                dirty |= content_session->Poll();
+                if (content_session->Busy()) dirty = true;
+                const auto send = [&](unsigned bits, Content::Input input) {
+                    if ((actions & bits) && content_session && content_session->Handle(input)) {
+                        const bool changed = content_session->Changed();
+                        const bool overview = configuration.open;
+                        content_session.reset(); game_options.page.reset();
+                        if (overview) game_options = {};
+                        if (changed) {
+                            cache.Clear(); metadata = {}; ++generation;
+                            for (auto& e : scan.entries) { e.title_loaded = false; e.metadata_loaded = false; e.build_id = {}; }
+                            metadata_dirty = true; names_cursor = fill_cursor = 0;
+                        }
+                    }
+                };
+                send(Up, Content::Input::Up); send(Down, Content::Input::Down);
+                send(Play, Content::Input::Confirm); send(Swap | AddFolder, Content::Input::Import);
+                send(PreviousTab | NextTab, Content::Input::Storage); send(Refresh, Content::Input::Refresh);
+                send(Quit, Content::Input::Back);
+                if (content_session && content_session->TakeAuthorizeRequest() && !picker) {
+                    try {
+                        winrt::Windows::Storage::Pickers::FolderPicker folder_picker;
+                        folder_picker.SuggestedStartLocation(winrt::Windows::Storage::Pickers::PickerLocationId::ComputerFolder);
+                        folder_picker.FileTypeFilter().Append(L"*"); picker_kind = 3;
+                        picker = folder_picker.PickSingleFolderAsync();
+                    } catch (...) { options_notice = Tr(T::PickerOpenFailed); }
+                }
+                dirty |= actions != 0;
+            } else if (cheat_session && actions) {
                 using Cheats::CheatsInput;
                 using Cheats::CheatsEffect;
                 const auto send = [&](unsigned bits, CheatsInput input) {
@@ -713,6 +757,20 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 send(Down, GameOptionsInput::Down);
                 send(Play, GameOptionsInput::Confirm);
                 send(Quit, GameOptionsInput::Back);
+                if (game_options.page == GameOption::Updates || game_options.page == GameOption::Dlc) {
+                    const auto& game = scan.entries[game_options.game];
+                    if (!game.title_loaded || !game.program_id) {
+                        notify(T::CheatsUnavailable); game_options.page.reset();
+                    } else {
+                        std::vector<std::uint64_t> bases;
+                        for (const auto& e : scan.entries) if (e.program_id) bases.push_back(FileSys::GetBaseTitleID(e.program_id));
+                        metadata_worker.request_stop();
+                        content_session = std::make_unique<Content::ContentSession>(game.program_id, game.launch_path,
+                            *game_options.page == GameOption::Updates ? Content::Kind::Update : Content::Kind::Dlc,
+                            std::move(bases), std::move(metadata_worker));
+                        metadata = {};
+                    }
+                }
                 if (game_options.page == GameOption::Cheats) {
                     // Cheat files are named after the game's title and main build ids, which the
                     // library reads with the title (uwp_library_metadata.cpp).
@@ -772,9 +830,18 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                         break;
                     }
                 } else if (loading || setup_future.valid()) configuration.notice = Tr(T::WaitForCheck);
-                else if (configuration.selected >= 3) {
+                else if (configuration.selected == 3 || configuration.selected == 4) {
+                    std::vector<std::uint64_t> bases;
+                    for (const auto& e : scan.entries) if (e.program_id) bases.push_back(FileSys::GetBaseTitleID(e.program_id));
+                    metadata_worker.request_stop();
+                    content_session = std::make_unique<Content::ContentSession>(0, "",
+                        configuration.selected == 3 ? Content::Kind::Update : Content::Kind::Dlc,
+                        std::move(bases), std::move(metadata_worker));
+                    metadata = {}; game_options.open = true; game_options.game = 0;
+                }
+                else if (configuration.selected >= 5) {
                     try {
-                        ForgetGameFolder(configuration.status.sources[configuration.selected - 3].token);
+                        ForgetGameFolder(configuration.status.sources[configuration.selected - 5].token);
                         configuration.notice = Tr(T::FolderRemoved);
                         configuration.selected = 0; refresh_setup(); start_scan();
                     } catch (...) { configuration.notice = Tr(T::FolderRemoveFailed); }
@@ -826,12 +893,26 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             selected_path = scan.entries[selected].launch_path;
             notice = Tr(T::CheckingGame);
             dirty = true;
-            std::packaged_task<std::string()> task{[path = selected_path] {
+            metadata_worker.request_stop();
+            metadata = {};
+            std::packaged_task<std::string()> task{[path = selected_path, old_metadata = std::move(metadata_worker)]() mutable {
+                if (old_metadata.joinable()) old_metadata.join();
                 winrt::init_apartment(winrt::apartment_type::multi_threaded);
                 struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } guard;
                 if (!HasUsableHeaderKey() && !path.ends_with(".nro"))
                     return I18n::ToUtf8(Tr(T::MissingKeys));
-                return IsStoragePath(path) ? CheckExternalGame(path) : std::string{};
+                if (IsStoragePath(path)) {
+                    if (const auto error = CheckExternalGame(path); !error.empty()) return error;
+                }
+                if (path.ends_with(".nro")) return std::string{};
+                Core::System system;
+                system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+                system.SetFilesystem(MakeUwpFilesystem());
+                system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
+                FileSys::ManualContentProvider provider;
+                const auto resolved = Content::ResolveLaunchContent(*system.GetFilesystem(), path, provider, false, {}, Content::ReportedSystemVersion(system));
+                if (resolved.error == Content::Error::Unavailable) return std::string{"content-missing"};
+                return resolved.error == Content::Error::None ? std::string{} : I18n::ToUtf8(Tr(Content::ErrorText(resolved.error)));
             }};
             validation = task.get_future();
             validation_worker = std::jthread(std::move(task));
@@ -937,7 +1018,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         // The player moved to another page: background work yields to its covers.
         if (metadata.valid() && metadata_background && (metadata_dirty || retained_page != page))
             metadata_worker.request_stop();
-        if (!configuration.open && !loading && !metadata.valid() && !scan.entries.empty()) {
+        if (!content_session && !validation.valid() && !missing_content && !configuration.open && !loading && !metadata.valid() && !scan.entries.empty()) {
             MetadataOptions request{title_language};
             std::vector<LibraryEntry> requested;
             if (metadata_dirty || retained_page != page) {
@@ -1006,10 +1087,10 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         }
         if (dirty) {
             const GameOptionsView options_view{
-                game_options, game_options.open ? &scan.entries[game_options.game] : nullptr,
-                cheat_session ? &*cheat_session : nullptr, cheats_page, options_notice};
+                game_options, game_options.open && game_options.game < scan.entries.size() ? &scan.entries[game_options.game] : nullptr,
+                cheat_session ? &*cheat_session : nullptr, cheats_page, options_notice, content_session.get()};
             canvas->Draw({scan, selected, loading, settings, setting_row, options, notice, panel,
-                          configuration, system_page, options_view});
+                          configuration, system_page, options_view, missing_content});
             dirty = false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{16});
