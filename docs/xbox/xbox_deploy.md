@@ -195,3 +195,9 @@ Las llamadas a la command list de D3D12 se pueden hacer en un hilo propio (`D3D1
 `async_record=1` en BootCfg: el hilo de GPU solo las graba, en bloques que ese hilo ejecuta en
 orden y envía a la cola. Por defecto el hilo de GPU las hace él mismo. El log dice qué modo se usa:
 `D3D12: command list calls made on a recording thread` o `on the GPU thread`.
+
+El hilo `HostTiming` duerme hasta poco antes de cada evento con un timer de alta resolución y
+solo espera en la CPU el retraso que ese timer suele tener (decenas de microsegundos). Con
+`timer_sleep=0` en BootCfg vuelve a dormir por ticks del timer del sistema y a esperar en la CPU
+el último tick entero, como antes: más preciso, pero ocupa casi un núcleo. El log dice qué modo
+se usa: `Host clock: ..., sleeps: high-resolution timer` u `OS timer ticks`.

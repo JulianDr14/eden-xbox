@@ -41,6 +41,7 @@
 #include "common/memory_ledger.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
+#include "common/thread.h"
 #include "common/windows/sampling_profiler.h"
 #include "common/windows/timer_resolution.h"
 #include "core/arm/cpu_profile.h"
@@ -242,6 +243,9 @@ struct BootConfig {
     /// Make the D3D12 command list calls on a thread of their own, so the GPU thread only records
     /// them ("async_record=1"). Off by default until it has been played through on the console.
     bool async_record{};
+    /// Host timing waits sleep on a high-resolution timer and wait only its lateness on the CPU
+    /// ("timer_sleep=0" waits the last timer tick on the CPU, as before).
+    bool timer_sleep{true};
     /// File name of a game in LocalState\games to boot instead of boot.nro (package-appx.ps1 -Game).
     std::string game;
     /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
@@ -328,6 +332,8 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     Core::CpuProfile::SetEnabled(config.cpu_profile);
     // Read when Core::System builds the kernel's cores.
     Kernel::PhysicalCore::SetIdleSpinPolicy(config.idle_spin);
+    // Read by the host timing thread's first wait.
+    Common::SetPreciseTimerSleeps(config.timer_sleep);
     // Read by HostMemory when Core::System builds the DRAM, so it has to be set before that.
     // The 384-MiB Series experiment covered only 388 of 2637 MiB requested by Game C (15%). The
     // resulting fastmem fault/recompile storm was markedly slower than the page table, so Auto
@@ -1806,6 +1812,11 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             config.async_record = line.back() == '1';
                             WriteDiag(std::string("boot.cfg: command list recording thread ") +
                                       (config.async_record ? "on" : "off"));
+                        } else if (line == "timer_sleep=0" || line == "timer_sleep=1") {
+                            config.timer_sleep = line.back() == '1';
+                            WriteDiag(std::string("boot.cfg: host timing sleeps on ") +
+                                      (config.timer_sleep ? "a high-resolution timer"
+                                                          : "timer ticks"));
                         } else if (line == "force_swap_interval=1") {
                             config.force_swap_interval_one = true;
                             WriteDiag("boot.cfg: forcing guest swap intervals above one to one");
