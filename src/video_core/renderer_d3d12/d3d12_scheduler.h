@@ -22,6 +22,11 @@
 
 namespace D3D12 {
 
+/// Makes the direct list's calls on a worker thread for schedulers created from now on
+/// (boot.cfg "async_record=1"), so the GPU thread only records them. Off: the GPU thread makes
+/// every call itself, as the renderer did before the recorder.
+void SetAsyncRecording(bool enabled);
+
 /// Owns the direct command list and tracks GPU progress with monotonically increasing ticks, the
 /// same model as the Vulkan backend's scheduler: CurrentTick() is the value the list being recorded
 /// will signal when it is flushed, and every other object (staging memory, descriptor ranges,

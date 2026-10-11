@@ -37,6 +37,8 @@ HANDLE ThreadWaitEvent() {
     return event.handle;
 }
 
+std::atomic<bool> async_recording{false};
+
 void StoreMax(std::atomic<u64>& target, u64 value) {
     u64 current = target.load(std::memory_order_relaxed);
     while (current < value &&
@@ -47,6 +49,10 @@ void StoreMax(std::atomic<u64>& target, u64 value) {
 
 } // Anonymous namespace
 
+void SetAsyncRecording(bool enabled) {
+    async_recording.store(enabled, std::memory_order_relaxed);
+}
+
 Scheduler::Scheduler(Device& device_) : device{device_} {
     ID3D12Device* const dev = device.Get();
     ThrowIfFailed(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)),
@@ -56,8 +62,13 @@ Scheduler::Scheduler(Device& device_) : device{device_} {
                                          current_allocator.Get(), nullptr,
                                          IID_PPV_ARGS(&command_list)),
                   "CreateCommandList");
-    recorder.emplace(command_list.Get(), ListRecorder::Options{},
-                     [this] { ReleaseWaitersAfterError(); });
+    // Below the GPU thread's priority: it only has to keep up with what the GPU thread records.
+    const ListRecorder::Options options{.threaded = async_recording.load(std::memory_order_relaxed),
+                                        .thread_name = "D3D12Recorder",
+                                        .priority = Common::ThreadPriority::High};
+    recorder.emplace(command_list.Get(), options, [this] { ReleaseWaitersAfterError(); });
+    LOG_INFO(Render, "D3D12: command list calls made {}",
+             options.threaded ? "on a recording thread" : "on the GPU thread");
     stream.emplace(*recorder);
     CreateTimestamps();
     BeginTimestamp();

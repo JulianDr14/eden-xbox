@@ -101,6 +101,7 @@ void SetAstcGpuFresh(bool enabled); // d3d12_texture_cache.h
 void SetGpuBasedValidation(bool enabled); // d3d12_device.h
 void SetDredEnabled(bool enabled);         // d3d12_device.h
 void SetDescriptorRemovalChecks(bool enabled); // d3d12_device.h
+void SetAsyncRecording(bool enabled);          // d3d12_scheduler.h
 using AppMemoryQuery = bool (*)(u64& used, u64& limit); // d3d12_device.h
 void SetAppMemoryQuery(AppMemoryQuery query);            // d3d12_device.h
 } // namespace D3D12
@@ -238,6 +239,9 @@ struct BootConfig {
     /// Copy and present frames on a thread of their own, so the GPU thread never waits for the
     /// display ("async_present=0" presents on the GPU thread, as Present used to).
     bool async_present{true};
+    /// Make the D3D12 command list calls on a thread of their own, so the GPU thread only records
+    /// them ("async_record=1"). Off by default until it has been played through on the console.
+    bool async_record{};
     /// File name of a game in LocalState\games to boot instead of boot.nro (package-appx.ps1 -Game).
     std::string game;
     /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
@@ -377,6 +381,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     VideoCore::Perf::SetDetailedGpuProfile(config.gpu_profile);
     VideoCore::Perf::SetForceSwapIntervalOne(config.force_swap_interval_one);
     Settings::values.async_presentation.SetValue(config.async_present);
+    D3D12::SetAsyncRecording(config.async_record);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
         D3D12::SetGpuBasedValidation(config.gpu_validation);
@@ -1797,6 +1802,10 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             config.async_present = line.back() == '1';
                             WriteDiag(std::string("boot.cfg: presentation thread ") +
                                       (config.async_present ? "on" : "off"));
+                        } else if (line == "async_record=0" || line == "async_record=1") {
+                            config.async_record = line.back() == '1';
+                            WriteDiag(std::string("boot.cfg: command list recording thread ") +
+                                      (config.async_record ? "on" : "off"));
                         } else if (line == "force_swap_interval=1") {
                             config.force_swap_interval_one = true;
                             WriteDiag("boot.cfg: forcing guest swap intervals above one to one");
