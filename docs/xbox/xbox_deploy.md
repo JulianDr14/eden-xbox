@@ -145,6 +145,48 @@ callbacks y preemption, no utilizacion CPU. El perfil esta desactivado por defec
 trabajo si se activa: comparar rendimiento con la misma configuracion en ambas builds.
 Para estudiar las cargas, combinarlo con `gpu_profile=1` y repetir el mismo recorrido.
 
+### Perfilador por muestreo (desde 0.2.75.2)
+
+Es el perfilador de CPU para la consola, donde no hay xperf ni PIX para UWP. Funciona así:
+
+- Pausa cada hilo con nombre 250 veces por segundo, copia su pila y lo reanuda. Cada pausa dura
+  unos 20 us, así que a un hilo que trabaja le cuesta menos del 1%.
+- La pila se desenrolla después, sobre la copia, con el hilo ya corriendo.
+- Los hilos bloqueados se muestrean 32 veces menos.
+
+Va apagado por defecto. Se activa al empaquetar un build de diagnóstico; un release se empaqueta
+sin la opción:
+
+```
+powershell -ExecutionPolicy Bypass -File tools\xbox\package-appx.ps1 -Library -Profile on
+```
+
+- `-Profile on` escribe `profile=1` en `boot.cfg`: solo el muestreo.
+- `-Profile full` escribe `profile=full`: además activa `gpu_profile` y `cpu_profile`. Esos
+  cronómetros sí frenan el hilo de GPU.
+- Con `-BootCfg` se ajustan la frecuencia, `profile_hz=` (10-1000, 250 por defecto), y la
+  duración de cada ventana, `profile_window=` (segundos, 20 por defecto).
+
+Cada ventana se añade a `LocalState\eden\log\eden_profile.txt`. Incluye el tiempo de CPU de cada
+hilo y cada pila distinta, con cuántas veces se vio corriendo (R) o esperando (W). El archivo se
+vacía al abrir la app; cada juego que se abre desde la biblioteca añade sus ventanas. En el PC,
+con el PDB del mismo build:
+
+```
+python tools/xbox/profile-report.py eden_profile.txt --out informe.md --folded perfil.folded
+```
+
+El informe incluye:
+
+- Qué hilos están saturados y en qué subsistema se les va el tiempo.
+- Por hilo:
+  - las funciones más caras, solas y con lo que llaman;
+  - quién llama al sistema y al driver;
+  - dónde espera.
+
+`perfil.folded` se abre en https://www.speedscope.app como flame graph. `--window N` o `--window
+N-M` limitan el informe a unas ventanas, por ejemplo las de la zona lenta.
+
 La presentación usa un hilo propio por defecto. Con `async_present=0` en BootCfg se presenta en
 el hilo de GPU, como antes de ese cambio. El log dice qué modo se usa:
 `D3D12: presentation on its own thread` o `on the GPU thread`.

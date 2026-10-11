@@ -44,7 +44,7 @@ to a new area still stutters while its shaders build.
 | Game B | **60 FPS** in matches, stable | No graphical errors, special move cutscenes included |
 | Game G | **60 FPS**, stable | No graphical errors |
 | Game C | **55–60 FPS**, stable | No crashes or graphical errors |
-| Game D | **About 20 FPS** in the open world, of the game's 30 | **Work in progress.** Renders without graphical errors; limited by the emulated CPU, see [Work in progress](#work-in-progress-game-d) |
+| Game D | **About 20 FPS** in the open world, of the game's 30 | **Work in progress.** Renders without graphical errors; limited by the cost of recording its draws, see [Work in progress](#work-in-progress-game-d) |
 | Game E | Renders **without graphical errors**, then **hits the memory wall** | The heaviest loads need more than the app's 5120 MiB, see [The memory wall](#the-memory-wall). On PC it reaches the open world at **30 FPS** |
 
 Audio works without problems in every game above. None of them has been played from start to
@@ -87,11 +87,16 @@ the graphics.
 #### Work in progress: Game D
 
 Game D already draws its open world correctly on the Series, but it runs at about
-20 FPS where the game targets 30. The overlay shows where the time goes: the GPU needs only about
-9.5 ms of each 50 ms frame, while the emulated CPU keeps close to four host cores busy. The bottleneck
-is the CPU emulation, which inside the Xbox sandbox has to go through a page table for every guest
-memory access (fastmem is impossible there, see [The memory wall](#the-memory-wall)). This is the
-next target for optimisation.
+20 FPS where the game targets 30. The renderer's own report shows where the time goes:
+
+- The GPU itself needs only about 8 ms per frame.
+- The open world issues about 4 000 draws per frame, and the renderer's GPU thread spends about
+  32 ms of host CPU time recording them, some 8 µs per draw.
+- The screen runs at 60 Hz, so a frame that misses 33.3 ms waits for the next refresh and takes
+  50 ms: a little over budget becomes 20 FPS instead of 30. In lighter areas, with under 2 000 draws
+  per frame, the game holds its 30 FPS.
+
+Cutting the per-draw cost of the D3D12 backend is the next target for optimisation.
 
 <table>
   <tr>
