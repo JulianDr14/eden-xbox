@@ -728,3 +728,119 @@ presupuesto de la VM, memoria con el menú abierto).
 Fuentes: [nx-cheats-db](https://github.com/sthetix/nx-cheats-db),
 [dmnt de Atmosphère](https://github.com/Atmosphere-NX/Atmosphere/tree/master/stratosphere/dmnt),
 [Designing for Xbox and TV](https://learn.microsoft.com/en-us/windows/uwp/design/devices/designing-for-tv).
+
+# Mods por juego (11 oct 2026)
+
+## Qué se hizo y por qué
+
+*Opciones del juego > Mods* instala, ordena y activa mods sin salir de la consola. El cargador de
+Eden (`PatchManager`) ya leía `load/<TID>/<mod>/{romfs,romfs_ext,romfslite,exefs,cheats}`; faltaba
+todo lo demás:
+
+- **Formatos**: `.zip`, `.7z` y `.rar` (RAR4 y RAR5), también **sólidos** y **en volúmenes**
+  (`x.part1.rar…`, `x.rar` + `x.r00…`, `x.7z.001…`). Lector: libarchive 3.8.9 (BSD-2, el mismo
+  que usa Windows 11) compilado **solo con sus lectores** contra el zlib, zstd y liblzma (xz
+  5.8.4, 0BSD) del árbol: `externals/libarchive/` (CMake y `config.h` propios, porque el CMake de
+  libarchive sondea bibliotecas del sistema antes de que el árbol las construya). No usa
+  `archive_write_disk`: la extracción la escribe el frontend.
+- **Dónde lee**: el archivo se abre donde está, por la VFS de la app (interna o USB vía
+  `FutureAccessList`), sin copiarlo antes. Pestaña *Archivos*: `LocalState\eden\mods\inbox`
+  (Device Portal) y las carpetas USB autorizadas (las de juegos y contenido, más *Añadir una
+  carpeta*).
+- **Qué hay dentro** (`mods/mod_layout.cpp`, solo con la lista de rutas, antes de extraer): carpeta
+  con `romfs/exefs/cheats`, el formato Atmosphère (`atmosphere/contents/<TID>/…` y
+  `atmosphere/exefs_patches/<x>/<build>.ips`, que el cargador no lee y se mueven a `exefs/`),
+  `.ips/.pchtxt` y cheats sueltos, y **variantes** lado a lado (30/60 FPS, idiomas): el jugador
+  marca cuáles instalar. Un `<TID>` de otro título se avisa.
+- **Instalación segura** (`mods/mod_installer.cpp`): espacio comprobado antes; extracción a
+  `mods/staging/<TID>/` y `rename` atómico a `load/<TID>/<mod>`: nunca arranca un juego con medio
+  mod, y un corte deja solo staging, que se borra al volver a abrir. Desinstalar renombra a
+  `mods/trash/` antes de borrar. Rutas `..`, absolutas, con unidad o ADS se rechazan; el tamaño
+  escrito no pasa del espacio libre (zip bombs). Archivos con contraseña dan un error claro.
+- **Orden de carga** (cambio pequeño en `core`): `Settings::values.mod_priority` por título y
+  `core/file_sys/mod_priority.h`. LayeredFS/ExeFS: gana la primera capa, así que va en orden;
+  IPS/pchtxt: gana el último aplicado, así que va invertido. Sin lista, el orden por nombre de
+  siempre. Corrige dos derefs nulos en `PatchExeFS`/`ApplyLayeredFS` (título sin SD o sin load).
+- **Activar/desactivar**: `disabled_addons` (que UWP nunca escribía). `Mods::ApplyModChoices`
+  lee todos los manifiestos (`LocalState\eden\mods\<TID>.json`) antes de `system.Load`. Los
+  cheats de un mod apagado tampoco salen en la página de Cheats.
+- **Conflictos y versión** (`mods/mod_analysis.h`, `mods/mod_inspect.cpp`): qué archivos del juego
+  pisa cada mod (romfs, exefs y los `.stub`/`.ips` de romfs_ext) y quién gana por orden; y si sus
+  parches y cheats son para el build ID del juego que arranca (con su actualización activa).
+- El manifiesto no guarda nada que se pueda leer del disco: las carpetas copiadas a mano se
+  adoptan, las borradas a mano desaparecen. Las carpetas de cheats en línea (`Online cheats`,
+  `Online graphics`) son de la página de Cheats y no se listan.
+
+## Interfaz
+
+Pestañas (LB/RB) *Instalados* y *Archivos*. En *Instalados*: número de prioridad, nombre, partes
+(archivos del juego, ejecutable, parches, cheats) y aviso de conflicto o versión; **A** activa,
+**X** levanta el mod para moverlo con arriba/abajo (el de arriba gana), **Y** opciones (mover,
+desinstalar con confirmación). Debajo, en palabras: «Gana a X en 14 archivos» / «X le gana 3
+archivos: súbelo para que gane él». Cabecera: activos, conflictos y espacio libre. Un trabajo
+(leer, instalar, desinstalar) corre en un hilo y muestra su progreso en MB; **B** lo cancela sin
+dejar nada a medias.
+
+## Pruebas
+
+Harness PASS (`cl /std:c++20 /EHsc /Zc:preprocessor /utf-8 /Isrc`): `mod-priority`, `mod-layout`,
+`mod-manifest` (`/I` de nlohmann_json), `mod-analysis`, `mods-page`, `archive-volumes`,
+`cheats-page`, `localization-catalogs`. Con libarchive enlazado (proyecto CMake de host):
+`mod-archive` (7z BCJ2/PPMd/ARM64/zstd sólido, RAR4 en 3 volúmenes, RAR5 sólido en 4, zip
+lzma/zip64, cifrados, `..`, límite de tamaño) y `mod-installer`.
+
+## Tienda y actualizaciones
+
+Tercera pestaña, *Explorar*, entre *Instalados* y *Archivos*:
+
+- **GameBanana** (`mods/gamebanana.cpp`, solo URLs y parseo de apiv11, sin red):
+  - El juego se busca por su nombre (`Util/Search/Results`). Se elige solo si el nombre coincide sin
+    contar ™, ® ni puntuación; si no, el jugador lo busca con otro nombre (teclado en pantalla) y
+    elige entre los resultados.
+  - La elección queda en `mods/gamebanana.json`.
+  - El listado es `Mod/Index` paginado (16 por página, carga al acercarse al final). Se puede
+    ordenar por más descargados, recientes, actualizados o gustados, y buscar por nombre
+    (`_aFilters[Generic_Name]=contains,…`).
+  - La ficha (`Mod/<id>/ProfilePage`) muestra galería (LB/RB), descripción (HTML a texto), números
+    y **todos sus archivos**, con tamaño, fecha y descargas.
+  - Solo se descargan los archivos con antivirus `clean` y análisis `ok`.
+- **Índice CNX** (`mods/cnx_index.cpp`): traducciones y modificaciones de `nx-links-v204.json`.
+  - Las entradas de un juego se reconocen por el `<TID>` de su enlace o de su `hash_file`.
+  - El índice se guarda con ETag en LocalCache y se vuelve a pedir como mucho una vez por hora.
+- **Adultos**: GameBanana marca con `_sInitialVisibility` `warn`/`hide` lo que esconde tras su
+  filtro. Por defecto no se listan (el pie dice cuántos se ocultaron). Con *Sistema > Mods para
+  adultos* se muestran con su carátula tal cual y una etiqueta 18+.
+- **Descargas** (`mods/mod_downloads.cpp`, `mods/mod_web.cpp`):
+  - Cola en su propio hilo: se sigue explorando mientras baja.
+  - Escribe a `LocalCache\mods\downloads\<fuente>-<id>.part` y **reanuda con `Range`** tras
+    perder la conexión o cerrar la página.
+  - Hasta 3 reintentos con espera de 2, 4 y 8 s.
+  - Comprueba el **MD5** del sitio (OpenSSL EVP) sobre el archivo entero; si no coincide, lo borra.
+  - Espacio comprobado antes, tope de 8 GiB, velocidad y porcentaje en el pie y en la pestaña.
+  - Al terminar se instala con el mismo flujo que un archivo local. Si trae variantes, se pide
+    elegir; el mod toma el nombre del de la tienda.
+- **Miniaturas** (`mods/mod_thumbnails.cpp`): en disco (`LocalCache\mods\pictures`, 64 MiB, las
+  más viejas fuera), pedidas al dibujarse, las últimas primero. `UiPainter::Picture` las decodifica
+  con WIC a 640 px como mucho, recortadas y con esquinas redondeadas.
+- **Actualizaciones**:
+  - Al abrir la página se miran los mods instalados de GameBanana (`_aFiles`: un archivo más nuevo
+    que el instalado) y de CNX (otro enlace u otro tamaño bajo el mismo nombre).
+  - Si hay alguna, se marca en la lista y en la cabecera, y en *Y* aparece *Actualizar*: se abre la
+    ficha para elegir el archivo nuevo.
+  - `ModLibrary::Replace` pone la versión nueva en el lugar y con el estado (activo o no) de la
+    vieja, y desinstala la vieja.
+- **Mantenimiento**:
+  - Cabecera con lo que ocupan los mods y el espacio libre.
+  - *Limpiar caché* de Sistema borra también imágenes, índice y descargas a medias.
+  - Las descargas `.part` sin tocar en 7 días se borran.
+  - Al arrancar un juego se limpia el staging/trash de todos los juegos.
+  - En el menú dentro del juego, una fila dice cuántos mods hay activos (se cambian en la
+    biblioteca; el juego los lee al arrancar).
+
+Mandos en *Explorar*: cruceta en la cuadrícula, **A** ficha, **X** buscar, **Y** opciones (orden,
+buscar, fuente, juego en GameBanana, cancelar descargas). En el teclado: **A** escribe, **X**
+borra, **Y** espacio, **Menú** o **RB** termina, **LB** mayúsculas, **B** cancela.
+
+Pruebas nuevas: `gamebanana-parse` (respuestas reales de la API y del índice CNX, recortadas),
+`mods-page` (cuadrícula, ficha, opciones, teclado, juego, reintento), `mod-installer` (`Replace`),
+`mod-layout` (`<TID>/romfs` propio y ajeno), `system-settings` (fila de adultos).

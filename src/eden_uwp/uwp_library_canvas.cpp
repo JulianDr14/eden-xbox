@@ -19,6 +19,7 @@
 #include "eden_uwp/game_library.h"
 #include "eden_uwp/game_options_page.h"
 #include "eden_uwp/content/content_view.h"
+#include "eden_uwp/mods/mods_view.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/ui_painter.h"
 #include "eden_uwp/text_entry_panel.h"
@@ -187,7 +188,7 @@ public:
         winrt::check_hresult(target->EndDraw());
         winrt::check_hresult(swapchain->Present(1, 0));
     }
-    void InvalidateCovers() { covers.clear(); }
+    void InvalidateCovers() { covers.clear(); pictures.clear(); }
 private:
     void DrawControllerPanel(const LibraryView& view) {
         const auto& options = view.options;
@@ -453,19 +454,19 @@ private:
         PageHeader(L::RowX, 99, ConfigurationIcon::Language, Tr(T::SystemTitle), Tr(T::SystemSubtitle));
         static constexpr std::array<ConfigurationIcon, SystemPage::RowCount> icons{
             ConfigurationIcon::User, ConfigurationIcon::Language, ConfigurationIcon::Controller,
-            ConfigurationIcon::Region, ConfigurationIcon::Cache};
+            ConfigurationIcon::Region, ConfigurationIcon::Mods, ConfigurationIcon::Cache};
         for (size_t i = 0; i < SystemPage::RowCount; ++i) {
             const auto row = static_cast<SystemPage::Row>(i);
             const float y = L::RowTop + static_cast<float>(i) * L::RowStride;
             const bool active = i == page.selected;
             RowFrame(L::RowX, y, L::RowWidth, L::RowHeight, active, icons[i]);
-            Text(Tr(SystemRowTitle(row)), L::RowX + 72, y + 7, 20, 0xf4f7fa, 420, 30, true);
-            Text(Tr(SystemRowHint(row)), L::RowX + 72, y + 36, 15, 0xb5c2d0, 440, 24);
+            Text(Tr(SystemRowTitle(row)), L::RowX + 72, y + 4, 20, 0xf4f7fa, 420, 30, true);
+            Text(Tr(SystemRowHint(row)), L::RowX + 72, y + 31, 15, 0xb5c2d0, 440, 24);
             const unsigned accent = active ? 0x77e3bd : 0x9ba9ba;
             const float right = L::RowX + L::RowWidth - 28;
             const float middle = y + L::RowHeight / 2;
             const bool choice = row == SystemPage::InterfaceLanguage || row == SystemPage::GameLanguage ||
-                                row == SystemPage::Region;
+                                row == SystemPage::Region || row == SystemPage::AdultMods;
             if (choice) {
                 // "< value >": arrows say left/right changes it, as in the controller panel.
                 Chevron(L::RowX + 486, middle, accent, true);
@@ -475,7 +476,7 @@ private:
             }
             const auto value = SystemRowValue(page, row);
             if (!value.empty())
-                Text(value, L::RowX + 500, y + 18, 19, active ? 0xf4f7fa : 0xd6e0ea,
+                Text(value, L::RowX + 500, y + (L::RowHeight - 30) / 2, 19, active ? 0xf4f7fa : 0xd6e0ea,
                      right - 22 - (L::RowX + 500), 30, active, false, false, true);
         }
         if (!page.notice.empty()) Text(page.notice, L::RowX + 4, L::Notice, 16, 0x77e3bd, L::RowWidth - 20, 28);
@@ -605,6 +606,31 @@ private:
             ControlPrompt(Navigation::Back, Tr(T::Back), x + L::Width - L::Margin - 150, footer, 120);
             return;
         }
+        if (view.page.page == GameOption::Mods && view.mods && view.mods_page) {
+            using L = Mods::ModsLayout;
+            using Button = Mods::ModsPrompt::Button;
+            constexpr float x = (1280 - L::Width) / 2, y = 30;
+            Mods::DrawModsPanel(*this, {*view.mods, *view.mods_page, game.name, view.notice}, x, y);
+            const float footer = y + L::Footer;
+            float next = x + L::Margin;
+            for (const auto& prompt : Mods::ModsPrompts(*view.mods, *view.mods_page)) {
+                const auto label = Tr(prompt.label);
+                // B, the way out, always sits at the right end.
+                if (prompt.button == Button::B) {
+                    ControlPrompt(Navigation::Back, label, x + L::Width - L::Margin - 170, footer, 140);
+                    continue;
+                }
+                const Navigation action = prompt.button == Button::A      ? Navigation::Play
+                                          : prompt.button == Button::X    ? Navigation::AddFolder
+                                          : prompt.button == Button::Y    ? Navigation::Refresh
+                                          : prompt.button == Button::Menu ? Navigation::Options
+                                                                          : Navigation::Tabs;
+                const float width = MeasureText(label, 19, false) + 8;
+                ControlPrompt(action, label, next, footer, width);
+                next += width + (action == Navigation::Tabs ? 120 : 64);
+            }
+            return;
+        }
         using L = GameOptionsLayout;
         Round(L::PanelX, L::PanelY, L::PanelWidth, L::PanelHeight, 24, Palette::Panel);
         PageHeader(L::RowX, 99, UiIcon::Game, Tr(T::GameOptionsTitle),
@@ -700,7 +726,72 @@ private:
                  y + size * 0.58f, 16, 0x9ba9ba, size * 0.85f);
         }
     }
+    /// The mods store's pictures (UiPainter::Picture): decoded once, at most 640 px wide.
+    bool Picture(const std::filesystem::path& file, float x, float y, float w, float h) override {
+        if (file.empty() || w < 1 || h < 1) return false;
+        auto found = pictures.find(file.native());
+        if (found == pictures.end()) {
+            if (pictures.size() >= MaxPictures) pictures.clear();
+            found = pictures.emplace(file.native(), DecodePicture(file, 640)).first;
+        }
+        const auto& bitmap = found->second;
+        if (!bitmap) return false;
+        // Cropped around the middle to the rectangle's shape.
+        const auto size = bitmap->GetSize();
+        float crop_w = size.width, crop_h = size.height;
+        if (crop_w / crop_h > w / h) crop_w = crop_h * w / h;
+        else crop_h = crop_w * h / w;
+        const auto source = D2D1::RectF((size.width - crop_w) / 2, (size.height - crop_h) / 2,
+                                        (size.width + crop_w) / 2, (size.height + crop_h) / 2);
+        auto& mask = picture_masks[(static_cast<unsigned>(w) << 16) | static_cast<unsigned>(h)];
+        if (!mask) {
+            ComPtr<ID2D1Factory> factory;
+            target->GetFactory(&factory);
+            if (FAILED(factory->CreateRoundedRectangleGeometry(
+                    D2D1::RoundedRect(D2D1::RectF(0, 0, w, h), 12, 12), &mask)))
+                return false;
+        }
+        D2D1_LAYER_PARAMETERS1 layer{};
+        layer.contentBounds = D2D1::RectF(x, y, x + w, y + h);
+        layer.geometricMask = mask.Get();
+        layer.maskAntialiasMode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
+        layer.maskTransform = D2D1::Matrix3x2F::Translation(x, y);
+        layer.opacity = 1;
+        target->PushLayer(&layer, nullptr);
+        target->DrawBitmap(bitmap.Get(), D2D1::RectF(x, y, x + w, y + h), 1, D2D1_INTERPOLATION_MODE_LINEAR,
+                           &source);
+        target->PopLayer();
+        return true;
+    }
+    ComPtr<ID2D1Bitmap1> DecodePicture(const std::filesystem::path& file, unsigned max_width) {
+        ComPtr<ID2D1Bitmap1> bitmap;
+        try {
+            ComPtr<IWICBitmapDecoder> decoder;
+            winrt::check_hresult(wic->CreateDecoderFromFilename(file.c_str(), nullptr, GENERIC_READ,
+                WICDecodeMetadataCacheOnDemand, &decoder));
+            ComPtr<IWICBitmapFrameDecode> frame;
+            winrt::check_hresult(decoder->GetFrame(0, &frame));
+            UINT w, h;
+            winrt::check_hresult(frame->GetSize(&w, &h));
+            if (w == 0 || h == 0 || w > 8192 || h > 8192) winrt::throw_hresult(E_INVALIDARG);
+            const UINT width = std::min(w, max_width);
+            const UINT height = std::max(1U, static_cast<UINT>(static_cast<unsigned long long>(h) * width / w));
+            ComPtr<IWICBitmapScaler> scaler;
+            winrt::check_hresult(wic->CreateBitmapScaler(&scaler));
+            winrt::check_hresult(scaler->Initialize(frame.Get(), width, height, WICBitmapInterpolationModeFant));
+            ComPtr<IWICFormatConverter> converter;
+            winrt::check_hresult(wic->CreateFormatConverter(&converter));
+            winrt::check_hresult(converter->Initialize(scaler.Get(), GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom));
+            winrt::check_hresult(target->CreateBitmapFromWicBitmap(converter.Get(), nullptr, &bitmap));
+        } catch (const winrt::hresult_error&) {
+            bitmap.Reset(); // Not a picture WIC reads: the placeholder stays.
+        }
+        return bitmap;
+    }
     static constexpr size_t MaxCovers = 32;
+    /// Two screens of the grid and a mod's gallery: 640 px wide at most, ~0.6 MiB each.
+    static constexpr size_t MaxPictures = 48;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain1> swapchain;
     ComPtr<ID2D1DeviceContext> target;
@@ -713,6 +804,8 @@ private:
     std::unordered_map<unsigned, ComPtr<ID2D1RoundedRectangleGeometry>> masks;
     ComPtr<IDWriteTextLayout> version_layout;
     std::unordered_map<std::string, ComPtr<ID2D1Bitmap1>> covers;
+    std::unordered_map<std::wstring, ComPtr<ID2D1Bitmap1>> pictures;
+    std::unordered_map<unsigned, ComPtr<ID2D1RoundedRectangleGeometry>> picture_masks;
 };
 LibraryCanvas::LibraryCanvas(void* window, unsigned width, unsigned height)
     : impl{std::make_unique<Impl>(window, width, height)} {}

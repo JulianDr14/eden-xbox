@@ -93,8 +93,11 @@ int main() {
 
     // The game options list opens its option's page and closes with Back.
     GameOptionsPage options{true, 7};
+    HandleGameOptionsInput(options, GameOptionsInput::Up);
+    check(options.selected == GameOptions().size() - 1); // the list wraps
     HandleGameOptionsInput(options, GameOptionsInput::Down);
-    check(options.selected == 0); // a single option wraps onto itself
+    HandleGameOptionsInput(options, GameOptionsInput::Down);
+    check(GameOptions()[options.selected] == GameOption::Cheats); // Mods, then Cheats
     HandleGameOptionsInput(options, GameOptionsInput::Confirm);
     check(options.page == GameOption::Cheats && options.open);
     HandleGameOptionsInput(options, GameOptionsInput::Back);

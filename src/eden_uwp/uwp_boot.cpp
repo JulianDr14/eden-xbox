@@ -89,6 +89,7 @@
 #include "eden_uwp/uwp_library.h"
 #include "eden_uwp/uwp_rom_storage.h"
 #include "eden_uwp/content/content_service.h"
+#include "eden_uwp/mods/mod_settings.h"
 #include "eden_uwp/uwp_file_manager.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/uwp_software_keyboard.h"
@@ -514,6 +515,10 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     }
     if (content.managed)
         system.GetContentProviderUnion().SetApplicationContentOverride(content.application, &manual_provider);
+    // The player's mod choices (which are off, and their order) before the loader reads any mod,
+    // and nothing left of an install the app closed during.
+    Mods::ClearScratch(Mods::DefaultModPaths());
+    Mods::ApplyModChoices(Mods::DefaultModPaths());
     ConsumeStorageReadFailure();
     WriteDiag("step: filesystem factories created");
 
@@ -837,9 +842,11 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                         void(system.GetAppLoader().ReadTitle(title));
                         game_title = Utf8ToUtf16(title);
                     }
-                    if (program_id != 0)
+                    if (program_id != 0) {
                         menu->SetCheatsOn(cheats_on(Cheats::LoadCatalog(
                             Cheats::TitleLoadDirectory(program_id), cheat_game.build_id)));
+                        menu->SetModsOn(Mods::ActiveMods(Mods::DefaultModPaths(), program_id));
+                    }
                     try {
                         menu_surface.emplace();
                     } catch (const winrt::hresult_error& e) {

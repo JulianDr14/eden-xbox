@@ -7,6 +7,7 @@ namespace EdenXbox {
 /// The vector icons UiPainter::Icon draws.
 enum class UiIcon {
     Folder, Controller, Key, Firmware, Remove, Settings, User, Language, Region, Cache, Cheats, Game,
+    Mods, Archive,
 };
 
 } // namespace EdenXbox

@@ -24,12 +24,17 @@
 #include "eden_uwp/game_library.h"
 #include "eden_uwp/game_options_page.h"
 #include "eden_uwp/content/content_view.h"
+#include "eden_uwp/mods/mod_session.h"
+#include "eden_uwp/mods/mod_web.h"
+#include "eden_uwp/mods/mods_page.h"
+#include "eden_uwp/mods/mods_view.h"
 #include "eden_uwp/library_cache.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/system_page.h"
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/uwp_library_metadata.h"
 #include "eden_uwp/uwp_system_settings.h"
+#include <fmt/format.h>
 #include "common/logging.h"
 #include "core/file_sys/common_funcs.h"
 #include "core/core.h"
@@ -73,6 +78,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     bool missing_content = false;
     std::optional<Cheats::CheatSession> cheat_session;
     Cheats::CheatsPage cheats_page;
+    std::unique_ptr<Mods::ModSession> mod_session;
+    Mods::ModsPage mods_page;
     std::wstring options_notice;
     system_page.settings = LoadSystemSettings();
     system_page.locale = DetectSystemLocale();
@@ -435,12 +442,16 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             }
             break;
         }
-        case SystemPageEffect::ClearCache:
+        case SystemPageEffect::ClearCache: {
             reload_metadata();
             canvas->InvalidateCovers();
+            // The mods store's pictures, index and unfinished downloads go with it.
+            std::error_code ec;
+            std::filesystem::remove_all(Mods::Web::CacheFolder(), ec);
             system_page.notice = Tr(cache.Clear() ? T::LibraryCacheCleared : T::SystemSaveFailed);
             system_notice_until = now + std::chrono::seconds{3};
             break;
+        }
         case SystemPageEffect::None:
         case SystemPageEffect::EditName:
             break;
@@ -492,7 +503,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             pad = next;
             next_pad_check = now + std::chrono::milliseconds{500};
         }
-        const unsigned context = game_options.open ? (cheat_session ? 8 : 7) :
+        const unsigned context = game_options.open ? (cheat_session ? 8 : mod_session ? 9 : 7) :
             system_page.name_editor ? 6 : system_page.open ? 5 :
             panel.keyboard.open ? 3 : panel.expanded ? 2 : settings ? 1 : configuration.open ? 4 : 0;
         if (context != navigation_context) {
@@ -583,6 +594,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                     auto folder = picker.GetResults();
                     if (folder && picker_kind == 0) start_scan(folder);
                     else if (folder && picker_kind == 3 && content_session) content_session->AuthorizeFolder(folder);
+                    else if (folder && picker_kind == 4 && mod_session) mod_session->AddFolder(folder);
+                    else if (picker_kind >= 3) {} // A page's folder whose page closed meanwhile.
                     else if (folder) {
                         configuration.busy = true;
                         configuration.notice.clear();
@@ -681,6 +694,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             if (!content_session && game_options.game >= scan.entries.size()) {
                 game_options = {};
                 cheat_session.reset();
+                mod_session.reset();
             }
             if (cheat_session && cheat_session->Poll()) {
                 Cheats::ClampCheatsPage(cheats_page, cheat_session->Catalog(), Cheats::CheatsLayout::VisibleRows);
@@ -715,6 +729,120 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                         winrt::Windows::Storage::Pickers::FolderPicker folder_picker;
                         folder_picker.SuggestedStartLocation(winrt::Windows::Storage::Pickers::PickerLocationId::ComputerFolder);
                         folder_picker.FileTypeFilter().Append(L"*"); picker_kind = 3;
+                        picker = folder_picker.PickSingleFolderAsync();
+                    } catch (...) { options_notice = Tr(T::PickerOpenFailed); }
+                }
+                dirty |= actions != 0;
+            } else if (mod_session) {
+                using Kind = Mods::ModsCommand::Kind;
+                using Mods::ModJob;
+                const ModJob finished = mod_session->Poll();
+                if (finished != ModJob::None) {
+                    const auto& result = mod_session->View();
+                    const bool online = result.origin.kind == Mods::SourceKind::GameBanana ||
+                                        result.origin.kind == Mods::SourceKind::Cnx;
+                    if (result.error != Mods::ModError::None) notify(Mods::ErrorText(result.error));
+                    if (finished == ModJob::Reading && result.error == Mods::ModError::None)
+                        Mods::ShowVariants(mods_page, result.candidates.size());
+                    // A download with several mods in it: the player picks, wherever they are.
+                    if (finished == ModJob::Installing && result.error == Mods::ModError::None &&
+                        result.installed == 0 && !result.candidates.empty())
+                        Mods::ShowVariants(mods_page, result.candidates.size());
+                    if (finished == ModJob::Installing && result.installed > 0) {
+                        // From a folder, back to the list where the new mods sit on top; from the
+                        // store, the player stays where they browse.
+                        if (!online) Mods::ShowInstalled(mods_page);
+                        if (result.error == Mods::ModError::None) {
+                            options_notice = result.updated ? std::wstring{Tr(T::ModsUpdated)}
+                                                            : I18n::Plural(T::ModsInstalledOne, T::ModsInstalledOther,
+                                                                           result.installed);
+                            options_notice_until = now + std::chrono::seconds{4};
+                        }
+                    }
+                    if (finished == ModJob::Browsing) mods_page.selected = mods_page.first = 0;
+                    if (mods_page.tab != Mods::ModsTab::Explore)
+                        Mods::ClampModsList(mods_page, mods_page.tab == Mods::ModsTab::Installed ? result.mods.size()
+                                                                                                : result.files.size());
+                    dirty = true;
+                }
+                if (mod_session->Tick()) dirty = true;
+                const auto failed = mod_session->TakeNotice();
+                if (failed) notify(Mods::ErrorText(*failed));
+                // The log keeps lines in memory until an error: a job's end or a failure writes
+                // them out, so the file pulled from the console tells what happened.
+                if (finished != ModJob::None || failed) Common::Log::Stop();
+                if (mod_session->Busy()) dirty = true; // The progress moves.
+                const std::wstring mods_game = scan.entries[game_options.game].name;
+                const auto send = [&](unsigned bits, Mods::ModsInput input) {
+                    if (!(actions & bits) || !mod_session) return;
+                    const auto counts = Mods::CountsFor(*mod_session, mods_page, mods_game);
+                    const auto command = Mods::HandleModsInput(mods_page, counts, input);
+                    switch (command.kind) {
+                    case Kind::Toggle:
+                        if (!mod_session->Toggle(command.index)) notify(T::ModsSaveFailed);
+                        break;
+                    case Kind::Move:
+                        if (!mod_session->Move(command.index, command.to)) notify(T::ModsSaveFailed);
+                        break;
+                    case Kind::Remove: mod_session->Remove(command.index); break;
+                    case Kind::Open: options_notice.clear(); mod_session->Open(command.index); break;
+                    case Kind::Up: mod_session->Up(); break;
+                    case Kind::Install:
+                        mod_session->Install(mods_page.chosen);
+                        mods_page.screen = Mods::ModsScreen::List;
+                        break;
+                    case Kind::Dismiss: mod_session->Dismiss(); break;
+                    case Kind::Cancel: mod_session->Cancel(); break;
+                    case Kind::Store: mod_session->OpenStore(); break;
+                    case Kind::Retry: mod_session->RetryStore(); break;
+                    case Kind::Want: mod_session->Want(command.index); break;
+                    case Kind::Detail: mod_session->OpenDetail(command.index); break;
+                    case Kind::Update: mod_session->OpenUpdate(command.index); break;
+                    case Kind::CloseDetail: mod_session->CloseDetail(); break;
+                    case Kind::Download:
+                        if (mod_session->Download(command.index)) {
+                            const auto& detail = mod_session->Store().detail;
+                            if (detail && command.index < detail->files.size()) {
+                                options_notice = I18n::Format(T::ModsDownloadQueued,
+                                                              {Wide(detail->files[command.index].name)});
+                                options_notice_until = now + std::chrono::seconds{4};
+                            }
+                        } else {
+                            notify(T::ModsDownloadRefused);
+                        }
+                        break;
+                    case Kind::Sort: mod_session->CycleSort(); break;
+                    case Kind::Search: mod_session->Search(I18n::ToUtf8(command.text)); break;
+                    case Kind::Source: mod_session->SwitchSource(); break;
+                    case Kind::FindGame: mod_session->FindGame(I18n::ToUtf8(command.text)); break;
+                    case Kind::PickGame: mod_session->PickGame(command.index); break;
+                    case Kind::CancelDownloads: mod_session->CancelDownloads(); break;
+                    case Kind::Close:
+                        mod_session.reset();
+                        game_options.page.reset();
+                        break;
+                    case Kind::None:
+                    case Kind::Moved:
+                        break;
+                    }
+                };
+                send(Up, Mods::ModsInput::Up);
+                send(Down, Mods::ModsInput::Down);
+                send(Left, Mods::ModsInput::Left);
+                send(Right, Mods::ModsInput::Right);
+                send(PreviousTab, Mods::ModsInput::PreviousTab);
+                send(NextTab, Mods::ModsInput::NextTab);
+                send(Play, Mods::ModsInput::Confirm);
+                send(Swap | AddFolder, Mods::ModsInput::Alternate);
+                send(Refresh, Mods::ModsInput::Menu);
+                send(Options, Mods::ModsInput::Start);
+                send(Quit, Mods::ModsInput::Back);
+                if (mod_session && mod_session->TakeFolderRequest() && !picker) {
+                    try {
+                        winrt::Windows::Storage::Pickers::FolderPicker folder_picker;
+                        folder_picker.SuggestedStartLocation(winrt::Windows::Storage::Pickers::PickerLocationId::ComputerFolder);
+                        folder_picker.FileTypeFilter().Append(L"*");
+                        picker_kind = 4;
                         picker = folder_picker.PickSingleFolderAsync();
                     } catch (...) { options_notice = Tr(T::PickerOpenFailed); }
                 }
@@ -770,6 +898,29 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                             *game_options.page == GameOption::Updates ? Content::Kind::Update : Content::Kind::Dlc,
                             std::move(bases), std::move(metadata_worker));
                         metadata = {};
+                    }
+                }
+                if (game_options.page == GameOption::Mods) {
+                    // Mods are kept per title id; the build id (of the version that boots, update
+                    // included) tells which mods' patches fit it.
+                    const auto& game = scan.entries[game_options.game];
+                    if (game.title_loaded && game.program_id == 0) {
+                        notify(T::ModsHomebrew);
+                        game_options.page.reset();
+                    } else if (!game.title_loaded) {
+                        notify(T::CheatsUnavailable);
+                        game_options.page.reset();
+                    } else {
+                        std::string build_id;
+                        if (std::any_of(game.build_id.begin(), game.build_id.end(), [](std::uint8_t b) { return b != 0; }))
+                            for (const auto b : game.build_id) build_id += fmt::format("{:02X}", b);
+                        // The store and the installs log what went wrong; the log opens with the page.
+                        if (!logging_ready) { Common::Log::Initialize(); logging_ready = true; }
+                        mod_session = std::make_unique<Mods::ModSession>(game.program_id, std::move(build_id),
+                                                                         game.launch_path, I18n::ToUtf8(game.name),
+                                                                         system_page.settings.show_adult_mods);
+                        mods_page = {};
+                        options_notice.clear();
                     }
                 }
                 if (game_options.page == GameOption::Cheats) {
@@ -1090,7 +1241,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         if (dirty) {
             const GameOptionsView options_view{
                 game_options, game_options.open && game_options.game < scan.entries.size() ? &scan.entries[game_options.game] : nullptr,
-                cheat_session ? &*cheat_session : nullptr, cheats_page, options_notice, content_session.get()};
+                cheat_session ? &*cheat_session : nullptr, cheats_page, options_notice, content_session.get(),
+                mod_session.get(), &mods_page};
             canvas->Draw({scan, selected, loading, settings, setting_row, options, notice, panel,
                           configuration, system_page, options_view, missing_content});
             dirty = false;

@@ -29,6 +29,7 @@ struct SystemSettings {
     std::optional<Settings::Language> game_language;  ///< nullopt follows the system.
     std::optional<Settings::Region> region;           ///< nullopt follows the system.
     std::wstring user_name;                           ///< Empty keeps the default name.
+    bool show_adult_mods{};                           ///< The mods store lists mods rated for adults.
 
     bool operator==(const SystemSettings&) const = default;
 };

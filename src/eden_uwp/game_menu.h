@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -110,7 +111,7 @@ struct GameMenuRow {
 /// The menu's items and cursor, with texts in the interface language.
 class GameMenu {
 public:
-    enum Item : std::size_t { Continue, Cheats, Style, FaceButtons, Deadzone, FullScreen, Library };
+    enum Item : std::size_t { Continue, Cheats, Mods, Style, FaceButtons, Deadzone, FullScreen, Library };
 
     /// `cheats`: the game can have cheats (it has a title id), so the menu offers them.
     explicit GameMenu(GameMenuSettings settings_, bool cheats = false) : settings{settings_} {
@@ -123,6 +124,16 @@ public:
 
     /// How many cheats are on, shown on the Cheats row.
     void SetCheatsOn(std::size_t count) { cheats_on = count; }
+
+    /// How many mods are on: with any, a row says so. It only informs; mods change in the library,
+    /// and a game reads them when it boots.
+    void SetModsOn(std::size_t count) {
+        mods_on = count;
+        const auto found = std::find(items.begin(), items.end(), Mods);
+        if (count == 0 || found != items.end()) return;
+        const auto after = std::find(items.begin(), items.end(), Cheats);
+        items.insert(after != items.end() ? after + 1 : items.begin() + 1, Mods);
+    }
 
     GameMenuResult Apply(MenuAction action) {
         switch (action) {
@@ -171,6 +182,9 @@ private:
         case Cheats:
             return {Tr(Text::CheatsTitle), I18n::Plural(Text::CheatsOnOne, Text::CheatsOnOther, cheats_on),
                     GameMenuRow::Kind::Page};
+        case Mods:
+            return {Tr(Text::ModsTitle), I18n::Plural(Text::ModsActiveOne, Text::ModsActiveOther, mods_on) +
+                                             L" · " + Tr(Text::MenuModsAtBoot)};
         case Style:
             return {Tr(Text::ControllerSeenAs), Tr(ControllerStyleText(settings.style)), Choice};
         case FaceButtons:
@@ -194,6 +208,8 @@ private:
             return action == MenuAction::Confirm ? GameMenuResult::Resume : GameMenuResult::None;
         case Cheats:
             return action == MenuAction::Confirm ? GameMenuResult::Cheats : GameMenuResult::None;
+        case Mods:
+            return GameMenuResult::None;
         case Library:
             return action == MenuAction::Confirm ? GameMenuResult::Library : GameMenuResult::None;
         case Style:
@@ -221,5 +237,6 @@ private:
     std::vector<Item> items;
     std::size_t selected{};
     std::size_t cheats_on{};
+    std::size_t mods_on{};
 };
 } // namespace EdenXbox

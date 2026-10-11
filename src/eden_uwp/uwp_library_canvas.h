@@ -8,6 +8,8 @@
 #include "eden_uwp/cheats/cheats_page.h"
 #include "eden_uwp/game_library.h"
 #include "eden_uwp/game_options_page.h"
+#include "eden_uwp/mods/mod_session.h"
+#include "eden_uwp/mods/mods_page.h"
 #include "eden_uwp/system_page.h"
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/uwp_controllers.h"
@@ -21,6 +23,8 @@ struct GameOptionsView {
     const Cheats::CheatsPage& cheats_page;
     std::wstring_view notice;
     const Content::ContentSession* content{};
+    const Mods::ModSession* mods{};      ///< The open mods page's.
+    const Mods::ModsPage* mods_page{};
 };
 /// Everything one frame of the library shows.
 struct LibraryView {

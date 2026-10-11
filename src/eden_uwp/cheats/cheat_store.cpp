@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eden_uwp/cheats/cheat_store.h"
 
+#include <charconv>
+
 #include <fmt/format.h>
 
 #include "common/fs/path_util.h"
@@ -9,6 +11,7 @@
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/memory/dmnt_cheat_vm.h"
 #include "eden_uwp/atomic_file.h"
+#include "eden_uwp/mods/mod_settings.h"
 
 namespace EdenXbox::Cheats {
 namespace {
@@ -47,8 +50,13 @@ std::filesystem::path TitleLoadDirectory(std::uint64_t title_id) {
 CheatCatalog LoadCatalog(const std::filesystem::path& title_dir, const BuildId& build_id) {
     FileSys::RealVfsFilesystem filesystem;
     const auto dir = filesystem.OpenDirectory(ToUtf8(title_dir), FileSys::OpenMode::Read);
-    // The frontend never disables mod folders, as the loader then sees them all too.
-    auto files = FileSys::ReadCheatFiles(dir, build_id, {});
+    // Cheats of mods the player turned off do not load (Mods::ApplyModChoices), so they are not
+    // listed either. The folder is named after the title id.
+    const auto folder = title_dir.filename().string();
+    std::uint64_t title_id = 0;
+    std::from_chars(folder.data(), folder.data() + folder.size(), title_id, 16);
+    const auto disabled = Mods::DisabledFolders(Mods::DefaultModPaths(), title_id);
+    auto files = FileSys::ReadCheatFiles(dir, build_id, disabled);
     std::vector<CheatSet> sets;
     sets.reserve(files.size());
     for (auto& file : files) {

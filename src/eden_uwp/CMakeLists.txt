@@ -78,6 +78,44 @@ add_executable(eden-uwp WIN32
     cheats/cheats_page.h
     cheats/cheats_view.cpp
     cheats/cheats_view.h
+    # Per-game mods: archives (zip, 7z, rar) read through libarchive, installed into load/, with
+    # their order, conflicts and on/off state handed to the loader at boot; and the store
+    # (GameBanana, the CNX index) that downloads them, resuming and checking each file.
+    mods/archive_volumes.h
+    mods/cnx_index.cpp
+    mods/cnx_index.h
+    mods/game_romfs.cpp
+    mods/game_romfs.h
+    mods/gamebanana.cpp
+    mods/gamebanana.h
+    mods/mod_analysis.h
+    mods/mod_archive.cpp
+    mods/mod_archive.h
+    mods/mod_downloads.cpp
+    mods/mod_downloads.h
+    mods/mod_inspect.cpp
+    mods/mod_inspect.h
+    mods/mod_installer.cpp
+    mods/mod_installer.h
+    mods/mod_layout.cpp
+    mods/mod_layout.h
+    mods/mod_manifest.cpp
+    mods/mod_manifest.h
+    mods/mod_model.h
+    mods/mod_session.cpp
+    mods/mod_session.h
+    mods/mod_settings.cpp
+    mods/mod_settings.h
+    mods/mod_store.cpp
+    mods/mod_store.h
+    mods/mod_thumbnails.cpp
+    mods/mod_thumbnails.h
+    mods/mod_web.cpp
+    mods/mod_web.h
+    mods/mods_page.h
+    mods/mods_view.cpp
+    mods/mods_view.h
+    mods/work_queue.h
 )
 
 # core transitively pulls common/video_core/audio_core/hid_core/dynarmic etc.; name the ones we touch
@@ -85,7 +123,8 @@ add_executable(eden-uwp WIN32
 # core's NS query service); input_common the virtual_gamepad engine that uwp_input.cpp feeds;
 # dynarmic the JIT's committed code size for the diag's memory split.
 target_link_libraries(eden-uwp PRIVATE common core video_core audio_core frontend_common hid_core
-                                        input_common SDL3::SDL3 dynarmic::dynarmic)
+                                        input_common SDL3::SDL3 dynarmic::dynarmic LibArchive::Read
+                                        OpenSSL::Crypto)
 
 # WinRT (CoreApplication, IFrameworkView, ApplicationData) comes from the Store umbrella import lib.
 target_link_libraries(eden-uwp PRIVATE WindowsApp.lib)

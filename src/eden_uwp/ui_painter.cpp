@@ -149,6 +149,19 @@ void UiPainter::Icon(UiIcon icon, float x, float y, unsigned color) {
         line(9, 22, 14, 13); line(14, 13, 18, 19); line(18, 19, 20, 16); line(20, 16, 24, 22);
         circle(21, 10, 2);
         break;
+    case UiIcon::Mods:
+        // Layers stacked over the game: what mods are to the loader.
+        line(16, 4, 28, 10); line(28, 10, 16, 16); line(16, 16, 4, 10); line(4, 10, 16, 4);
+        line(4, 16, 16, 22); line(16, 22, 28, 16);
+        line(4, 22, 16, 28); line(16, 28, 28, 22);
+        break;
+    case UiIcon::Archive:
+        // A box with a zip down its middle.
+        surface->DrawRoundedRectangle(D2D1::RoundedRect(
+            D2D1::RectF(x + 6, y + 3, x + 26, y + 29), 3, 3), brush.Get(), 2);
+        for (float p : {6.0f, 12.0f}) { line(14, p, 16, p); line(16, p + 3, 18, p + 3); }
+        surface->DrawRectangle(D2D1::RectF(x + 13, y + 18, x + 19, y + 25), brush.Get(), 2);
+        break;
     }
 }
 

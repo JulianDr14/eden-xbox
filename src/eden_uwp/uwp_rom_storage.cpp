@@ -362,6 +362,15 @@ std::uint64_t StorageFileStamp(std::string_view path) {
     } catch (...) { return 0; }
 }
 std::vector<StorageBrowserEntry> BrowseStorageFolder(std::string_view path, std::stop_token stop) {
+    return BrowseStorageFolder(path, stop, [](std::string_view name) {
+        auto ext = std::filesystem::u8path(name).extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+        return ext == ".nsp" || ext == ".xci" || ext == ".nca" || ext == ".nsz" || ext == ".xcz";
+    });
+}
+
+std::vector<StorageBrowserEntry> BrowseStorageFolder(std::string_view path, std::stop_token stop,
+                                                     const std::function<bool(std::string_view)>& keep) {
     std::vector<StorageBrowserEntry> result;
     const auto parsed = ParseStoragePath(path);
     if (!parsed) return result;
@@ -374,11 +383,7 @@ std::vector<StorageBrowserEntry> BrowseStorageFolder(std::string_view path, std:
             const auto child = parsed->relative.empty() ? name : parsed->relative + "/" + name;
             if (!ValidStorageRelative(child)) continue;
             const bool directory = item.IsOfType(StorageItemTypes::Folder);
-            if (!directory) {
-                auto ext = std::filesystem::u8path(name).extension().string();
-                std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
-                if (ext != ".nsp" && ext != ".xci" && ext != ".nca" && ext != ".nsz" && ext != ".xcz") continue;
-            }
+            if (!directory && !keep(name)) continue;
             result.push_back({MakeStoragePath(parsed->token, child), std::wstring{item.Name()}, directory});
         }
         if (items.Size() < PageSize) break;

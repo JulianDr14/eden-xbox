@@ -21,6 +21,9 @@ FileSys::VirtualFilesystem MakeUwpFilesystem();
 struct StorageBrowserEntry { std::string path; std::wstring name; bool folder{}; std::uint64_t size{}; };
 std::vector<StorageBrowserEntry> ContentFolderSources();
 std::vector<StorageBrowserEntry> BrowseStorageFolder(std::string_view path, std::stop_token stop);
+/// The folders in `path`, and the files `keep` accepts (by their UTF-8 name).
+std::vector<StorageBrowserEntry> BrowseStorageFolder(std::string_view path, std::stop_token stop,
+                                                     const std::function<bool(std::string_view)>& keep);
 std::uint64_t StorageFileStamp(std::string_view path);
 bool ConsumeStorageReadFailure();
 // Bounded preflight, run on an MTA worker before starting the guest. Reports

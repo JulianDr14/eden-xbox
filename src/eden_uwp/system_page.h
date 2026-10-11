@@ -17,7 +17,7 @@
 namespace EdenXbox {
 
 struct SystemPage {
-    enum Row : std::size_t { UserName, InterfaceLanguage, GameLanguage, Region, ClearCache, RowCount };
+    enum Row : std::size_t { UserName, InterfaceLanguage, GameLanguage, Region, AdultMods, ClearCache, RowCount };
 
     bool open{};
     std::size_t selected{};
@@ -85,6 +85,9 @@ inline SystemPageEffect HandleSystemInput(SystemPage& page, SystemInput input) {
     case Row::Region:
         settings.region = StepChoice(settings.region, SelectableRegions(), back);
         return SystemPageEffect::Changed;
+    case Row::AdultMods:
+        settings.show_adult_mods = !settings.show_adult_mods;
+        return SystemPageEffect::Changed;
     case Row::ClearCache:
         return input == SystemInput::Confirm ? SystemPageEffect::ClearCache : SystemPageEffect::None;
     case Row::RowCount:
@@ -118,6 +121,7 @@ inline I18n::Text SystemRowTitle(SystemPage::Row row) {
     case SystemPage::InterfaceLanguage: return Text::InterfaceLanguage;
     case SystemPage::GameLanguage:      return Text::GameLanguage;
     case SystemPage::Region:            return Text::ConsoleRegion;
+    case SystemPage::AdultMods:         return Text::ModsAdult;
     default:                            return Text::ClearLibraryCache;
     }
 }
@@ -129,6 +133,7 @@ inline I18n::Text SystemRowHint(SystemPage::Row row) {
     case SystemPage::InterfaceLanguage: return Text::InterfaceLanguageHint;
     case SystemPage::GameLanguage:      return Text::GameLanguageHint;
     case SystemPage::Region:            return Text::ConsoleRegionHint;
+    case SystemPage::AdultMods:         return Text::ModsAdultHint;
     default:                            return Text::ClearLibraryCacheHint;
     }
 }
@@ -153,6 +158,8 @@ inline std::wstring SystemRowValue(const SystemPage& page, SystemPage::Row row) 
     case SystemPage::Region:
         if (settings.region) return std::wstring{I18n::Tr(RegionText(*settings.region))};
         return automatic(I18n::Tr(RegionText(RegionForLocale(page.locale))));
+    case SystemPage::AdultMods:
+        return std::wstring{I18n::Tr(settings.show_adult_mods ? Text::ModsAdultShown : Text::ModsAdultHidden)};
     default:
         return {};
     }
@@ -161,7 +168,7 @@ inline std::wstring SystemRowValue(const SystemPage& page, SystemPage::Row row) 
 /// Geometry shared by the canvas and pointer hit tests (1280x720 layout units).
 struct SystemPageLayout {
     static constexpr float PanelX = 140, PanelY = 72, PanelWidth = 1000, PanelHeight = 612;
-    static constexpr float RowX = 180, RowWidth = 920, RowTop = 214, RowStride = 76, RowHeight = 66;
+    static constexpr float RowX = 180, RowWidth = 920, RowTop = 196, RowStride = 64, RowHeight = 58;
     static constexpr float Notice = 594, Footer = 630;
     /// The name editor's keyboard panel (text_entry_panel.h), centered on the screen.
     static constexpr float EditorX = (1280 - TextEntryPanelLayout::Width) / 2;

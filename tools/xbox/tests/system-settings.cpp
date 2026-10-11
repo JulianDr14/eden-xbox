@@ -85,6 +85,11 @@ int main() {
     page.selected = SystemPage::Region;
     check(HandleSystemInput(page, SystemInput::Confirm) == SystemPageEffect::Changed && page.settings.region);
     check(HandleSystemInput(page, SystemInput::Down) == SystemPageEffect::None &&
+          page.selected == SystemPage::AdultMods);
+    check(SystemRowValue(page, SystemPage::AdultMods) == L"Ocultos");
+    check(HandleSystemInput(page, SystemInput::Right) == SystemPageEffect::Changed && page.settings.show_adult_mods);
+    check(SystemRowValue(page, SystemPage::AdultMods) == L"Se muestran");
+    check(HandleSystemInput(page, SystemInput::Down) == SystemPageEffect::None &&
           page.selected == SystemPage::ClearCache);
     check(HandleSystemInput(page, SystemInput::Confirm) == SystemPageEffect::ClearCache);
     check(HandleSystemInput(page, SystemInput::Down) == SystemPageEffect::None &&

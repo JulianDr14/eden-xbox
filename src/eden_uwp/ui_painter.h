@@ -8,6 +8,7 @@
 // look the same from one implementation.
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -37,6 +38,8 @@ inline constexpr unsigned Track = 0x2a3848;
 
 class UiPainter {
 public:
+    virtual ~UiPainter() = default;
+
     /// Draws on `target` from now on; texts are laid out by `write`.
     void Attach(ID2D1RenderTarget* target, IDWriteFactory* write);
     /// Text formats follow the interface language; call once per frame.
@@ -60,6 +63,12 @@ public:
     void ButtonGlyph(std::wstring_view letters, float x, float y, unsigned color);
     /// A button glyph and its label; returns the width it took.
     float Prompt(std::wstring_view letters, unsigned color, std::wstring_view label, float x, float y);
+    /// The picture in `file`, cropped to fill the rectangle, with rounded corners. False when this
+    /// surface draws no pictures or the file cannot be decoded: the caller draws a placeholder.
+    virtual bool Picture(const std::filesystem::path& file, float x, float y, float w, float h) {
+        (void)file, (void)x, (void)y, (void)w, (void)h;
+        return false;
+    }
 
 protected:
     IDWriteTextFormat* Format(float size, bool bold, bool wrap, bool center, bool trailing);

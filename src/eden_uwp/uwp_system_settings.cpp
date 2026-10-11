@@ -15,6 +15,7 @@ constexpr auto UiLanguageKey = L"system_ui_language";
 constexpr auto GameLanguageKey = L"system_game_language";
 constexpr auto RegionKey = L"system_region";
 constexpr auto UserNameKey = L"system_user_name";
+constexpr auto AdultModsKey = L"system_show_adult_mods";
 
 /// Saved as the enum's value, or -1 for "follow the system". A value that is not a selectable
 /// option (an older or newer build's) also falls back to the system.
@@ -46,6 +47,7 @@ SystemSettings LoadSystemSettings() {
         if (values.HasKey(UserNameKey))
             settings.user_name = SanitizeUserName(
                 winrt::unbox_value<winrt::hstring>(values.Lookup(UserNameKey)).c_str());
+        if (values.HasKey(AdultModsKey)) settings.show_adult_mods = winrt::unbox_value<bool>(values.Lookup(AdultModsKey));
     } catch (...) { /* Missing or invalid values keep following the system. */ }
     return settings;
 }
@@ -57,6 +59,7 @@ bool SaveSystemSettings(const SystemSettings& settings) {
         values.Insert(GameLanguageKey, winrt::box_value(ChoiceValue(settings.game_language)));
         values.Insert(RegionKey, winrt::box_value(ChoiceValue(settings.region)));
         values.Insert(UserNameKey, winrt::box_value(winrt::hstring{SanitizeUserName(settings.user_name)}));
+        values.Insert(AdultModsKey, winrt::box_value(settings.show_adult_mods));
         return true;
     } catch (...) { return false; }
 }

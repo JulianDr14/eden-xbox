@@ -17,11 +17,12 @@
 
 namespace EdenXbox {
 
-enum class GameOption : std::uint8_t { Cheats, Updates, Dlc };
+enum class GameOption : std::uint8_t { Cheats, Mods, Updates, Dlc };
 
 /// The options shown, in order.
 inline std::span<const GameOption> GameOptions() {
-    static constexpr std::array options{GameOption::Cheats, GameOption::Updates, GameOption::Dlc};
+    static constexpr std::array options{GameOption::Mods, GameOption::Cheats, GameOption::Updates,
+                                        GameOption::Dlc};
     return options;
 }
 
@@ -30,6 +31,7 @@ inline I18n::Text GameOptionTitle(GameOption option) {
     case GameOption::Updates: return I18n::Text::ContentUpdates;
     case GameOption::Dlc: return I18n::Text::ContentDlc;
     case GameOption::Cheats: return I18n::Text::CheatsTitle;
+    case GameOption::Mods: return I18n::Text::ModsTitle;
     }
     return I18n::Text::CheatsTitle;
 }
@@ -39,6 +41,7 @@ inline I18n::Text GameOptionHint(GameOption option) {
     case GameOption::Updates:
     case GameOption::Dlc: return I18n::Text::ContentCategoryHint;
     case GameOption::Cheats: return I18n::Text::CheatsHint;
+    case GameOption::Mods: return I18n::Text::ModsHint;
     }
     return I18n::Text::CheatsHint;
 }
@@ -48,6 +51,7 @@ inline UiIcon GameOptionIcon(GameOption option) {
     case GameOption::Updates:
     case GameOption::Dlc: return UiIcon::Folder;
     case GameOption::Cheats: return UiIcon::Cheats;
+    case GameOption::Mods: return UiIcon::Mods;
     }
     return UiIcon::Settings;
 }
