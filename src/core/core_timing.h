@@ -14,6 +14,8 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <span>
+#include <vector>
 
 #include <boost/heap/fibonacci_heap.hpp>
 
@@ -44,6 +46,32 @@ struct EventType {
 enum class UnscheduleEventType {
     Wait,
     NoWait,
+};
+
+// IDs are assigned by the owning subsystem when rebuilding its objects. Names are diagnostic
+// only: several instances of a service can legitimately use the same event name.
+struct CheckpointEventBinding {
+    u64 id;
+    std::shared_ptr<EventType> type;
+};
+
+struct CheckpointEvent {
+    u64 binding_id;
+    s64 time_ns;
+    u64 fifo_order;
+    s64 period_ns;
+};
+
+struct TimingCheckpoint {
+    bool multicore;
+    s64 time_ns;
+    u64 clock_ticks;
+    u64 gpu_ticks;
+    u64 cpu_ticks;
+    s64 downcount;
+    s64 pause_end_time;
+    u64 next_fifo_id;
+    std::vector<CheckpointEvent> events;
 };
 
 /**
@@ -97,6 +125,14 @@ public:
 
     /// Checks if there are any pending time events.
     bool HasPendingEvents() const;
+
+    // Caller must park CPU and every producer of timing events first. These operations also
+    // exclude Advance(), including callbacks running outside basic_lock. No callbacks execute
+    // during reconstruction. Invalid or incomplete bindings leave the current queue intact.
+    [[nodiscard]] TimingCheckpoint CaptureCheckpoint(
+        std::span<const CheckpointEventBinding> bindings);
+    void RestoreCheckpoint(const TimingCheckpoint& state,
+                           std::span<const CheckpointEventBinding> bindings);
 
     /// Schedules an event in core timing
     void ScheduleEvent(std::chrono::nanoseconds ns_into_future,
@@ -164,6 +200,17 @@ public:
     std::atomic<bool> wait_set{};
     std::atomic<bool> has_started{};
     bool is_multicore{};
+
+private:
+    // Written only while all clock consumers are parked. No capture allocation or worker exists
+    // during gameplay; the normal clock path only subtracts these origins.
+    s64 checkpoint_ns_origin{};
+    u64 checkpoint_clock_origin{};
+    u64 checkpoint_gpu_origin{};
+    bool checkpoint_resume_pending{};
+    s64 checkpoint_restore_ns{};
+    u64 checkpoint_restore_clock{};
+    u64 checkpoint_restore_gpu{};
 };
 
 /// Creates a core timing event with the given name and callback.

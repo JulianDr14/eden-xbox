@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <stdexcept>
 
 #include "core/core.h"
 #include "core/core_timing.h"
@@ -51,6 +52,56 @@ u64 TestTimerSpeed(Core::Timing::CoreTiming& core_timing) {
 }
 
 } // Anonymous namespace
+
+TEST_CASE("CoreTiming[Pulse reconstructs owners and FIFO]", "[core][pulse]") {
+    using namespace Core::Timing;
+    std::vector<int> calls;
+    TimingCheckpoint saved{};
+    {
+        CoreTiming source;
+        source.SetMulticore(false);
+        source.Initialize([] {});
+        auto first = CreateEvent("same-name", [&](s64, auto) {
+            calls.push_back(-1);
+            return std::optional<std::chrono::nanoseconds>{};
+        });
+        auto second = CreateEvent("same-name", [&](s64, auto) {
+            calls.push_back(-2);
+            return std::optional<std::chrono::nanoseconds>{};
+        });
+        const std::array bindings{CheckpointEventBinding{1, first},
+                                  CheckpointEventBinding{2, second}};
+        source.ScheduleEvent(std::chrono::nanoseconds{0}, second);
+        source.ScheduleEvent(std::chrono::nanoseconds{0}, first);
+        saved = source.CaptureCheckpoint(bindings);
+        REQUIRE(calls.empty());
+        REQUIRE_THROWS_AS(source.CaptureCheckpoint({}), std::invalid_argument);
+    }
+    // Every original owner and callback has been destroyed. IDs bind fresh callbacks.
+    CoreTiming restored;
+    restored.SetMulticore(false);
+    restored.Initialize([] {});
+    auto first = CreateEvent("same-name", [&](s64, auto) {
+        calls.push_back(1);
+        return std::optional<std::chrono::nanoseconds>{};
+    });
+    auto second = CreateEvent("same-name", [&](s64, auto) {
+        calls.push_back(2);
+        return std::optional<std::chrono::nanoseconds>{};
+    });
+    const std::array bindings{CheckpointEventBinding{1, first},
+                              CheckpointEventBinding{2, second}};
+    restored.RestoreCheckpoint(saved, bindings);
+    auto invalid = saved;
+    invalid.events.back().fifo_order = invalid.events.front().fifo_order;
+    REQUIRE_THROWS_AS(restored.RestoreCheckpoint(invalid, bindings), std::invalid_argument);
+    invalid = saved;
+    invalid.events.front().binding_id = 99;
+    REQUIRE_THROWS_AS(restored.RestoreCheckpoint(invalid, bindings), std::invalid_argument);
+    REQUIRE(calls.empty());
+    restored.Advance();
+    REQUIRE(calls == std::vector<int>{2, 1});
+}
 
 TEST_CASE("CoreTiming[BasicOrder]", "[core]") {
     ScopeInit guard;

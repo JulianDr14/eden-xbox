@@ -6,8 +6,12 @@
 
 #include <algorithm>
 #include <mutex>
+#include <limits>
 #include <string>
 #include <tuple>
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 #include "common/cpu_features.h"
 #include "common/cpu_wait.h"
 #include "common/logging.h"
@@ -69,6 +73,10 @@ CoreTiming::~CoreTiming() {
 
 void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
     Reset();
+    checkpoint_ns_origin = 0;
+    checkpoint_clock_origin = 0;
+    checkpoint_gpu_origin = 0;
+    checkpoint_resume_pending = false;
     on_thread_init = std::move(on_thread_init_);
     event_fifo_id = 0;
     cpu_ticks = 0;
@@ -128,6 +136,13 @@ void CoreTiming::ClearPendingEvents() {
 }
 
 void CoreTiming::Pause(bool is_paused) {
+    if (!is_paused && checkpoint_resume_pending) {
+        // Reconstruction can take seconds. Exclude that host time before waking any callback.
+        checkpoint_ns_origin += Common::g_wall_clock.GetTimeNS().count() - checkpoint_restore_ns;
+        checkpoint_clock_origin += Common::g_wall_clock.GetCNTPCT() - checkpoint_restore_clock;
+        checkpoint_gpu_origin += Common::g_wall_clock.GetGPUTick() - checkpoint_restore_gpu;
+        checkpoint_resume_pending = false;
+    }
     paused = is_paused;
     pause_event.Set();
 
@@ -242,7 +257,7 @@ void CoreTiming::ResetTicks() {
 }
 
 u64 CoreTiming::GetClockTicks() const {
-    u64 fres = is_multicore ? Common::g_wall_clock.GetCNTPCT() : Common::WallClock::CPUTickToCNTPCT(cpu_ticks);
+    u64 fres = is_multicore ? Common::g_wall_clock.GetCNTPCT() - checkpoint_clock_origin : Common::WallClock::CPUTickToCNTPCT(cpu_ticks);
     if (const u32 target = CpuClockTargetMhz(Settings::values.cpu_clock.GetValue());
         target != CPU_CLOCK_BASE_MHZ) {
         fres = fres * target / CPU_CLOCK_BASE_MHZ;
@@ -257,7 +272,7 @@ u64 CoreTiming::GetClockTicks() const {
 
 u64 CoreTiming::GetGPUTicks() const {
     return is_multicore
-        ? Common::g_wall_clock.GetGPUTick()
+        ? Common::g_wall_clock.GetGPUTick() - checkpoint_gpu_origin
         : Common::WallClock::CPUTickToGPUTick(cpu_ticks);
 }
 
@@ -334,14 +349,14 @@ void CoreTiming::Reset() {
 /// @brief Returns current time in nanoseconds.
 std::chrono::nanoseconds CoreTiming::GetGlobalTimeNs() const noexcept {
     return is_multicore
-        ? Common::g_wall_clock.GetTimeNS()
+        ? Common::g_wall_clock.GetTimeNS() - std::chrono::nanoseconds{checkpoint_ns_origin}
         : std::chrono::nanoseconds{Common::WallClock::CPUTickToNS(cpu_ticks)};
 }
 
 /// @brief Returns current time in microseconds.
 std::chrono::microseconds CoreTiming::GetGlobalTimeUs() const noexcept {
     return is_multicore
-        ? Common::g_wall_clock.GetTimeUS()
+        ? std::chrono::duration_cast<std::chrono::microseconds>(GetGlobalTimeNs())
         : std::chrono::microseconds{Common::WallClock::CPUTickToUS(cpu_ticks)};
 }
 
@@ -350,5 +365,107 @@ void CoreTiming::SetTimerResolutionNs(std::chrono::nanoseconds ns) {
     timer_resolution_ns = ns.count();
 }
 #endif
+
+namespace {
+constexpr size_t MaxCheckpointEvents = 65536;
+
+void ValidateBindings(std::span<const CheckpointEventBinding> bindings) {
+    if (bindings.size() > MaxCheckpointEvents) {
+        throw std::invalid_argument("Pulse: too many timing bindings");
+    }
+    std::unordered_set<u64> ids;
+    std::unordered_set<const EventType*> types;
+    for (const auto& binding : bindings) {
+        if (binding.id == 0 || !binding.type || !ids.insert(binding.id).second ||
+            !types.insert(binding.type.get()).second) {
+            throw std::invalid_argument("Pulse: invalid or duplicate timing binding");
+        }
+    }
+}
+} // namespace
+
+TimingCheckpoint CoreTiming::CaptureCheckpoint(
+    std::span<const CheckpointEventBinding> bindings) {
+    std::scoped_lock lock{advance_lock, basic_lock};
+    if (!paused || (timer_thread.joinable() && !paused_set)) {
+        throw std::logic_error("Pulse: timing must be synchronously paused");
+    }
+    ValidateBindings(bindings);
+    if (event_queue.size() > MaxCheckpointEvents) {
+        throw std::invalid_argument("Pulse: too many timing events");
+    }
+    std::unordered_map<const EventType*, u64> ids;
+    for (const auto& binding : bindings) {
+        ids.emplace(binding.type.get(), binding.id);
+    }
+    TimingCheckpoint state{};
+    state.multicore = is_multicore;
+    state.time_ns = GetGlobalTimeNs().count();
+    state.clock_ticks = Common::g_wall_clock.GetCNTPCT() - checkpoint_clock_origin;
+    state.gpu_ticks = Common::g_wall_clock.GetGPUTick() - checkpoint_gpu_origin;
+    state.cpu_ticks = cpu_ticks;
+    state.downcount = downcount;
+    state.pause_end_time = pause_end_time;
+    state.next_fifo_id = event_fifo_id;
+    state.events.reserve(event_queue.size());
+    for (const auto& pending : event_queue) {
+        const auto type = pending.type.lock();
+        if (!type || !ids.contains(type.get())) {
+            throw std::invalid_argument("Pulse: timing event has no reconstructible owner");
+        }
+        state.events.push_back({ids.at(type.get()), pending.time, pending.fifo_order,
+                                pending.reschedule_time});
+    }
+    return state;
+}
+
+void CoreTiming::RestoreCheckpoint(const TimingCheckpoint& state,
+                                  std::span<const CheckpointEventBinding> bindings) {
+    std::scoped_lock lock{advance_lock, basic_lock};
+    if (!paused || (timer_thread.joinable() && !paused_set)) {
+        throw std::logic_error("Pulse: timing must be synchronously paused");
+    }
+    ValidateBindings(bindings);
+    if (state.multicore != is_multicore || state.time_ns < 0 ||
+        state.pause_end_time < 0 || state.pause_end_time > state.time_ns ||
+        state.next_fifo_id == std::numeric_limits<u64>::max() ||
+        state.events.size() > MaxCheckpointEvents) {
+        throw std::invalid_argument("Pulse: invalid timing checkpoint");
+    }
+    std::unordered_map<u64, std::shared_ptr<EventType>> types;
+    for (const auto& binding : bindings) {
+        types.emplace(binding.id, binding.type);
+    }
+    std::unordered_set<u64> orders;
+    heap_t rebuilt;
+    for (const auto& pending : state.events) {
+        if (!types.contains(pending.binding_id) || pending.period_ns < 0 ||
+            pending.time_ns < 0 ||
+            pending.period_ns > std::numeric_limits<s64>::max() -
+                                    std::max(pending.time_ns, state.time_ns) ||
+            pending.fifo_order >= state.next_fifo_id ||
+            !orders.insert(pending.fifo_order).second) {
+            throw std::invalid_argument("Pulse: invalid timing event reference or order");
+        }
+        auto handle = rebuilt.emplace(Event{pending.time_ns, pending.fifo_order,
+                                            types.at(pending.binding_id), pending.period_ns});
+        (*handle).handle = handle;
+    }
+    // Publication follows all allocations and validation. Heap handles remain attached to their
+    // nodes across swap; no captured host handle or callback is reused.
+    std::swap(event_queue, rebuilt);
+    checkpoint_restore_ns = Common::g_wall_clock.GetTimeNS().count();
+    checkpoint_restore_clock = Common::g_wall_clock.GetCNTPCT();
+    checkpoint_restore_gpu = Common::g_wall_clock.GetGPUTick();
+    checkpoint_ns_origin = checkpoint_restore_ns - state.time_ns;
+    checkpoint_clock_origin = checkpoint_restore_clock - state.clock_ticks;
+    checkpoint_gpu_origin = checkpoint_restore_gpu - state.gpu_ticks;
+    checkpoint_resume_pending = true;
+    cpu_ticks = state.cpu_ticks;
+    downcount = state.downcount;
+    global_timer = state.time_ns;
+    pause_end_time = state.pause_end_time;
+    event_fifo_id = state.next_fifo_id;
+}
 
 } // namespace Core::Timing
