@@ -125,7 +125,6 @@ public:
         Text(Tr(T::LibraryHeading), 266, 54, 16, 0x9ba9ba, 200);
         Round(670, 43, 225, 44, 14, 0x202b39);
         ControlPrompt(Navigation::AddFolder, Tr(T::SettingsTitle), 680, 49, 174);
-        Text(I18n::Plural(T::GamesCountOne, T::GamesCountOther, scan.entries.size()), 900, 52, 18, 0x9ba9ba, 170);
         Round(1080, 43, 146, 44, 14, 0x202b39);
         ControlPrompt(Navigation::Settings, Tr(T::Controller), 1090, 49, 100);
         Round(50, 112, 1176, 1, 0, 0x233142);

@@ -2590,3 +2590,9 @@ R ya estaba incluido, pero la rama nativa de ControlPrompt no lo utilizaba.
 Añadido O outline original del mismo conjunto Kenney y conectados ambos PNG
 a las acciones de abrir carpeta/refrescar de teclado, sin cambiar bindings.
 Se conservan los glyphs nativos para los botones de mando.
+
+
+## 11 octubre 2026: contador superior de biblioteca
+
+Eliminado el contador redundante junto a Configuración; se conserva el indicador
+de posición/total que ya aparece junto a «Tus juegos». Cambio de dibujo solamente.
