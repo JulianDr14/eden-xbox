@@ -23,6 +23,7 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "eden_uwp/uwp_input.h"
+#include "eden_uwp/localization.h"
 #include "eden_uwp/uwp_controllers.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
@@ -241,19 +242,21 @@ bool SaveKeyboardBindings(const KeyboardBindings& bindings) {
     } catch (const winrt::hresult_error&) { return false; }
 }
 std::wstring KeyboardKeyName(unsigned key) {
-    if (!key) return L"Sin asignar";
+    using I18n::Text;
+    const auto tr = [](Text id) { return std::wstring{I18n::Tr(id)}; };
+    if (!key) return tr(Text::KeyUnassigned);
     if ((key >= 'A' && key <= 'Z') || (key >= '0' && key <= '9')) return std::wstring(1, static_cast<wchar_t>(key));
     if (key >= 112 && key <= 135) return L"F" + std::to_wstring(key - 111);
     if (key >= 96 && key <= 105) return L"Num " + std::to_wstring(key - 96);
     switch (key) {
-    case 8: return L"Retroceso"; case 9: return L"Tab"; case 13: return L"Enter";
+    case 8: return tr(Text::KeyBackspace); case 9: return L"Tab"; case 13: return L"Enter";
     case 16: return L"Shift"; case 17: return L"Ctrl"; case 18: return L"Alt";
-    case 32: return L"Espacio"; case 33: return L"Re Pag"; case 34: return L"Av Pag";
-    case 35: return L"Fin"; case 36: return L"Inicio"; case 37: return L"Izquierda";
-    case 38: return L"Arriba"; case 39: return L"Derecha"; case 40: return L"Abajo";
-    case 45: return L"Insert"; case 46: return L"Supr"; case 106: return L"Num *";
+    case 32: return tr(Text::KeySpace); case 33: return tr(Text::KeyPageUp); case 34: return tr(Text::KeyPageDown);
+    case 35: return tr(Text::KeyEnd); case 36: return tr(Text::KeyHome); case 37: return tr(Text::KeyLeft);
+    case 38: return tr(Text::KeyUp); case 39: return tr(Text::KeyRight); case 40: return tr(Text::KeyDown);
+    case 45: return L"Insert"; case 46: return tr(Text::KeyDelete); case 106: return L"Num *";
     case 107: return L"Num +"; case 109: return L"Num -"; case 110: return L"Num .";
-    case 111: return L"Num /"; default: return L"Tecla " + std::to_wstring(key);
+    case 111: return L"Num /"; default: return I18n::Format(Text::KeyNumbered, {std::to_wstring(key)});
     }
 }
 void InitializeKeyboardBindings() {
@@ -427,7 +430,7 @@ void ApplyControllerStyleSettings(ConsoleControllerStyle style) {
         Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Handheld);
     }
     LOG_INFO(Input, "UWP input: player 1 presented as {}",
-             winrt::to_string(ConsoleControllerStyleLabel(style)));
+             ConsoleControllerStyleLogName(style));
 }
 
 ConsoleControllerStyle GamepadInput::SyncControllerStyle() {
@@ -462,7 +465,7 @@ ConsoleControllerStyle GamepadInput::SyncControllerStyle() {
     if (!IsStyleSupported(wanted, supported)) {
         if (forced) {
             LOG_WARNING(Input, "UWP input: this game does not accept {}",
-                        winrt::to_string(ConsoleControllerStyleLabel(wanted)));
+                        ConsoleControllerStyleLogName(wanted));
         }
         return current;
     }
@@ -478,8 +481,8 @@ ConsoleControllerStyle GamepadInput::SyncControllerStyle() {
         player->Connect();
     }
     LOG_INFO(Input, "UWP input: player 1 reconnected from {} as {}",
-             winrt::to_string(ConsoleControllerStyleLabel(current)),
-             winrt::to_string(ConsoleControllerStyleLabel(wanted)));
+             ConsoleControllerStyleLogName(current),
+             ConsoleControllerStyleLogName(wanted));
     return seen();
 }
 

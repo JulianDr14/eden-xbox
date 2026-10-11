@@ -79,6 +79,8 @@
 #include "eden_uwp/uwp_library.h"
 #include "eden_uwp/uwp_rom_storage.h"
 #include "eden_uwp/uwp_file_manager.h"
+#include "eden_uwp/localization.h"
+#include "eden_uwp/uwp_system_settings.h"
 
 namespace D3D12 {
 // renderer_d3d12.h; its includes need Mesa's headers, which only video_core sees.
@@ -165,35 +167,59 @@ static void ApplyHeadlessBootSettings(const BootSurface& surface) {
     // Player 1 is bound to the virtual_gamepad engine (uwp_input.h) and presented to the game as
     // the controller chosen in the library (a Pro Controller unless told otherwise).
     ApplyControllerStyleSettings(LoadControllerOptions().style);
-    // Latin American Spanish (es-419, the Switch's only variant for Mexico and the US) on the
-    // American region; once the game is loaded, ApplyGameLanguage narrows it to what it ships.
-    Settings::values.language_index = Settings::Language::SpanishLatin;
-    Settings::values.region_index = Settings::Region::Usa;
+    // Language and region from Settings > System, or from Windows (the console's own) when they
+    // follow the system; once the game is loaded, ApplyGameLanguage narrows the language to what
+    // it ships. Also sets the interface language for the in-game menu.
+    ApplySystemSettings();
     // memory_layout_mode stays at its default until the Series-S budget is measured on-console; the
     // DRAM clamp is a separate reservation follow-up, not here.
 }
 
+/// The NACP's supported-language bit for a system language (as NACP::GetLanguageEntry maps them).
+static u32 NacpLanguageBit(Settings::Language language) {
+    using FileSys::Language;
+    const auto bit = [](Language nacp) { return u32{1} << static_cast<u32>(nacp); };
+    switch (language) {
+    case Settings::Language::Japanese:            return bit(Language::Japanese);
+    case Settings::Language::EnglishAmerican:     return bit(Language::AmericanEnglish);
+    case Settings::Language::EnglishBritish:      return bit(Language::BritishEnglish);
+    case Settings::Language::French:              return bit(Language::French);
+    case Settings::Language::FrenchCanadian:      return bit(Language::CanadianFrench);
+    case Settings::Language::German:              return bit(Language::German);
+    case Settings::Language::Italian:             return bit(Language::Italian);
+    case Settings::Language::Spanish:             return bit(Language::Spanish);
+    case Settings::Language::SpanishLatin:        return bit(Language::LatinAmericanSpanish);
+    case Settings::Language::Dutch:               return bit(Language::Dutch);
+    case Settings::Language::Portuguese:          return bit(Language::Portuguese);
+    case Settings::Language::PortugueseBrazilian: return bit(Language::BrazilianPortuguese);
+    case Settings::Language::Russian:             return bit(Language::Russian);
+    case Settings::Language::Korean:              return bit(Language::Korean);
+    case Settings::Language::Chinese:
+    case Settings::Language::ChineseSimplified:   return bit(Language::SimplifiedChinese);
+    case Settings::Language::Taiwanese:
+    case Settings::Language::ChineseTraditional:  return bit(Language::TraditionalChinese);
+    case Settings::Language::Polish:              return bit(Language::Polish);
+    case Settings::Language::Thai:                return bit(Language::Thai);
+    }
+    return 0;
+}
+
 /// Many games read the system language directly and fall back to English on their own when they
-/// lack it (Game G has Spain's Spanish but not es-419). Pick from the languages the
-/// game declares: Latin American Spanish, else Spain's Spanish, else American English.
+/// lack it, even when they ship a close variant (Spain's Spanish but not es-419). Give them the
+/// closest language they declare instead (PickGameLanguage: variant, then English, then any).
 static void ApplyGameLanguage(Core::System& system) {
     FileSys::NACP nacp;
     if (system.GetAppLoader().ReadControlData(nacp) != Loader::ResultStatus::Success) {
         return;
     }
     const u32 supported = nacp.GetSupportedLanguages();
-    const auto has = [supported](FileSys::SupportedLanguage language) {
-        return (supported & static_cast<u32>(language)) != 0;
-    };
-    // An empty mask declares nothing; keep es-419 and let the game decide.
-    const auto language =
-        supported == 0 || has(FileSys::SupportedLanguage::LatinAmericanSpanish)
-            ? Settings::Language::SpanishLatin
-        : has(FileSys::SupportedLanguage::Spanish) ? Settings::Language::Spanish
-                                                   : Settings::Language::EnglishAmerican;
+    const auto preferred = Settings::values.language_index.GetValue();
+    const auto language = PickGameLanguage(preferred, [supported](Settings::Language language) {
+        return (supported & NacpLanguageBit(language)) != 0;
+    });
     Settings::values.language_index = language;
-    LOG_INFO(Frontend, "Headless boot: game languages {:08X}, system language {}", supported,
-             Settings::CanonicalizeEnum(language));
+    LOG_INFO(Frontend, "Headless boot: game languages {:08X}, preferred {}, system language {}",
+             supported, Settings::CanonicalizeEnum(preferred), Settings::CanonicalizeEnum(language));
 }
 
 /// Optional boot.cfg next to boot.nro (written by package-appx.ps1 -RunSeconds).
@@ -452,6 +478,10 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     system.SetFilesystem(MakeUwpFilesystem());
     system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
     system.GetUserChannel().clear();
+    // Before Load: games read the profile name when they start.
+    if (ApplyUserName(system.GetProfileManager(), LoadSystemSettings().user_name)) {
+        WriteDiag("step: profile name from Settings > System");
+    }
     if (const auto file = system.GetFilesystem()->OpenFile(nro_path, FileSys::OpenMode::Read);
         file != nullptr && manual_provider.AddEntriesFromContainer(file)) {
         WriteDiag("step: game contents registered");
@@ -586,8 +616,11 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
             const std::vector<std::string> lines = menu->Lines();
             const size_t selected = menu->Selected();
             system.GPU().RunOnGpuThread([&] {
-                D3D12::ShowGameMenu(system.Renderer(), "MENU", lines, selected,
-                                    "A ELEGIR   B VOLVER   < > CAMBIAR");
+                using I18n::Text;
+                const auto overlay = [](Text id) { return I18n::ToOverlayText(I18n::Tr(id)); };
+                D3D12::ShowGameMenu(system.Renderer(), overlay(Text::MenuTitle), lines, selected,
+                                    "A " + overlay(Text::Select) + "   B " + overlay(Text::Back) +
+                                        "   < > " + overlay(Text::Change));
             });
         };
         constexpr auto TICK = std::chrono::milliseconds(20);
@@ -2005,12 +2038,12 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
             }
             worker.join();
             if (show_library && boot_status.load() == 2) {
-                library_error = "No se pudo cargar el juego. Comprueba el USB, los permisos y los datos del juego.";
+                library_error = EdenXbox::I18n::ToUtf8(EdenXbox::I18n::Tr(EdenXbox::I18n::Text::GameLoadFailed));
                 WriteDiag("boot load failed; returning to library for recovery");
                 continue;
             }
             if (show_library && boot_status.load() == 15) {
-                library_error = "El juego se detuvo por un fallo de gráficos o falta de memoria.";
+                library_error = EdenXbox::I18n::ToUtf8(EdenXbox::I18n::Tr(EdenXbox::I18n::Text::GameStoppedGpu));
                 WriteDiag("GPU failure handled; returning to library for recovery");
                 continue;
             }

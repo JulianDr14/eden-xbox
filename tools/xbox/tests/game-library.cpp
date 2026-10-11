@@ -13,7 +13,7 @@ int main() {
     fs::create_directory(root);
     struct Cleanup { fs::path root; ~Cleanup() { fs::remove_all(root); } } cleanup{root};
     assert(EdenXbox::ScanGameLibrary(root).entries.empty());
-    assert(!EdenXbox::ScanGameLibrary(root / "missing").error.empty());
+    assert(EdenXbox::ScanGameLibrary(root / "missing").missing_root);
     fs::create_directory(root / "nested");
     for (const auto& name : {"b.XCI", "a.nsp", "ignored.nca", "partial.nsp.tmp"})
         std::ofstream{root / name};

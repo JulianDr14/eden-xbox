@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 #include "eden_uwp/controller_style.h"
+#include "eden_uwp/localization.h"
+#include "eden_uwp/ui_text.h"
 
 namespace EdenXbox {
 // In-game menu: View + Menu held for a second (Escape on a keyboard) pauses the game and opens it.
@@ -92,7 +94,8 @@ struct GameMenuSettings {
 
 enum class GameMenuResult : std::uint8_t { None, Resume, Library, SettingsChanged, FullScreen };
 
-/// The menu's items and cursor. Text is upper-case ASCII: the renderer's overlay font.
+/// The menu's items and cursor. Text is in the interface language, as upper-case ASCII for the
+/// renderer's overlay font (I18n::ToOverlayText).
 class GameMenu {
 public:
     enum Item : std::size_t { Continue, Style, FaceButtons, Deadzone, FullScreen, Library };
@@ -134,33 +137,34 @@ public:
     [[nodiscard]] const GameMenuSettings& Settings() const { return settings; }
 
     static std::string StyleName(ConsoleControllerStyle style) {
-        switch (style) {
-        case ConsoleControllerStyle::Pro:         return "PRO CONTROLLER";
-        case ConsoleControllerStyle::DualJoycon:  return "JOY-CON DOBLES";
-        case ConsoleControllerStyle::Handheld:    return "MODO PORTATIL";
-        case ConsoleControllerStyle::LeftJoycon:  return "JOY-CON IZQUIERDO";
-        case ConsoleControllerStyle::RightJoycon: return "JOY-CON DERECHO";
-        default:                                  return "AUTOMATICO";
-        }
+        // "Automatic (per game)" does not fit the overlay's line; the menu says just "Automatic".
+        return Overlay(style == ConsoleControllerStyle::Auto ? I18n::Text::Automatic
+                                                             : ControllerStyleText(style));
     }
 
 private:
+    static std::string Overlay(I18n::Text id) { return I18n::ToOverlayText(I18n::Tr(id)); }
+    static std::string Choice(I18n::Text label, const std::string& value) {
+        return Overlay(label) + "  < " + value + " >";
+    }
+
     std::string Line(Item item) const {
+        using I18n::Text;
         switch (item) {
         case Continue:
-            return "CONTINUAR";
+            return Overlay(Text::MenuResume);
         case Style:
-            return "LA CONSOLA LO VE COMO  < " + StyleName(settings.style) + " >";
+            return Choice(Text::ControllerSeenAs, StyleName(settings.style));
         case FaceButtons:
-            return std::string{"BOTONES A B X Y  < "} +
-                   (settings.swap_face_buttons ? "POR POSICION" : "POR LETRA") + " >";
+            return Choice(Text::FaceButtons,
+                          Overlay(settings.swap_face_buttons ? Text::ByPosition : Text::ByLetter));
         case Deadzone:
-            return "ZONA MUERTA  < " +
-                   std::to_string(static_cast<int>(settings.deadzone * 100 + 0.5f)) + "% >";
+            return Choice(Text::DeadZone,
+                          std::to_string(static_cast<int>(settings.deadzone * 100 + 0.5f)) + "%");
         case FullScreen:
-            return std::string{"PANTALLA COMPLETA  < "} + (settings.fullscreen ? "SI" : "NO") + " >";
+            return Choice(Text::MenuFullScreen, Overlay(settings.fullscreen ? Text::Yes : Text::No));
         case Library:
-            return "VOLVER AL INICIO";
+            return Overlay(Text::MenuBackToHome);
         }
         return {};
     }

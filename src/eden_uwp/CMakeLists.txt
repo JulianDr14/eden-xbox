@@ -28,6 +28,22 @@ add_executable(eden-uwp WIN32
     uwp_controllers.cpp
     uwp_controllers.h
     vma_impl.cpp
+    # Interface languages: one catalog per language under locales/ (localization.h).
+    localization.cpp
+    localization.h
+    locales/catalogs.h
+    locales/registry.cpp
+    locales/en.cpp
+    locales/es.cpp
+    ui_text.h
+    # Settings > System and the library's on-disk metadata cache.
+    system_settings.h
+    system_page.h
+    text_entry.h
+    uwp_system_settings.cpp
+    uwp_system_settings.h
+    library_cache.cpp
+    library_cache.h
 )
 
 # core transitively pulls common/video_core/audio_core/hid_core/dynarmic etc.; name the ones we touch

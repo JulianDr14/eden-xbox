@@ -14,14 +14,15 @@ enum class ConsoleControllerStyle : std::uint8_t {
 };
 inline constexpr std::size_t ConsoleControllerStyleCount = 6;
 
-constexpr std::wstring_view ConsoleControllerStyleLabel(ConsoleControllerStyle style) {
+/// Name for the log; the interface's comes from ControllerStyleText (ui_text.h).
+constexpr std::string_view ConsoleControllerStyleLogName(ConsoleControllerStyle style) {
     switch (style) {
-    case ConsoleControllerStyle::Pro:         return L"Pro Controller";
-    case ConsoleControllerStyle::DualJoycon:  return L"Joy-Con dobles";
-    case ConsoleControllerStyle::Handheld:    return L"Modo portatil";
-    case ConsoleControllerStyle::LeftJoycon:  return L"Joy-Con izquierdo";
-    case ConsoleControllerStyle::RightJoycon: return L"Joy-Con derecho";
-    default:                                  return L"Automatico (segun el juego)";
+    case ConsoleControllerStyle::Pro:         return "Pro Controller";
+    case ConsoleControllerStyle::DualJoycon:  return "Dual Joy-Con";
+    case ConsoleControllerStyle::Handheld:    return "Handheld";
+    case ConsoleControllerStyle::LeftJoycon:  return "Left Joy-Con";
+    case ConsoleControllerStyle::RightJoycon: return "Right Joy-Con";
+    default:                                  return "Automatic";
     }
 }
 

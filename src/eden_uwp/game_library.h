@@ -15,7 +15,8 @@ struct LibraryEntry {
     std::wstring name;
     std::wstring developer;
     std::vector<unsigned char> icon;
-    bool metadata_loaded{};
+    bool metadata_loaded{}; ///< Title and icon requested for the visible window.
+    bool title_loaded{};    ///< Title and developer known (from the game or the cache).
     std::string launch_path; // Absolute internal path or token-scoped external identity.
     std::wstring source_name;
 };
@@ -23,6 +24,7 @@ struct LibraryScan {
     std::vector<LibraryEntry> entries;
     std::string error;
     bool limited{};
+    bool missing_root{}; ///< The internal games folder does not exist.
 };
 
 // Only enumerate names: never open multi-gigabyte containers during a scan.
@@ -32,7 +34,9 @@ inline LibraryScan ScanGameLibrary(const std::filesystem::path& root,
     LibraryScan result;
     std::error_code ec;
     if (!std::filesystem::is_directory(root, ec)) {
-        result.error = ec ? ec.message() : "La carpeta games esta vacia o no existe.";
+        // Not an error by itself: games can all live in external folders.
+        result.missing_root = true;
+        if (ec) result.error = ec.message();
         return result;
     }
     auto it = std::filesystem::recursive_directory_iterator{

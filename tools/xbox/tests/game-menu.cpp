@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Build with src/eden_uwp/localization.cpp and src/eden_uwp/locales/*.cpp.
 #include <cstdio>
 #include <cstdlib>
 #include "eden_uwp/game_menu.h"
@@ -64,7 +65,8 @@ int main() {
         check(delivered);
     }
 
-    // Menu model.
+    // Menu model, in Spanish.
+    I18n::SetUiLanguage(*I18n::FindUiLanguage(L"es"));
     GameMenu menu{{ConsoleControllerStyle::Auto, false, 0.12f}};
     check(menu.Lines().size() == 5 && menu.SelectedItem() == GameMenu::Continue);
     check(menu.Apply(MenuAction::Confirm) == GameMenuResult::Resume);
@@ -101,5 +103,8 @@ int main() {
     check(pc.Apply(MenuAction::Confirm) == GameMenuResult::FullScreen && pc.Settings().fullscreen);
     check(pc.Apply(MenuAction::Right) == GameMenuResult::FullScreen && !pc.Settings().fullscreen);
     for (const auto& line : menu.Lines()) check(line.find("PANTALLA") == std::string::npos);
+    // The same menu follows the interface language.
+    I18n::SetUiLanguage(*I18n::FindUiLanguage(L"en"));
+    check(pc.Lines()[0] == "RESUME" && pc.Lines()[4].find("FULL SCREEN  < NO >") == 0);
     std::puts("game menu: combo hold/stagger/tap/held passthrough, navigation and settings PASS");
 }

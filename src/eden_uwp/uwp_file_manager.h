@@ -24,8 +24,10 @@ struct ConfigurationPanel {
     std::wstring notice;
     unsigned completed{}, total{};
 };
+/// Rows of the settings home, in order.
+enum ConfigurationHomeRow : size_t { HomeFiles, HomeControllers, HomeSystem, HomeRowCount };
 inline size_t ConfigurationRowCount(const ConfigurationPanel& panel) {
-    return panel.files ? 3 + panel.status.sources.size() : 2;
+    return panel.files ? 3 + panel.status.sources.size() : HomeRowCount;
 }
 inline size_t ConfigurationFirstRow(const ConfigurationPanel& panel) {
     return (panel.selected / 5) * 5;
@@ -36,7 +38,7 @@ struct ConfigurationLayout {
 };
 inline ConfigurationLayout GetConfigurationLayout(const ConfigurationPanel& panel) {
     return panel.files ? ConfigurationLayout{126, 1028, 246, 62, 54, 622}
-                       : ConfigurationLayout{180, 920, 246, 100, 86, 540};
+                       : ConfigurationLayout{180, 920, 226, 92, 80, 584};
 }
 enum class FileImport { Keys, Firmware };
 struct FileImportProgress {

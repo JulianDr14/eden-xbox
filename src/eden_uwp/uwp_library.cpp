@@ -20,8 +20,12 @@
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.Pickers.h>
 #include "eden_uwp/game_library.h"
+#include "eden_uwp/library_cache.h"
+#include "eden_uwp/localization.h"
+#include "eden_uwp/system_page.h"
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/uwp_library_metadata.h"
+#include "eden_uwp/uwp_system_settings.h"
 #include "common/logging.h"
 
 namespace EdenXbox {
@@ -29,7 +33,19 @@ namespace {
 using winrt::Windows::Gaming::Input::Gamepad;
 using winrt::Windows::Gaming::Input::GamepadButtons;
 using winrt::Windows::System::VirtualKey;
+using I18n::Tr;
+using T = I18n::Text;
 
+/// Games per row of the grid; the metadata window is the visible page and both neighbours.
+constexpr size_t PageSize = 5;
+/// Background batches stay short so a page change never waits long behind them: games opened
+/// through the loaders per fill batch, cache records read per names batch.
+constexpr size_t FillBatch = 6;
+constexpr size_t NamesBatch = 64;
+
+std::wstring Wide(std::string_view utf8) {
+    return winrt::to_hstring(utf8).c_str();
+}
 } // namespace
 
 std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, unsigned height,
@@ -43,6 +59,12 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     size_t selected = 0;
     bool dirty = true, loading = true, settings = false;
     ConfigurationPanel configuration;
+    SystemPage system_page;
+    system_page.settings = LoadSystemSettings();
+    system_page.locale = DetectSystemLocale();
+    // Titles are read in the game language, so the library shows what the games will.
+    Settings::Language title_language = ApplySystemSettings().game_language;
+    const LibraryCache cache{DefaultLibraryCacheDirectory()};
     bool return_to_configuration = false;
     unsigned picker_kind = 0; // 0 games, 1 keys, 2 firmware
     std::future<FileSetupStatus> setup_future;
@@ -61,9 +83,12 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     std::wstring notice; // Library scan/metadata messages only.
     auto keyboard_notice_until = std::chrono::steady_clock::time_point{};
     auto controller_notice_until = std::chrono::steady_clock::time_point{};
+    auto system_notice_until = std::chrono::steady_clock::time_point{};
+    // Set by input handlers when the name editor closes: true keeps the name, false discards it.
+    std::optional<bool> finish_name_editor;
     auto save_keyboard = [&] {
         const bool saved = SaveKeyboardBindings(panel.keyboard.bindings);
-        panel.keyboard.notice = saved ? L"Teclado guardado" : L"No se pudo guardar el teclado";
+        panel.keyboard.notice = Tr(saved ? T::KeyboardSaved : T::KeyboardSaveFailed);
         keyboard_notice_until = saved ? std::chrono::steady_clock::now() + std::chrono::seconds{3} :
                                        std::chrono::steady_clock::time_point::max();
         dirty = true;
@@ -77,6 +102,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     bool device_changed = false;
     size_t retained_page = SIZE_MAX;
     bool metadata_dirty = true;
+    size_t names_cursor = 0; // Next game whose title is looked up in the cache, after a scan.
+    size_t fill_cursor = 0;  // Next game the background fill reads into the cache.
     unsigned actions = 0;
     enum : unsigned { Up = 1, Down = 2, Play = 4, Quit = 8, Swap = 16, Zone = 32,
                       Refresh = 64, Panel = 128, Left = 256, Right = 512, AddFolder = 1024 };
@@ -99,8 +126,32 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             panel.keyboard.capturing = false; dirty = true;
         }
     });
+    // Typing on a real keyboard while the name editor is open; KeyDown handles the rest.
+    auto characters = window.CharacterReceived(winrt::auto_revoke, [&](auto&&, CharacterReceivedEventArgs const& e) {
+        if (!system_page.name_editor) return;
+        system_page.name_editor->Type(static_cast<wchar_t>(e.KeyCode()));
+        system_page.editor_notice.clear();
+        dirty = true;
+        e.Handled(true);
+    });
     auto keyboard = window.KeyDown(winrt::auto_revoke, [&](auto&&, KeyEventArgs const& e) {
         if (e.KeyStatus().WasKeyDown) return;
+        if (system_page.name_editor) {
+            auto& editor = *system_page.name_editor;
+            switch (e.VirtualKey()) {
+            case VirtualKey::Escape: finish_name_editor = false; break;
+            case VirtualKey::Enter: finish_name_editor = true; break;
+            case VirtualKey::Back: editor.Backspace(); break;
+            case VirtualKey::Up: editor.Move(0, -1); break;
+            case VirtualKey::Down: editor.Move(0, 1); break;
+            case VirtualKey::Left: editor.Move(-1, 0); break;
+            case VirtualKey::Right: editor.Move(1, 0); break;
+            default: break; // Characters arrive through CharacterReceived.
+            }
+            dirty = true;
+            e.Handled(true);
+            return;
+        }
         auto& editor = panel.keyboard;
         if (editor.open) {
             const auto key = e.VirtualKey();
@@ -108,7 +159,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 if (key != VirtualKey::Escape) {
                     if (AssignKeyboardKey(editor.bindings, editor.selected, static_cast<unsigned>(key))) save_keyboard();
                     else {
-                        editor.notice = L"Esa tecla no es compatible";
+                        editor.notice = Tr(T::KeyUnsupported);
                         keyboard_notice_until = std::chrono::steady_clock::time_point::max();
                     }
                 }
@@ -155,6 +206,36 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         const auto scale = std::max(0.01f, std::min(width / 1280.0f, height / 720.0f));
         const float x = static_cast<float>((p.X * dpi - (width - 1280 * scale) / 2) / scale);
         const float y = static_cast<float>((p.Y * dpi - (height - 720 * scale) / 2) / scale);
+        if (system_page.name_editor) {
+            using K = TextEntryLayout;
+            const float column = (x - K::Left) / (K::KeyWidth + K::Gap);
+            const float row = (y - K::Top) / (K::KeyHeight + K::Gap);
+            if (column >= 0 && row >= 0 && column < TextEntry::Columns && row < TextEntry::Rows) {
+                auto& editor = *system_page.name_editor;
+                editor.Focus(static_cast<size_t>(row), static_cast<size_t>(column));
+                if (editor.Press() == TextEntry::Result::Done) finish_name_editor = true;
+                system_page.editor_notice.clear();
+                dirty = true;
+            }
+            e.Handled(true);
+            return;
+        }
+        if (system_page.open && configuration.open && !settings) {
+            using L = SystemPageLayout;
+            if (y >= L::Footer - 7 && y < L::Footer + 40 && x >= L::RowX + L::RowWidth - 230 &&
+                x < L::RowX + L::RowWidth) {
+                actions |= Quit;
+            } else if (x >= L::RowX && x < L::RowX + L::RowWidth && y >= L::RowTop) {
+                const auto row = static_cast<size_t>((y - L::RowTop) / L::RowStride);
+                if (row < SystemPage::RowCount && y < L::RowTop + row * L::RowStride + L::RowHeight) {
+                    system_page.selected = row;
+                    actions |= Play;
+                    dirty = true;
+                }
+            }
+            e.Handled(true);
+            return;
+        }
         if (configuration.open && !settings) {
             const auto layout = GetConfigurationLayout(configuration);
             if (y >= layout.footer - 7 && y < layout.footer + 40 &&
@@ -219,7 +300,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         else if (x >= 1080 && y >= 43 && y < 87) actions |= Panel;
         else if (!loading && x >= 320 && x < 504 && y >= 334 && y < 380) actions |= Play;
         else if (!loading && x >= 58 && x < 1226 && y >= 444 && y < 635) {
-            const size_t index = selected / 5 * 5 + static_cast<size_t>((x - 58) / 232);
+            const size_t index = selected / PageSize * PageSize + static_cast<size_t>((x - 58) / 232);
             if (index < scan.entries.size()) { selected = index; dirty = true; }
         }
         e.Handled(true);
@@ -236,7 +317,13 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     });
     std::future<LibraryScan> future;
     std::jthread scanner;
-    struct MetadataBatch { std::vector<LibraryEntry> entries; unsigned generation{}; };
+    struct MetadataBatch {
+        std::vector<LibraryEntry> entries;
+        unsigned generation{};
+        bool icons{};      // The window around the cursor.
+        bool stopped{};    // Interrupted: some entries were not read.
+    };
+    bool metadata_background = false; // The running job is a names or fill batch.
     std::future<MetadataBatch> metadata;
     std::jthread metadata_worker;
     unsigned generation = 0;
@@ -251,11 +338,26 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         setup_future = task.get_future();
         setup_worker = std::jthread(std::move(task));
     };
+    // Forget what the entries know and read it again (cache first): after the game language
+    // changed or the cache was cleared. Results in flight belong to the old generation.
+    auto reload_metadata = [&] {
+        ++generation;
+        metadata_worker.request_stop();
+        for (auto& entry : scan.entries) {
+            entry.metadata_loaded = entry.title_loaded = false;
+            std::vector<unsigned char>{}.swap(entry.icon);
+        }
+        metadata_dirty = true;
+        retained_page = SIZE_MAX;
+        names_cursor = fill_cursor = 0;
+        dirty = true;
+    };
     auto start_scan = [&](StorageFolder added = nullptr) {
         loading = dirty = true;
         ++generation;
         metadata_dirty = true;
         retained_page = SIZE_MAX;
+        names_cursor = fill_cursor = 0;
         metadata_worker.request_stop();
         canvas->InvalidateCovers();
         std::packaged_task<LibraryScan(std::stop_token)> task{[&, added](std::stop_token stop) {
@@ -267,10 +369,11 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             std::error_code ec;
             std::filesystem::create_directories(root, ec);
             auto result = ScanGameLibrary(root, stop);
+            const std::wstring internal{Tr(T::SourceInternal)};
             for (auto& entry : result.entries) {
                 const auto path = (root / entry.relative_path).u8string();
                 entry.launch_path.assign(reinterpret_cast<const char*>(path.data()), path.size());
-                entry.source_name = L"Interna";
+                entry.source_name = internal;
             }
             try {
                 if (added) RememberGameFolder(added);
@@ -283,9 +386,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 result.entries.insert(result.entries.end(),
                     std::make_move_iterator(external.entries.begin()), std::make_move_iterator(external.entries.end()));
             } catch (const winrt::hresult_error& e) {
-                result.error = "No se pudo autorizar/recuperar la carpeta: " + winrt::to_string(e.message());
+                result.error = I18n::ToUtf8(I18n::Format(T::FolderAuthFailed, {e.message()}));
             } catch (const std::exception& e) { result.error = e.what(); }
-            if (!result.entries.empty() && result.error == "La carpeta games esta vacia o no existe.") result.error.clear();
             std::sort(result.entries.begin(), result.entries.end(), [](const auto& a, const auto& b) {
                 return a.launch_path < b.launch_path;
             });
@@ -293,6 +395,33 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         }};
         future = task.get_future();
         scanner = std::jthread(std::move(task));
+    };
+    // Saves and applies the System page; the interface switches language on the next frame.
+    auto apply_system_effect = [&](SystemPageEffect effect, std::chrono::steady_clock::time_point now) {
+        switch (effect) {
+        case SystemPageEffect::Changed:
+        case SystemPageEffect::NameDone: {
+            const bool saved = SaveSystemSettings(system_page.settings);
+            const auto resolved = ApplySystemSettings();
+            system_page.notice = Tr(saved ? T::SettingsSaved : T::SystemSaveFailed);
+            system_notice_until = saved ? now + std::chrono::seconds{3} : std::chrono::steady_clock::time_point::max();
+            if (resolved.game_language != title_language) {
+                title_language = resolved.game_language;
+                reload_metadata();
+            }
+            break;
+        }
+        case SystemPageEffect::ClearCache:
+            reload_metadata();
+            canvas->InvalidateCovers();
+            system_page.notice = Tr(cache.Clear() ? T::LibraryCacheCleared : T::SystemSaveFailed);
+            system_notice_until = now + std::chrono::seconds{3};
+            break;
+        case SystemPageEffect::None:
+        case SystemPageEffect::EditName:
+            break;
+        }
+        dirty = true;
     };
     start_scan();
     GamepadButtons previous{};
@@ -308,6 +437,9 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         }
         if (!panel.notice.empty() && now >= controller_notice_until) {
             panel.notice.clear(); dirty = true;
+        }
+        if (!system_page.notice.empty() && now >= system_notice_until) {
+            system_page.notice.clear(); dirty = true;
         }
         if (panel.keyboard.capturing && now >= capture_until) {
             panel.keyboard.capturing = false; dirty = true;
@@ -333,7 +465,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             pad = next;
             next_pad_check = now + std::chrono::milliseconds{500};
         }
-        const unsigned context = panel.keyboard.open ? 3 : panel.expanded ? 2 : settings ? 1 : configuration.open ? 4 : 0;
+        const unsigned context = system_page.name_editor ? 6 : system_page.open ? 5 :
+            panel.keyboard.open ? 3 : panel.expanded ? 2 : settings ? 1 : configuration.open ? 4 : 0;
         if (context != navigation_context) {
             stick_navigation.Reset(); navigation_context = context;
         }
@@ -344,39 +477,66 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 const auto edges = buttons & ~previous;
                 previous = buttons;
                 auto hit = [&](GamepadButtons b) { return (edges & b) == b; };
-                // Back must remain available while editing/capturing keyboard input.
-                // Track all edges, but suppress other pad actions inside that modal.
-                if (hit(GamepadButtons::B)) actions |= Quit;
-                if (!panel.keyboard.open) {
-                    // The d-pad takes precedence; do not combine opposite directions.
-                    constexpr auto dpad = GamepadButtons::DPadUp | GamepadButtons::DPadDown |
-                                          GamepadButtons::DPadLeft | GamepadButtons::DPadRight;
-                    if ((buttons & dpad) != GamepadButtons::None) stick_navigation.Reset();
-                    else {
-                        switch (stick_navigation.Update(reading.LeftThumbstickX, reading.LeftThumbstickY, now)) {
-                        case StickDirection::Up: actions |= Up; break;
-                        case StickDirection::Down: actions |= Down; break;
-                        case StickDirection::Left: actions |= Left; break;
-                        case StickDirection::Right: actions |= Right; break;
-                        case StickDirection::None: break;
+                // The d-pad takes precedence; do not combine opposite directions.
+                constexpr auto dpad = GamepadButtons::DPadUp | GamepadButtons::DPadDown |
+                                      GamepadButtons::DPadLeft | GamepadButtons::DPadRight;
+                unsigned directions = 0;
+                if ((buttons & dpad) != GamepadButtons::None) stick_navigation.Reset();
+                else {
+                    switch (stick_navigation.Update(reading.LeftThumbstickX, reading.LeftThumbstickY, now)) {
+                    case StickDirection::Up: directions |= Up; break;
+                    case StickDirection::Down: directions |= Down; break;
+                    case StickDirection::Left: directions |= Left; break;
+                    case StickDirection::Right: directions |= Right; break;
+                    case StickDirection::None: break;
+                    }
+                }
+                if (hit(GamepadButtons::DPadUp)) directions |= Up;
+                if (hit(GamepadButtons::DPadDown)) directions |= Down;
+                if (hit(GamepadButtons::DPadLeft)) directions |= Left;
+                if (hit(GamepadButtons::DPadRight)) directions |= Right;
+                if (system_page.name_editor) {
+                    // Like the console's keyboard: A types, X deletes, Y adds a space, Menu is done,
+                    // View is Shift and B leaves without saving.
+                    auto& editor = *system_page.name_editor;
+                    if (directions & Up) editor.Move(0, -1);
+                    if (directions & Down) editor.Move(0, 1);
+                    if (directions & Left) editor.Move(-1, 0);
+                    if (directions & Right) editor.Move(1, 0);
+                    if (hit(GamepadButtons::A) && editor.Press() == TextEntry::Result::Done) finish_name_editor = true;
+                    if (hit(GamepadButtons::X)) editor.Backspace();
+                    if (hit(GamepadButtons::Y)) editor.Type(L' ');
+                    if (hit(GamepadButtons::View)) editor.ToggleShift();
+                    if (hit(GamepadButtons::Menu)) finish_name_editor = true;
+                    if (hit(GamepadButtons::B)) finish_name_editor = false;
+                    if (directions || edges != GamepadButtons::None) {
+                        system_page.editor_notice.clear();
+                        dirty = true;
+                    }
+                } else {
+                    // Back must remain available while editing/capturing keyboard input.
+                    // Track all edges, but suppress other pad actions inside that modal.
+                    if (hit(GamepadButtons::B)) actions |= Quit;
+                    if (!panel.keyboard.open) {
+                        actions |= directions;
+                        if (hit(GamepadButtons::A)) actions |= Play;
+                        if (hit(GamepadButtons::X)) {
+                            if (settings) actions |= Swap;
+                            else if (!configuration.open) actions |= AddFolder;
                         }
+                        if (hit(GamepadButtons::Y)) actions |= Zone;
+                        if (hit(GamepadButtons::Menu)) actions |= Refresh;
+                        if (hit(GamepadButtons::View)) actions |= Panel;
                     }
-                    if (hit(GamepadButtons::DPadUp)) actions |= Up;
-                    if (hit(GamepadButtons::DPadDown)) actions |= Down;
-                    if (hit(GamepadButtons::DPadLeft)) actions |= Left;
-                    if (hit(GamepadButtons::DPadRight)) actions |= Right;
-                    if (hit(GamepadButtons::A)) actions |= Play;
-                    if (hit(GamepadButtons::X)) {
-                        if (settings) actions |= Swap;
-                        else if (!configuration.open) actions |= AddFolder;
-                    }
-                    if (hit(GamepadButtons::Y)) actions |= Zone;
-                    if (hit(GamepadButtons::Menu)) actions |= Refresh;
-                    if (hit(GamepadButtons::View)) actions |= Panel;
                 }
             } catch (...) { pad.reset(); previous = {}; stick_navigation.Reset(); }
         }
         if (window_closed || QuitRequested()) return std::nullopt;
+        if (finish_name_editor) {
+            apply_system_effect(FinishNameEditor(system_page, *finish_name_editor), now);
+            finish_name_editor.reset();
+            dirty = true;
+        }
         if (picker) {
             actions = 0; // The system picker owns input until it returns.
             if (picker.Status() != winrt::Windows::Foundation::AsyncStatus::Started) {
@@ -398,9 +558,9 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                             }};
                         import_future = task.get_future();
                         import_worker = std::jthread(std::move(task));
-                    } else { configuration.notice = L"Seleccion cancelada."; dirty = true; }
+                    } else { configuration.notice = Tr(T::SelectionCancelled); dirty = true; }
                 } catch (const winrt::hresult_error& e) {
-                    configuration.notice = L"No se pudo seleccionar la carpeta: " + std::wstring{e.message()}; dirty = true;
+                    configuration.notice = I18n::Format(T::FolderPickFailed, {e.message()}); dirty = true;
                 }
                 picker = nullptr;
                 previous = {};
@@ -413,19 +573,19 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 try {
                     const auto error = validation.get();
                     if (error.empty()) return selected_path;
-                    notice = winrt::to_hstring(error).c_str();
-                } catch (const std::exception& e) { notice = winrt::to_hstring(e.what()).c_str(); }
+                    notice = Wide(error);
+                } catch (const std::exception& e) { notice = Wide(e.what()); }
                 dirty = true;
             }
         }
         if (setup_future.valid() && setup_future.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
             try { configuration.status = setup_future.get(); }
-            catch (...) { configuration.notice = L"No se pudo comprobar la configuracion de archivos."; }
+            catch (...) { configuration.notice = Tr(T::SetupCheckFailed); }
             configuration.selected = std::min(configuration.selected, ConfigurationRowCount(configuration) - 1);
             dirty = true;
         }
         if (configuration.busy) {
-            if (actions & Quit) { import_worker.request_stop(); configuration.notice = L"Cancelando importacion..."; }
+            if (actions & Quit) { import_worker.request_stop(); configuration.notice = Tr(T::CancellingImport); }
             actions = 0;
             const auto done = import_progress.completed.load(std::memory_order_relaxed);
             const auto total = import_progress.total.load(std::memory_order_relaxed);
@@ -435,8 +595,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             if (import_future.wait_for(std::chrono::seconds{0}) == std::future_status::ready) {
                 try {
                     const auto error = import_future.get();
-                    configuration.notice = error.empty() ? L"Importacion completa. Datos listos en almacenamiento interno." : std::wstring{winrt::to_hstring(error)};
-                } catch (...) { configuration.notice = L"No se pudo importar; se conserva la instalacion anterior."; }
+                    configuration.notice = error.empty() ? std::wstring{Tr(T::ImportDone)} : Wide(error);
+                } catch (...) { configuration.notice = Tr(T::ImportFailedKept); }
                 configuration.busy = false;
                 // The old metadata worker has joined; discard results before rescanning.
                 metadata = {};
@@ -445,12 +605,28 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 dirty = true;
             }
         }
+        if (system_page.open && configuration.open && !settings) {
+            // The name editor takes its input in the handlers above; the page waits behind it.
+            if (!system_page.name_editor && actions) {
+                const auto send = [&](unsigned bit, SystemInput input) {
+                    if (actions & bit) apply_system_effect(HandleSystemInput(system_page, input), now);
+                };
+                send(Up, SystemInput::Up);
+                send(Down, SystemInput::Down);
+                send(Left, SystemInput::Left);
+                send(Right, SystemInput::Right);
+                send(Play, SystemInput::Confirm);
+                send(Quit, SystemInput::Back);
+                if (!system_page.open) configuration.selected = HomeSystem;
+            }
+            actions = 0;
+        }
         if (actions & Quit) {
             if (panel.keyboard.open) { panel.keyboard.open = panel.keyboard.capturing = false; dirty = true; actions &= ~Quit; }
             else if (panel.expanded) { panel.expanded = false; dirty = true; actions &= ~Quit; }
             else if (settings) { settings = false; configuration.open = return_to_configuration; return_to_configuration = false; dirty = true; actions &= ~Quit; }
             else if (configuration.open) {
-                if (configuration.files) { configuration.files = false; configuration.selected = 0; }
+                if (configuration.files) { configuration.files = false; configuration.selected = HomeFiles; }
                 else configuration.open = false;
                 dirty = true; actions &= ~Quit;
             }
@@ -458,7 +634,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         }
         if (actions & Panel && !configuration.open) { settings = !settings; panel.keyboard.open = panel.keyboard.capturing = false; panel.expanded = false; dirty = true; }
         if (actions & AddFolder && !settings && !picker && !configuration.busy && !validation.valid()) {
-            configuration.open = true; configuration.files = false; configuration.selected = 0;
+            configuration.open = true; configuration.files = false; configuration.selected = HomeFiles;
             configuration.notice.clear(); refresh_setup(); dirty = true;
         }
         if (configuration.open && !settings && !picker && !configuration.busy) {
@@ -468,15 +644,24 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             if (actions & (Up | Down)) dirty = true;
             if (actions & Play) {
                 if (!configuration.files) {
-                    if (configuration.selected == 0) { configuration.files = true; configuration.selected = 0; }
-                    else { settings = true; return_to_configuration = true; }
-                } else if (loading || setup_future.valid()) configuration.notice = L"Espera a que termine la comprobacion de archivos.";
+                    switch (configuration.selected) {
+                    case HomeFiles: configuration.files = true; configuration.selected = 0; break;
+                    case HomeControllers: settings = true; return_to_configuration = true; break;
+                    default:
+                        system_page.open = true;
+                        system_page.selected = SystemPage::UserName;
+                        system_page.notice.clear();
+                        // Windows' language or region may have changed since the library opened.
+                        system_page.locale = DetectSystemLocale();
+                        break;
+                    }
+                } else if (loading || setup_future.valid()) configuration.notice = Tr(T::WaitForCheck);
                 else if (configuration.selected >= 3) {
                     try {
                         ForgetGameFolder(configuration.status.sources[configuration.selected - 3].token);
-                        configuration.notice = L"Carpeta quitada de la biblioteca. Tus juegos siguen en el USB.";
+                        configuration.notice = Tr(T::FolderRemoved);
                         configuration.selected = 0; refresh_setup(); start_scan();
-                    } catch (...) { configuration.notice = L"No se pudo quitar la carpeta."; }
+                    } catch (...) { configuration.notice = Tr(T::FolderRemoveFailed); }
                 } else {
                     picker_kind = static_cast<unsigned>(configuration.selected);
                     try {
@@ -484,9 +669,9 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                         folder_picker.SuggestedStartLocation(winrt::Windows::Storage::Pickers::PickerLocationId::ComputerFolder);
                         folder_picker.FileTypeFilter().Append(L"*");
                         picker = folder_picker.PickSingleFolderAsync();
-                        configuration.notice = picker_kind == 0 ? L"Elige la carpeta de juegos." : picker_kind == 1 ?
-                            L"Elige la carpeta con prod.keys y, opcionalmente, title.keys." : L"Elige la carpeta de firmware extraido (.nca).";
-                    } catch (...) { configuration.notice = L"No se pudo abrir el selector de carpetas."; }
+                        configuration.notice = Tr(picker_kind == 0 ? T::PickGamesFolder :
+                                                  picker_kind == 1 ? T::PickKeysFolder : T::PickFirmwareFolder);
+                    } catch (...) { configuration.notice = Tr(T::PickerOpenFailed); }
                 }
                 dirty = true;
             }
@@ -501,10 +686,10 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             loading = false;
             if (!configuration.busy) refresh_setup();
             selected = std::min(selected, scan.entries.empty() ? 0 : scan.entries.size() - 1);
-            notice = winrt::to_hstring(scan.error).c_str();
-            if (notice.empty() && !initial_notice.empty()) notice = winrt::to_hstring(initial_notice).c_str();
+            notice = Wide(scan.error);
+            if (notice.empty() && !initial_notice.empty()) notice = Wide(initial_notice);
             initial_notice = {};
-            if (scan.limited) notice = L"Limite de exploracion alcanzado: 10000 entradas, 5 niveles.";
+            if (scan.limited) notice = Tr(T::ScanLimit);
             dirty = true;
         }
         if (!auto_pick.empty() && !configuration.open && !loading && !picker && !validation.valid()) {
@@ -523,13 +708,13 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         }
         if (actions & Play && !configuration.open && !settings && !panel.keyboard.open && !loading && !scan.entries.empty()) {
             selected_path = scan.entries[selected].launch_path;
-            notice = L"Comprobando acceso al juego...";
+            notice = Tr(T::CheckingGame);
             dirty = true;
             std::packaged_task<std::string()> task{[path = selected_path] {
                 winrt::init_apartment(winrt::apartment_type::multi_threaded);
                 struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } guard;
                 if (!HasUsableHeaderKey() && !path.ends_with(".nro"))
-                    return std::string{"Faltan tus claves. Abre Configuracion > Gestor de archivos > Importar claves."};
+                    return I18n::ToUtf8(Tr(T::MissingKeys));
                 return IsStoragePath(path) ? CheckExternalGame(path) : std::string{};
             }};
             validation = task.get_future();
@@ -581,8 +766,8 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             actions &= ~(Swap | Zone);
             if (actions & Left && selected) { --selected; dirty = true; }
             if (actions & Right && selected + 1 < scan.entries.size()) { ++selected; dirty = true; }
-            if (actions & Up && selected >= 5) { selected -= 5; dirty = true; }
-            if (actions & Down && selected + 5 < scan.entries.size()) { selected += 5; dirty = true; }
+            if (actions & Up && selected >= PageSize) { selected -= PageSize; dirty = true; }
+            if (actions & Down && selected + PageSize < scan.entries.size()) { selected += PageSize; dirty = true; }
         }
         if (actions & Swap) { options.swap_face_buttons = !options.swap_face_buttons; dirty = true; }
         if (actions & Zone) {
@@ -592,7 +777,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         if (device_changed || actions & (Swap | Zone)) {
             device_changed = false;
             const bool saved = SaveControllerOptions(options);
-            panel.notice = saved ? L"Configuracion guardada" : L"No se pudo guardar el mando";
+            panel.notice = Tr(saved ? T::SettingsSaved : T::ControllerSaveFailed);
             controller_notice_until = saved ? now + std::chrono::seconds{3} :
                                              std::chrono::steady_clock::time_point::max();
         }
@@ -601,49 +786,93 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             try {
                 auto batch = metadata.get();
                 if (batch.generation == generation) {
+                    // Merge field by field: a names-only batch must not drop icons already shown.
+                    const size_t page = selected / PageSize * PageSize;
+                    const size_t window_first = page >= PageSize ? page - PageSize : 0;
                     for (auto& entry : batch.entries) {
                         auto found = std::find_if(scan.entries.begin(), scan.entries.end(), [&](const auto& e) {
                             return e.launch_path == entry.launch_path;
                         });
-                        if (found != scan.entries.end()) *found = std::move(entry);
+                        if (found == scan.entries.end()) continue;
+                        const auto index = static_cast<size_t>(found - scan.entries.begin());
+                        // An interrupted background batch is resumed from its first unread game.
+                        if (batch.stopped && !batch.icons && !entry.title_loaded) {
+                            names_cursor = std::min(names_cursor, index);
+                            fill_cursor = std::min(fill_cursor, index);
+                        }
+                        found->name = std::move(entry.name);
+                        found->developer = std::move(entry.developer);
+                        found->title_loaded |= entry.title_loaded;
+                        // The player may have paged on meanwhile: keep icons only inside the window.
+                        if (batch.icons && index >= window_first && index < page + 2 * PageSize)
+                            found->icon = std::move(entry.icon);
                     }
                     dirty = true;
-                    metadata_dirty = true;
                 }
-            } catch (const std::exception&) { notice = L"No se pudieron leer los datos de algunos juegos."; }
+            } catch (const std::exception&) { notice = Tr(T::MetadataFailed); }
         }
-        const size_t page = selected / 5 * 5;
-        if (!configuration.open && !loading && !metadata.valid() && !scan.entries.empty() &&
-            (metadata_dirty || retained_page != page)) {
-            metadata_dirty = false;
+        // Metadata, one worker at a time and in priority order: the covers around the cursor, then
+        // every title the cache already has, then the rest of the library into the cache.
+        const size_t page = selected / PageSize * PageSize;
+        // The player moved to another page: background work yields to its covers.
+        if (metadata.valid() && metadata_background && (metadata_dirty || retained_page != page))
+            metadata_worker.request_stop();
+        if (!configuration.open && !loading && !metadata.valid() && !scan.entries.empty()) {
+            MetadataOptions request{title_language};
             std::vector<LibraryEntry> requested;
-            const size_t first = selected / 5 * 5;
-            if (retained_page != SIZE_MAX && retained_page != first) {
-                for (size_t i = retained_page; i < std::min(retained_page + 5, scan.entries.size()); ++i) {
+            if (metadata_dirty || retained_page != page) {
+                metadata_dirty = false;
+                retained_page = page;
+                const size_t window_first = page >= PageSize ? page - PageSize : 0;
+                const size_t window_end = std::min(page + 2 * PageSize, scan.entries.size());
+                for (size_t i = 0; i < scan.entries.size(); ++i) {
                     auto& entry = scan.entries[i];
-                    if (!entry.icon.empty()) {
+                    if ((i < window_first || i >= window_end) && entry.metadata_loaded) {
                         std::vector<unsigned char>{}.swap(entry.icon);
                         entry.metadata_loaded = false;
                     }
                 }
-            }
-            retained_page = first;
-            for (size_t i = first; i < std::min(first + 5, scan.entries.size()); ++i) {
-                auto& entry = scan.entries[i];
-                if (!entry.metadata_loaded) {
-                    requested.push_back(entry);
-                    entry.metadata_loaded = true;
+                // The visible page first, then the next one (where the player usually goes), then the previous.
+                const auto want = [&](size_t first, size_t last) {
+                    for (size_t i = first; i < std::min(last, scan.entries.size()); ++i) {
+                        auto& entry = scan.entries[i];
+                        if (entry.metadata_loaded) continue;
+                        entry.metadata_loaded = true;
+                        requested.push_back(entry);
+                    }
+                };
+                want(page, page + PageSize);
+                want(page + PageSize, page + 2 * PageSize);
+                want(window_first, page);
+                request.icons = true;
+            } else {
+                // Titles without icons: what the grid and the cache need, never a cover's bytes.
+                const auto take = [&](size_t& cursor, size_t batch) {
+                    while (cursor < scan.entries.size() && requested.size() < batch) {
+                        const auto& entry = scan.entries[cursor++];
+                        if (!entry.title_loaded)
+                            requested.push_back({entry.relative_path, entry.name, {}, {}, false, false,
+                                                 entry.launch_path, entry.source_name});
+                    }
+                };
+                if (names_cursor < scan.entries.size()) {
+                    take(names_cursor, NamesBatch);
+                    request.cache_only = true;
+                } else {
+                    take(fill_cursor, FillBatch);
                 }
             }
             if (!requested.empty()) {
                 if (!logging_ready) { Common::Log::Initialize(); logging_ready = true; }
                 std::packaged_task<MetadataBatch(std::stop_token)> task{
-                    [root, requested = std::move(requested), generation](std::stop_token stop) mutable {
+                    [root, &cache, requested = std::move(requested), generation, request](std::stop_token stop) mutable {
                         winrt::init_apartment(winrt::apartment_type::multi_threaded);
                         struct Uninitialize { ~Uninitialize() { winrt::uninit_apartment(); } } guard;
-                        ReadLibraryMetadata(root, requested, stop);
-                        return MetadataBatch{std::move(requested), generation};
+                        ReadLibraryMetadata(root, requested, cache, request, stop);
+                        return MetadataBatch{std::move(requested), generation, request.icons,
+                                             stop.stop_requested()};
                     }};
+                metadata_background = !request.icons;
                 metadata = task.get_future();
                 metadata_worker = std::jthread(std::move(task));
             }
@@ -655,7 +884,11 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             resize = false;
             dirty = true;
         }
-        if (dirty) { canvas->Draw(scan, selected, loading, settings, setting_row, options, notice, panel, configuration); dirty = false; }
+        if (dirty) {
+            canvas->Draw({scan, selected, loading, settings, setting_row, options, notice, panel,
+                          configuration, system_page});
+            dirty = false;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds{16});
     }
 }

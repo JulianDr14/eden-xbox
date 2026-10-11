@@ -1,0 +1,300 @@
+// SPDX-FileCopyrightText: Copyright 2026 JulianDr14
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+
+// Interface text of the Xbox/UWP frontend in several languages.
+//
+// Every visible string has an id in `Text`. Each language is one catalog in locales/<tag>.cpp that
+// maps ids to text; MakeCatalog runs at compile time and rejects a missing or repeated id, so a
+// half-translated screen never ships by accident. Adding a language is one new catalog file plus
+// one line in locales/registry.cpp (see docs/xbox/xbox_frontend.md, "Idiomas").
+//
+// Placeholders are positional, "{0}" and "{1}", so translations can reorder them. Counts go
+// through Plural(), which asks the language which form a number takes.
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+#include <span>
+#include <string>
+#include <string_view>
+
+namespace EdenXbox::I18n {
+
+enum class Text : std::uint16_t {
+    // Library
+    LibraryHeading,
+    GamesCountOne,
+    GamesCountOther,
+    LoadingTitle,
+    LoadingBody,
+    EmptyTitle,
+    EmptyBody,
+    ReadyToPlay,
+    ImportKeysFirst,
+    PersonalLibrary,
+    YourGames,
+    SourceInternal,
+    CheckingGame,
+    MissingKeys,
+    ScanLimit,
+    MetadataFailed,
+    FolderAuthFailed,
+    GameLoadFailed,
+    GameStoppedGpu,
+
+    // Prompts and common actions
+    Play,
+    Browse,
+    Refresh,
+    Exit,
+    Select,
+    Change,
+    Back,
+    Open,
+    Cancel,
+    Controller,
+    Keyboard,
+    Arrows,
+    DPad,
+    Yes,
+    No,
+    Automatic,
+    AutomaticValue,
+
+    // Controller panel
+    ControllerTitle,
+    ControllerSubtitle,
+    ControllerDevice,
+    ControllerSeenAs,
+    FaceButtons,
+    DeadZone,
+    NintendoFaceButtons,
+    ByPosition,
+    ByLetter,
+    SetUpKeyboard,
+    AutoFirstController,
+    Wireless,
+    Usb,
+    AutomaticOnly,
+    NoCompatibleMapping,
+    SettingsSaved,
+    ControllerSaveFailed,
+    ControllerGeneric,
+    ControllerNumbered,
+    NoController,
+    ChosenControllerMissing,
+    StyleAuto,
+    StylePro,
+    StyleDualJoycon,
+    StyleHandheld,
+    StyleLeftJoycon,
+    StyleRightJoycon,
+
+    // Keyboard editor
+    KeyboardTitle,
+    KeyboardSubtitle,
+    ControllerView,
+    SelectedBinding,
+    PressAKey,
+    KeyPageButtons,
+    KeyPageSystem,
+    KeyPageSticks,
+    ClearBinding,
+    RestoreDefaults,
+    WaitingForKey,
+    KeyboardHelp,
+    KeyboardSaved,
+    KeyboardSaveFailed,
+    KeyUnsupported,
+    ActionLeftStickClick,
+    ActionRightStickClick,
+    ActionDPadLeft,
+    ActionDPadUp,
+    ActionDPadRight,
+    ActionDPadDown,
+    ActionCapture,
+    ActionLeftStickUp,
+    ActionLeftStickDown,
+    ActionLeftStickLeft,
+    ActionLeftStickRight,
+    ActionRightStickUp,
+    ActionRightStickDown,
+    ActionRightStickLeft,
+    ActionRightStickRight,
+    KeyUnassigned,
+    KeyBackspace,
+    KeySpace,
+    KeyPageUp,
+    KeyPageDown,
+    KeyEnd,
+    KeyHome,
+    KeyLeft,
+    KeyUp,
+    KeyRight,
+    KeyDown,
+    KeyDelete,
+    KeyNumbered,
+
+    // In-game menu
+    MenuTitle,
+    MenuResume,
+    MenuFullScreen,
+    MenuBackToHome,
+
+    // Settings home and file manager
+    SettingsTitle,
+    SettingsSubtitle,
+    FileManager,
+    FileManagerHint,
+    ControllersAndKeyboard,
+    ControllersHint,
+    System,
+    SystemHint,
+    EmulatorData,
+    KeysReady,
+    KeysMissing,
+    FirmwareFiles,
+    FilesSubtitle,
+    AddGamesFolder,
+    ImportKeys,
+    ImportFirmware,
+    RemoveFolder,
+    Importing,
+    SelectionCancelled,
+    FolderPickFailed,
+    SetupCheckFailed,
+    CancellingImport,
+    ImportDone,
+    ImportFailedKept,
+    WaitForCheck,
+    FolderRemoved,
+    FolderRemoveFailed,
+    PickGamesFolder,
+    PickKeysFolder,
+    PickFirmwareFolder,
+    PickerOpenFailed,
+    UsbFolder,
+    FolderLimit,
+    KeysFirst,
+    ImportFailed,
+    StorageUnavailable,
+    GameOpenFailed,
+    GameReadFailed,
+    GameReadPast4GiB,
+    GameReadEndFailed,
+    ImportDestinationInvalid,
+    TooManyFirmwareFiles,
+    FirmwareFolderOnly,
+    ImportCancelled,
+    NoFirmwareInFolder,
+    ImportCancelledKept,
+    KeysFileTooLarge,
+    CopyIncomplete,
+    FirmwareUnreadable,
+    FolderHasGameNca,
+    KeysMissingHeaderKey,
+    FirmwareIncomplete,
+
+    // System page
+    SystemTitle,
+    SystemSubtitle,
+    UserName,
+    UserNameHint,
+    InterfaceLanguage,
+    InterfaceLanguageHint,
+    GameLanguage,
+    GameLanguageHint,
+    ConsoleRegion,
+    ConsoleRegionHint,
+    ClearLibraryCache,
+    ClearLibraryCacheHint,
+    LibraryCacheCleared,
+    SystemSaveFailed,
+    RegionJapan,
+    RegionAmericas,
+    RegionEurope,
+    RegionAustralia,
+    RegionChina,
+    RegionKorea,
+    RegionTaiwan,
+
+    // Name editor
+    NameEditorHint,
+    NameEmpty,
+    NameEditorKeyboardHelp,
+    TypeKey,
+    ShiftKey,
+    SymbolsKey,
+    LettersKey,
+    SpaceKey,
+    DeleteKey,
+    DoneKey,
+
+    Count
+};
+inline constexpr std::size_t TextCount = static_cast<std::size_t>(Text::Count);
+
+using Catalog = std::array<std::wstring_view, TextCount>;
+
+struct Entry {
+    Text id;
+    std::wstring_view text;
+};
+
+/// Builds a catalog at compile time. A repeated id, an empty text or (unless `partial`) a
+/// missing id stops the build at the offending catalog. A partial catalog is for a language
+/// still being translated: its gaps fall back to English at run time.
+template <std::size_t N>
+consteval Catalog MakeCatalog(const Entry (&entries)[N], bool partial = false) {
+    Catalog catalog{};
+    for (const Entry& entry : entries) {
+        const auto index = static_cast<std::size_t>(entry.id);
+        if (index >= TextCount) throw "text id out of range";
+        if (entry.text.empty()) throw "empty translation";
+        if (!catalog[index].empty()) throw "text id translated twice";
+        catalog[index] = entry.text;
+    }
+    if (!partial)
+        for (const auto text : catalog)
+            if (text.empty()) throw "missing translation: add every Text id to this catalog";
+    return catalog;
+}
+
+/// CLDR plural categories; English and Spanish only use these two.
+enum class PluralForm : std::uint8_t { One, Other };
+
+struct UiLanguage {
+    std::wstring_view tag;         ///< BCP 47 tag, "en" or "es".
+    std::wstring_view native_name; ///< The language's name in itself, for the picker.
+    const Catalog* catalog;
+    PluralForm (*plural)(std::uint64_t count);
+};
+
+/// Every interface language, English first (the fallback for anything missing).
+std::span<const UiLanguage> UiLanguages();
+const UiLanguage* FindUiLanguage(std::wstring_view tag);
+
+/// Best language for an ordered list of user preferences ("es-CO", "en-US", ...): the first
+/// preference whose tag, or a shorter form of it ("es-419" -> "es"), is available; English if none.
+const UiLanguage& NegotiateUiLanguage(std::span<const UiLanguage> available,
+                                      std::span<const std::wstring> preferences);
+
+void SetUiLanguage(const UiLanguage& language);
+const UiLanguage& CurrentUiLanguage();
+
+/// Text in the current language (English when its catalog lacks it).
+std::wstring_view Tr(Text id);
+/// Tr with "{0}", "{1}"... replaced by `args`.
+std::wstring Format(Text id, std::initializer_list<std::wstring_view> args);
+/// `one` or `other` by the current language's plural rule, with "{0}" replaced by `count`.
+std::wstring Plural(Text one, Text other, std::uint64_t count);
+
+/// UTF-8 for strings that travel as std::string (worker errors, logs).
+std::string ToUtf8(std::wstring_view text);
+/// Upper-case ASCII for the in-game menu's overlay font: accents are dropped (Á -> A, Ñ -> N) and
+/// characters it cannot draw become spaces.
+std::string ToOverlayText(std::wstring_view text);
+
+} // namespace EdenXbox::I18n

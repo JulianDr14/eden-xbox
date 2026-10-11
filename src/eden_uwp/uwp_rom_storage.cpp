@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eden_uwp/uwp_rom_storage.h"
 #include "eden_uwp/storage_path.h"
+#include "eden_uwp/localization.h"
 
 #include <algorithm>
 #include <array>
@@ -41,8 +42,7 @@ void EnsureStorageApartment() {
 }
 
 std::string ErrorText(const winrt::hresult_error& e) {
-    return "USB/carpeta no disponible. Conectala o vuelve a agregarla. " +
-           winrt::to_string(e.message());
+    return I18n::ToUtf8(I18n::Format(I18n::Text::StorageUnavailable, {e.message()}));
 }
 void AddError(LibraryScan& scan, std::string_view error) {
     // Bound diagnostic/UI text even if every source is unavailable.
@@ -358,7 +358,7 @@ std::string RememberGameFolder(const StorageFolder& folder) {
         }
     }
     if (token.empty()) {
-        if (count >= MaxSources) throw std::runtime_error("Limite de 16 carpetas externas alcanzado.");
+        if (count >= MaxSources) throw std::runtime_error(I18n::ToUtf8(I18n::Tr(I18n::Text::FolderLimit)));
         GUID guid{};
         winrt::check_hresult(CoCreateGuid(&guid));
         token = "eden-games-";
@@ -396,18 +396,18 @@ std::string CheckExternalGame(std::string_view path) {
     try {
         auto fs = MakeUwpFilesystem();
         auto file = fs->OpenFile(path, FileSys::OpenMode::Read);
-        if (!file) return "No se pudo abrir el juego. Conecta el USB o vuelve a agregar su carpeta.";
+        if (!file) return I18n::ToUtf8(I18n::Tr(I18n::Text::GameOpenFailed));
         std::array<u8, 64> bytes{};
         const auto size = file->GetSize();
         if (!size || file->Read(bytes.data(), std::min(bytes.size(), size), 0) != std::min(bytes.size(), size))
-            return "No se pudo leer el juego desde su carpeta.";
+            return I18n::ToUtf8(I18n::Tr(I18n::Text::GameReadFailed));
         // Exercise 64-bit offsets before spending time constructing the guest.
         if (size > (u64{1} << 32) + bytes.size() &&
             file->Read(bytes.data(), bytes.size(), (u64{1} << 32) + 1) != bytes.size())
-            return "No se pudo leer el juego por encima de 4 GiB.";
+            return I18n::ToUtf8(I18n::Tr(I18n::Text::GameReadPast4GiB));
         const auto count = std::min(bytes.size(), size);
         if (file->Read(bytes.data(), count, size - count) != count ||
-            file->Read(bytes.data(), 1, size) != 0) return "No se pudo leer el final del juego.";
+            file->Read(bytes.data(), 1, size) != 0) return I18n::ToUtf8(I18n::Tr(I18n::Text::GameReadEndFailed));
         LOG_INFO(Frontend, "ROM storage: preflight passed size={} path={}", size, path);
         return {};
     } catch (const winrt::hresult_error& e) { return ErrorText(e); }

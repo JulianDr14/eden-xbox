@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eden_uwp/uwp_controllers.h"
+#include "eden_uwp/localization.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -168,7 +169,7 @@ std::vector<ControllerDevice> EnumerateControllers() {
             // library and gameplay.
             if (pro_controller && !pro.empty()) continue;
             device.name = pro_controller ? L"Nintendo Switch Pro Controller" : raw.DisplayName().c_str();
-            if (device.name.empty()) device.name = L"Mando";
+            if (device.name.empty()) device.name = I18n::Tr(I18n::Text::ControllerGeneric);
             device.wireless = raw.IsWireless();
             device.pad = Gamepad::FromGameController(raw);
             if (!device.id.empty()) devices.push_back(std::move(device));
@@ -185,7 +186,8 @@ std::vector<ControllerDevice> EnumerateControllers() {
             if (std::any_of(devices.begin(), devices.end(), [&](const auto& d) { return d.pad == pad; }))
                 continue;
             devices.push_back({L"session:" + std::to_wstring(i),
-                               L"Mando " + std::to_wstring(i + 1), pad.IsWireless(), pad});
+                               I18n::Format(I18n::Text::ControllerNumbered, {std::to_wstring(i + 1)}),
+                               pad.IsWireless(), pad});
         }
     } catch (const winrt::hresult_error&) {}
     devices.insert(devices.end(), pro.begin(), pro.end());
@@ -197,9 +199,10 @@ std::optional<size_t> SelectController(const std::vector<ControllerDevice>& devi
 }
 std::wstring ControllerLabel(const std::vector<ControllerDevice>& devices,
                              std::wstring_view preferred) {
-    if (preferred == KeyboardControllerId) return L"Teclado";
+    if (preferred == KeyboardControllerId) return std::wstring{I18n::Tr(I18n::Text::Keyboard)};
     if (const auto selected = SelectController(devices, preferred)) return devices[*selected].name;
-    return preferred.empty() ? L"Sin mando conectado" : L"Mando elegido desconectado";
+    return std::wstring{I18n::Tr(preferred.empty() ? I18n::Text::NoController
+                                                   : I18n::Text::ChosenControllerMissing)};
 }
 bool SameControllerList(const std::vector<ControllerDevice>& a,
                         const std::vector<ControllerDevice>& b) {

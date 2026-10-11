@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eden_uwp/uwp_library_metadata.h"
+#include "eden_uwp/storage_path.h"
 #include "eden_uwp/uwp_rom_storage.h"
 #include "eden_uwp/uwp_file_manager.h"
+#include <memory>
 #include <winrt/base.h>
 #include "common/logging.h"
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/registered_cache.h"
@@ -13,38 +16,65 @@
 #include "core/loader/loader.h"
 
 namespace EdenXbox {
-void ReadLibraryMetadata(const std::filesystem::path& root,
-                         std::vector<LibraryEntry>& entries, std::stop_token stop) {
-    // Core construction provides the loader's filesystem services. Initialize
-    // would reserve guest DRAM and start timing; metadata does not need either.
-    Core::System system;
-    system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
-    system.SetFilesystem(MakeUwpFilesystem());
-    const bool have_keys = HasUsableHeaderKey();
-    if (have_keys) system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
+namespace {
+void Apply(LibraryEntry& entry, LibraryCacheRecord&& record, bool icons) {
+    if (!record.name.empty()) entry.name = std::move(record.name);
+    entry.developer = std::move(record.developer);
+    if (icons) entry.icon = std::move(record.icon);
+    entry.title_loaded = true;
+}
+} // namespace
+
+void ReadLibraryMetadata(const std::filesystem::path& root, std::vector<LibraryEntry>& entries,
+                         const LibraryCache& cache, MetadataOptions options, std::stop_token stop) {
+    const auto language = static_cast<std::uint32_t>(options.language);
+    // NACP::GetLanguageEntry reads the title in Eden's system language. Only one metadata worker
+    // runs at a time and the guest is not running, so setting it here races with nothing.
+    Settings::values.language_index = options.language;
+    // Core construction provides the loader's filesystem services. Initialize would reserve
+    // guest DRAM and start timing; metadata does not need either.
+    std::unique_ptr<Core::System> system;
+    bool have_keys = false;
     for (auto& entry : entries) {
         if (stop.stop_requested()) break;
-        entry.metadata_loaded = true;
-        // A clean install has no user keys yet. Keep placeholders until the file
-        // manager imports them, rather than constructing NCA readers with a zero XTS key.
+        const auto stamp = IsStoragePath(entry.launch_path) ? 0 : LibraryCache::StampFor(root / entry.relative_path);
+        if (auto record = cache.Load(entry.launch_path, stamp, language, options.icons)) {
+            Apply(entry, std::move(*record), options.icons);
+            continue;
+        }
+        if (options.cache_only) continue;
+        if (!system) {
+            system = std::make_unique<Core::System>();
+            system->SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+            system->SetFilesystem(MakeUwpFilesystem());
+            have_keys = HasUsableHeaderKey();
+            if (have_keys) system->GetFileSystemController().CreateFactories(*system->GetFilesystem());
+        }
+        // A clean install has no user keys yet. Keep placeholders until the file manager imports
+        // them, rather than constructing NCA readers with a zero XTS key.
         if (!have_keys && entry.relative_path.extension() != L".nro") continue;
+        // From here on a failure is final for this session: the background fill must move on.
+        entry.title_loaded = true;
         try {
             const auto path = (root / entry.relative_path).u8string();
-            const auto file = system.GetFilesystem()->OpenFile(entry.launch_path.empty() ?
+            const auto file = system->GetFilesystem()->OpenFile(entry.launch_path.empty() ?
                 std::string{reinterpret_cast<const char*>(path.data()), path.size()} : entry.launch_path,
                 FileSys::OpenMode::Read);
-            auto loader = Loader::GetLoader(system, file);
+            auto loader = Loader::GetLoader(*system, file);
             if (!loader) continue;
+            LibraryCacheRecord record;
             std::string title;
             if (loader->ReadTitle(title) == Loader::ResultStatus::Success && !title.empty())
-                entry.name = winrt::to_hstring(title).c_str();
+                record.name = winrt::to_hstring(title).c_str();
             FileSys::NACP control;
             if (loader->ReadControlData(control) == Loader::ResultStatus::Success)
-                entry.developer = winrt::to_hstring(control.GetDeveloperName()).c_str();
-            std::vector<u8> icon;
-            if (loader->ReadIcon(icon) == Loader::ResultStatus::Success && icon.size() <= 1024 * 1024)
-                entry.icon = std::move(icon);
-            LOG_INFO(Frontend, "Library metadata: title '{}', icon {} bytes", title, entry.icon.size());
+                record.developer = winrt::to_hstring(control.GetDeveloperName()).c_str();
+            if (loader->ReadIcon(record.icon) != Loader::ResultStatus::Success ||
+                record.icon.size() > LibraryCache::MaxIcon)
+                record.icon.clear();
+            LOG_INFO(Frontend, "Library metadata: title '{}', icon {} bytes", title, record.icon.size());
+            cache.Store(entry.launch_path, stamp, language, record);
+            Apply(entry, std::move(record), options.icons);
         } catch (const std::exception&) {
             // Missing keys/control data or an unreadable dump keeps filename
             // and placeholder; one entry must not take down the whole library.
