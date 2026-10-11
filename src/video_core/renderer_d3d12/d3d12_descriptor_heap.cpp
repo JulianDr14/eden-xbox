@@ -150,7 +150,22 @@ D3D12_GPU_DESCRIPTOR_HANDLE DescriptorRing::Upload(
 }
 
 bool DescriptorRing::TryAllocate(u32 count, u32& offset) {
-    Retire();
+    // Ranges the last known GPU tick already covers are retired first; the fence is only read
+    // when they do not make room, instead of once per draw.
+    Retire(false);
+    if (FindSpace(count, offset)) {
+        head = offset + count;
+        return true;
+    }
+    Retire(true);
+    if (FindSpace(count, offset)) {
+        head = offset + count;
+        return true;
+    }
+    return false;
+}
+
+bool DescriptorRing::FindSpace(u32 count, u32& offset) const {
     // A drained ring keeps its head (tail caught up with it) instead of restarting at 0: a draw may
     // still be writing the table it took when a mid-draw Finish retired every range, and its slots
     // sit right behind the head, so only a whole lap of the ring could reach them again.
@@ -164,17 +179,21 @@ bool DescriptorRing::TryAllocate(u32 count, u32& offset) {
         } else {
             return false;
         }
-    } else if (head < tail && tail - head > count) {
-        offset = head;
-    } else {
-        return false; // head == tail with ranges in flight: completely full
+        return true;
     }
-    head = offset + count;
-    return true;
+    if (head < tail && tail - head > count) {
+        offset = head;
+        return true;
+    }
+    return false; // head == tail with ranges in flight: completely full
 }
 
-void DescriptorRing::Retire() {
-    while (!in_flight.empty() && scheduler.IsFree(in_flight.front().first)) {
+void DescriptorRing::Retire(bool read_fence) {
+    while (!in_flight.empty()) {
+        const u64 tick = in_flight.front().first;
+        if (!scheduler.IsKnownFree(tick) && !(read_fence && scheduler.IsFree(tick))) {
+            break;
+        }
         tail = in_flight.front().second;
         in_flight.pop_front();
     }

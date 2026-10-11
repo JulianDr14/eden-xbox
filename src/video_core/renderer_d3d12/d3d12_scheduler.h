@@ -83,6 +83,12 @@ public:
         return tick <= known_gpu_tick.load(std::memory_order_acquire) || tick <= KnownGpuTick();
     }
 
+    /// IsFree without reading the fence: by the last tick seen completed (each submit and wait
+    /// refreshes it). For per-draw checks that can fall back to IsFree when it says no.
+    [[nodiscard]] bool IsKnownFree(u64 tick) const noexcept {
+        return tick <= known_gpu_tick.load(std::memory_order_acquire);
+    }
+
     /// Whether the caller is the thread recording into CommandList().
     [[nodiscard]] bool IsRecordingThread() const {
         return recording_thread.load(std::memory_order_relaxed) == std::this_thread::get_id();

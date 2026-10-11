@@ -75,7 +75,10 @@ public:
 
 private:
     bool TryAllocate(u32 count, u32& offset);
-    void Retire();
+    /// Where count slots fit now, without taking them.
+    bool FindSpace(u32 count, u32& offset) const;
+    /// Drops the ranges the GPU is done with; only read_fence asks the fence for new progress.
+    void Retire(bool read_fence);
 
     ID3D12Device* device;
     Scheduler& scheduler;
