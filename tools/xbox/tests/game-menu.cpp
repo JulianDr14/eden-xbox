@@ -69,7 +69,7 @@ int main() {
     // Menu model, in Spanish.
     I18n::SetUiLanguage(*I18n::FindUiLanguage(L"es"));
     GameMenu menu{{ConsoleControllerStyle::Auto, false, 0.12f}};
-    check(menu.Rows().size() == 6 && menu.SelectedItem() == GameMenu::Continue);
+    check(menu.Rows().size() == 7 && menu.SelectedItem() == GameMenu::Continue);
     check(menu.Apply(MenuAction::Confirm) == GameMenuResult::Resume);
     check(menu.Apply(MenuAction::Back) == GameMenuResult::Resume);
     check(menu.Apply(MenuAction::Toggle) == GameMenuResult::Resume);
@@ -100,7 +100,7 @@ int main() {
     // A game with a title id offers its cheats, second, with how many are on.
     GameMenu with_cheats{{ConsoleControllerStyle::Auto, false, 0.12f}, true};
     with_cheats.SetCheatsOn(3);
-    check(with_cheats.Rows().size() == 7);
+    check(with_cheats.Rows().size() == 8);
     check(with_cheats.Rows()[1].kind == GameMenuRow::Kind::Page && with_cheats.Rows()[1].value == L"3 activos");
     check(with_cheats.Apply(MenuAction::Down) == GameMenuResult::None && with_cheats.SelectedItem() == GameMenu::Cheats);
     check(with_cheats.Apply(MenuAction::Right) == GameMenuResult::None);
@@ -108,12 +108,11 @@ int main() {
     with_cheats.SetCheatsOn(1);
     check(with_cheats.Rows()[1].value == L"1 activo");
 
-    // PC: full screen sits above "back to the library"; the Series menu never shows it.
+    // PC: full screen sits above the display rows and "back to the library"; the Series menu never
+    // shows it.
     GameMenu pc{{ConsoleControllerStyle::Auto, false, 0.12f, true, false}};
-    check(pc.Rows().size() == 7 && pc.Rows()[4].label == L"Pantalla completa" && pc.Rows()[4].value == L"No");
-    pc.Apply(MenuAction::Up);
-    pc.Apply(MenuAction::Up);
-    pc.Apply(MenuAction::Up);
+    check(pc.Rows().size() == 8 && pc.Rows()[4].label == L"Pantalla completa" && pc.Rows()[4].value == L"No");
+    for (int i = 0; i < 4; ++i) pc.Apply(MenuAction::Up);
     check(pc.SelectedItem() == GameMenu::FullScreen && pc.Selected() == 4);
     check(pc.Apply(MenuAction::Confirm) == GameMenuResult::FullScreen && pc.Settings().fullscreen);
     check(pc.Apply(MenuAction::Right) == GameMenuResult::FullScreen && !pc.Settings().fullscreen);
@@ -143,5 +142,25 @@ int main() {
     check(reopened.Settings().show_performance_stats);
     check(stats_menu.Apply(MenuAction::Right) == GameMenuResult::PerformanceStatsChanged);
     check(!stats_menu.Settings().show_performance_stats);
-    std::puts("game menu: combo hold/stagger/tap/held passthrough, navigation, settings and cheats PASS");
+
+    // Image upscaling: above the statistics, a choice that steps both ways and wraps around.
+    I18n::SetUiLanguage(*I18n::FindUiLanguage(L"es"));
+    GameMenu scaling_menu{{}};
+    for (int i = 0; i < 3; ++i) scaling_menu.Apply(MenuAction::Up);
+    check(scaling_menu.SelectedItem() == GameMenu::ImageUpscaling);
+    const auto scaling_row = [&] { return scaling_menu.Rows()[scaling_menu.Selected()]; };
+    check(scaling_row().label == L"Escalado de imagen" && scaling_row().value == L"Bilineal");
+    check(scaling_row().kind == GameMenuRow::Kind::Choice);
+    check(scaling_menu.Apply(MenuAction::Right) == GameMenuResult::UpscalingChanged);
+    check(scaling_menu.Settings().upscaling == Upscaling::FsrSharp && scaling_row().value == L"FSR 1 · nítido");
+    check(scaling_menu.Apply(MenuAction::Confirm) == GameMenuResult::UpscalingChanged);
+    check(scaling_row().value == L"FSR 1 · equilibrado");
+    check(scaling_menu.Apply(MenuAction::Left) == GameMenuResult::UpscalingChanged);
+    check(scaling_menu.Apply(MenuAction::Left) == GameMenuResult::UpscalingChanged);
+    check(scaling_menu.Settings().upscaling == Upscaling::Bilinear);
+    check(scaling_menu.Apply(MenuAction::Left) == GameMenuResult::UpscalingChanged);
+    check(scaling_menu.Settings().upscaling == Upscaling::FsrSoft && scaling_row().value == L"FSR 1 · suave");
+    GameMenu scaling_reopened{scaling_menu.Settings()};
+    check(scaling_reopened.Settings().upscaling == Upscaling::FsrSoft);
+    std::puts("game menu: combo hold/stagger/tap/held passthrough, navigation, settings, upscaling and cheats PASS");
 }

@@ -471,5 +471,10 @@ const Catalog EnglishCatalog = MakeCatalog({
     {Text::ModsCategoriesLoading, L"Loading the categories..."},
     {Text::ModsPromptCategories, L"Categories"},
     {Text::ModsPromptListAll, L"List all"},
+    {Text::Upscaling, L"Image upscaling"},
+    {Text::UpscalingBilinear, L"Bilinear"},
+    {Text::UpscalingFsrSharp, L"FSR 1 · sharp"},
+    {Text::UpscalingFsrBalanced, L"FSR 1 · balanced"},
+    {Text::UpscalingFsrSoft, L"FSR 1 · soft"},
 });
 } // namespace EdenXbox::I18n

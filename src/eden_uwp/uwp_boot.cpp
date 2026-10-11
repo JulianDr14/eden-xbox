@@ -278,6 +278,9 @@ struct BootConfig {
     /// Copy and present frames on a thread of their own, so the GPU thread never waits for the
     /// display ("async_present=0" presents on the GPU thread, as Present used to).
     bool async_present{true};
+    /// This boot's image upscaling instead of the saved one, for test runs ("upscaling=fsr";
+    /// upscaling.h ParseUpscaling lists the values). Not saved.
+    std::optional<Upscaling> upscaling;
     /// Make the D3D12 command list calls on a thread of their own, so the GPU thread only records
     /// them ("async_record=1"). Off by default until it has been played through on the console.
     bool async_record{};
@@ -425,6 +428,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     VideoCore::Perf::SetDetailedGpuProfile(config.gpu_profile);
     VideoCore::Perf::SetForceSwapIntervalOne(config.force_swap_interval_one);
     Settings::values.async_presentation.SetValue(config.async_present);
+    if (config.upscaling) ApplyUpscaling(*config.upscaling); // before the renderer exists
     D3D12::SetAsyncRecording(config.async_record);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
@@ -834,9 +838,13 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     input.SetMenuOpen(true);
                     SetTextEntryActive(false); // The real keyboard drives the menu.
                     const ControllerOptions options = input.Options();
+                    // Upscaling as this boot applied it (a boot.cfg override included); only the
+                    // GPU thread writes it while the game runs, and it is paused now.
                     menu.emplace(GameMenuSettings{options.style, options.swap_face_buttons,
                                                   options.deadzone, g_can_fullscreen.load(),
-                                                  g_fullscreen.load(), LoadSystemSettings().show_performance_stats},
+                                                  g_fullscreen.load(), LoadSystemSettings().show_performance_stats,
+                                                  FromSettings(Settings::values.scaling_filter.GetValue(),
+                                                               Settings::values.fsr_sharpening_slider.GetValue())},
                                  program_id != 0);
                     if (game_title.empty()) {
                         std::string title;
@@ -928,6 +936,16 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     settings.show_performance_stats = menu->Settings().show_performance_stats;
                     if (!SaveSystemSettings(settings)) WriteDiag("menu: statistics preference could not be saved");
                     VideoCore::performance_overlay_enabled.store(settings.show_performance_stats, std::memory_order_relaxed);
+                }
+                if (result == GameMenuResult::UpscalingChanged) {
+                    const Upscaling upscaling = menu->Settings().upscaling;
+                    auto settings = LoadSystemSettings();
+                    settings.upscaling = upscaling;
+                    if (!SaveSystemSettings(settings)) WriteDiag("menu: upscaling preference could not be saved");
+                    // Written where the present reads it; draw_menu below presents the paused
+                    // frame again with it.
+                    system.GPU().RunOnGpuThread([upscaling] { ApplyUpscaling(upscaling); });
+                    WriteDiag("menu: upscaling " + I18n::ToUtf8(I18n::Tr(UpscalingText(upscaling))));
                 }
                 if (result == GameMenuResult::FullScreen) {
                     g_fullscreen_request.store(menu->Settings().fullscreen ? 1 : 0);
@@ -2081,6 +2099,13 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             config.null_audio = false;
                             WriteDiag("boot.cfg: unknown audio backend '" + line.substr(6) +
                                       "', using XAudio2");
+                        } else if (line.starts_with("upscaling=")) {
+                            config.upscaling =
+                                EdenXbox::ParseUpscaling(std::string_view{line}.substr(10));
+                            WriteDiag(config.upscaling
+                                          ? "boot.cfg: image upscaling " + line.substr(10)
+                                          : "boot.cfg: unknown upscaling '" + line.substr(10) +
+                                                "', using the saved one");
                         } else if (line == "async_present=0" || line == "async_present=1") {
                             config.async_present = line.back() == '1';
                             WriteDiag(std::string("boot.cfg: presentation thread ") +

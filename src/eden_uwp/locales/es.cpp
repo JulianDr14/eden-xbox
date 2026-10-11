@@ -471,5 +471,10 @@ const Catalog SpanishCatalog = MakeCatalog({
     {Text::ModsCategoriesLoading, L"Cargando las categorías..."},
     {Text::ModsPromptCategories, L"Categorías"},
     {Text::ModsPromptListAll, L"Ver todo"},
+    {Text::Upscaling, L"Escalado de imagen"},
+    {Text::UpscalingBilinear, L"Bilineal"},
+    {Text::UpscalingFsrSharp, L"FSR 1 · nítido"},
+    {Text::UpscalingFsrBalanced, L"FSR 1 · equilibrado"},
+    {Text::UpscalingFsrSoft, L"FSR 1 · suave"},
 });
 } // namespace EdenXbox::I18n

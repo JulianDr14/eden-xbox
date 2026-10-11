@@ -18,6 +18,7 @@ constexpr auto RegionKey = L"system_region";
 constexpr auto UserNameKey = L"system_user_name";
 constexpr auto PerformanceStatsKey = L"system_show_performance_stats";
 constexpr auto AdultModsKey = L"system_show_adult_mods";
+constexpr auto UpscalingKey = L"system_upscaling";
 
 /// Saved as the enum's value, or -1 for "follow the system". A value that is not a selectable
 /// option (an older or newer build's) also falls back to the system.
@@ -51,6 +52,9 @@ SystemSettings LoadSystemSettings() {
                 winrt::unbox_value<winrt::hstring>(values.Lookup(UserNameKey)).c_str());
         if (values.HasKey(PerformanceStatsKey)) settings.show_performance_stats = winrt::unbox_value<bool>(values.Lookup(PerformanceStatsKey));
         if (values.HasKey(AdultModsKey)) settings.show_adult_mods = winrt::unbox_value<bool>(values.Lookup(AdultModsKey));
+        if (values.HasKey(UpscalingKey))
+            settings.upscaling = UpscalingFromValue(winrt::unbox_value<int32_t>(values.Lookup(UpscalingKey)))
+                                     .value_or(Upscaling::Bilinear);
     } catch (...) { /* Missing or invalid values keep following the system. */ }
     return settings;
 }
@@ -64,6 +68,7 @@ bool SaveSystemSettings(const SystemSettings& settings) {
         values.Insert(UserNameKey, winrt::box_value(winrt::hstring{SanitizeUserName(settings.user_name)}));
         values.Insert(PerformanceStatsKey, winrt::box_value(settings.show_performance_stats));
         values.Insert(AdultModsKey, winrt::box_value(settings.show_adult_mods));
+        values.Insert(UpscalingKey, winrt::box_value(static_cast<int32_t>(settings.upscaling)));
         return true;
     } catch (...) { return false; }
 }
@@ -85,6 +90,7 @@ ResolvedSystem ApplySystemSettings() {
     const auto locale = DetectSystemLocale();
     const auto settings = LoadSystemSettings();
     VideoCore::performance_overlay_enabled.store(settings.show_performance_stats, std::memory_order_relaxed);
+    ApplyUpscaling(settings.upscaling);
     const auto resolved = ResolveSystem(settings, locale);
     I18n::SetUiLanguage(*resolved.ui_language);
     Settings::values.language_index = resolved.game_language;
@@ -95,6 +101,12 @@ ResolvedSystem ApplySystemSettings() {
              I18n::ToUtf8(resolved.ui_language->tag), Settings::CanonicalizeEnum(resolved.game_language),
              Settings::CanonicalizeEnum(resolved.region));
     return resolved;
+}
+
+void ApplyUpscaling(Upscaling upscaling) {
+    const UpscalingSettings values = ToSettings(upscaling);
+    Settings::values.scaling_filter.SetValue(values.filter);
+    Settings::values.fsr_sharpening_slider.SetValue(values.fsr_sharpening_slider);
 }
 
 bool ApplyUserName(Service::Account::ProfileManager& profiles, std::wstring_view name) {

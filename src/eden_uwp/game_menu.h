@@ -9,6 +9,7 @@
 #include "eden_uwp/controller_style.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/ui_text.h"
+#include "eden_uwp/upscaling.h"
 
 namespace EdenXbox {
 // In-game menu: View + Menu held for a second (Escape on a keyboard) pauses the game and opens it.
@@ -97,9 +98,13 @@ struct GameMenuSettings {
     bool can_fullscreen{};
     bool fullscreen{};
     bool show_performance_stats{};
+    /// Shown live: the paused frame is presented again with each change.
+    Upscaling upscaling{Upscaling::Bilinear};
 };
 
-enum class GameMenuResult : std::uint8_t { None, Resume, Library, SettingsChanged, FullScreen, Cheats, PerformanceStatsChanged };
+enum class GameMenuResult : std::uint8_t {
+    None, Resume, Library, SettingsChanged, FullScreen, Cheats, PerformanceStatsChanged, UpscalingChanged,
+};
 
 /// One row as drawn: a label, and the value of a setting (changed with left/right) or of a page.
 struct GameMenuRow {
@@ -112,7 +117,9 @@ struct GameMenuRow {
 /// The menu's items and cursor, with texts in the interface language.
 class GameMenu {
 public:
-    enum Item : std::size_t { Continue, Cheats, Mods, Style, FaceButtons, Deadzone, FullScreen, PerformanceStats, Library };
+    enum Item : std::size_t {
+        Continue, Cheats, Mods, Style, FaceButtons, Deadzone, FullScreen, ImageUpscaling, PerformanceStats, Library,
+    };
 
     /// `cheats`: the game can have cheats (it has a title id), so the menu offers them.
     explicit GameMenu(GameMenuSettings settings_, bool cheats = false) : settings{settings_} {
@@ -120,6 +127,7 @@ public:
         if (cheats) items.push_back(Cheats);
         items.insert(items.end(), {Style, FaceButtons, Deadzone});
         if (settings.can_fullscreen) items.push_back(FullScreen);
+        items.push_back(ImageUpscaling);
         items.push_back(PerformanceStats);
         items.push_back(Library);
     }
@@ -195,6 +203,8 @@ private:
         case Deadzone:
             return {Tr(Text::DeadZone), std::to_wstring(static_cast<int>(settings.deadzone * 100 + 0.5f)) + L"%",
                     Choice};
+        case ImageUpscaling:
+            return {Tr(Text::Upscaling), Tr(UpscalingText(settings.upscaling)), Choice};
         case PerformanceStats:
             return {Tr(Text::PerformanceStats), Tr(settings.show_performance_stats ? Text::Yes : Text::No), Choice};
         case FullScreen:
@@ -230,6 +240,9 @@ private:
             settings.deadzone = steps[i];
             return GameMenuResult::SettingsChanged;
         }
+        case ImageUpscaling:
+            settings.upscaling = StepUpscaling(settings.upscaling, back);
+            return GameMenuResult::UpscalingChanged;
         case PerformanceStats:
             settings.show_performance_stats = !settings.show_performance_stats;
             return GameMenuResult::PerformanceStatsChanged;

@@ -39,6 +39,7 @@ add_executable(eden-uwp WIN32
     # Settings > System and the library's on-disk metadata cache.
     system_settings.h
     system_page.h
+    upscaling.h
     text_entry.h
     text_entry_panel.cpp
     text_entry_panel.h

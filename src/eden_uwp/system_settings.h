@@ -17,6 +17,7 @@
 
 #include "common/settings_enums.h"
 #include "eden_uwp/localization.h"
+#include "eden_uwp/upscaling.h"
 
 namespace EdenXbox {
 
@@ -31,6 +32,7 @@ struct SystemSettings {
     std::wstring user_name;                           ///< Empty keeps the default name.
     bool show_performance_stats{}; ///< Persistent global HUD preference, off on first install.
     bool show_adult_mods{};                           ///< The mods store lists mods rated for adults.
+    Upscaling upscaling{Upscaling::Bilinear};         ///< Set from the in-game menu.
 
     bool operator==(const SystemSettings&) const = default;
 };

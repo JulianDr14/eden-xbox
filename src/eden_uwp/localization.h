@@ -496,6 +496,11 @@ enum class Text : std::uint16_t {
     ModsCategoriesLoading,
     ModsPromptCategories,
     ModsPromptListAll,
+    Upscaling,
+    UpscalingBilinear,
+    UpscalingFsrSharp,
+    UpscalingFsrBalanced,
+    UpscalingFsrSoft,
 
 
     Count
