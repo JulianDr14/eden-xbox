@@ -127,7 +127,8 @@ Cutting the per-draw cost of the D3D12 backend is the next target for optimisati
 | App memory | A memory guard that shrinks the caches as the 5120 MiB limit nears, and a ledger of who owns each MiB | See [The memory guard](#the-memory-guard) and [The memory wall](#the-memory-wall) |
 | Textures | ASTC decoded on the GPU into BC3, or BC1 when the texture has no alpha; arrays included | `astc=bc3` keeps the CPU path, `astc_opaque=bc3` keeps every ASTC texture as BC3, `astc_arrays=rgba` keeps arrays in RGBA8 |
 | Audio | XAudio2 2.9 | Same path on PC and Series |
-| Front end | Game library with cover art cached on disk, in-game menu (View + Menu held), settings with a System page (user name, languages, region) | English and Spanish interface; imports keys and firmware from a folder; games from `LocalState\games` or external folders and USB drives. See [The front end](#the-front-end) |
+| Front end | Game library with cover art cached on disk, in-game menu (View + Menu held), settings with a System page (user name, languages, region), per-game options | English and Spanish interface; imports keys and firmware from a folder; games from `LocalState\games` or external folders and USB drives. See [The front end](#the-front-end) |
+| Cheats | Atmosphere cheats from the game's files and the online nx-cheats-db, turned on before playing or while playing | See [Cheats](#cheats) |
 | Input | Xbox controllers, keyboard on PC with rebindable keys | Emulated controller type (Pro, Joy-Cons, handheld) chosen per game; a chosen pad that disconnects is never silently replaced |
 | Recovery | A GPU failure returns to the library instead of killing the app | Still being validated on the Series |
 
@@ -262,7 +263,7 @@ Where things live:
 | `src/shader_recompiler/` | Eden's shader recompiler, with the adjustments the D3D12 profile needs |
 | `tools/xbox/mesa/` | Our additions to Mesa's `spirv_to_dxil` (pipeline linking, integer sampling) |
 | `tools/xbox/` | Build, packaging, local run, Mesa build and crash symbolication scripts |
-| `tools/xbox/tests/` | Standalone tests of the pure policies: memory guard, PSO residency, JIT warm-up, controllers, library, languages, system settings, on-screen keyboard |
+| `tools/xbox/tests/` | Standalone tests of the pure policies: memory guard, PSO residency, JIT warm-up, controllers, library, languages, system settings, on-screen keyboard, cheats |
 | `dist/uwp/` | App manifest and package assets |
 
 Two runtime DLLs are loaded from the package root: `spirv_to_dxil.dll` (built from Mesa by
@@ -456,8 +457,8 @@ turns the tracker off. To get the files off a console, use the Device Portal fil
 
 ### The front end
 
-The library, settings and in-game menu are drawn with Direct2D on the app's own swapchain (the
-in-game menu with the renderer's overlay font), without XAML.
+The library, settings and in-game menu are drawn with Direct2D, without XAML: the library on the
+app's own swapchain, the in-game menu on a CPU bitmap the renderer copies over the paused game.
 
 **Cover art and titles are cached.** Reading a game's title and icon means opening the NSP or XCI
 through Eden's loaders, and before that building a `Core::System`. The library used to do it for
@@ -497,6 +498,30 @@ name field would depend on an overlay that may never show up. The keyboard in `t
 instead behaves the same on the Series and the PC, works with a controller, a mouse or a real
 keyboard, and is a pure class with its own tests. Controls follow the console keyboard: A types,
 X deletes, Y adds a space, View is Shift, Menu confirms and B cancels.
+
+### Cheats
+
+**Menu** on a game in the library opens its options; **Cheats** is the first. The in-game menu
+(View + Menu held) has the same page, and there a change takes effect as soon as the game resumes,
+with no restart, even for a game that booted without cheats.
+
+- **Where they come from.** The game's own cheat folders (`load/<title id>/<mod>/cheats/<build
+  id>.txt`, as on Atmosphere) and [nx-cheats-db](https://github.com/sthetix/nx-cheats-db) by
+  sthetix, which collects the community's cheats and updates daily. Only the game's own file is
+  downloaded (a few KB), revalidated with its ETag so an unchanged file costs a body-less 304, and
+  not asked again for 10 minutes; offline, the last copy is used. Gameplay and graphics (60 FPS,
+  resolution) cheats are separate tabs. The cheats belong to their authors.
+- **The right build, found for you.** Cheat files are per build of the game. The library reads
+  the main module's build id when it reads the title (from the update the file carries, if any)
+  and caches it, so the page opens on the cheats that match.
+- **Atmosphere's format.** Which cheats are on is kept in `toggles.txt`, as Atmosphere and EdiZon
+  do, so cheat folders can be copied between this, a Switch and other emulators.
+- **Nothing silently lost.** Eden used to discard a whole cheat file at its first bad line and to
+  load every file twice on Windows; now a damaged cheat is left out alone and each file loads once.
+  The cheat VM holds 1024 words: the page shows how many are in use and refuses a cheat that would
+  not fit, instead of the VM quietly running none.
+- **No cost when unused.** A game with no cheats on runs no cheat engine at all; the in-game menu's
+  surface exists only while it is open.
 
 ## Running it on a console
 

@@ -600,8 +600,8 @@ pequeños.
 `localization.h`: cada texto visible tiene un id en `I18n::Text`; cada idioma es un catálogo en
 `locales/<tag>.cpp` construido con `MakeCatalog`, que es `consteval`: un id que falta, repetido o
 vacío **no compila**. Marcadores posicionales `{0}`, `{1}` (la traducción puede reordenarlos);
-plurales con la regla CLDR del idioma (`Plural`). El menú en juego usa la misma traducción
-pasada a `ToOverlayText` (mayúsculas ASCII sin tildes para la fuente 3x5 del overlay).
+plurales con la regla CLDR del idioma (`Plural`). El menú en juego usa la misma traducción (con
+texto real desde la sección de cheats, más abajo).
 
 Negociación BCP 47: preferencias de Windows en orden, recortando subetiquetas
 (`es-CO` -> `es`), inglés si ninguna coincide. Inglés es también el respaldo de cualquier texto
@@ -651,3 +651,80 @@ CJK en los nombres de idioma, tiempos de caché con biblioteca grande).
 Fuentes: [GlobalizationPreferences](https://learn.microsoft.com/en-us/uwp/api/Windows.System.UserProfile.GlobalizationPreferences),
 [cadenas de fallback de locale (Firefox)](https://firefox-source-docs.mozilla.org/intl/locale.html),
 [BCP 47](https://www.rfc-editor.org/info/bcp47).
+
+# Opciones del juego y cheats (11 oct 2026)
+
+## Qué se hizo y por qué
+
+Cheats antes de jugar (biblioteca) y **en caliente** (menú del juego), sin reescribir nada de
+Eden: el motor (`CheatEngine` + `DmntCheatVm`) y el cargador (`PatchManager`) son los de siempre,
+con cambios pequeños en `core`:
+
+- `core/memory/cheat_text`: el parser de texto Atmosphere sale de `cheat_engine.cpp` (puro, con
+  test de host). Antes un solo error descartaba **el archivo entero**; ahora se descarta solo el
+  cheat dañado (palabra que no es de 8 hex, más de 0x100 opcodes, segundo maestro, token raro).
+  Comentarios `//` y `#`, BOM y encabezados sin opcodes (etiquetas) se ignoran. Corrige una
+  lectura de un byte fuera del archivo en `ExtractName`.
+- `toggles.txt` de Atmosphere (`[Nombre]` + `true/false`) junto a cada `cheats/<build>.txt`
+  (sueltos `cheat_*.txt`: `<nombre>.toggles`). Sin archivo, todo activo como antes. El cheat
+  maestro solo corre si algún cheat de su archivo está activo.
+- `FileSys::ReadCheatFiles`: la lista de archivos de cheats de un título con sus toggles, para el
+  cargador y para el frontend (sin duplicar el descubrimiento). Corrige la doble carga: el
+  reintento en minúsculas encontraba el mismo archivo en un sistema que ignora mayúsculas.
+- `CheatEngine::Reload` es seguro desde cualquier hilo (mutex; el hilo de timing solo lo toma
+  cuando hay recarga pendiente). Si los cheats activos superan las 0x400 palabras de la VM se
+  registra en el log en vez de apagarlos todos en silencio.
+- `System::EnsureCheatEngine`: el `nso` del módulo principal guarda su región; un juego que
+  arrancó sin cheats puede crear el motor al activar el primero. Mientras no se use, **no hay
+  evento de CoreTiming**: coste cero.
+
+## Base de datos en línea
+
+nx-cheats-db (sthetix) publica un JSON por título y categoría: `cheats/<TID>.json` y
+`cheats_gfx/<TID>.json` (60 FPS, resolución). Se baja **solo el del juego** (2–200 KB, no el zip
+de 4 MB) con `Windows.Web.Http`, timeouts de 10 s por espera, sin caché HTTP propia del sistema:
+la copia y su `ETag` van a `LocalCache\cheats\<TID>\`. La siguiente consulta manda
+`If-None-Match`: un 304 no trae cuerpo. Una consulta confirmada no se repite en 10 minutos. Sin
+red se usa la última copia. Un build puede venir con clave de 16 y de 64 hex: se fusionan por
+nombre.
+
+Los cheats de la base se escriben **completos** en carpetas de mod propias (`Online cheats`,
+`Online graphics`) con su `toggles.txt`, que nombra todos (los nuevos, apagados). Las carpetas de
+cheats del usuario no se tocan salvo su `toggles.txt`. Nada se copia dos veces.
+
+## Interfaz
+
+- Biblioteca: **Menú** abre *Opciones del juego* (`game_options_page.h`, lista extensible: cada
+  opción nueva es un valor del enum, sus textos, su icono y su página). **Y** pasa a ser
+  Actualizar; **LB/RB** cambian de pestaña. En el héroe hay una píldora *Opciones* (clic).
+- Página de cheats (`cheats/cheats_page.h`, pura y compartida): una pestaña por categoría con
+  cheats (Juego, Gráficos y FPS, Tus archivos) y su conteo, interruptores, **A** activa, **X**
+  todos/ninguno, **Y** reconsulta la base, **B** vuelve. Medidor del motor (`x / 1024` palabras,
+  ámbar al 80 %): un cheat que no cabe se rechaza con aviso. Lee primero lo local (instantáneo) y
+  agrega lo de la base cuando llega; nada bloquea el frame.
+- El build ID se lee al leer el título (`uwp_library_metadata.cpp`: NSO `main` del update que
+  trae el mismo archivo, o del base) y queda en la caché de la biblioteca (versión 2 del
+  registro). No hay que elegirlo a mano.
+- Menú del juego: ítem *Cheats* con cuántos están activos y la misma página. Un cambio recarga
+  el motor y corre desde el siguiente tick al continuar.
+
+## Menú del juego con texto real
+
+`game_menu_surface.cpp` dibuja el menú con Direct2D sobre un bitmap WIC (software: no comparte
+el device D3D12 ni deja nada residente en la GPU) con la misma paleta y primitivas que la
+biblioteca (`ui_painter.h`). El renderer copia la imagen sobre el frame en pausa con
+`CopyTextureRegion` desde el pool de staging (`D3D12::ShowGameMenu(MenuImage)`); sin texturas
+nuevas. Escala por la altura de pantalla, tope 1,5x. La superficie existe solo con el menú
+abierto. La fuente 3x5 queda para los overlays de rendimiento y carga; `ToOverlayText` se quitó.
+
+## Pruebas
+
+Harness PASS (`cl /std:c++20 /EHsc /Zc:preprocessor /utf-8 /Isrc`): `cheat-text`,
+`cheat-catalog`, `cheats-page`, `game-menu`, `localization-catalogs`, `library-cache`
+(`/DEDEN_XBOX_NO_WINRT`), `system-settings`, `game-library`. Build UWP de `eden-uwp` limpio.
+Pendiente: validar en Series (descarga y 304, cheats en caliente con y sin cheats al arrancar,
+presupuesto de la VM, memoria con el menú abierto).
+
+Fuentes: [nx-cheats-db](https://github.com/sthetix/nx-cheats-db),
+[dmnt de Atmosphère](https://github.com/Atmosphere-NX/Atmosphere/tree/master/stratosphere/dmnt),
+[Designing for Xbox and TV](https://learn.microsoft.com/en-us/windows/uwp/design/devices/designing-for-tv).
