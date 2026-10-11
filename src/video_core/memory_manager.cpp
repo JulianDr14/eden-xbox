@@ -646,6 +646,19 @@ MemoryManager::GetSubmappedRange(GPUVAddr gpu_addr, std::size_t size) const {
 template <bool is_gpu_address>
 void MemoryManager::GetSubmappedRangeImpl(GPUVAddr gpu_addr, std::size_t size, boost::container::small_vector<std::pair<std::conditional_t<is_gpu_address, GPUVAddr, DAddr>, std::size_t>, 32>& result)
     const {
+    // Most ranges sit inside one mapped big page: a single segment, as the walk below would find.
+    if (size != 0 && IsWithinGPUAddressRange(gpu_addr) &&
+        (gpu_addr >> big_page_bits) == ((gpu_addr + size - 1) >> big_page_bits) &&
+        GetEntry(gpu_addr, true) == EntryType::Mapped) [[likely]] {
+        if constexpr (is_gpu_address) {
+            result.emplace_back(gpu_addr, size);
+        } else {
+            const DAddr dev_addr_base =
+                DAddr(big_page_table_dev[PageEntryIndex(gpu_addr, true)]) << cpu_page_bits;
+            result.emplace_back(dev_addr_base + (gpu_addr & big_page_mask), size);
+        }
+        return;
+    }
     std::optional<std::pair<std::conditional_t<is_gpu_address, GPUVAddr, DAddr>, std::size_t>> last_segment{};
     std::optional<DAddr> old_page_addr{};
     const auto split = [&last_segment, &result]([[maybe_unused]] std::size_t page_index,
