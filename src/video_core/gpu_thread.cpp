@@ -66,7 +66,9 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer,
                 // Time with nothing to do: the guest CPU has not produced the next work yet.
                 const auto idle_start = std::chrono::steady_clock::now();
                 VideoCore::Perf::ScopedTimer idle{VideoCore::Perf::Counter::GpuThreadIdleUs};
-                state.queue.PopWait(next, stop_token);
+                if (!state.queue.PopWait(next, stop_token)) {
+                    break;
+                }
                 if (VideoCore::FrameTrace::Active()) {
                     const u64 idle_us = VideoCore::Perf::ElapsedUs(idle_start);
                     if (idle_us >= 200) {

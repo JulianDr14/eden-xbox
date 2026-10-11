@@ -13,7 +13,7 @@
 #include <thread>
 #include <variant>
 
-#include "common/bounded_threadsafe_queue.h"
+#include "common/spsc_wake_queue.h"
 #include "common/polyfill_thread.h"
 #include "video_core/dma_pusher.h"
 #include "video_core/framebuffer_config.h"
@@ -100,7 +100,9 @@ struct CommandDataContainer {
 
 /// Struct used to synchronize the GPU thread
 struct SynchState final {
-    using CommandQueue = Common::SPSCQueue<CommandDataContainer>;
+    /// The GPU thread spins briefly for the next command before blocking, and the guest only
+    /// enters the OS to wake it when it has blocked.
+    using CommandQueue = Common::SPSCWakeQueue<CommandDataContainer>;
     std::mutex write_lock;
     CommandQueue queue;
     u64 last_fence{};
