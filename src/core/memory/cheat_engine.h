@@ -9,8 +9,10 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include "common/common_types.h"
+#include "core/memory/cheat_text.h"
 #include "core/memory/dmnt_cheat_types.h"
 #include "core/memory/dmnt_cheat_vm.h"
 
@@ -53,23 +55,6 @@ private:
     mutable u64 cached_process_id{};
 };
 
-// Intermediary class that parses a text file or other disk format for storing cheats into a
-// CheatList object, that can be used for execution.
-class CheatParser {
-public:
-    virtual ~CheatParser();
-
-    [[nodiscard]] virtual std::vector<CheatEntry> Parse(std::string_view data) const = 0;
-};
-
-// CheatParser implementation that parses text files
-class TextCheatParser final : public CheatParser {
-public:
-    ~TextCheatParser() override;
-
-    [[nodiscard]] std::vector<CheatEntry> Parse(std::string_view data) const override;
-};
-
 // Class that encapsulates a CheatList and manages its interaction with memory and CoreTiming
 class CheatEngine final {
 public:
@@ -80,6 +65,7 @@ public:
     void Initialize();
     void SetMainMemoryParameters(VAddr main_region_begin, u64 main_region_size);
 
+    /// Replaces the cheat list; the VM loads it on its next tick. Safe from any thread.
     void Reload(std::vector<CheatEntry> reload_cheats);
 
 private:
@@ -88,6 +74,7 @@ private:
     DmntCheatVm vm;
     CheatProcessMetadata metadata;
 
+    std::mutex cheats_mutex; ///< Guards `cheats` between Reload and the timing thread.
     std::vector<CheatEntry> cheats;
     std::atomic_bool is_pending_reload{false};
 

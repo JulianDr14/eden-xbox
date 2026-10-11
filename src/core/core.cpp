@@ -525,6 +525,8 @@ struct System::Impl {
 
     std::array<u64, Core::Hardware::NUM_CPU_CORES> dynarmic_ticks{};
     std::array<u8, 0x20> build_id{};
+    u64 main_region_begin{};
+    u64 main_region_size{};
 
     std::string current_application_filepath;
 
@@ -824,6 +826,18 @@ void System::RegisterCheatList(const std::vector<Memory::CheatEntry>& list,
     impl->cheat_engine->SetMainMemoryParameters(main_region_begin, main_region_size);
 }
 
+Memory::CheatEngine* System::GetCheatEngine() {
+    return impl->cheat_engine ? &*impl->cheat_engine : nullptr;
+}
+
+Memory::CheatEngine& System::EnsureCheatEngine() {
+    if (!impl->cheat_engine) {
+        RegisterCheatList({}, impl->build_id, impl->main_region_begin, impl->main_region_size);
+        impl->cheat_engine->Initialize();
+    }
+    return *impl->cheat_engine;
+}
+
 void System::SetFrontendAppletSet(Service::AM::Frontend::FrontendAppletSet&& set) {
     impl->frontend_applets.SetFrontendAppletSet(std::move(set));
 }
@@ -923,6 +937,11 @@ void System::SetApplicationProcessBuildID(const CurrentBuildProcessID& id) {
 
 const System::CurrentBuildProcessID& System::GetApplicationProcessBuildID() const {
     return impl->build_id;
+}
+
+void System::SetApplicationProcessMainRegion(u64 begin, u64 size) {
+    impl->main_region_begin = begin;
+    impl->main_region_size = size;
 }
 
 Service::SM::ServiceManager& System::ServiceManager() {

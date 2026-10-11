@@ -45,6 +45,7 @@ enum class ResultStatus : u16;
 } // namespace Loader
 
 namespace Core::Memory {
+class CheatEngine;
 struct CheatEntry;
 class Memory;
 } // namespace Core::Memory
@@ -345,6 +346,13 @@ public:
                            const std::array<u8, 0x20>& build_id, u64 main_region_begin,
                            u64 main_region_size);
 
+    /// The application's cheat engine, or nullptr when it booted without cheats.
+    [[nodiscard]] Memory::CheatEngine* GetCheatEngine();
+
+    /// The application's cheat engine, created (with no cheats) for the main module when it
+    /// booted without one, so cheats can be turned on while it runs. Only after Load.
+    Memory::CheatEngine& EnsureCheatEngine();
+
     void SetFrontendAppletSet(Service::AM::Frontend::FrontendAppletSet&& set);
 
     [[nodiscard]] Service::AM::Frontend::FrontendAppletHolder& GetFrontendAppletHolder();
@@ -390,6 +398,9 @@ public:
 
     void SetApplicationProcessBuildID(const CurrentBuildProcessID& id);
     [[nodiscard]] const CurrentBuildProcessID& GetApplicationProcessBuildID() const;
+
+    /// Where the application's main module was loaded, for a cheat engine created later.
+    void SetApplicationProcessMainRegion(u64 begin, u64 size);
 
     /// Register a host thread as an emulated CPU Core.
     void RegisterCoreThread(std::size_t id);

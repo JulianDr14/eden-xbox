@@ -33,7 +33,7 @@
 #include "core/hle/service/set/settings_server.h"
 #include "core/loader/loader.h"
 #include "core/loader/nso.h"
-#include "core/memory/cheat_engine.h"
+#include "core/memory/cheat_text.h"
 
 namespace FileSys {
 namespace {
@@ -83,27 +83,26 @@ VirtualDir FindSubdirectoryCaseless(const VirtualDir dir, std::string_view name)
 #endif
 }
 
-std::optional<std::vector<Core::Memory::CheatEntry>> ReadCheatFileFromFolder(
-    u64 title_id, const PatchManager::BuildID& build_id_, const VirtualDir& base_path, bool upper) {
-    const auto build_id_raw = Common::HexToString(build_id_, upper);
-    const auto build_id = build_id_raw.substr(0, sizeof(u64) * 2);
-    const auto file = base_path->GetFile(fmt::format("{}.txt", build_id));
-
-    if (file == nullptr) {
-        LOG_INFO(Common_Filesystem, "No cheats file found for title_id={:016X}, build_id={}",
-                 title_id, build_id);
-        return std::nullopt;
+std::string ReadText(const VirtualFile& file) {
+    std::string text(file->GetSize(), '\0');
+    if (file->Read(reinterpret_cast<u8*>(text.data()), text.size()) != text.size()) {
+        LOG_WARNING(Common_Filesystem, "Failed to read {}", file->GetName());
+        return {};
     }
+    return text;
+}
 
-    std::vector<u8> data(file->GetSize());
-    if (file->Read(data.data(), data.size()) != data.size()) {
-        LOG_INFO(Common_Filesystem, "Failed to read cheats file for title_id={:016X}, build_id={}",
-                 title_id, build_id);
-        return std::nullopt;
+/// Parses `file` and applies the toggles in `toggles_dir`/`toggles_name`, when present.
+CheatFile ReadCheatFile(std::string mod, const VirtualFile& file, const VirtualDir& toggles_dir,
+                        std::string toggles_name) {
+    CheatFile out{.mod = std::move(mod), .toggles_dir = toggles_dir,
+                  .toggles_name = std::move(toggles_name)};
+    out.cheats = Core::Memory::TextCheatParser{}.Parse(ReadText(file));
+    if (const auto toggles = toggles_dir->GetFile(out.toggles_name)) {
+        Core::Memory::ApplyCheatToggles(out.cheats,
+                                        Core::Memory::ParseCheatToggles(ReadText(toggles)));
     }
-
-    const Core::Memory::TextCheatParser parser;
-    return parser.Parse(std::string_view(reinterpret_cast<const char*>(data.data()), data.size()));
+    return out;
 }
 
 void AppendCommaIfNotEmpty(std::string& to, std::string_view with) {
@@ -487,43 +486,60 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
     return !CollectPatches(patch_dirs, build_id).empty();
 }
 
+std::vector<CheatFile> ReadCheatFiles(const VirtualDir& title_load_dir,
+                                      const PatchManager::BuildID& build_id,
+                                      std::span<const std::string> disabled) {
+    std::vector<CheatFile> out;
+    if (title_load_dir == nullptr) {
+        return out;
+    }
+    const auto is_enabled = [&](const std::string& name) {
+        return std::find(disabled.begin(), disabled.end(), name) == disabled.end();
+    };
+    // <mod dir> / <folder> / cheats / <build id>.txt, named with the first 16 hex digits. Try the
+    // other case only when the first is missing: a case-insensitive host finds both names.
+    auto mod_dirs = title_load_dir->GetSubdirectories();
+    std::sort(mod_dirs.begin(), mod_dirs.end(),
+              [](const auto& l, const auto& r) { return l->GetName() < r->GetName(); });
+    for (const auto& mod_dir : mod_dirs) {
+        if (!is_enabled(mod_dir->GetName())) {
+            continue;
+        }
+        const auto cheats_dir = FindSubdirectoryCaseless(mod_dir, "cheats");
+        if (cheats_dir == nullptr) {
+            continue;
+        }
+        VirtualFile file;
+        for (const bool upper : {true, false}) {
+            const auto name = Common::HexToString(build_id, upper).substr(0, sizeof(u64) * 2);
+            if ((file = cheats_dir->GetFile(name + ".txt")) != nullptr) {
+                break;
+            }
+        }
+        if (file != nullptr) {
+            out.push_back(ReadCheatFile(mod_dir->GetName(), file, cheats_dir, "toggles.txt"));
+        }
+    }
+    // Uncareless user-friendly loading of patches (must start with 'cheat_')
+    // <mod dir> / <cheat file>.txt, toggled by <cheat file>.txt.toggles
+    for (const auto& file : title_load_dir->GetFiles()) {
+        const auto name = file->GetName();
+        if (name.starts_with("cheat_") && name.ends_with(".txt") && is_enabled(name)) {
+            out.push_back(ReadCheatFile(name, file, title_load_dir, name + ".toggles"));
+        }
+    }
+    return out;
+}
+
 std::vector<Core::Memory::CheatEntry> PatchManager::CreateCheatList(const BuildID& build_id_) const {
     const auto load_dir = GetModificationLoadRoot();
     if (load_dir == nullptr) {
         LOG_ERROR(Loader, "Cannot load mods for invalid title_id={:016X}", title_id);
         return {};
     }
-
-    const auto disabled = GetDisabledAddons();
-    auto patch_dirs = load_dir->GetSubdirectories();
-    std::sort(patch_dirs.begin(), patch_dirs.end(), [](auto const& l, auto const& r) { return l->GetName() < r->GetName(); });
-
-    // <mod dir> / <folder> / cheats / <build id>.txt
     std::vector<Core::Memory::CheatEntry> out;
-    for (const auto& subdir : patch_dirs) {
-        if (std::find(disabled.cbegin(), disabled.cend(), subdir->GetName()) == disabled.cend()) {
-            if (auto cheats_dir = FindSubdirectoryCaseless(subdir, "cheats"); cheats_dir != nullptr) {
-                if (auto const res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, true))
-                    std::copy(res->begin(), res->end(), std::back_inserter(out));
-                if (auto const res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, false))
-                    std::copy(res->begin(), res->end(), std::back_inserter(out));
-            }
-        }
-    }
-    // Uncareless user-friendly loading of patches (must start with 'cheat_')
-    // <mod dir> / <cheat file>.txt
-    for (auto const& f : load_dir->GetFiles()) {
-        auto const name = f->GetName();
-        if (name.starts_with("cheat_") && std::find(disabled.cbegin(), disabled.cend(), name) == disabled.cend()) {
-            std::vector<u8> data(f->GetSize());
-            if (f->Read(data.data(), data.size()) == data.size()) {
-                const Core::Memory::TextCheatParser parser;
-                auto const res = parser.Parse(std::string_view(reinterpret_cast<const char*>(data.data()), data.size()));
-                std::copy(res.begin(), res.end(), std::back_inserter(out));
-            } else {
-                LOG_INFO(Common_Filesystem, "Failed to read cheats file for title_id={:016X}", title_id);
-            }
-        }
+    for (const auto& file : ReadCheatFiles(load_dir, build_id_, GetDisabledAddons())) {
+        out.insert(out.end(), file.cheats.begin(), file.cheats.end());
     }
     return out;
 }
