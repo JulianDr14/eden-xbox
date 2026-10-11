@@ -28,6 +28,10 @@ param(
     [string] $Game,
     # Folder library for PC/Series; game files live under the app's LocalState\games.
     [switch] $Library,
+    # Diagnostic builds: the in-process sampling profiler (boot.cfg profile=1). "full" also turns on
+    # the per-draw GPU and per-core CPU timers, which slow the GPU thread. Never for a release.
+    [ValidateSet("", "on", "full")]
+    [string] $Profile = "",
     # Extra boot.cfg lines for diagnosis: "log_filter=*:Info HW.GPU:Debug", "renderer=null".
     [string[]] $BootCfg = @(),
     # Must match Identity/@Publisher in dist/uwp/AppxManifest.xml, character for character.
@@ -40,6 +44,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 if ($Library) { $BootCfg += 'library=1'; $BootCfg += 'play=1' }
+if ($Profile -eq "on") { $BootCfg += 'profile=1' }
+if ($Profile -eq "full") { $BootCfg += 'profile=full' }
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $repo
 

@@ -41,6 +41,7 @@
 #include "common/memory_ledger.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
+#include "common/windows/sampling_profiler.h"
 #include "common/windows/timer_resolution.h"
 #include "core/arm/cpu_profile.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
@@ -216,6 +217,13 @@ struct BootConfig {
     bool gpu_profile{};
     /// Per-core JIT elapsed time and slow callback counts ("cpu_profile=1"). Diagnostic only.
     bool cpu_profile{};
+    /// In-process sampling profiler over every named thread ("profile=1"; "profile=full" adds the
+    /// gpu_profile and cpu_profile timers): stacks and CPU time per thread in
+    /// LocalState/eden/log/eden_profile.txt, read by tools/xbox/profile-report.py. Off unless a
+    /// diagnostic package asks for it (package-appx.ps1 -Profile).
+    bool profile{};
+    u32 profile_hz{250};      ///< "profile_hz=": samples per second of each running thread.
+    u32 profile_window{20};   ///< "profile_window=": seconds per report window.
     /// How idle emulated cores wait for work ("idle_spin=off|adaptive|adaptive:<us>|fixed:<us>").
     Common::SpinPolicy idle_spin{};
     /// Per-game JIT profile, compiled before the guest runs ("jit_prewarm=1", the default),
@@ -401,6 +409,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     GamepadInput input{config.input_script};
     system.HIDCore().ReloadInputDevices();
     const auto shutdown = [&] {
+        Common::SamplingProfiler::Stop(); // writes the window in progress, if it runs
         if (config.gpu_failure_probe) WriteDiag("GPU recovery shutdown: input.Stop");
         input.Stop();
         Kernel::Svc::SetDebugStringObserver(nullptr); // detach before teardown
@@ -519,6 +528,15 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         }
     }
 
+    if (config.profile) {
+        const auto output =
+            Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "eden_profile.txt";
+        Common::SamplingProfiler::Start({.hz = config.profile_hz,
+                                         .window_seconds = config.profile_window,
+                                         .output = output});
+        WriteDiag("step: sampling profiler on, " + std::to_string(config.profile_hz) +
+                  " Hz, " + std::to_string(config.profile_window) + " s windows");
+    }
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
     void(system.Run());
     input.Start(system.HIDCore());
@@ -659,6 +677,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 if (result == GameMenuResult::FullScreen) {
                     g_fullscreen_request.store(menu->Settings().fullscreen ? 1 : 0);
                 }
+
                 draw_menu();
             }
             if (config.memory_audit && tick % (10 * TICKS_PER_SECOND) == 0) {
@@ -1706,6 +1725,28 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
                         } else if (line == "cpu_profile=1") {
                             config.cpu_profile = true;
+                        } else if (line == "profile=1") {
+                            config.profile = true;
+                            WriteDiag("boot.cfg: sampling profiler on");
+                        } else if (line == "profile=full") {
+                            // The fine timers read the clock about 15 times a draw: they slow the
+                            // GPU thread down, so they are not part of the plain profile.
+                            config.profile = true;
+                            config.gpu_profile = true;
+                            config.cpu_profile = true;
+                            WriteDiag("boot.cfg: sampling profiler with GPU and CPU timers");
+                        } else if (line.starts_with("profile_hz=") ||
+                                   line.starts_with("profile_window=")) {
+                            const bool hz = line.starts_with("profile_hz=");
+                            const std::string value = line.substr(line.find('=') + 1);
+                            const unsigned long parsed = std::strtoul(value.c_str(), nullptr, 10);
+                            if (hz && parsed >= 10 && parsed <= 1000) {
+                                config.profile_hz = static_cast<u32>(parsed);
+                            } else if (!hz && parsed >= 1 && parsed <= 600) {
+                                config.profile_window = static_cast<u32>(parsed);
+                            } else {
+                                WriteDiag("boot.cfg: invalid " + line + ", ignored");
+                            }
                         } else if (line.starts_with("idle_spin=")) {
                             if (const auto policy = Common::SpinPolicy::Parse(line.substr(10))) {
                                 config.idle_spin = *policy;
