@@ -49,7 +49,7 @@ void RasterizerD3D12::DrawTexture() {
     const VideoCommon::Region2D src_region{
         {static_cast<s32>(state.src_x0), static_cast<s32>(state.src_y0)},
         {static_cast<s32>(state.src_x1), static_cast<s32>(state.src_y1)}};
-    framebuffer->PrepareAttachments();
+    framebuffer->PrepareAttachments(scheduler);
     if (trace_draws) {
         TraceDraw(fmt::format("draw texture from {} {}x{}", texture.format, texture.size.width,
                               texture.size.height),
@@ -80,7 +80,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
     std::scoped_lock lock{texture_cache.mutex};
     texture_cache.UpdateRenderTargets(true);
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
-    framebuffer->PrepareAttachments();
+    framebuffer->PrepareAttachments(scheduler);
     // As in Vulkan, the clear covers layers [layer, layer + layer_count) of the attachments. The
     // framebuffer's views cover all their layers; a narrower clear gets views of its own, freed
     // once recorded (RTVs and DSVs are read when the clear is recorded).

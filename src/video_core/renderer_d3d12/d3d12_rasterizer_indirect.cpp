@@ -69,7 +69,7 @@ void RasterizerD3D12::DrawIndirect() {
         return;
     }
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
-    framebuffer->PrepareAttachments(bindings.depth_sampled);
+    framebuffer->PrepareAttachments(scheduler, bindings.depth_sampled);
 
     // Records of INDIRECT_DRAW(_INDEXED)_WORDS: the CPU writes is_indexed_draw, the y/z flips and
     // the draw index; GPU copies add the guest's arguments and, as the first two runtime-data

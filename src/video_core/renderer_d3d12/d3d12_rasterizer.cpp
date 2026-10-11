@@ -157,7 +157,7 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     }
     VideoCore::Perf::ScopedNsTimer record_timer{VideoCore::Perf::Counter::DrawRecordNs};
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
-    framebuffer->PrepareAttachments(bindings.depth_sampled);
+    framebuffer->PrepareAttachments(scheduler, bindings.depth_sampled);
 
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     DrawParams params{

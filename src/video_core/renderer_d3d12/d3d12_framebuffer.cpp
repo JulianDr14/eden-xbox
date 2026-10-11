@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "common/settings.h"
+#include "video_core/renderer_d3d12/d3d12_barrier_batch.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/render_targets.h"
 
@@ -76,22 +77,26 @@ Framebuffer::Framebuffer(TextureCacheRuntime& runtime, std::span<ImageView*, NUM
     }
 }
 
-void Framebuffer::PrepareAttachments(bool depth_sampled) const {
+void Framebuffer::PrepareAttachments(Scheduler& scheduler, bool depth_sampled) const {
     if (!images) return;
+    BarrierBatch barriers{scheduler};
     for (size_t index = 0; index < num_colors; ++index) {
         if (color_images[index] == ImageId{}) {
             continue;
         }
         Image& image = (*images)[color_images[index]];
         if ((copy_colors >> index) & 1) {
+            // Records its own barrier on the image's copy: the batched ones go first.
+            barriers.Flush();
             image.RenderToReinterpreted();
         } else {
-            image.Transition(D3D12_RESOURCE_STATE_RENDER_TARGET);
+            image.Transition(D3D12_RESOURCE_STATE_RENDER_TARGET, &barriers);
         }
     }
     if (depth_image != ImageId{}) {
         (*images)[depth_image].Transition(depth_sampled ? DEPTH_SAMPLED_STATE
-                                                        : D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                                                        : D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                                          &barriers);
     }
 }
 

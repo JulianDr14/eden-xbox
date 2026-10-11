@@ -583,8 +583,9 @@ public:
     [[nodiscard]] bool IsRescaled() const noexcept { return is_rescaled; }
 
     /// Transitions the attachments to RENDER_TARGET and DEPTH_WRITE, or the depth buffer to
-    /// DEPTH_SAMPLED_STATE when the draw also samples it (bind DepthTarget(true) then).
-    void PrepareAttachments(bool depth_sampled = false) const;
+    /// DEPTH_SAMPLED_STATE when the draw also samples it (bind DepthTarget(true) then), with one
+    /// ResourceBarrier call for all of them.
+    void PrepareAttachments(Scheduler& scheduler, bool depth_sampled = false) const;
 
 private:
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, NUM_RT> colors{};
