@@ -181,6 +181,10 @@ private:
     u32 stride;
     u32 used{};
     std::unordered_map<std::vector<u64>, u32, KeyHash, KeyEqual> tables; ///< keys -> first slot
+    /// The table the previous call returned: consecutive draws mostly sample the same way, and
+    /// comparing against it skips hashing the keys.
+    std::vector<u64> last_keys;
+    u32 last_first{};
     bool logged_cache{};
     bool logged_reuse{};
 };

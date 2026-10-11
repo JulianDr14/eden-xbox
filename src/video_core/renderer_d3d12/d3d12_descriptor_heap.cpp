@@ -395,6 +395,9 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
     if (count == 0 || count > CAPACITY || keys.size() != samplers.size()) {
         throw std::runtime_error(fmt::format("D3D12: bad sampler table request ({})", count));
     }
+    if (std::ranges::equal(keys, last_keys)) {
+        return {gpu_base.ptr + static_cast<u64>(last_first) * stride};
+    }
     // Heterogeneous lookup avoids allocating/copying a vector on every draw. Only a new
     // table owns a key; hits compare the caller's span against that stored vector.
     if (const auto it = tables.find(keys); it != tables.end()) {
@@ -402,6 +405,8 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
             LOG_INFO(Render, "D3D12: sampler table deduplication active ({} samplers)", count);
             logged_reuse = true;
         }
+        last_keys.assign(keys.begin(), keys.end());
+        last_first = it->second;
         return {gpu_base.ptr + static_cast<u64>(it->second) * stride};
     }
     if (used + count > CAPACITY) {
@@ -421,6 +426,8 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
     });
     used += count;
     tables.emplace(std::vector<u64>(keys.begin(), keys.end()), first);
+    last_keys.assign(keys.begin(), keys.end());
+    last_first = first;
     if (!logged_cache) {
         LOG_INFO(Render, "D3D12: sampler table cached ({} samplers, {} of {} slots used)", count,
                  used, CAPACITY);
