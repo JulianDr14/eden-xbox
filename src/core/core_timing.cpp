@@ -9,7 +9,8 @@
 #include <string>
 #include <tuple>
 #include "common/cpu_features.h"
-#include "common/cpu_features.h"
+#include "common/cpu_wait.h"
+#include "common/logging.h"
 
 #ifdef _WIN32
 #include "common/windows/timer_resolution.h"
@@ -71,6 +72,13 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
     event_fifo_id = 0;
     cpu_ticks = 0;
     if (is_multicore) {
+        const auto& clock = Common::g_wall_clock;
+#ifdef ARCHITECTURE_x86_64
+        LOG_INFO(Core_Timing, "Host clock: {}, CPU waits: {}",
+                 clock.IsNative() ? fmt::format("TSC at {:.1f} MHz", clock.rdtsc_frequency / 1e6)
+                                  : std::string{"steady_clock"},
+                 Common::CpuWaitMethodName(Common::BestCpuWaitMethod()));
+#endif
         timer_thread = std::jthread([this](std::stop_token stop_token) {
             Common::SetCurrentThreadName("HostTiming");
             Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);

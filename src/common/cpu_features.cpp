@@ -224,6 +224,11 @@ const CPUCaps g_cpu_caps = [] {
             caps.tsc_frequency = X64::EstimateRDTSCFrequency();
         }
     }
+    // AMD has no leaf 0x15: without an estimate the wall clock would fall back to steady_clock
+    // and the monitor waits (MWAITX), whose timeouts count TSC ticks, would be unusable.
+    if (caps.invariant_tsc && caps.tsc_frequency == 0) {
+        caps.tsc_frequency = X64::EstimateRDTSCFrequency();
+    }
 
     if (max_std_fn >= 0x16) {
         __cpuid(cpu_id, 0x16);
