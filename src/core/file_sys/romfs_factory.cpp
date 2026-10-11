@@ -21,8 +21,9 @@
 namespace FileSys {
 
 RomFSFactory::RomFSFactory(Loader::AppLoader& app_loader, ContentProvider& provider,
-                           Service::FileSystem::FileSystemController& controller)
-    : content_provider{provider}, filesystem_controller{controller} {
+                           Service::FileSystem::FileSystemController& controller,
+                           std::shared_ptr<NCA> loaded_base_)
+    : loaded_base{std::move(loaded_base_)}, content_provider{provider}, filesystem_controller{controller} {
     // Load the RomFS from the app
     if (app_loader.ReadRomFS(file) != Loader::ResultStatus::Success) {
         LOG_WARNING(Service_FS, "Unable to read base RomFS");
@@ -46,7 +47,7 @@ VirtualFile RomFSFactory::OpenCurrentProcess(u64 current_process_title_id) const
     const auto nca = content_provider.GetEntry(current_process_title_id, type);
     const PatchManager patch_manager{current_process_title_id, filesystem_controller,
                                      content_provider};
-    return patch_manager.PatchRomFS(nca.get(), file, ContentRecordType::Program, packed_update_raw);
+    return patch_manager.PatchRomFS(loaded_base ? loaded_base.get() : nca.get(), file, ContentRecordType::Program, content_provider.HasApplicationContentOverride(current_process_title_id) ? nullptr : packed_update_raw);
 }
 
 VirtualFile RomFSFactory::OpenPatchedRomFS(u64 title_id, ContentRecordType type) const {
@@ -79,6 +80,7 @@ VirtualFile RomFSFactory::Open(u64 title_id, StorageId storage, ContentRecordTyp
 
 std::shared_ptr<NCA> RomFSFactory::GetEntry(u64 title_id, StorageId storage,
                                             ContentRecordType type) const {
+    if (content_provider.HasApplicationContentOverride(title_id)) return content_provider.GetEntry(title_id, type);
     switch (storage) {
     case StorageId::None:
         return content_provider.GetEntry(title_id, type);

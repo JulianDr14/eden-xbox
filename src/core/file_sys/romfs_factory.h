@@ -37,7 +37,8 @@ enum class StorageId : u8 {
 class RomFSFactory {
 public:
     explicit RomFSFactory(Loader::AppLoader& app_loader, ContentProvider& provider,
-                          Service::FileSystem::FileSystemController& controller);
+                          Service::FileSystem::FileSystemController& controller,
+                          std::shared_ptr<NCA> loaded_base = {});
     ~RomFSFactory();
 
     void SetPackedUpdate(VirtualFile packed_update_raw);
@@ -50,6 +51,7 @@ public:
                                                 ContentRecordType type) const;
 
 private:
+    std::shared_ptr<NCA> loaded_base;
     VirtualFile file;
     VirtualFile packed_update_raw;
 

@@ -212,14 +212,14 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
 
     if (content_union) {
         // First, check ExternalContentProvider
-        const auto* external_provider = content_union->GetExternalProvider();
+        const auto* external_provider = content_union->GetExternalProvider(title_id);
         if (external_provider) {
             const auto update_versions = external_provider->ListUpdateVersions(update_tid);
 
             if (!update_versions.empty()) {
                 checked_external = true;
                 for (const auto& update_entry : update_versions) {
-                    if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
+                    if (content_union->HasApplicationContentOverride(title_id) || !IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
                         update_disabled = false;
                         enabled_version = update_entry.version;
                         break;
@@ -238,7 +238,7 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
                 if (!manual_update_versions.empty()) {
                     checked_manual = true;
                     for (const auto& update_entry : manual_update_versions) {
-                        if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
+                        if (content_union->HasApplicationContentOverride(title_id) || !IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
                             update_disabled = false;
                             enabled_version = update_entry.version;
                             break;
@@ -295,7 +295,7 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
 
     // If we have a specific enabled version from external provider, use it
     if (enabled_version.has_value() && content_union) {
-        const auto* external_provider = content_union->GetExternalProvider();
+        const auto* external_provider = content_union->GetExternalProvider(title_id);
         if (external_provider) {
             auto file = external_provider->GetEntryForVersion(update_tid, ContentRecordType::Program, *enabled_version);
             if (file != nullptr) {
@@ -643,14 +643,14 @@ VirtualFile PatchManager::PatchRomFS(const NCA* base_nca, VirtualFile base_romfs
     const auto* content_union = static_cast<const ContentProviderUnion*>(&content_provider);
     if (content_union) {
         // First, check ExternalContentProvider
-        const auto* external_provider = content_union->GetExternalProvider();
+        const auto* external_provider = content_union->GetExternalProvider(title_id);
         if (external_provider) {
             const auto update_versions = external_provider->ListUpdateVersions(update_tid);
 
             if (!update_versions.empty()) {
                 checked_external = true;
                 for (const auto& update_entry : update_versions) {
-                    if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
+                    if (content_union->HasApplicationContentOverride(title_id) || !IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
                         update_disabled = false;
                         enabled_version = update_entry.version;
                         update_raw = external_provider->GetEntryForVersion(update_tid, type, update_entry.version);
@@ -669,7 +669,7 @@ VirtualFile PatchManager::PatchRomFS(const NCA* base_nca, VirtualFile base_romfs
                 if (!manual_update_versions.empty()) {
                     checked_manual = true;
                     for (const auto& update_entry : manual_update_versions) {
-                        if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
+                        if (content_union->HasApplicationContentOverride(title_id) || !IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
                             update_disabled = false;
                             enabled_version = update_entry.version;
                             update_raw = manual_provider->GetEntryForVersion(update_tid, type, update_entry.version);
@@ -762,7 +762,7 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
 
     if (content_union) {
         // First, check ExternalContentProvider for updates
-        const auto* external_provider = content_union->GetExternalProvider();
+        const auto* external_provider = content_union->GetExternalProvider(title_id);
         if (external_provider) {
             const auto update_versions = external_provider->ListUpdateVersions(update_tid);
 

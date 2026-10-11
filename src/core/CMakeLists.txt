@@ -50,6 +50,7 @@ add_library(core STATIC
     device_memory_manager.inc
     file_sys/bis_factory.cpp
     file_sys/bis_factory.h
+    file_sys/content_provider_union.cpp
     file_sys/card_image.cpp
     file_sys/card_image.h
     file_sys/common_funcs.h

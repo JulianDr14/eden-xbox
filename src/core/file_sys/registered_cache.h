@@ -82,6 +82,7 @@ public:
     virtual bool HasEntry(u64 title_id, ContentRecordType type) const = 0;
     bool HasEntry(ContentProviderEntry entry) const;
 
+    virtual bool HasApplicationContentOverride(u64 title_id) const { return false; }
     virtual std::optional<u32> GetEntryVersion(u64 title_id) const = 0;
 
     virtual VirtualFile GetEntryUnparsed(u64 title_id, ContentRecordType type) const = 0;
@@ -188,6 +189,11 @@ public:
                                const ContentRecord& base_record, bool overwrite_if_exists = false,
                                const VfsCopyFunction& copy = &VfsRawCopy);
 
+    // Install exactly one inspected CNMT set into an isolated cache. No removal of old titles.
+    InstallResult InstallContentSet(const CNMT& cnmt, const VirtualFile& meta,
+                                   const std::vector<VirtualFile>& files,
+                                   const VfsCopyFunction& copy);
+
     // Removes an existing entry based on title id
     bool RemoveExistingEntry(u64 title_id) const;
     bool Delete(const NcaID& id) const;
@@ -233,6 +239,10 @@ public:
     ~ContentProviderUnion() override;
 
     void SetSlot(ContentProviderUnionSlot slot, ContentProvider* provider);
+    // Launch-scoped selection, non-owning; provider must outlive this union.
+    // Every lookup/enumeration for this application is exclusive to that selection.
+    void SetApplicationContentOverride(u64 application_id, ContentProvider* provider);
+    bool HasApplicationContentOverride(u64 title_id) const override { return OverrideFor(title_id) != nullptr; }
     void Refresh() override;
     bool HasEntry(u64 title_id, ContentRecordType type) const override;
     std::optional<u32> GetEntryVersion(u64 title_id) const override;
@@ -243,7 +253,7 @@ public:
         std::optional<TitleType> title_type, std::optional<ContentRecordType> record_type,
         std::optional<u64> title_id) const override;
 
-    const ExternalContentProvider* GetExternalProvider() const;
+    const ExternalContentProvider* GetExternalProvider(u64 title_id = 0) const;
     [[nodiscard]] inline const ContentProvider* GetSlotProvider(ContentProviderUnionSlot slot) const {
         return providers[size_t(slot)];
     }
@@ -255,7 +265,10 @@ public:
 
     std::optional<ContentProviderUnionSlot> GetSlotForEntry(u64 title_id, ContentRecordType type) const;
 private:
-    std::array<ContentProvider*, size_t(ContentProviderUnionSlot::Count)> providers;
+    ContentProvider* OverrideFor(u64 title_id) const;
+    std::optional<u64> selected_application;
+    ContentProvider* selected_provider{};
+    std::array<ContentProvider*, size_t(ContentProviderUnionSlot::Count)> providers{};
 };
 
 class ManualContentProvider : public ContentProvider {

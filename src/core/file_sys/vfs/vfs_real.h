@@ -82,6 +82,8 @@ class RealVfsFile : public VfsFile {
     friend class RealVfsFilesystem;
 
 public:
+    bool Commit() const;
+
     RealVfsFile(RealVfsFilesystem& base, std::unique_ptr<FileReference> reference,
                 const std::string& path, OpenMode perms = OpenMode::Read,
                 std::optional<u64> size = {}, std::optional<std::string> parent_path = {});
