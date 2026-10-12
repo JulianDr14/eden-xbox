@@ -44,8 +44,35 @@ constexpr u32 CpuClockTargetMhz(Settings::CpuClock clock) {
     }
 }
 
+namespace {
+// Every event type ever created, by name; expired entries are dropped as the registry grows.
+std::mutex live_events_lock;
+std::unordered_multimap<std::string, std::weak_ptr<EventType>> live_events;
+size_t live_events_sweep_at = 256;
+} // namespace
+
 std::shared_ptr<EventType> CreateEvent(std::string name, TimedCallback&& callback) {
-    return std::make_shared<EventType>(std::move(callback), std::move(name));
+    auto type = std::make_shared<EventType>(std::move(callback), std::move(name));
+    std::scoped_lock lock{live_events_lock};
+    if (live_events.size() >= live_events_sweep_at) {
+        std::erase_if(live_events, [](const auto& entry) { return entry.second.expired(); });
+        live_events_sweep_at = std::max<size_t>(256, live_events.size() * 2);
+    }
+    live_events.emplace(type->name, type);
+    return type;
+}
+
+std::shared_ptr<EventType> FindLiveEvent(const std::string& name) {
+    std::scoped_lock lock{live_events_lock};
+    std::shared_ptr<EventType> found;
+    const auto [begin, end] = live_events.equal_range(name);
+    for (auto it = begin; it != end; ++it) {
+        auto type = it->second.lock();
+        if (!type) continue;
+        if (found) return {};
+        found = std::move(type);
+    }
+    return found;
 }
 
 struct CoreTiming::Event {

@@ -60,8 +60,8 @@ constexpr auto SessionManagerTimeout = std::chrono::seconds{5};
 [[noreturn]] void Invalid(const char* reason) {
     throw Failure{Error::Invalid, reason};
 }
-[[noreturn]] void Incompatible(const char* reason) {
-    throw Failure{Error::Incompatible, reason};
+[[noreturn]] void Incompatible(const std::string& reason) {
+    throw Failure{Error::Incompatible, reason.c_str()};
 }
 [[noreturn]] void Reject(bool retryable, const std::string& reason) {
     throw CheckpointRejected{retryable, "Pulse: " + reason};
@@ -435,7 +435,8 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
             continue;
         }
         if (type->name.empty() || type->name.size() > MaxTimingNameLength ||
-            timing_section.bindings.size() == MaxTimingNames || !seen_names.insert(type->name).second) {
+            timing_section.bindings.size() == MaxTimingNames || !seen_names.insert(type->name).second ||
+            Core::Timing::FindLiveEvent(type->name) != type) {
             Reject(false, "timing event '" + type->name + "' cannot be bound by name");
         }
         timing_section.bindings.push_back({id, type->name});
@@ -852,9 +853,14 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
         std::unordered_set<std::string> bound;
         u64 next_id{};
         for (const auto& binding : section.bindings) {
+            // Not queued yet in the fresh system: its owner still exists and holds the type.
             const auto found = fresh_types.find(binding.name);
-            if (found == fresh_types.end()) Incompatible("Pulse: timing event missing after rebuild");
-            bindings.push_back({binding.id, found->second});
+            auto type = found != fresh_types.end() ? found->second
+                                                   : Core::Timing::FindLiveEvent(binding.name);
+            if (!type || type == hardware_timer) {
+                Incompatible("Pulse: timing event '" + binding.name + "' missing after rebuild");
+            }
+            bindings.push_back({binding.id, std::move(type)});
             bound.insert(binding.name);
             next_id = std::max(next_id, binding.id);
         }

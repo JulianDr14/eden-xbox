@@ -224,4 +224,8 @@ private:
 ///
 std::shared_ptr<EventType> CreateEvent(std::string name, TimedCallback&& callback);
 
+/// Pulse: the only live event type with this name, queued or not. Null when none is alive or
+/// several are, so a restore never binds an event to a guess.
+[[nodiscard]] std::shared_ptr<EventType> FindLiveEvent(const std::string& name);
+
 } // namespace Core::Timing
