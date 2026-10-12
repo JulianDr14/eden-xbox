@@ -30,9 +30,16 @@
 namespace Service {
 
 SessionRequestHandler::SessionRequestHandler(Kernel::KernelCore& kernel_, const char* service_name_)
-    : kernel{kernel_} {}
+    : kernel{kernel_}, pulse_name{service_name_ ? service_name_ : "unnamed"} {}
 
 SessionRequestHandler::~SessionRequestHandler() = default;
+
+SessionRequestHandlerPtr SessionRequestHandler::PulseRestore(std::string_view kind,
+                                                             Pulse::HandlerRestore& restore) {
+    if (PulseKind().empty() || kind != PulseKind()) return nullptr;
+    restore.state.End(); // a stateless root
+    return shared_from_this();
+}
 
 SessionRequestManager::SessionRequestManager(Kernel::KernelCore& kernel_,
                                              ServerManager& server_manager_)

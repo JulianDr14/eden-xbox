@@ -28,6 +28,19 @@ IManagerRootService::IManagerRootService(Core::System& system_,
 
 IManagerRootService::~IManagerRootService() = default;
 
+SessionRequestHandlerPtr IManagerRootService::PulseRestore(std::string_view kind,
+                                                Pulse::HandlerRestore& restore) {
+    if (kind == "IApplicationDisplayService") {
+        return IApplicationDisplayService::PulseRestoreFrom(system, m_container, restore);
+    }
+    if (kind == "IHOSBinderDriver") {
+        std::shared_ptr<Nvnflinger::IHOSBinderDriver> driver;
+        m_container->GetBinderDriver(&driver);
+        return driver->PulseRestore(kind, restore);
+    }
+    return SessionRequestHandler::PulseRestore(kind, restore);
+}
+
 Result IManagerRootService::GetDisplayService(
     Out<SharedPointer<IApplicationDisplayService>> out_application_display_service, Policy policy) {
     LOG_DEBUG(Service_VI, "called");

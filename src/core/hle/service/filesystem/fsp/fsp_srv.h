@@ -49,6 +49,12 @@ public:
     explicit FSP_SRV(Core::System& system_);
     ~FSP_SRV() override;
 
+    std::string_view PulseKind() const override {
+        return "fsp-srv";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) override;
+
 private:
     Result SetCurrentProcess(ClientProcessId pid);
     Result OpenDataFileSystemByCurrentProcess(OutInterface<IFileSystem> out_interface);

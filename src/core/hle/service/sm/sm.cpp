@@ -112,6 +112,14 @@ Result ServiceManager::GetServicePort(Kernel::KClientPort** out_client_port,
     return ResultSuccess;
 }
 
+std::string ServiceManager::FindServiceName(const Kernel::KClientPort* port) const {
+    std::scoped_lock lk{lock};
+    for (const auto& [name, client_port] : service_ports) {
+        if (client_port == port) return name;
+    }
+    return {};
+}
+
 /**
  * SM::Initialize service function
  *  Inputs:

@@ -8,6 +8,8 @@
 
 #include <memory>
 #include <mutex>
+#include <utility>
+#include <vector>
 #include "common/container/unordered_map.h"
 
 #include "common/common_types.h"
@@ -30,6 +32,13 @@ public:
     std::shared_ptr<android::IBinder> TryGetBinder(s32 id) const;
 
     void AdjustRefcount(s32 binder_id, s32 delta, bool is_weak);
+
+    // Pulse: live binder ids, their reference counts, and the id the next binder follows.
+    std::vector<s32> PulseBinderIds() const;
+    std::pair<s32, s32> PulseRefcounts(s32 binder_id) const;
+    void PulseSetRefcounts(s32 binder_id, s32 strong, s32 weak);
+    s32 PulseLastId() const;
+    void PulseSetLastId(s32 id);
 
 private:
     struct RefCounts {

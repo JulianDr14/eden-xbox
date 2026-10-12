@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 #include "common/container/unordered_map.h"
 #include <assert.h>
 
@@ -156,6 +157,29 @@ public:
     std::optional<FreeInfo> FreeHandle(Handle::Id handle, bool internal_session);
 
     void UnmapAllHandles(NvCore::SessionId session_id);
+
+    // Pulse: a handle as a checkpoint stores it. Pins and internal references are not stored:
+    // their owners (a GraphicBuffer) take them again when they are rebuilt.
+    struct PulseHandle {
+        Handle::Id id{};
+        u64 size{};
+        u64 aligned_size{};
+        u64 orig_size{};
+        u64 align{};
+        u32 flags{};
+        VAddr address{};
+        u8 kind{};
+        bool allocated{};
+        s32 dupes{};
+        size_t session{};
+    };
+    std::vector<PulseHandle> PulseHandles();
+    u32 PulseNextId() const {
+        return next_handle_id.load(std::memory_order_relaxed);
+    }
+    // Recreates a handle under its captured id; throws std::invalid_argument when it is taken.
+    void PulseRestoreHandle(const PulseHandle& handle, NvCore::SessionId session_id);
+    void PulseRaiseNextId(u32 id);
 
 private:
     std::list<std::shared_ptr<Handle>> unmap_queue{};

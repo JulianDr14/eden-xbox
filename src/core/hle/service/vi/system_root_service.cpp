@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "core/hle/service/cmif_serialization.h"
+#include "core/hle/service/nvnflinger/hos_binder_driver.h"
 #include "core/hle/service/vi/application_display_service.h"
 #include "core/hle/service/vi/container.h"
 #include "core/hle/service/vi/service_creator.h"
@@ -21,6 +22,19 @@ ISystemRootService::ISystemRootService(Core::System& system_, std::shared_ptr<Co
 }
 
 ISystemRootService::~ISystemRootService() = default;
+
+SessionRequestHandlerPtr ISystemRootService::PulseRestore(std::string_view kind,
+                                                Pulse::HandlerRestore& restore) {
+    if (kind == "IApplicationDisplayService") {
+        return IApplicationDisplayService::PulseRestoreFrom(system, m_container, restore);
+    }
+    if (kind == "IHOSBinderDriver") {
+        std::shared_ptr<Nvnflinger::IHOSBinderDriver> driver;
+        m_container->GetBinderDriver(&driver);
+        return driver->PulseRestore(kind, restore);
+    }
+    return SessionRequestHandler::PulseRestore(kind, restore);
+}
 
 Result ISystemRootService::GetDisplayService(
     Out<SharedPointer<IApplicationDisplayService>> out_application_display_service, Policy policy) {

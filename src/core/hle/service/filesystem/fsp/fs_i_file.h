@@ -10,9 +10,22 @@
 
 namespace Service::FileSystem {
 
+class IFileSystem;
+
 class IFile final : public ServiceFramework<IFile> {
 public:
     explicit IFile(Core::System& system_, FileSys::VirtualFile file_);
+
+    // Pulse: a file is reopened by path, in its mode, through the file system that opened it.
+    void SetPulseOrigin(std::shared_ptr<IFileSystem> parent, std::string path, u32 mode) {
+        pulse_parent = std::move(parent);
+        pulse_path = std::move(path);
+        pulse_mode = mode;
+    }
+    std::string_view PulseKind() const override {
+        return "IFile";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
 
     // Called only after the service barrier; a successful ordinary Flush() is not evidence that
     // writes have reached durable storage (that SDK entry point is currently a no-op).
@@ -22,6 +35,9 @@ public:
 
 private:
     std::unique_ptr<FileSys::Fsa::IFile> backend;
+    std::shared_ptr<IFileSystem> pulse_parent;
+    std::string pulse_path;
+    u32 pulse_mode{};
 
     Result Read(FileSys::ReadOption option, Out<s64> out_size, s64 offset,
                 const OutBuffer<BufferAttr_HipcMapAlias | BufferAttr_HipcMapTransferAllowsNonSecure>

@@ -231,7 +231,7 @@ u32 System::GetBufferCount() const {
 }
 
 u64 System::GetPlayedSampleCount() const {
-    return session->GetPlayedSampleCount();
+    return played_sample_base + session->GetPlayedSampleCount();
 }
 
 } // namespace AudioCore::AudioOut

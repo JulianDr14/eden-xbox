@@ -23,6 +23,11 @@ public:
 
     Result SetAllAudioOutVolume(f32 volume);
 
+    std::string_view PulseKind() const override {
+        return "audout:u";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) override;
+
 private:
     Result ListAudioOuts(OutArray<AudioDeviceName, BufferAttr_HipcMapAlias> out_audio_outs,
                          Out<u32> out_count);

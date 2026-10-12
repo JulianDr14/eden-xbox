@@ -39,6 +39,11 @@ public:
     void OnOpen(NvCore::SessionId session_id, DeviceFD fd) override;
     void OnClose(DeviceFD fd) override;
 
+    // The handles live in NvCore::NvMap, which the NVDRV serializer stores.
+    bool PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const override {
+        return true;
+    }
+
     enum class HandleParameterType : u32_le {
         Size = 1,
         Alignment = 2,

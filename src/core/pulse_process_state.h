@@ -233,15 +233,28 @@ inline ProcessLayout DecodeProcessLayout(std::span<const u8> bytes) {
 
 // ---------------------------------------------------------------- section Objects
 
-enum class ObjectKind : u32 { Process = 1, Event = 2, ReadableEvent = 3, ClientSession = 4 };
+// Event: owned by the application. ServiceEvent: owned by a service, rebuilt by the interface that
+// exported it. ServiceHandler: an HLE interface, not a kernel object, in the same identity space so
+// session graphs and service events can reference it.
+enum class ObjectKind : u32 {
+    Process = 1,
+    Event = 2,
+    ReadableEvent = 3,
+    ClientSession = 4,
+    ServiceHandler = 5,
+    ServiceEvent = 6,
+};
 inline constexpr u64 ProcessObjectId = 1;
+inline constexpr size_t MaxObjectPayload = (1U << 20) + 4096;
 
 struct ObjectRecord {
     u64 id{};
     ObjectKind kind{};
     u32 flags{};  // ReadableEvent: bit 0 signaled
-    u64 parent{}; // ReadableEvent: its Event
-    std::vector<u8> payload; // ClientSession: Service::Pulse::EncodeSessionGraph
+    u64 parent{}; // ReadableEvent: its (service) event; ServiceEvent: its ServiceHandler
+    // ClientSession: Service::Pulse::EncodeSessionRecord; ServiceHandler: EncodeHandlerRecord;
+    // ServiceEvent: the u32 slot its handler exported it under
+    std::vector<u8> payload;
     bool operator==(const ObjectRecord&) const = default;
 };
 
@@ -251,12 +264,17 @@ inline void ValidateObjects(std::span<const ObjectRecord> records) {
     if (records.size() > MaxKernelObjects) Invalid("Pulse: too many kernel objects");
     std::unordered_set<u64> ids;
     std::unordered_set<u64> events;
+    std::unordered_set<u64> handlers;
+    std::vector<u64> handler_refs;
     for (const auto& r : records) {
-        if (!r.id || !ids.insert(r.id).second || r.payload.size() > (1U << 20) ||
+        const bool with_payload = r.kind == ObjectKind::ClientSession ||
+                                  r.kind == ObjectKind::ServiceHandler ||
+                                  r.kind == ObjectKind::ServiceEvent;
+        if (!r.id || !ids.insert(r.id).second || r.payload.size() > MaxObjectPayload ||
             r.flags > 1 || (r.flags && r.kind != ObjectKind::ReadableEvent) ||
-            (r.parent && r.kind != ObjectKind::ReadableEvent) ||
-            (!r.payload.empty() && r.kind != ObjectKind::ClientSession) ||
-            (r.kind == ObjectKind::ClientSession && r.payload.empty()) ||
+            (r.parent && r.kind != ObjectKind::ReadableEvent && r.kind != ObjectKind::ServiceEvent) ||
+            with_payload == r.payload.empty() ||
+            (r.kind == ObjectKind::ServiceEvent && r.payload.size() != 4) ||
             ((r.kind == ObjectKind::Process) != (r.id == ProcessObjectId))) {
             Invalid("Pulse: malformed kernel object record");
         }
@@ -264,6 +282,12 @@ inline void ValidateObjects(std::span<const ObjectRecord> records) {
         case ObjectKind::Process:
         case ObjectKind::ClientSession:
             break;
+        case ObjectKind::ServiceHandler:
+            handlers.insert(r.id);
+            break;
+        case ObjectKind::ServiceEvent:
+            handler_refs.push_back(r.parent);
+            [[fallthrough]];
         case ObjectKind::Event:
             events.insert(r.id);
             break;
@@ -275,6 +299,9 @@ inline void ValidateObjects(std::span<const ObjectRecord> records) {
         }
     }
     if (!events.empty()) Invalid("Pulse: event without its readable event");
+    for (const auto id : handler_refs) {
+        if (!handlers.contains(id)) Invalid("Pulse: service event without its interface");
+    }
 }
 
 inline std::vector<u8> EncodeObjects(std::span<const ObjectRecord> records) {

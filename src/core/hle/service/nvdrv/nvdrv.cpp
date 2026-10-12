@@ -5,6 +5,7 @@
 // SPDX-FileCopyrightText: 2021 Skyline Team and Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <stdexcept>
 #include <utility>
 
 #include <fmt/ranges.h>
@@ -189,10 +190,28 @@ DeviceFD Module::Open(const std::string& device_name, NvCore::SessionId session_
     const DeviceFD fd = next_fd++;
     auto& builder = it->second;
     auto device = builder(fd)->second;
+    open_names[fd] = device_name;
 
     device->OnOpen(session_id, fd);
 
     return fd;
+}
+
+std::string Module::PulseDeviceName(DeviceFD fd) const {
+    const auto found = open_names.find(fd);
+    return found != open_names.end() ? found->second : std::string{};
+}
+
+std::shared_ptr<Devices::nvdevice> Module::PulseOpen(DeviceFD fd, const std::string& device_name,
+                                                     NvCore::SessionId session_id) {
+    const auto it = builders.find(device_name);
+    if (it == builders.end()) throw std::invalid_argument("Pulse: unknown nvdrv device");
+    if (fd <= 0 || open_files.contains(fd)) throw std::invalid_argument("Pulse: nvdrv fd taken");
+    auto device = it->second(fd)->second;
+    open_names[fd] = device_name;
+    device->OnOpen(session_id, fd);
+    next_fd = (std::max)(next_fd, fd + 1);
+    return device;
 }
 
 NvResult Module::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> input,
@@ -262,6 +281,7 @@ NvResult Module::Close(DeviceFD fd) {
     itr->second->OnClose(fd);
 
     open_files.erase(itr);
+    open_names.erase(fd);
 
     return NvResult::Success;
 }

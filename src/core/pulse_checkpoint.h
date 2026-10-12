@@ -36,7 +36,7 @@ enum class ProcessSection : u32 {
     Exclusive = 0x70, // exclusive monitor reservations
     Timing = 0x80,    // CoreTiming queue and clocks
 };
-inline constexpr u32 ProcessSectionVersion = 1;
+inline constexpr u32 ProcessSectionVersion = 2;
 
 // The system is in a state that cannot be captured. Retryable when the cause is transient (a
 // thread inside an SVC or an IPC round trip): run the guest briefly and capture again. Not

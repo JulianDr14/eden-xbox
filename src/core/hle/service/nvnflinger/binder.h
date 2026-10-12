@@ -11,6 +11,7 @@
 #include "common/common_types.h"
 
 namespace Kernel {
+class KEvent;
 class KReadableEvent;
 } // namespace Kernel
 
@@ -26,6 +27,10 @@ public:
     virtual void Transact(u32 code, std::span<const u8> parcel_data, std::span<u8> parcel_reply,
                           u32 flags) = 0;
     virtual Kernel::KReadableEvent* GetNativeHandle(u32 type_id) = 0;
+    // Pulse: the event GetNativeHandle hands out, if any.
+    virtual Kernel::KEvent* PulseNativeEvent() {
+        return nullptr;
+    }
 };
 
 } // namespace Service::android

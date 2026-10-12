@@ -32,6 +32,7 @@
 #include "core/hle/result.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/hle/service/filesystem/fsp/fs_i_file.h"
 #include "core/hle/service/filesystem/fsp/fs_i_filesystem.h"
 #include "core/hle/service/filesystem/fsp/fs_i_multi_commit_manager.h"
 #include "core/hle/service/filesystem/fsp/fs_i_save_data_info_reader.h"
@@ -191,6 +192,74 @@ FSP_SRV::FSP_SRV(Core::System& system_)
 
 FSP_SRV::~FSP_SRV() = default;
 
+void FSP_SRV::PulseCapture(Pulse::HandlerCapture& capture) const {
+    capture.state.U64(current_process_id);
+    capture.state.U32(static_cast<u32>(access_log_mode));
+    capture.state.U32(access_log_program_index);
+}
+
+SessionRequestHandlerPtr FSP_SRV::PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) {
+    auto& in = restore.state;
+    if (kind == PulseKind()) {
+        const u64 pid = in.U64();
+        access_log_mode = static_cast<AccessLogMode>(in.U32());
+        access_log_program_index = in.U32();
+        in.End();
+        if (pid && SetCurrentProcess(ClientProcessId{pid}).IsError()) {
+            throw std::invalid_argument("Pulse: fsp-srv does not know the restored process");
+        }
+        return shared_from_this();
+    }
+    if (kind == "IFileSystem") {
+        const auto origin = static_cast<IFileSystem::PulseOrigin>(in.U32());
+        std::vector<u8> args(in.Count(1));
+        in.Bytes(args);
+        in.End();
+        Pulse::StateReader arg{args};
+        std::shared_ptr<IFileSystem> filesystem;
+        Result result = ResultSuccess;
+        switch (origin) {
+        case IFileSystem::PulseOrigin::SdCard:
+            result = OpenSdCardFileSystem(&filesystem);
+            break;
+        case IFileSystem::PulseOrigin::SaveData:
+        case IFileSystem::PulseOrigin::SystemSaveData: {
+            const auto space_id = arg.Raw<FileSys::SaveDataSpaceId>();
+            const auto attribute = arg.Raw<FileSys::SaveDataAttribute>();
+            if (!save_data_controller) {
+                throw std::invalid_argument("Pulse: fsp-srv save data without a process");
+            }
+            result = origin == IFileSystem::PulseOrigin::SaveData
+                         ? OpenSaveDataFileSystem(&filesystem, space_id, attribute)
+                         : OpenSaveDataFileSystemBySystemSaveDataId(&filesystem, space_id, attribute);
+            break;
+        }
+        default:
+            throw std::invalid_argument("Pulse: unknown file system origin");
+        }
+        arg.End();
+        if (result.IsError() || !filesystem) {
+            throw std::invalid_argument("Pulse: fsp-srv could not reopen a file system");
+        }
+        return filesystem;
+    }
+    if (kind == "IFile") {
+        const auto parent = restore.Resolve(in.U64());
+        const auto path = in.String();
+        const u32 mode = in.U32();
+        in.End();
+        if (!parent || parent->PulseKind() != "IFileSystem") {
+            throw std::invalid_argument("Pulse: file without its file system");
+        }
+        std::shared_ptr<IFile> file;
+        if (std::static_pointer_cast<IFileSystem>(parent)->PulseOpenFile(&file, path, mode).IsError()) {
+            throw std::invalid_argument("Pulse: fsp-srv could not reopen " + path);
+        }
+        return file;
+    }
+    return nullptr;
+}
+
 Result FSP_SRV::SetCurrentProcess(ClientProcessId pid) {
     current_process_id = *pid;
 
@@ -229,6 +298,7 @@ Result FSP_SRV::OpenSdCardFileSystem(OutInterface<IFileSystem> out_interface) {
 
     *out_interface = std::make_shared<IFileSystem>(
         system, sdmc_dir, SizeGetter::FromStorageId(fsc, FileSys::StorageId::SdCard));
+    (*out_interface)->SetPulseOrigin(IFileSystem::PulseOrigin::SdCard, {});
 
     R_SUCCEED();
 }
@@ -303,6 +373,10 @@ Result FSP_SRV::OpenSaveDataFileSystem(OutInterface<IFileSystem> out_interface,
 
     *out_interface =
         std::make_shared<IFileSystem>(system, std::move(dir), SizeGetter::FromStorageId(fsc, id));
+    Pulse::StateWriter pulse_args;
+    pulse_args.Raw(space_id);
+    pulse_args.Raw(attribute);
+    (*out_interface)->SetPulseOrigin(IFileSystem::PulseOrigin::SaveData, std::move(pulse_args.bytes));
 
     R_SUCCEED();
 }
@@ -349,6 +423,10 @@ Result FSP_SRV::OpenSaveDataFileSystemBySystemSaveDataId(OutInterface<IFileSyste
 
     *out_interface =
         std::make_shared<IFileSystem>(system, std::move(dir), SizeGetter::FromStorageId(fsc, id));
+    Pulse::StateWriter pulse_args;
+    pulse_args.Raw(space_id);
+    pulse_args.Raw(attribute);
+    (*out_interface)->SetPulseOrigin(IFileSystem::PulseOrigin::SystemSaveData, std::move(pulse_args.bytes));
 
     R_SUCCEED();
 }

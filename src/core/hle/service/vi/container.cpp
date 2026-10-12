@@ -4,12 +4,16 @@
 // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <stdexcept>
+
 #include "core/core.h"
 #include "video_core/frame_trace.h"
 #include "core/hle/service/nvdrv/nvdrv_interface.h"
 #include "core/hle/service/nvnflinger/buffer_queue_producer.h"
 #include "core/hle/service/nvnflinger/hos_binder_driver.h"
 #include "core/hle/service/nvnflinger/hos_binder_driver_server.h"
+#include "core/hle/service/nvnflinger/display.h"
 #include "core/hle/service/nvnflinger/surface_flinger.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/vi/container.h"
@@ -185,6 +189,75 @@ Result Container::SetLayerIsOverlay(u64 layer_id, bool is_overlay) {
 
     m_surface_flinger->SetLayerIsOverlay(layer->GetConsumerBinderId(), is_overlay);
     R_SUCCEED();
+}
+
+std::shared_ptr<android::BufferQueueProducer> Container::PulseCreateStrayLayer(
+    u64 layer_id, u64 display_id, s32 consumer_binder_id, s32 producer_binder_id) {
+    std::scoped_lock lk{m_lock};
+    const auto server = m_binder_driver->GetServer();
+    if (layer_id == 0 || m_layers.GetLayerById(layer_id) ||
+        producer_binder_id != consumer_binder_id + 1 || consumer_binder_id <= 0 ||
+        server->TryGetBinder(consumer_binder_id) || server->TryGetBinder(producer_binder_id)) {
+        throw std::invalid_argument("Pulse: vi layer ids taken");
+    }
+    const auto last_binder = server->PulseLastId();
+    const auto next_layer = m_layers.PulseNextId();
+    server->PulseSetLastId(consumer_binder_id - 1);
+    m_layers.PulseSetNextId(layer_id - 1);
+    u64 created_layer{};
+    s32 created_producer{};
+    const bool ok = this->CreateLayerLocked(&created_layer, display_id, {}).IsSuccess() &&
+                    this->OpenLayerLocked(&created_producer, created_layer, {}).IsSuccess();
+    server->PulseSetLastId((std::max)(last_binder, server->PulseLastId()));
+    m_layers.PulseSetNextId((std::max)(next_layer, m_layers.PulseNextId()));
+    if (!ok || created_layer != layer_id || created_producer != producer_binder_id) {
+        throw std::invalid_argument("Pulse: vi layer not recreated with its ids");
+    }
+    return std::static_pointer_cast<android::BufferQueueProducer>(
+        server->TryGetBinder(producer_binder_id));
+}
+
+std::optional<Container::PulseLayer> Container::PulseGetLayer(u64 layer_id) {
+    std::scoped_lock lk{m_lock};
+    auto* const layer = m_layers.GetLayerById(layer_id);
+    if (!layer || !layer->IsOpen() || !layer->GetDisplay()) return std::nullopt;
+    const auto flinger_layer = m_surface_flinger->FindLayer(layer->GetConsumerBinderId());
+    if (!flinger_layer) return std::nullopt;
+    return PulseLayer{
+        .display_id = layer->GetDisplay()->GetId(),
+        .consumer_binder_id = layer->GetConsumerBinderId(),
+        .producer_binder_id = layer->GetProducerBinderId(),
+        .visible = flinger_layer->visible,
+        .blending = static_cast<u32>(flinger_layer->blending),
+        .z_index = flinger_layer->z_index,
+        .is_overlay = flinger_layer->is_overlay,
+        .layer_stack_mask = flinger_layer->layer_stack_mask,
+    };
+}
+
+void Container::PulseSetLayer(u64 layer_id, const PulseLayer& state) {
+    std::scoped_lock lk{m_lock};
+    auto* const layer = m_layers.GetLayerById(layer_id);
+    const auto flinger_layer =
+        layer ? m_surface_flinger->FindLayer(layer->GetConsumerBinderId()) : nullptr;
+    if (!flinger_layer) throw std::invalid_argument("Pulse: vi layer lost");
+    flinger_layer->visible = state.visible;
+    flinger_layer->blending = static_cast<Nvnflinger::LayerBlending>(state.blending);
+    flinger_layer->z_index = state.z_index;
+    flinger_layer->is_overlay = state.is_overlay;
+    flinger_layer->layer_stack_mask = state.layer_stack_mask;
+}
+
+std::pair<u64, s32> Container::PulseNextIds() {
+    std::scoped_lock lk{m_lock};
+    return {m_layers.PulseNextId(), m_binder_driver->GetServer()->PulseLastId()};
+}
+
+void Container::PulseRaiseNextIds(u64 layer_id, s32 binder_id) {
+    std::scoped_lock lk{m_lock};
+    const auto server = m_binder_driver->GetServer();
+    m_layers.PulseSetNextId((std::max)(layer_id, m_layers.PulseNextId()));
+    server->PulseSetLastId((std::max)(binder_id, server->PulseLastId()));
 }
 
 void Container::LinkVsyncEvent(u64 display_id, Event* event) {

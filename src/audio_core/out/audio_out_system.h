@@ -226,6 +226,15 @@ public:
      */
     u64 GetPlayedSampleCount() const;
 
+    /// Pulse: the buffers the guest still owns a release for, oldest first.
+    std::vector<AudioBuffer> PulsePendingBuffers() const {
+        return buffers.PulsePending();
+    }
+    /// Pulse: a restored session continues the captured played sample count.
+    void PulseSetPlayedSampleBase(u64 base) {
+        played_sample_base = base;
+    }
+
 private:
     /// Core system
     Core::System& system;
@@ -253,6 +262,8 @@ private:
     std::string name{};
     /// Volume of this system
     f32 volume{1.0f};
+    /// Samples played before a Pulse restore
+    u64 played_sample_base{};
 };
 
 } // namespace AudioCore::AudioOut

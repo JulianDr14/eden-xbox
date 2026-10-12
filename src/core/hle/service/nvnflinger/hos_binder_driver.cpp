@@ -24,6 +24,19 @@ IHOSBinderDriver::IHOSBinderDriver(Core::System& system_,
 
 IHOSBinderDriver::~IHOSBinderDriver() = default;
 
+void IHOSBinderDriver::PulseCapture(Pulse::HandlerCapture& capture) const {
+    for (const s32 id : m_server->PulseBinderIds()) {
+        if (const auto binder = m_server->TryGetBinder(id)) {
+            capture.ExportEvent(static_cast<u32>(id), binder->PulseNativeEvent());
+        }
+    }
+}
+
+Kernel::KEvent* IHOSBinderDriver::PulseEvent(u32 slot) {
+    const auto binder = m_server->TryGetBinder(static_cast<s32>(slot));
+    return binder ? binder->PulseNativeEvent() : nullptr;
+}
+
 Result IHOSBinderDriver::TransactParcel(s32 binder_id, u32 transaction_id,
                                         InBuffer<BufferAttr_HipcMapAlias> parcel_data,
                                         OutBuffer<BufferAttr_HipcMapAlias> parcel_reply,

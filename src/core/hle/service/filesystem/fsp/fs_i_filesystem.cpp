@@ -101,12 +101,28 @@ Result IFileSystem::OpenFile(OutInterface<IFile> out_interface,
                              u32 mode) {
     LOG_DEBUG(Service_FS, "called. file={}, mode={}", path->str, mode);
 
+    R_RETURN(PulseOpenFile(out_interface.Get(), path->str, mode));
+}
+
+Result IFileSystem::PulseOpenFile(std::shared_ptr<IFile>* out_file, const std::string& path,
+                                  u32 mode) {
     FileSys::VirtualFile vfs_file{};
-    R_TRY(backend->OpenFile(&vfs_file, FileSys::Path(path->str),
+    R_TRY(backend->OpenFile(&vfs_file, FileSys::Path(path.c_str()),
                             static_cast<FileSys::OpenMode>(mode)));
 
-    *out_interface = std::make_shared<IFile>(system, vfs_file);
+    auto file = std::make_shared<IFile>(system, vfs_file);
+    file->SetPulseOrigin(std::static_pointer_cast<IFileSystem>(shared_from_this()), path, mode);
+    *out_file = std::move(file);
     R_SUCCEED();
+}
+
+void IFileSystem::PulseCapture(Pulse::HandlerCapture& capture) const {
+    if (pulse_origin == PulseOrigin::None) {
+        throw Pulse::ServiceRejected(false, "IFileSystem opened by a call Pulse cannot replay");
+    }
+    capture.state.U32(static_cast<u32>(pulse_origin));
+    capture.state.U32(static_cast<u32>(pulse_args.size()));
+    capture.state.Bytes(pulse_args);
 }
 
 Result IFileSystem::OpenDirectory(OutInterface<IDirectory> out_interface,

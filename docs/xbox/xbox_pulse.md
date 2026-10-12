@@ -135,9 +135,9 @@ Los errores IO/cuota están inyectados; no confundirlos con esos gates físicos.
 | Fase | Estado |
 |---|---|
 | 0: inventario exhaustivo/registro de tipos | Inventario inicial; pendiente cierre |
-| 1: formato/storage | Archivo, catálogo y consumo implementados; gates desktop. AppContainer/Series y durabilidad física pendientes |
-| 2: barrera/CPU/memoria/kernel/timing | Coordinador de proceso implementado y compilado; gate de 100 ciclos en Series **pendiente de ejecutar** (ver abajo) |
-| 3: servicios/FS/GPU/audio | Piezas por componente (sesiones IPC, FS, XAudio2, readback D3D12); **sin integrar** en el coordinador ni gate audiovisual |
+| 1: formato/storage | **Cerrada en PC**: harness de archivo/store PASS y cada ciclo de los gates de fase 2/3 publica y consume por `Store`. Riesgos residuales: corte eléctrico real y disco físico lleno (solo inyectados) |
+| 2: barrera/CPU/memoria/kernel/timing | **Cerrada**: gate de 100 ciclos PASS en la Series (0.2.87.12); fuga JIT por ciclo corregida y verificada en PC |
+| 3: servicios/FS/GPU/audio | **Integrada**: vi/nvnflinger, nvdrv, audout y fs serializados en el coordinador; gate `pulse_av` PASS en PC (ver abajo). Pendiente el banco de pruebas en la Series |
 | 4: biblioteca/múltiples sesiones | Pendiente |
 | 5: compatibilidad/rendimiento | Pendiente |
 
@@ -288,3 +288,65 @@ El cambio de generación de los datos por hilo del kernel (`tls_data`) de 0.2.87
 la causa, aunque sigue siendo correcto: el hilo host reutilizaba el `KThread` dummy del
 primer kernel. El diagnóstico por objeto de 0.2.87.13 se retiró: leía objetos colgados ya
 liberados.
+
+## Fase 3: servicios (12 oct 2026)
+
+Política: **restauración con pérdidas**. Solo se guarda lo que el guest observa;
+lo que el host puede regenerar se regenera. Un frame puede perderse o presentarse
+dos veces y los buffers de audio se vuelven a encolar. No se guardan fences GPU ni
+el historial de frames.
+
+Cada servicio implementa `PulseKind`, `PulseCapture`, `PulseRestore` y `PulseEvent`
+(`src/core/hle/service/pulse_service.h`). Las sesiones creadas por una petición
+(p. ej. GetRelayService → IHOSBinderDriver) se registran bajo el puerto de su
+servidor y se reconstruyen desde su raíz; `capture.Reference` ordena las
+dependencias. Los eventos exportados se enlazan cuando ya están todos los
+handlers y se señalan según el flag capturado.
+
+- **vi**: `IApplicationDisplayService` guarda los eventos vsync y las capas stray:
+  ids de capa y de binder recreados exactos, propiedades del compositor y
+  refcounts. Las capas gestionadas por vi se rechazan (sin serializador).
+- **nvnflinger**: `BufferQueueProducer` guarda configuración, slots con su
+  `NvGraphicBuffer` (el handle nvmap se vuelve a duplicar y fijar) y la cola. Un
+  slot adquirido por el compositor vuelve a la cola; las fences pasan a NoFence.
+- **nvdrv**: nvmap y `nvhost-ctrl`. Este último guarda solo los eventos registrados
+  y rechaza (reintentable) uno en uso. Los eventos se exportan con slot
+  `fd << 8 | índice`.
+- **audout** (XAudio2 nativo) y **fs** (archivos abiertos, posición) por componente.
+
+Homebrew `tools/xbox/pulse_av` (libnx): capa stray con framebuffer y contador de
+frames, audout con tres buffers de un tono continuo y un log en `sdmc:` escrito y
+leído en cada latido. Emite `PULSE_HB <latido> frames=.. audio=.. samples=.. fs=..`.
+
+```powershell
+C:\devkitPro\msys2\usr\bin\make.exe -C tools\xbox\pulse_av
+powershell -File tools\xbox\local-run.ps1 -NoBuild -BootNro tools\xbox\pulse_av\pulse_av.nro -BootCfg 'pulse_cycles=10','pulse_seed=7'
+```
+
+**Resultado en PC (12 oct 2026):** semilla 1 con 3 ciclos y semilla 7 con 10 ciclos, ambos
+`PULSE gate PASS`. Restauración máx. ~1,1 s, archivo ~132 KB, captura máx. 476 ms.
+Frames, audio y fs siguen avanzando tras cada restauración. `pulse.nro` (fase 2)
+repite PASS con 5 ciclos. Los harness `run-pulse.cmd` y `run-pulse-phase3.ps1` pasan.
+
+Arreglos para llegar ahí: serializador de `nvhost-ctrl`; las raíces `vi:u/s/m`
+reenvían `IHOSBinderDriver` al driver del contenedor; las sesiones que crea la
+restauración reciben el proceso dueño (el hilo host no tiene proceso actual).
+
+Riesgos residuales:
+
+- Los valores de syncpoint GPU no se restauran (solo el estado de los eventos).
+- Capas gestionadas por vi rechazadas; fences descartadas; frame duplicado posible.
+- Hasta 162 reintentos de captura con la semilla 7 (hilo guest esperando IPC o un
+  lock del kernel). No bloquea, pero alarga la captura.
+- `samples=0` con el sink nulo en PC también ocurre antes del primer checkpoint: es
+  del emulador headless, no de la restauración.
+
+### Banco de pruebas en la Series (fases 1, 2 y 3)
+
+Un solo paquete con `pulse_av.nro` y `pulse_cycles=100`: cada ciclo recorre el
+coordinador de fase 2, publica y consume por el `Store` de fase 1 en el
+almacenamiento de la app (AppContainer) y restaura los servicios de fase 3.
+
+```powershell
+powershell -File tools\xbox\package-appx.ps1 -BootNro tools\xbox\pulse_av\pulse_av.nro -BootCfg 'pulse_cycles=100','pulse_seed=1'
+```

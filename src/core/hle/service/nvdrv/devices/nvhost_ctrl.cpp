@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include <fmt/ranges.h>
+#include "core/hle/service/pulse_service.h"
 #include "common/assert.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
@@ -85,6 +86,61 @@ NvResult nvhost_ctrl::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> inp
 void nvhost_ctrl::OnOpen(NvCore::SessionId session_id, DeviceFD fd) {}
 
 void nvhost_ctrl::OnClose(DeviceFD fd) {}
+
+bool nvhost_ctrl::PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const {
+    std::scoped_lock lk{events_mutex};
+    u32 count{};
+    for (const auto& event : events) {
+        if (!event.registered) continue;
+        if (event.IsBeingUsed()) {
+            throw Service::Pulse::ServiceRejected(true, "an nvhost-ctrl event is waiting");
+        }
+        ++count;
+    }
+    out.U32(count);
+    for (u32 index = 0; index < MaxNvEvents; ++index) {
+        const auto& event = events[index];
+        if (!event.registered) continue;
+        out.U32(index);
+        out.U32(static_cast<u32>(event.status.load()));
+        out.U32(event.fails);
+        out.U32(event.assigned_syncpt);
+        out.U32(event.assigned_value);
+    }
+    return true;
+}
+
+void nvhost_ctrl::PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) {
+    auto lock = NvEventsLock();
+    const auto count = in.Count(20);
+    for (u32 i = 0; i < count; ++i) {
+        const u32 index = in.U32();
+        const u32 status = in.U32();
+        if (index >= MaxNvEvents || events[index].registered ||
+            status > static_cast<u32>(EventState::Cancelled)) {
+            throw std::invalid_argument("Pulse: malformed nvhost-ctrl event");
+        }
+        CreateNvEvent(index);
+        auto& event = events[index];
+        event.status = static_cast<EventState>(status);
+        if (event.IsBeingUsed()) throw std::invalid_argument("Pulse: nvhost-ctrl event in use");
+        event.fails = in.U32();
+        event.assigned_syncpt = in.U32();
+        event.assigned_value = in.U32();
+    }
+}
+
+void nvhost_ctrl::PulseEvents(std::vector<std::pair<u32, Kernel::KEvent*>>& out) const {
+    std::scoped_lock lk{events_mutex};
+    for (u32 index = 0; index < MaxNvEvents; ++index) {
+        if (events[index].registered) out.emplace_back(index, events[index].kevent);
+    }
+}
+
+Kernel::KEvent* nvhost_ctrl::PulseEvent(u32 index) {
+    auto lock = NvEventsLock();
+    return index < MaxNvEvents && events[index].registered ? events[index].kevent : nullptr;
+}
 
 NvResult nvhost_ctrl::NvOsGetConfigU32(IocGetConfigParams& params) {
     LOG_TRACE(Service_NVDRV, "called, setting={}!{}", params.domain_str.data(),

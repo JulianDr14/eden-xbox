@@ -32,6 +32,14 @@ public:
         return m_server;
     }
 
+    // Pulse: the relay holds no state of its own (the binders belong to the layers that created
+    // them); it exports each binder's native event under the binder id.
+    std::string_view PulseKind() const override {
+        return "IHOSBinderDriver";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    Kernel::KEvent* PulseEvent(u32 slot) override;
+
 private:
     Result TransactParcel(s32 binder_id, u32 transaction_id,
                           InBuffer<BufferAttr_HipcMapAlias> parcel_data,

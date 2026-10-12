@@ -20,7 +20,8 @@ IAudioOut::IAudioOut(Core::System& system_, Manager& manager, size_t session_id,
                      Kernel::KProcess* handle, u64 applet_resource_user_id)
     : ServiceFramework{system_, "IAudioOut"}, service_context{system_, "IAudioOut"},
       event{service_context.CreateEvent("AudioOutEvent")}, process{handle},
-      impl{std::make_shared<AudioCore::AudioOut::Out>(system_, manager, event, session_id)} {
+      impl{std::make_shared<AudioCore::AudioOut::Out>(system_, manager, event, session_id)},
+      pulse_device_name{device_name}, pulse_params{in_params}, pulse_aruid{applet_resource_user_id} {
 
     // clang-format off
     static const FunctionInfo functions[] = {
@@ -43,6 +44,48 @@ IAudioOut::IAudioOut(Core::System& system_, Manager& manager, size_t session_id,
     RegisterHandlers(functions);
 
     process->Open(system.Kernel());
+}
+
+void IAudioOut::PulseCapture(Pulse::HandlerCapture& capture) const {
+    auto& out = capture.state;
+    auto& out_system = impl->GetSystem();
+    out.String(pulse_device_name);
+    out.Raw(pulse_params);
+    out.U64(pulse_aruid);
+    out.Bool(out_system.GetState() == AudioCore::AudioOut::State::Started);
+    out.Raw(out_system.GetVolume());
+    out.U64(out_system.GetPlayedSampleCount());
+    const auto pending = out_system.PulsePendingBuffers();
+    out.U32(static_cast<u32>(pending.size()));
+    for (const auto& buffer : pending) {
+        out.U64(buffer.samples);
+        out.U64(buffer.size);
+        out.U64(buffer.tag);
+    }
+    capture.ExportEvent(0, event);
+}
+
+void IAudioOut::PulseApply(Pulse::StateReader& in) {
+    auto& out_system = impl->GetSystem();
+    const bool started = in.Bool();
+    const auto volume = in.Raw<f32>();
+    out_system.PulseSetPlayedSampleBase(in.U64());
+    impl->SetVolume(volume);
+    const auto count = in.Count(24);
+    for (u32 i = 0; i < count; ++i) {
+        const VAddr samples = in.U64();
+        const u64 size = in.U64();
+        const u64 tag = in.U64();
+        const AudioCore::AudioOut::AudioOutBuffer buffer{
+            .next = nullptr, .samples = samples, .capacity = size, .size = size, .offset = 0};
+        if (impl->AppendBuffer(buffer, tag).IsError()) {
+            throw std::invalid_argument("Pulse: audio out cannot queue a restored buffer");
+        }
+    }
+    in.End();
+    if (started && impl->StartSystem().IsError()) {
+        throw std::invalid_argument("Pulse: audio out cannot restart");
+    }
 }
 
 IAudioOut::~IAudioOut() {

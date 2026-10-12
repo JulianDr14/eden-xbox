@@ -38,6 +38,11 @@ namespace Service::Nvidia::NvCore {
 class NvMap;
 } // namespace Service::Nvidia::NvCore
 
+namespace Service::Pulse {
+class StateReader;
+class StateWriter;
+} // namespace Service::Pulse
+
 namespace Service::android {
 
 class BufferQueueCore;
@@ -55,6 +60,15 @@ public:
                   u32 flags) override;
 
     Kernel::KReadableEvent* GetNativeHandle(u32 type_id) override;
+    Kernel::KEvent* PulseNativeEvent() override {
+        return buffer_wait_event;
+    }
+
+    // Pulse: the queue configuration, the slots and their buffers, and the queued frames. Fences
+    // and the frame history are dropped; a buffer the composer held is queued again, so a resume
+    // may present one frame twice.
+    void PulseCapture(Service::Pulse::StateWriter& out) const;
+    void PulseRestore(Service::Pulse::StateReader& in);
 
 public:
     Status RequestBuffer(s32 slot, std::shared_ptr<GraphicBuffer>* buf);

@@ -27,6 +27,17 @@ public:
         return impl;
     }
 
+    // Pulse: the open parameters, the play state, volume and the buffers the guest has not taken
+    // back. What was mid-playback is queued again: a resume may repeat a few milliseconds of sound.
+    std::string_view PulseKind() const override {
+        return "IAudioOut";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 ? event : nullptr;
+    }
+    void PulseApply(Pulse::StateReader& state);
+
     Result GetAudioOutState(Out<u32> out_state);
     Result Start();
     Result Stop();
@@ -53,6 +64,9 @@ private:
     Kernel::KEvent* event;
     Kernel::KProcess* process;
     std::shared_ptr<AudioCore::AudioOut::Out> impl;
+    std::string pulse_device_name;
+    AudioCore::AudioOut::AudioOutParameter pulse_params;
+    u64 pulse_aruid;
 };
 
 } // namespace Service::Audio

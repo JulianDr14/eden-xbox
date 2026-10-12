@@ -58,6 +58,9 @@ public:
     static std::shared_ptr<SessionRequestManager> FindSessionManager(
         const Kernel::KServerSession* session);
 
+    /// Pulse: the sm: names of the ports this server registered, in registration order.
+    std::vector<std::string> PulsePortNames();
+
 private:
     void LinkToDeferredList(MultiWaitHolder* holder);
     void LinkDeferred();
@@ -93,6 +96,7 @@ private:
     std::list<Session*> m_deferred_sessions{};
     std::optional<MultiWaitHolder> m_wakeup_holder{};
     std::optional<MultiWaitHolder> m_deferral_holder{};
+    std::vector<std::string> m_port_names{};
 
     // Host state tracking
     Common::Event m_stopped{};

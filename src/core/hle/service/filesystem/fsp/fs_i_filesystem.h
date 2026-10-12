@@ -57,7 +57,21 @@ public:
                                const InLargeData<FileSys::Sf::Path, BufferAttr_HipcPointer> path);
     Result GetFileSystemAttribute(Out<FileSys::FileSystemAttribute> out_attribute);
 
+    // Pulse: the FSP_SRV call that opened it and its arguments, replayed on restore.
+    enum class PulseOrigin : u32 { None, SdCard, SaveData, SystemSaveData };
+    void SetPulseOrigin(PulseOrigin origin, std::vector<u8> args) {
+        pulse_origin = origin;
+        pulse_args = std::move(args);
+    }
+    std::string_view PulseKind() const override {
+        return "IFileSystem";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    Result PulseOpenFile(std::shared_ptr<IFile>* out_file, const std::string& path, u32 mode);
+
 private:
+    PulseOrigin pulse_origin{};
+    std::vector<u8> pulse_args;
     std::unique_ptr<FileSys::Fsa::IFileSystem> backend;
     SizeGetter size_getter;
 };

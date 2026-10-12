@@ -7,6 +7,7 @@
 #include "core/file_sys/errors.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/filesystem/fsp/fs_i_file.h"
+#include "core/hle/service/filesystem/fsp/fs_i_filesystem.h"
 
 namespace Service::FileSystem {
 
@@ -24,6 +25,15 @@ IFile::IFile(Core::System& system_, FileSys::VirtualFile file_)
     };
     // clang-format on
     RegisterHandlers(functions);
+}
+
+void IFile::PulseCapture(Pulse::HandlerCapture& capture) const {
+    if (!pulse_parent) throw Pulse::ServiceRejected(false, "IFile without the file system that opened it");
+    // Writes the guest already saw succeed must be on disk before the checkpoint is published.
+    if (!CommitForCheckpoint()) throw Pulse::ServiceRejected(true, "IFile could not commit its writes");
+    capture.state.U64(capture.Reference(pulse_parent));
+    capture.state.String(pulse_path);
+    capture.state.U32(pulse_mode);
 }
 
 Result IFile::Read(

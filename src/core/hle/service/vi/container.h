@@ -70,6 +70,25 @@ public:
     Result SetLayerIsOverlay(u64 layer_id, bool is_overlay);
     Result SetLayerStackMask(u64 layer_id, u32 layer_stack_mask);
 
+    // Pulse: a stray layer with its captured ids, open on its display, with its producer.
+    std::shared_ptr<android::BufferQueueProducer> PulseCreateStrayLayer(u64 layer_id, u64 display_id,
+                                                                       s32 consumer_binder_id,
+                                                                       s32 producer_binder_id);
+    struct PulseLayer {
+        u64 display_id;
+        s32 consumer_binder_id;
+        s32 producer_binder_id;
+        bool visible;
+        u32 blending;
+        s32 z_index;
+        bool is_overlay;
+        u32 layer_stack_mask;
+    };
+    std::optional<PulseLayer> PulseGetLayer(u64 layer_id);
+    void PulseSetLayer(u64 layer_id, const PulseLayer& state);
+    std::pair<u64, s32> PulseNextIds();
+    void PulseRaiseNextIds(u64 layer_id, s32 binder_id);
+
     void LinkVsyncEvent(u64 display_id, Event* event);
     void UnlinkVsyncEvent(u64 display_id, Event* event);
 

@@ -21,6 +21,7 @@
 #include "core/hle/service/nvnflinger/parcel.h"
 #include "core/hle/service/nvnflinger/ui/graphic_buffer.h"
 #include "core/hle/service/nvnflinger/window.h"
+#include "core/hle/service/pulse_service.h"
 #include "video_core/frame_trace.h"
 #include "video_core/perf_counters.h"
 
@@ -798,6 +799,162 @@ Status BufferQueueProducer::SetPreallocatedBuffer(s32 slot,
     buffer_wait_event->Signal(service_context.kernel);
 
     return Status::NoError;
+}
+
+namespace {
+
+void PulseWriteItem(Service::Pulse::StateWriter& out, const BufferItem& item) {
+    out.S32(item.slot);
+    out.S32(item.crop.left);
+    out.S32(item.crop.top);
+    out.S32(item.crop.right);
+    out.S32(item.crop.bottom);
+    out.U32(static_cast<u32>(item.transform));
+    out.U32(item.scaling_mode);
+    out.S64(item.timestamp);
+    out.Bool(item.is_auto_timestamp);
+    out.U64(item.frame_number);
+    out.Bool(item.is_droppable);
+    out.Bool(item.transform_to_display_inverse);
+    out.S32(item.swap_interval);
+}
+
+BufferItem PulseReadItem(Service::Pulse::StateReader& in) {
+    BufferItem item;
+    item.slot = in.S32();
+    item.crop.left = in.S32();
+    item.crop.top = in.S32();
+    item.crop.right = in.S32();
+    item.crop.bottom = in.S32();
+    item.transform = static_cast<NativeWindowTransform>(in.U32());
+    item.scaling_mode = in.U32();
+    item.timestamp = in.S64();
+    item.is_auto_timestamp = in.Bool();
+    item.frame_number = in.U64();
+    item.is_droppable = in.Bool();
+    item.transform_to_display_inverse = in.Bool();
+    item.swap_interval = in.S32();
+    return item;
+}
+
+constexpr size_t PulseItemSize = 4 * 5 + 4 + 4 + 8 + 1 + 8 + 1 + 1 + 4;
+constexpr size_t PulseSlotSize = 4 + 4 + 1 + 8 + 1 + 1 + 1;
+
+} // namespace
+
+void BufferQueueProducer::PulseCapture(Service::Pulse::StateWriter& out) const {
+    std::scoped_lock lock{core->mutex};
+    if (core->is_abandoned || core->is_allocating) {
+        throw Service::Pulse::ServiceRejected(true, "a buffer queue is allocating");
+    }
+    out.S32(static_cast<s32>(core->connected_api));
+    out.Bool(core->consumer_controlled_by_app);
+    out.U32(core->consumer_usage_bit);
+    out.S32(core->override_max_buffer_count);
+    out.Bool(core->dequeue_buffer_cannot_block);
+    out.U32(static_cast<u32>(core->default_buffer_format));
+    out.U32(core->default_width);
+    out.U32(core->default_height);
+    out.S32(core->default_max_buffer_count);
+    out.Bool(core->buffer_has_been_queued);
+    out.U64(core->frame_counter);
+    out.U32(core->transform_hint);
+    out.U32(sticky_transform);
+
+    u32 count{};
+    for (const auto& slot : slots) {
+        count += slot.graphic_buffer || slot.buffer_state != BufferState::Free;
+    }
+    out.U32(count);
+    for (s32 index = 0; index < static_cast<s32>(slots.size()); ++index) {
+        const auto& slot = slots[index];
+        if (!slot.graphic_buffer && slot.buffer_state == BufferState::Free) continue;
+        out.S32(index);
+        out.U32(static_cast<u32>(slot.buffer_state));
+        out.Bool(slot.request_buffer_called);
+        out.U64(slot.frame_number);
+        out.Bool(slot.attached_by_consumer);
+        out.Bool(slot.is_preallocated);
+        out.Bool(slot.graphic_buffer != nullptr);
+        if (slot.graphic_buffer) {
+            out.Raw(static_cast<const NvGraphicBuffer&>(*slot.graphic_buffer));
+        }
+    }
+    out.U32(static_cast<u32>(core->queue.size()));
+    for (const auto& item : core->queue) {
+        PulseWriteItem(out, item);
+    }
+}
+
+void BufferQueueProducer::PulseRestore(Service::Pulse::StateReader& in) {
+    std::scoped_lock lock{core->mutex};
+    core->connected_api = static_cast<NativeWindowApi>(in.S32());
+    core->consumer_controlled_by_app = in.Bool();
+    core->consumer_usage_bit = in.U32();
+    core->override_max_buffer_count = in.S32();
+    core->dequeue_buffer_cannot_block = in.Bool();
+    core->default_buffer_format = static_cast<PixelFormat>(in.U32());
+    core->default_width = in.U32();
+    core->default_height = in.U32();
+    core->default_max_buffer_count = in.S32();
+    core->buffer_has_been_queued = in.Bool();
+    core->frame_counter = in.U64();
+    core->transform_hint = in.U32();
+    sticky_transform = in.U32();
+
+    std::vector<s32> acquired;
+    const auto count = in.Count(PulseSlotSize);
+    for (u32 i = 0; i < count; ++i) {
+        const s32 index = in.S32();
+        const auto state = in.U32();
+        if (index < 0 || index >= static_cast<s32>(slots.size()) ||
+            state > static_cast<u32>(BufferState::Acquired)) {
+            throw std::invalid_argument("Pulse: malformed buffer queue slot");
+        }
+        auto& slot = slots[index];
+        slot.buffer_state = static_cast<BufferState>(state);
+        slot.request_buffer_called = in.Bool();
+        slot.frame_number = in.U64();
+        slot.attached_by_consumer = in.Bool();
+        slot.is_preallocated = in.Bool();
+        slot.fence = Fence::NoFence();
+        slot.acquire_called = false;
+        slot.needs_cleanup_on_release = false;
+        if (in.Bool()) {
+            const auto raw = in.Raw<NvGraphicBuffer>();
+            slot.graphic_buffer =
+                std::make_shared<GraphicBuffer>(nvmap, std::make_shared<NvGraphicBuffer>(raw));
+        }
+        if (slot.buffer_state == BufferState::Acquired) acquired.push_back(index);
+    }
+
+    core->queue.clear();
+    // What the composer held goes first: presented again, then released as usual.
+    for (const s32 index : acquired) {
+        auto& slot = slots[index];
+        slot.buffer_state = BufferState::Queued;
+        BufferItem item;
+        item.slot = index;
+        item.graphic_buffer = slot.graphic_buffer;
+        item.fence = Fence::NoFence();
+        item.frame_number = slot.frame_number;
+        item.is_auto_timestamp = true;
+        item.swap_interval = 1;
+        core->queue.push_back(std::move(item));
+    }
+    const auto queued = in.Count(PulseItemSize);
+    for (u32 i = 0; i < queued; ++i) {
+        auto item = PulseReadItem(in);
+        if (item.slot < 0 || item.slot >= static_cast<s32>(slots.size()) ||
+            slots[item.slot].buffer_state != BufferState::Queued) {
+            throw std::invalid_argument("Pulse: queued frame without its slot");
+        }
+        item.graphic_buffer = slots[item.slot].graphic_buffer;
+        item.fence = Fence::NoFence();
+        core->queue.push_back(std::move(item));
+    }
+    in.End();
+    core->SignalDequeueCondition();
 }
 
 Kernel::KReadableEvent* BufferQueueProducer::GetNativeHandle(u32 type_id) {

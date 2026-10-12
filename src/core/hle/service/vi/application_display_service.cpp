@@ -5,7 +5,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "core/hle/service/cmif_serialization.h"
+#include "core/hle/kernel/k_readable_event.h"
+#include "core/hle/service/nvdrv/nvdrv_interface.h"
+#include "core/hle/service/nvnflinger/buffer_queue_producer.h"
 #include "core/hle/service/nvnflinger/hos_binder_driver.h"
+#include "core/hle/service/nvnflinger/hos_binder_driver_server.h"
+#include "core/hle/service/sm/sm.h"
 #include "core/hle/service/nvnflinger/parcel.h"
 #include "core/hle/service/os/event.h"
 #include "core/hle/service/vi/application_display_service.h"
@@ -61,6 +66,128 @@ IApplicationDisplayService::~IApplicationDisplayService() {
     for (const auto layer_id : m_stray_layer_ids) {
         m_container->DestroyStrayLayer(layer_id);
     }
+}
+
+void IApplicationDisplayService::PulseCapture(Pulse::HandlerCapture& capture) const {
+    std::scoped_lock lk{m_lock};
+    if (!m_open_layer_ids.empty()) {
+        throw Pulse::ServiceRejected(false, "vi managed layers have no serializer");
+    }
+    auto& out = capture.state;
+
+    // The nvmap handles behind the layers' buffers are restored first.
+    std::vector<u64> nvdrv_refs;
+    for (const char* port : {"nvdrv", "nvdrv:s", "nvdrv:t"}) {
+        const auto nvdrv = system.ServiceManager().GetService<Nvidia::NVDRV>(port);
+        if (nvdrv && nvdrv->PulseInitialized()) nvdrv_refs.push_back(capture.Reference(nvdrv));
+    }
+    out.U32(static_cast<u32>(nvdrv_refs.size()));
+    for (const u64 ref : nvdrv_refs) out.U64(ref);
+
+    const auto [next_layer, last_binder] = m_container->PulseNextIds();
+    out.U64(next_layer);
+    out.S32(last_binder);
+    out.Bool(m_vsync_event_fetched);
+
+    out.U32(static_cast<u32>(m_display_vsync_events.size()));
+    u32 slot{};
+    for (const auto& [display_id, event] : m_display_vsync_events) {
+        out.U64(display_id);
+        capture.ExportEvent(slot++, const_cast<Event&>(event).GetHandle()->GetParent());
+    }
+
+    std::shared_ptr<Nvnflinger::IHOSBinderDriver> driver;
+    m_container->GetBinderDriver(&driver);
+    const auto server = driver->GetServer();
+    out.U32(static_cast<u32>(m_stray_layer_ids.size()));
+    for (const u64 layer_id : m_stray_layer_ids) {
+        const auto layer = m_container->PulseGetLayer(layer_id);
+        if (!layer) throw Pulse::ServiceRejected(false, "a vi stray layer is not on a display");
+        const auto producer = std::static_pointer_cast<android::BufferQueueProducer>(
+            server->TryGetBinder(layer->producer_binder_id));
+        if (!producer) throw Pulse::ServiceRejected(false, "a vi layer lost its producer binder");
+        out.U64(layer_id);
+        out.U64(layer->display_id);
+        out.S32(layer->consumer_binder_id);
+        out.S32(layer->producer_binder_id);
+        out.Bool(layer->visible);
+        out.U32(layer->blending);
+        out.S32(layer->z_index);
+        out.Bool(layer->is_overlay);
+        out.U32(layer->layer_stack_mask);
+        for (const s32 id : {layer->consumer_binder_id, layer->producer_binder_id}) {
+            const auto [strong, weak] = server->PulseRefcounts(id);
+            out.S32(strong);
+            out.S32(weak);
+        }
+        Pulse::StateWriter queue;
+        producer->PulseCapture(queue);
+        out.U32(static_cast<u32>(queue.bytes.size()));
+        out.Bytes(queue.bytes);
+    }
+}
+
+Kernel::KEvent* IApplicationDisplayService::PulseEvent(u32 slot) {
+    std::scoped_lock lk{m_lock};
+    if (slot >= m_display_vsync_events.size()) return nullptr;
+    auto it = m_display_vsync_events.begin();
+    std::advance(it, slot);
+    return it->second.GetHandle()->GetParent();
+}
+
+SessionRequestHandlerPtr IApplicationDisplayService::PulseRestoreFrom(
+    Core::System& system, std::shared_ptr<Container> container, Pulse::HandlerRestore& restore) {
+    auto& in = restore.state;
+    const auto refs = in.Count(8);
+    for (u32 i = 0; i < refs; ++i) restore.Resolve(in.U64());
+
+    auto service = std::make_shared<IApplicationDisplayService>(system, container);
+    const u64 next_layer = in.U64();
+    const s32 last_binder = in.S32();
+    service->m_vsync_event_fetched = in.Bool();
+
+    const auto vsyncs = in.Count(8);
+    for (u32 i = 0; i < vsyncs; ++i) {
+        const u64 display_id = in.U64();
+        auto [it, created] = service->m_display_vsync_events.emplace(display_id, service->m_context);
+        if (!created) throw std::invalid_argument("Pulse: vi vsync event twice");
+        container->LinkVsyncEvent(display_id, &it->second);
+    }
+
+    std::shared_ptr<Nvnflinger::IHOSBinderDriver> driver;
+    container->GetBinderDriver(&driver);
+    const auto server = driver->GetServer();
+    const auto layers = in.Count(8 + 8 + 4 + 4 + 1 + 4 + 4 + 1 + 4 + 16 + 4);
+    for (u32 i = 0; i < layers; ++i) {
+        const u64 layer_id = in.U64();
+        Container::PulseLayer layer{};
+        layer.display_id = in.U64();
+        layer.consumer_binder_id = in.S32();
+        layer.producer_binder_id = in.S32();
+        layer.visible = in.Bool();
+        layer.blending = in.U32();
+        layer.z_index = in.S32();
+        layer.is_overlay = in.Bool();
+        layer.layer_stack_mask = in.U32();
+        s32 counts[4];
+        for (auto& count : counts) count = in.S32();
+
+        const auto producer = container->PulseCreateStrayLayer(
+            layer_id, layer.display_id, layer.consumer_binder_id, layer.producer_binder_id);
+        service->m_stray_layer_ids.insert(layer_id);
+        container->PulseSetLayer(layer_id, layer);
+
+        std::vector<u8> queue(in.Count(1));
+        in.Bytes(queue);
+        Pulse::StateReader queue_in{queue};
+        producer->PulseRestore(queue_in);
+
+        server->PulseSetRefcounts(layer.consumer_binder_id, counts[0], counts[1]);
+        server->PulseSetRefcounts(layer.producer_binder_id, counts[2], counts[3]);
+    }
+    in.End();
+    container->PulseRaiseNextIds(next_layer, last_binder);
+    return service;
 }
 
 Result IApplicationDisplayService::GetRelayService(

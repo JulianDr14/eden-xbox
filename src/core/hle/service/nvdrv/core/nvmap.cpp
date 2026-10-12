@@ -5,7 +5,9 @@
 // SPDX-FileCopyrightText: 2022 Skyline Team and Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <functional>
+#include <stdexcept>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -328,6 +330,59 @@ std::optional<NvMap::FreeInfo> NvMap::FreeHandle(Handle::Id handle, bool interna
     }
 
     return freeInfo;
+}
+
+std::vector<NvMap::PulseHandle> NvMap::PulseHandles() {
+    std::scoped_lock lock(handles_lock);
+    std::vector<PulseHandle> out;
+    out.reserve(handles.size());
+    for (const auto& [id, handle] : handles) {
+        std::scoped_lock handle_lock(handle->mutex);
+        out.push_back({
+            .id = id,
+            .size = handle->size,
+            .aligned_size = handle->aligned_size,
+            .orig_size = handle->orig_size,
+            .align = handle->align,
+            .flags = handle->flags.raw,
+            .address = handle->address,
+            .kind = handle->kind,
+            .allocated = handle->allocated,
+            .dupes = handle->dupes,
+            .session = handle->session_id.id,
+        });
+    }
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    return out;
+}
+
+void NvMap::PulseRestoreHandle(const PulseHandle& state, NvCore::SessionId session_id) {
+    if (!state.id || state.id % HandleIdIncrement || !state.size) {
+        throw std::invalid_argument("Pulse: malformed nvmap handle");
+    }
+    auto handle = std::make_shared<Handle>(state.size, state.id);
+    handle->aligned_size = state.aligned_size;
+    handle->orig_size = state.orig_size;
+    handle->align = state.align;
+    handle->flags.raw = state.flags;
+    handle->address = state.address;
+    handle->kind = state.kind;
+    handle->allocated = state.allocated;
+    handle->dupes = state.dupes;
+    handle->session_id = session_id;
+    {
+        std::scoped_lock lock(handles_lock);
+        if (!handles.emplace(state.id, std::move(handle)).second) {
+            throw std::invalid_argument("Pulse: nvmap handle id taken");
+        }
+    }
+    PulseRaiseNextId(state.id + HandleIdIncrement);
+}
+
+void NvMap::PulseRaiseNextId(u32 id) {
+    u32 current = next_handle_id.load(std::memory_order_relaxed);
+    while (current < id && !next_handle_id.compare_exchange_weak(current, id)) {
+    }
 }
 
 void NvMap::UnmapAllHandles(NvCore::SessionId session_id) {

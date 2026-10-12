@@ -37,6 +37,12 @@ public:
 
     Kernel::KEvent* QueryEvent(u32 event_id) override;
 
+    // Pulse: the registered events. One a syncpoint wait still holds rejects the checkpoint.
+    bool PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const override;
+    void PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) override;
+    void PulseEvents(std::vector<std::pair<u32, Kernel::KEvent*>>& out) const override;
+    Kernel::KEvent* PulseEvent(u32 index) override;
+
     union SyncpointEventValue {
         u32 raw;
 
@@ -96,7 +102,7 @@ private:
     u32 FindFreeNvEvent(u32 syncpoint_id);
 
     std::array<InternalEvent, MaxNvEvents> events{};
-    std::mutex events_mutex;
+    mutable std::mutex events_mutex;
     u64 events_mask{};
 
     struct IocSyncptReadParams {

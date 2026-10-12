@@ -21,6 +21,12 @@ public:
     explicit ISystemRootService(Core::System& system_, std::shared_ptr<Container> container);
     ~ISystemRootService() override;
 
+    std::string_view PulseKind() const override {
+        return "vi:s";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override;
+
 private:
     Result GetDisplayService(
         Out<SharedPointer<IApplicationDisplayService>> out_application_display_service,

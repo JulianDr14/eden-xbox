@@ -13,6 +13,9 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/nvdrv/core/nvmap.h"
+#include "core/hle/service/nvdrv/devices/nvdevice.h"
+#include "core/hle/service/pulse_service.h"
 #include "core/hle/service/nvdrv/nvdata.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
 #include "core/hle/service/nvdrv/nvdrv_interface.h"
@@ -44,6 +47,7 @@ void NVDRV::Open(HLERequestContext& ctx) {
     }
 
     DeviceFD fd = nvdrv->Open(device_name, session_id);
+    if (fd != INVALID_NVDRV_FD) pulse_fds.insert(fd);
 
     rb.Push<DeviceFD>(fd);
     rb.PushEnum(fd != INVALID_NVDRV_FD ? NvResult::Success : NvResult::FileOperationFailed);
@@ -148,6 +152,7 @@ void NVDRV::Close(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     const auto fd = rp.Pop<DeviceFD>();
     const auto result = nvdrv->Close(fd);
+    if (result == NvResult::Success) pulse_fds.erase(fd);
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
@@ -241,6 +246,126 @@ void NVDRV::DumpGraphicsMemoryInfo(HLERequestContext& ctx) {
 
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
+}
+
+void NVDRV::PulseCapture(Pulse::HandlerCapture& capture) const {
+    auto& out = capture.state;
+    out.U64(pid);
+    out.Bool(is_initialized);
+    if (!is_initialized) {
+        if (!pulse_fds.empty()) throw Pulse::ServiceRejected(false, "nvdrv fds without a session");
+        return;
+    }
+    out.S32(nvdrv->PulseNextFd());
+    out.U32(static_cast<u32>(pulse_fds.size()));
+    for (const auto fd : pulse_fds) {
+        const auto name = nvdrv->PulseDeviceName(fd);
+        const auto device = nvdrv->GetDevice<Devices::nvdevice>(fd);
+        if (!device || name.empty()) throw Pulse::ServiceRejected(false, "nvdrv fd without a device");
+        Pulse::StateWriter device_state;
+        if (!device->PulseCapture(fd, device_state)) {
+            throw Pulse::ServiceRejected(false, "nvdrv device " + name + " has no serializer");
+        }
+        out.S32(fd);
+        out.String(name);
+        out.U32(static_cast<u32>(device_state.bytes.size()));
+        out.Bytes(device_state.bytes);
+        std::vector<std::pair<u32, Kernel::KEvent*>> events;
+        device->PulseEvents(events);
+        for (const auto& [index, event] : events) {
+            if (fd < 0 || fd > 0xFFFFFF || index > 0xFF) {
+                throw Pulse::ServiceRejected(false, "nvdrv event out of the slot range");
+            }
+            capture.ExportEvent((static_cast<u32>(fd) << 8) | index, event);
+        }
+    }
+    auto& nvmap = nvdrv->GetContainer().GetNvMapFile();
+    std::vector<NvCore::NvMap::PulseHandle> handles;
+    for (const auto& handle : nvmap.PulseHandles()) {
+        // An unallocated handle has no session yet; nothing but this one creates handles here.
+        if (!handle.allocated || handle.session == session_id.id) handles.push_back(handle);
+    }
+    out.U32(nvmap.PulseNextId());
+    out.U32(static_cast<u32>(handles.size()));
+    for (const auto& handle : handles) {
+        out.U32(handle.id);
+        out.U64(handle.size);
+        out.U64(handle.aligned_size);
+        out.U64(handle.orig_size);
+        out.U64(handle.align);
+        out.U32(handle.flags);
+        out.U64(handle.address);
+        out.U8(handle.kind);
+        out.Bool(handle.allocated);
+        out.S32(handle.dupes);
+    }
+}
+
+Kernel::KEvent* NVDRV::PulseEvent(u32 slot) {
+    const auto fd = static_cast<DeviceFD>(slot >> 8);
+    if (!pulse_fds.contains(fd)) return nullptr;
+    const auto device = nvdrv->GetDevice<Devices::nvdevice>(fd);
+    return device ? device->PulseEvent(slot & 0xFF) : nullptr;
+}
+
+SessionRequestHandlerPtr NVDRV::PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) {
+    if (kind != PulseKind()) return nullptr;
+    if (is_initialized) throw std::invalid_argument("Pulse: nvdrv interface already in use");
+    auto& in = restore.state;
+    pid = in.U64();
+    if (!in.Bool()) {
+        in.End();
+        return shared_from_this();
+    }
+    auto& container = nvdrv->GetContainer();
+    session_id = container.OpenSession(restore.process);
+    is_initialized = true;
+
+    const auto next_fd = in.S32();
+    const auto fd_count = in.Count(12);
+    for (u32 i = 0; i < fd_count; ++i) {
+        const auto fd = in.S32();
+        const auto name = in.String();
+        std::vector<u8> device_state(in.Count(1));
+        in.Bytes(device_state);
+        auto device = nvdrv->PulseOpen(fd, name, session_id);
+        pulse_fds.insert(fd);
+        Pulse::StateReader device_in{device_state};
+        device->PulseRestore(fd, device_in);
+        device_in.End();
+    }
+    nvdrv->PulseRaiseNextFd(next_fd);
+
+    auto& nvmap = container.GetNvMapFile();
+    const auto next_id = in.U32();
+    const auto handle_count = in.Count(54);
+    for (u32 i = 0; i < handle_count; ++i) {
+        NvCore::NvMap::PulseHandle handle;
+        handle.id = in.U32();
+        handle.size = in.U64();
+        handle.aligned_size = in.U64();
+        handle.orig_size = in.U64();
+        handle.align = in.U64();
+        handle.flags = in.U32();
+        handle.address = in.U64();
+        handle.kind = in.U8();
+        handle.allocated = in.Bool();
+        handle.dupes = in.S32();
+        nvmap.PulseRestoreHandle(handle, session_id);
+        // IocAlloc shares the pages with the device; the memory section expects them so.
+        if (handle.allocated && handle.address) {
+            bool is_io{};
+            if (restore.process->GetPageTable()
+                    .LockForMapDeviceAddressSpace(&is_io, handle.address, handle.size,
+                                                  Kernel::KMemoryPermission::None, true, false)
+                    .IsError()) {
+                throw std::invalid_argument("Pulse: nvmap pages cannot be shared with the device");
+            }
+        }
+    }
+    nvmap.PulseRaiseNextId(next_id);
+    in.End();
+    return shared_from_this();
 }
 
 NVDRV::NVDRV(Core::System& system_, std::shared_ptr<Module> nvdrv_, const char* name)

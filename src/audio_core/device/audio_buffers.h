@@ -306,6 +306,28 @@ public:
         return buffers[index].end_timestamp;
     }
 
+    /**
+     * Pulse: every buffer the guest has not taken back yet (released but not fetched, registered,
+     * appended), oldest first.
+     */
+    std::vector<AudioBuffer> PulsePending() const {
+        std::scoped_lock l{lock};
+        std::vector<AudioBuffer> pending;
+        const auto collect = [&](s32 end, s32 count) {
+            for (s32 i = count; i > 0; --i) {
+                auto index{end - i};
+                if (index < 0) {
+                    index += N;
+                }
+                pending.push_back(buffers[index]);
+            }
+        };
+        collect(released_index, released_count);
+        collect(registered_index, registered_count);
+        collect(appended_index, appended_count);
+        return pending;
+    }
+
 private:
     /// Buffer lock
     mutable std::recursive_mutex lock{};

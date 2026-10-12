@@ -4,6 +4,7 @@
 #pragma once
 
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "common/common_types.h"
@@ -17,6 +18,11 @@ class System;
 namespace Kernel {
 class KEvent;
 }
+
+namespace Service::Pulse {
+class StateReader;
+class StateWriter;
+} // namespace Service::Pulse
 
 namespace Service::Nvidia::Devices {
 
@@ -72,6 +78,19 @@ public:
     virtual void OnClose(DeviceFD fd) = 0;
 
     virtual Kernel::KEvent* QueryEvent(u32 event_id) {
+        return nullptr;
+    }
+
+    // Pulse checkpoints (pulse_service.h): the state of an open fd beyond its session, which
+    // OnOpen restores. False: the device has no serializer.
+    virtual bool PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const {
+        return false;
+    }
+    virtual void PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) {}
+    // The service events the fd hands out (QueryEvent), under indices below 256 stable for the
+    // device.
+    virtual void PulseEvents(std::vector<std::pair<u32, Kernel::KEvent*>>& out) const {}
+    virtual Kernel::KEvent* PulseEvent(u32 index) {
         return nullptr;
     }
 

@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <limits>
+#include <set>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -32,6 +34,7 @@
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/service.h"
+#include "core/hle/service/sm/sm.h"
 #include "core/memory.h"
 #include "core/pulse_checkpoint.h"
 #include "core/pulse_machine_state.h"
@@ -160,6 +163,15 @@ public:
         return objects;
     }
 
+    // A record with no kernel object behind it (a service interface).
+    u64 AddRecord(ObjectKind kind) {
+        if (records.size() == MaxKernelObjects) Reject(false, "too many kernel objects");
+        const auto id = next++;
+        records.push_back({id, kind, 0, 0, {}});
+        objects.push_back(nullptr);
+        return id;
+    }
+
 private:
     u64 Add(const KAutoObject* object, ObjectKind kind, u64 parent) {
         if (records.size() == MaxKernelObjects) Reject(false, "too many kernel objects");
@@ -170,13 +182,14 @@ private:
         return id;
     }
 
+    // An event a service owns is resolved after the lock, to the interface that exports it.
     std::pair<u64, u64> AddEvent(Kernel::KEvent* event) {
-        if (event->GetOwner() != process) Reject(false, "event owned by a service process");
         auto* readable = std::addressof(event->GetReadableEvent());
         if (const auto found = ids.find(event); found != ids.end()) {
             return {found->second, ids.at(readable)};
         }
-        const auto event_id = Add(event, ObjectKind::Event, 0);
+        const auto kind = event->GetOwner() == process ? ObjectKind::Event : ObjectKind::ServiceEvent;
+        const auto event_id = Add(event, kind, 0);
         return {event_id, Add(readable, ObjectKind::ReadableEvent, event_id)};
     }
 
@@ -193,10 +206,17 @@ Kernel::KClientPort* FindSmPort(Kernel::KernelCore& kernel) {
     return port.GetPointerUnsafe();
 }
 
-// Every session on the sm: port is served by the one SM handler that port's factory returns, so
-// the port check (done by the callers) is what proves the handler is SM. The build has no RTTI.
-bool IsSmHandler(const Service::SessionRequestHandlerPtr& handler) {
-    return handler != nullptr;
+Kernel::KClientPort* FindServicePort(Core::System& system, const std::string& name) {
+    if (name == "sm:") return FindSmPort(system.Kernel());
+    Kernel::KClientPort* port{};
+    if (system.ServiceManager().GetServicePort(std::addressof(port), name).IsError()) return nullptr;
+    return port;
+}
+
+std::string Join(const std::set<std::string>& names) {
+    std::string out;
+    for (const auto& name : names) out += (out.empty() ? "" : ", ") + name;
+    return out;
 }
 
 } // namespace
@@ -291,6 +311,12 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
         } catch (const std::invalid_argument& error) {
             // A wait the graph cannot express yet (a kernel lock inside an SVC): transient.
             Reject(true, error.what());
+        } catch (const std::runtime_error& error) {
+            std::string reasons;
+            for (const auto* thread : waiting) {
+                reasons += fmt::format(" {}", static_cast<u32>(thread->GetWaitReasonForDebugging()));
+            }
+            Reject(false, std::string{error.what()} + " (wait reasons" + reasons + ")");
         }
         for (size_t i = 0; i < registry.Records().size(); ++i) {
             if (registry.Records()[i].kind != ObjectKind::ReadableEvent) continue;
@@ -300,30 +326,154 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
         exclusive = process->GetExclusiveMonitor().CaptureCheckpoint();
     }
 
-    // Sessions: only sm: has a serializer (its whole state is the session graph).
+    // Sessions and the service interfaces behind them. Every interface the guest can reach needs
+    // a serializer; the rejection names all that are missing at once.
+    struct HandlerEntry {
+        size_t record;
+        Service::SessionRequestHandlerPtr handler;
+        Service::ServerManager* server;
+        std::string port; // set for a root: the port of the session that starts with it
+    };
+    std::vector<HandlerEntry> handlers;
+    std::unordered_map<const Service::SessionRequestHandler*, size_t> handler_index;
+    std::unordered_map<Service::ServerManager*, std::string> server_ports;
+    std::unordered_map<const Service::SessionRequestManager*, u64> managers; // -> owning session
+    std::set<std::string> missing;
+    std::set<std::string> refused;
+    bool refused_retryable = true;
+    const auto add_handler = [&](const Service::SessionRequestHandlerPtr& handler,
+                                 Service::ServerManager* server) -> u64 {
+        if (const auto found = handler_index.find(handler.get()); found != handler_index.end()) {
+            return registry.Records()[handlers[found->second].record].id;
+        }
+        const auto id = registry.AddRecord(ObjectKind::ServiceHandler);
+        handler_index.emplace(handler.get(), handlers.size());
+        handlers.push_back({registry.Records().size() - 1, handler, server, {}});
+        if (handler->PulseKind().empty()) missing.insert(handler->PulseName());
+        return id;
+    };
     auto* sm_port = FindSmPort(kernel);
-    for (size_t i = 0; i < registry.Records().size(); ++i) {
-        auto& record = registry.Records()[i];
-        if (record.kind != ObjectKind::ClientSession) continue;
+    // Port sessions first, so a clone always names the session that connected.
+    std::vector<size_t> session_order;
+    for (const bool ported : {true, false}) {
+        for (size_t i = 0; i < registry.Records().size(); ++i) {
+            if (registry.Records()[i].kind != ObjectKind::ClientSession) continue;
+            const auto* client = static_cast<const Kernel::KClientSession*>(registry.Objects()[i]);
+            const auto* session = client->GetParent();
+            if ((session && session->GetParent()) == ported) session_order.push_back(i);
+        }
+    }
+    for (const size_t i : session_order) {
         const auto* client = static_cast<const Kernel::KClientSession*>(registry.Objects()[i]);
         auto* session = client->GetParent();
-        if (!session || session->IsServerClosed() || !sm_port || session->GetParent() != sm_port) {
-            Reject(false, "IPC session to a service without a serializer");
+        if (!session || session->IsServerClosed()) Reject(false, "IPC session whose server is closed");
+        const auto* port = session->GetParent();
+        Service::Pulse::SessionRecord session_record;
+        if (port) {
+            session_record.port = port == sm_port ? "sm:" : system.ServiceManager().FindServiceName(port);
+            if (session_record.port.empty()) Reject(false, "IPC session to an unregistered port");
         }
         const auto manager =
             Service::ServerManager::FindSessionManager(std::addressof(session->GetServerSession()));
         if (!manager) Reject(true, "IPC session is not registered with its server yet");
-        if (manager->IsDomain()) Reject(false, "sm: session converted to a domain");
-        const auto id = record.id;
+        if (const auto owner = managers.find(manager.get()); owner != managers.end()) {
+            if (port) Reject(false, "two port sessions share one service session");
+            session_record.clone_of = owner->second;
+            registry.Records()[i].payload = Service::Pulse::EncodeSessionRecord(session_record);
+            continue;
+        }
+        managers.emplace(manager.get(), registry.Records()[i].id);
+        auto* server = std::addressof(manager->GetServerManager());
+        if (port) server_ports.try_emplace(server, session_record.port);
         Service::SessionManagerCheckpoint graph;
         try {
             graph = manager->CaptureCheckpoint([&](const Service::SessionRequestHandlerPtr& handler) {
-                return IsSmHandler(handler) ? id : u64{0};
+                return add_handler(handler, server);
             });
         } catch (const std::exception& error) {
             Reject(false, error.what());
         }
-        record.payload = Service::Pulse::EncodeSessionGraph(graph);
+        if (port && graph.session_handler) {
+            auto& root = handlers[handler_index.at(std::addressof(manager->SessionHandler()))];
+            if (!root.port.empty() && root.port != session_record.port) {
+                Reject(false, "one service interface is the root of two ports");
+            }
+            root.port = session_record.port;
+        }
+        session_record.graph = Service::Pulse::EncodeSessionGraph(graph);
+        registry.Records()[i].payload = Service::Pulse::EncodeSessionRecord(session_record);
+    }
+    // Interface state, in discovery order; a reference discovers the interface it names.
+    std::unordered_map<const Kernel::KEvent*, std::pair<u64, u32>> exported;
+    for (size_t h = 0; h < handlers.size(); ++h) {
+        const auto handler = handlers[h].handler;
+        auto* server = handlers[h].server;
+        const auto record_index = handlers[h].record;
+        if (handler->PulseKind().empty()) continue;
+        Service::Pulse::HandlerCapture capture{[&](const Service::SessionRequestHandlerPtr& other) {
+            return add_handler(other, server);
+        }};
+        try {
+            handler->PulseCapture(capture);
+        } catch (const Service::Pulse::ServiceRejected& error) {
+            refused.insert(std::string{handler->PulseName()} + ": " + error.what());
+            refused_retryable = refused_retryable && error.retryable;
+            continue;
+        } catch (const std::exception& error) {
+            refused.insert(std::string{handler->PulseName()} + ": " + error.what());
+            refused_retryable = false;
+            continue;
+        }
+        Service::Pulse::HandlerRecord handler_record;
+        handler_record.kind = handler->PulseKind();
+        handler_record.root = !handlers[h].port.empty();
+        handler_record.port = handlers[h].port;
+        if (handler_record.port.empty()) {
+            if (const auto found = server_ports.find(server); found != server_ports.end()) {
+                handler_record.port = found->second;
+            } else if (const auto names = server->PulsePortNames(); !names.empty()) {
+                handler_record.port = names.front();
+            } else {
+                Reject(false, std::string{"service interface without a port: "} + handler->PulseName());
+            }
+        }
+        handler_record.state = std::move(capture.state.bytes);
+        if (handler_record.state.size() > Service::Pulse::MaxHandlerState) {
+            Reject(false, std::string{"service state too large: "} + handler->PulseName());
+        }
+        const auto id = registry.Records()[record_index].id;
+        registry.Records()[record_index].payload = Service::Pulse::EncodeHandlerRecord(handler_record);
+        for (const auto& event : capture.events) {
+            if (!exported.emplace(event.event, std::make_pair(id, event.slot)).second) {
+                Reject(false, "a service event exported twice");
+            }
+        }
+    }
+    std::set<std::string> unexported;
+    for (size_t i = 0; i < registry.Records().size(); ++i) {
+        auto& record = registry.Records()[i];
+        if (record.kind != ObjectKind::ServiceEvent) continue;
+        const auto* event = static_cast<const Kernel::KEvent*>(registry.Objects()[i]);
+        const auto found = exported.find(event);
+        if (found == exported.end()) {
+            const auto* owner = event->GetOwner();
+            unexported.insert(owner ? owner->GetName() : "no process");
+            continue;
+        }
+        record.parent = found->second.first;
+        const u32 slot = found->second.second;
+        record.payload = {static_cast<u8>(slot), static_cast<u8>(slot >> 8),
+                          static_cast<u8>(slot >> 16), static_cast<u8>(slot >> 24)};
+    }
+    if (!missing.empty() || !refused.empty() || !unexported.empty()) {
+        std::string reason;
+        if (!missing.empty()) reason += "no serializer for service interfaces " + Join(missing);
+        if (!refused.empty()) reason += (reason.empty() ? "" : "; ") + Join(refused);
+        if (!unexported.empty()) {
+            reason += (reason.empty() ? "" : "; ") +
+                      std::string{"events of service processes no interface exports: "} + Join(unexported);
+        }
+        Reject(missing.empty() && unexported.empty() && refused_retryable, reason);
     }
 
     // Memory map: what the rebuilt skeleton must reproduce, and what to store.
@@ -360,16 +510,21 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
         const auto attribute = static_cast<KMemoryAttribute>(block.attribute);
         if (state == KMemoryState::Ipc || state == KMemoryState::NonSecureIpc ||
             state == KMemoryState::NonDeviceIpc ||
-            True(attribute & (KMemoryAttribute::IpcLocked | KMemoryAttribute::DeviceShared))) {
-            Reject(true, fmt::format("guest memory is lent to an IPC or device operation "
+            True(attribute & KMemoryAttribute::IpcLocked)) {
+            Reject(true, fmt::format("guest memory is lent to an IPC operation "
                                      "(block {:#x}+{:#x} state {:#x} attribute {:#x})",
                                      block.address, block.size, block.state, block.attribute));
         }
-        // PermissionLocked (libnx locks its RELRO page) is replayed by the restore; Uncached is not.
-        if (True(attribute & ~(KMemoryAttribute::Locked | KMemoryAttribute::PermissionLocked))) {
+        // PermissionLocked (libnx locks its RELRO page) is replayed by the restore, DeviceShared by
+        // the nvdrv serializer re-sharing its nvmap handles; Uncached is not.
+        if (True(attribute & ~(KMemoryAttribute::Locked | KMemoryAttribute::PermissionLocked |
+                               KMemoryAttribute::DeviceShared))) {
             Reject(false, fmt::format("memory attribute {:#x} has no serializer", block.attribute));
         }
         const bool normal = state == KMemoryState::Normal;
+        if (True(attribute & KMemoryAttribute::DeviceShared) && !normal) {
+            Reject(false, "device-shared memory outside the heap");
+        }
         if (True(attribute & KMemoryAttribute::Locked) && !normal) {
             Reject(false, "locked memory outside the heap");
         }
@@ -682,7 +837,7 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
         for (const auto& block : layout.blocks) {
             const auto block_state = static_cast<KMemoryState>(block.state);
             if ((block_state != KMemoryState::CodeData && block_state != KMemoryState::Normal) ||
-                block.attribute != 0) {
+                (block.attribute & ~static_cast<u32>(KMemoryAttribute::DeviceShared)) != 0) {
                 continue;
             }
             for (u64 address = block.address; address < block.address + block.size;) {
@@ -724,11 +879,16 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
     }
     case ProcessSection::Objects: {
         const auto records = DecodeObjects(bytes);
+        std::unordered_map<u64, const ObjectRecord*> by_id;
+        for (const auto& record : records) by_id.emplace(record.id, std::addressof(record));
+        const auto kind_of = [&](u64 object_id) {
+            const auto found = by_id.find(object_id);
+            return found != by_id.end() ? found->second->kind : ObjectKind{};
+        };
+
+        // Application events.
         for (const auto& record : records) {
-            switch (record.kind) {
-            case ObjectKind::Process:
-                break; // bound with the skeleton
-            case ObjectKind::Event: {
+            if (record.kind == ObjectKind::Event) {
                 Kernel::KScopedResourceReservation reservation{
                     kernel, process, Kernel::LimitableResource::EventCountMax};
                 if (!reservation.Succeeded()) Incompatible("Pulse: event limit reached");
@@ -740,55 +900,210 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
                 state->created.push_back(event);
                 Kernel::KEvent::Register(kernel, event);
                 bind(record.id, event);
-                break;
-            }
-            case ObjectKind::ReadableEvent: {
+            } else if (record.kind == ObjectKind::ReadableEvent &&
+                       kind_of(record.parent) == ObjectKind::Event) {
                 auto* event = resolve(record.parent)->DynamicCast<Kernel::KEvent*>();
                 if (!event) Invalid("Pulse: readable event without its event");
                 auto* readable = std::addressof(event->GetReadableEvent());
                 bind(record.id, readable);
                 if (record.flags & 1) Check(readable->Signal(kernel), "Pulse: event signal failed");
-                break;
             }
-            case ObjectKind::ClientSession: {
-                Service::Pulse::SessionGraph graph;
-                try {
-                    graph = Service::Pulse::DecodeSessionGraph(record.payload);
-                } catch (const std::invalid_argument&) {
-                    Invalid("Pulse: malformed sm: session graph");
+        }
+
+        // Sessions to named ports: the fresh service accepts them and gives each its root.
+        struct PortContext {
+            Service::SessionRequestHandlerPtr root;
+            Service::ServerManager* server{};
+        };
+        std::unordered_map<std::string, PortContext> ports;
+        std::unordered_map<u64, std::shared_ptr<Service::SessionRequestManager>> managers;
+        std::unordered_map<u64, Service::SessionRequestHandlerPtr> roots; // handler id -> fresh root
+        std::unordered_map<u64, Service::Pulse::SessionRecord> sessions;
+        const auto open_port = [&](const std::string& name) {
+            auto* port = FindServicePort(system, name);
+            if (!port) Incompatible("Pulse: service port '" + name + "' missing");
+            Kernel::KClientSession* client{};
+            Check(port->CreateSession(kernel, std::addressof(client), process),
+                  "Pulse: service session rebuild failed");
+            state->created.push_back(client);
+            // The server thread registers the session asynchronously.
+            const auto* server = std::addressof(client->GetParent()->GetServerSession());
+            const auto deadline = std::chrono::steady_clock::now() + ServiceStartTimeout;
+            std::shared_ptr<Service::SessionRequestManager> manager;
+            while (!(manager = Service::ServerManager::FindSessionManager(server))) {
+                if (std::chrono::steady_clock::now() > deadline) {
+                    Incompatible("Pulse: service '" + name + "' did not accept the session");
                 }
-                if (graph.is_domain || graph.session_handler != record.id) {
-                    Invalid("Pulse: malformed sm: session graph");
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            if (!manager->HasSessionHandler()) Incompatible("Pulse: service '" + name + "' has no handler");
+            ports.try_emplace(name, PortContext{manager->SessionHandler().shared_from_this(),
+                                                std::addressof(manager->GetServerManager())});
+            return std::make_pair(client, manager);
+        };
+        for (const auto& record : records) {
+            if (record.kind != ObjectKind::ClientSession) continue;
+            auto& session = sessions[record.id];
+            try {
+                session = Service::Pulse::DecodeSessionRecord(record.payload);
+                if (!session.clone_of) Service::Pulse::DecodeSessionGraph(session.graph);
+            } catch (const std::invalid_argument&) {
+                Invalid("Pulse: malformed session record");
+            }
+            if (session.port.empty()) continue;
+            const auto graph = Service::Pulse::DecodeSessionGraph(session.graph);
+            auto [client, manager] = open_port(session.port);
+            bind(record.id, client);
+            managers.emplace(record.id, manager);
+            if (graph.session_handler) {
+                if (kind_of(graph.session_handler) != ObjectKind::ServiceHandler) {
+                    Invalid("Pulse: session root is not a service interface");
                 }
-                auto* port = FindSmPort(kernel);
-                if (!port) Incompatible("Pulse: sm: port missing");
-                Kernel::KClientSession* client{};
-                Check(port->CreateSession(kernel, std::addressof(client), process),
-                      "Pulse: sm: session rebuild failed");
-                state->created.push_back(client);
-                bind(record.id, client);
-                // The server thread registers the session asynchronously.
-                const auto* server = std::addressof(client->GetParent()->GetServerSession());
-                const auto deadline = std::chrono::steady_clock::now() + ServiceStartTimeout;
-                std::shared_ptr<Service::SessionRequestManager> manager;
-                while (!(manager = Service::ServerManager::FindSessionManager(server))) {
-                    if (std::chrono::steady_clock::now() > deadline) {
-                        Incompatible("Pulse: sm: server did not accept the session");
+                roots.try_emplace(graph.session_handler, manager->SessionHandler().shared_from_this());
+            }
+        }
+
+        // Interfaces, each after the ones it references.
+        std::unordered_map<u64, Service::SessionRequestHandlerPtr> handlers;
+        std::unordered_set<u64> restoring;
+        std::function<Service::SessionRequestHandlerPtr(u64)> restore_handler;
+        const auto handler_port = [&](u64 handler_id) -> PortContext& {
+            if (kind_of(handler_id) != ObjectKind::ServiceHandler) {
+                Invalid("Pulse: reference to a missing service interface");
+            }
+            Service::Pulse::HandlerRecord handler;
+            try {
+                handler = Service::Pulse::DecodeHandlerRecord(by_id.at(handler_id)->payload);
+            } catch (const std::invalid_argument&) {
+                Invalid("Pulse: malformed service interface record");
+            }
+            if (!ports.contains(handler.port)) open_port(handler.port);
+            return ports.at(handler.port);
+        };
+        restore_handler = [&](u64 handler_id) -> Service::SessionRequestHandlerPtr {
+            if (const auto found = handlers.find(handler_id); found != handlers.end()) return found->second;
+            if (!restoring.insert(handler_id).second) Invalid("Pulse: service interfaces reference in a cycle");
+            auto& context = handler_port(handler_id);
+            const auto handler = Service::Pulse::DecodeHandlerRecord(by_id.at(handler_id)->payload);
+            Service::Pulse::HandlerRestore restore{system, process, handler.state, restore_handler};
+            Service::SessionRequestHandlerPtr rebuilt;
+            try {
+                if (handler.root) {
+                    const auto root = roots.find(handler_id);
+                    if (root == roots.end()) Invalid("Pulse: root interface without its session");
+                    rebuilt = root->second->PulseRestore(handler.kind, restore);
+                    if (rebuilt != root->second) {
+                        Incompatible("Pulse: service '" + handler.port + "' root changed kind");
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                } else {
+                    rebuilt = context.root->PulseRestore(handler.kind, restore);
                 }
-                if (!manager->HasSessionHandler()) Incompatible("Pulse: sm: handler");
-                const auto handler = manager->SessionHandler().shared_from_this();
-                manager->RestoreCheckpoint(graph, [&](u64 handler_id) {
-                    return handler_id == record.id ? handler : Service::SessionRequestHandlerPtr{};
-                });
-                break;
+            } catch (const std::invalid_argument& error) {
+                Incompatible(error.what());
             }
+            if (!rebuilt) {
+                Incompatible("Pulse: service '" + handler.port + "' cannot rebuild " + handler.kind);
+            }
+            restoring.erase(handler_id);
+            handlers.emplace(handler_id, rebuilt);
+            return rebuilt;
+        };
+        for (const auto& record : records) {
+            if (record.kind == ObjectKind::ServiceHandler) restore_handler(record.id);
+        }
+
+        // Session graphs. A session a request created is registered with its service's server.
+        for (const auto& record : records) {
+            if (record.kind != ObjectKind::ClientSession) continue;
+            const auto& session = sessions.at(record.id);
+            if (session.clone_of) continue;
+            const auto graph = Service::Pulse::DecodeSessionGraph(session.graph);
+            std::shared_ptr<Service::SessionRequestManager> manager;
+            Kernel::KSession* created_session{};
+            if (session.port.empty()) {
+                u64 any{graph.session_handler};
+                for (const auto domain : graph.domain_handlers) any = any ? any : domain;
+                if (!any) Invalid("Pulse: session without an interface");
+                auto& context = handler_port(any);
+                Kernel::KScopedResourceReservation reservation{
+                    kernel, process, Kernel::LimitableResource::SessionCountMax};
+                if (!reservation.Succeeded()) Incompatible("Pulse: session limit reached");
+                created_session = Kernel::KSession::Create(kernel);
+                if (!created_session) Incompatible("Pulse: out of kernel sessions");
+                created_session->Initialize(kernel, nullptr, 0, process);
+                reservation.Commit();
+                Kernel::KSession::Register(kernel, created_session);
+                state->created.push_back(std::addressof(created_session->GetClientSession()));
+                bind(record.id, std::addressof(created_session->GetClientSession()));
+                manager = std::make_shared<Service::SessionRequestManager>(kernel, *context.server);
+                managers.emplace(record.id, manager);
+            } else {
+                manager = managers.at(record.id);
+            }
+            try {
+                manager->RestoreCheckpoint(graph, [&](u64 handler_id) {
+                    return kind_of(handler_id) == ObjectKind::ServiceHandler ? handlers.at(handler_id)
+                                                                             : nullptr;
+                });
+            } catch (const std::invalid_argument& error) {
+                Invalid(error.what());
+            }
+            if (created_session) {
+                Check(handler_port(graph.session_handler ? graph.session_handler
+                                                         : graph.domain_handlers.front())
+                          .server->RegisterSession(std::addressof(created_session->GetServerSession()),
+                                                   manager),
+                      "Pulse: service session registration failed");
+            }
+        }
+
+        // Clones: a fresh session served by the manager of the session they were cloned from.
+        for (const auto& record : records) {
+            if (record.kind != ObjectKind::ClientSession) continue;
+            const auto& session = sessions.at(record.id);
+            if (!session.clone_of) continue;
+            const auto owner = sessions.find(session.clone_of);
+            if (owner == sessions.end() || owner->second.clone_of) {
+                Invalid("Pulse: session clone without its original");
+            }
+            const auto manager = managers.at(session.clone_of);
+            Kernel::KScopedResourceReservation reservation{
+                kernel, process, Kernel::LimitableResource::SessionCountMax};
+            if (!reservation.Succeeded()) Incompatible("Pulse: session limit reached");
+            auto* clone = Kernel::KSession::Create(kernel);
+            if (!clone) Incompatible("Pulse: out of kernel sessions");
+            clone->Initialize(kernel, nullptr, 0, process);
+            reservation.Commit();
+            Kernel::KSession::Register(kernel, clone);
+            state->created.push_back(std::addressof(clone->GetClientSession()));
+            bind(record.id, std::addressof(clone->GetClientSession()));
+            Check(manager->GetServerManager().RegisterSession(std::addressof(clone->GetServerSession()),
+                                                              manager),
+                  "Pulse: service session registration failed");
+        }
+
+        // Service events, from the interfaces that exported them, with the captured signal.
+        for (const auto& record : records) {
+            if (record.kind == ObjectKind::ServiceEvent) {
+                const u32 slot = record.payload[0] | (u32{record.payload[1]} << 8) |
+                                 (u32{record.payload[2]} << 16) | (u32{record.payload[3]} << 24);
+                auto* event = handlers.at(record.parent)->PulseEvent(slot);
+                if (!event) Incompatible("Pulse: a service interface lost an exported event");
+                bind(record.id, event);
+            } else if (record.kind == ObjectKind::ReadableEvent &&
+                       kind_of(record.parent) == ObjectKind::ServiceEvent) {
+                auto* event = resolve(record.parent)->DynamicCast<Kernel::KEvent*>();
+                if (!event) Invalid("Pulse: readable event without its event");
+                auto* readable = std::addressof(event->GetReadableEvent());
+                bind(record.id, readable);
+                Check((record.flags & 1) ? readable->Signal(kernel) : readable->Clear(kernel),
+                      "Pulse: service event signal failed");
             }
         }
         stats.objects = static_cast<u32>(records.size());
         break;
     }
+
     case ProcessSection::Threads: {
         const auto records = DecodeThreads(bytes);
         for (const auto& record : records) {

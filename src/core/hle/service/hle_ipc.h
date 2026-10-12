@@ -23,6 +23,7 @@
 #include "core/hle/ipc.h"
 #include "core/hle/kernel/k_handle_table.h"
 #include "core/hle/kernel/svc_common.h"
+#include "core/hle/service/pulse_service.h"
 #include "core/hle/service/pulse_session_graph.h"
 
 union Result;
@@ -78,8 +79,31 @@ public:
     virtual Result HandleSyncRequest(Kernel::KServerSession& session,
                                      HLERequestContext& context) = 0;
 
+    // Pulse checkpoints (pulse_service.h). The build has no RTTI, so an interface declares its
+    // own serializer: a stable kind (empty: none, and a checkpoint that reaches it is rejected),
+    // its state, and the service events the guest may hold.
+    virtual std::string_view PulseKind() const {
+        return {};
+    }
+    // Called with the system paused; throws Pulse::ServiceRejected when the state cannot be stored.
+    virtual void PulseCapture(Pulse::HandlerCapture& capture) const {}
+    // Called on the root handler of a fresh System's port: rebuilds an interface of this service
+    // from a captured state. The root itself (kind == PulseKind()) applies the state and returns
+    // itself.
+    virtual SessionRequestHandlerPtr PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore);
+    // After PulseRestore: the event this interface exported under the slot.
+    virtual Kernel::KEvent* PulseEvent(u32 slot) {
+        return nullptr;
+    }
+    const char* PulseName() const {
+        return pulse_name;
+    }
+
 protected:
     Kernel::KernelCore& kernel;
+
+private:
+    const char* pulse_name;
 };
 
 using SessionRequestHandlerWeakPtr = std::weak_ptr<SessionRequestHandler>;

@@ -52,6 +52,13 @@ public:
         }
     }
 
+    u64 PulseNextId() const {
+        return m_next_id;
+    }
+    void PulseSetNextId(u64 id) {
+        m_next_id = id;
+    }
+
 private:
     Layer* GetFreeLayer() {
         for (auto& layer : m_layers) {

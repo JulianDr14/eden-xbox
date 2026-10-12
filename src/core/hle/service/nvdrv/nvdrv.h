@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <functional>
 #include <list>
 #include <memory>
@@ -94,6 +95,17 @@ public:
         return container;
     }
 
+    // Pulse: the device an fd was opened as, and an open at an exact fd (a restore).
+    std::string PulseDeviceName(DeviceFD fd) const;
+    std::shared_ptr<Devices::nvdevice> PulseOpen(DeviceFD fd, const std::string& device_name,
+                                                 NvCore::SessionId session_id);
+    DeviceFD PulseNextFd() const {
+        return next_fd;
+    }
+    void PulseRaiseNextFd(DeviceFD fd) {
+        next_fd = (std::max)(next_fd, fd);
+    }
+
 private:
     friend class EventInterface;
 
@@ -106,6 +118,7 @@ private:
     using FilesContainerType = ::Common::unordered_map<DeviceFD, std::shared_ptr<Devices::nvdevice>>;
     /// Mapping of file descriptors to the devices they reference.
     FilesContainerType open_files;
+    ::Common::unordered_map<DeviceFD, std::string> open_names;
 
     KernelHelpers::ServiceContext service_context;
 

@@ -38,6 +38,17 @@ public:
         return m_container;
     }
 
+    // Pulse: the vsync events the guest fetched and the stray layers it created, with their buffer
+    // queues. Restored through any vi root (PulseRestoreFrom), all of which share the container.
+    std::string_view PulseKind() const override {
+        return "IApplicationDisplayService";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    Kernel::KEvent* PulseEvent(u32 slot) override;
+    static SessionRequestHandlerPtr PulseRestoreFrom(Core::System& system,
+                                                     std::shared_ptr<Container> container,
+                                                     Pulse::HandlerRestore& restore);
+
 public:
     Result GetRelayService(Out<SharedPointer<Nvnflinger::IHOSBinderDriver>> out_relay_service);
     Result GetSystemDisplayService(
@@ -77,7 +88,7 @@ private:
     const std::shared_ptr<Container> m_container;
 
     KernelHelpers::ServiceContext m_context;
-    std::mutex m_lock{};
+    mutable std::mutex m_lock{};
     std::set<u64> m_open_layer_ids{};
     std::set<u64> m_stray_layer_ids{};
     std::map<u64, Event> m_display_vsync_events{};

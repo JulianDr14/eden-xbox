@@ -40,6 +40,12 @@ public:
     explicit SM(ServiceManager& service_manager_, Core::System& system_);
     ~SM() override;
 
+    // Pulse: one handler serves every sm: session; a session's only state (initialized) lives in
+    // its session graph.
+    std::string_view PulseKind() const override {
+        return "sm";
+    }
+
 private:
     void Initialize(HLERequestContext& ctx);
     void GetServiceCmif(HLERequestContext& ctx);
@@ -66,6 +72,8 @@ public:
                            u32 max_sessions, SessionRequestHandlerFactory handler_factory);
     Result UnregisterService(const std::string& name);
     Result GetServicePort(Kernel::KClientPort** out_client_port, const std::string& name);
+    /// The name a port was registered under, empty if none (Pulse: sessions record their port).
+    std::string FindServiceName(const Kernel::KClientPort* port) const;
 
     template <std::derived_from<SessionRequestHandler> T>
     std::shared_ptr<T> GetService(const std::string& name, bool block = false) const {

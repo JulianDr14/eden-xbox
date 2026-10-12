@@ -61,6 +61,32 @@ Result IAudioOutManager::ListAudioOutsAuto(
     R_SUCCEED();
 }
 
+SessionRequestHandlerPtr IAudioOutManager::PulseRestore(std::string_view kind,
+                                                        Pulse::HandlerRestore& restore) {
+    if (kind != "IAudioOut") {
+        return SessionRequestHandler::PulseRestore(kind, restore);
+    }
+    auto& in = restore.state;
+    const auto device_name = in.String();
+    const auto parameter = in.Raw<AudioOutParameter>();
+    const u64 aruid = in.U64();
+
+    size_t new_session_id{};
+    if (impl->LinkToManager().IsError() || impl->AcquireSessionId(new_session_id).IsError()) {
+        throw std::invalid_argument("Pulse: audout:u has no free session");
+    }
+    auto audio_out = std::make_shared<IAudioOut>(system, *impl, new_session_id, device_name,
+                                                 parameter, restore.process, aruid);
+    if (audio_out->GetImpl()->GetSystem().Initialize(device_name, parameter, restore.process, aruid)
+            .IsError()) {
+        throw std::invalid_argument("Pulse: audout:u cannot reopen " + device_name);
+    }
+    impl->sessions[new_session_id] = audio_out->GetImpl();
+    impl->applet_resource_user_ids[new_session_id] = aruid;
+    audio_out->PulseApply(in);
+    return audio_out;
+}
+
 Result IAudioOutManager::OpenAudioOutAuto(
     Out<AudioOutParameterInternal> out_parameter_internal,
     Out<SharedPointer<IAudioOut>> out_audio_out,

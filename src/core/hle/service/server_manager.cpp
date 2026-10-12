@@ -188,6 +188,7 @@ Result ServerManager::RegisterNamedService(const std::string& service_name,
     {
         std::scoped_lock ll{m_deferred_list_mutex};
         m_servers.push_back(*server);
+        m_port_names.push_back(service_name);
     }
 
     // Register to wait on the server port.
@@ -459,6 +460,11 @@ std::shared_ptr<SessionRequestManager> ServerManager::FindSessionManager(
     std::scoped_lock lk{g_session_directory_mutex};
     const auto it = g_session_directory.find(session);
     return it != g_session_directory.end() ? it->second.lock() : nullptr;
+}
+
+std::vector<std::string> ServerManager::PulsePortNames() {
+    std::scoped_lock lk{m_deferred_list_mutex};
+    return m_port_names;
 }
 
 void ServerManager::DestroySession(Session* session) {
