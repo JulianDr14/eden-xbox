@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <list>
 #include <memory>
@@ -337,6 +338,16 @@ public:
     /// guest IDs cannot be reused by threads created afterwards.
     void ReserveThreadIds(u64 next_id);
 
+    /// Pulse capture only: while set, a 64-bit guest thread that enters an SVC is parked before
+    /// the call runs, with its pc back on the SVC instruction, so the capture sees it outside the
+    /// kernel and a restore issues the call again. Clearing it lets the parked threads go on.
+    void SetCheckpointBarrier(bool value) {
+        checkpoint_barrier.store(value, std::memory_order_release);
+    }
+    bool CheckpointBarrier() const {
+        return checkpoint_barrier.load(std::memory_order_acquire);
+    }
+
 private:
     friend class KProcess;
     friend class KThread;
@@ -364,6 +375,7 @@ private:
 
     bool exception_exited{};
     std::optional<ProcessLayoutPin> next_process_layout;
+    std::atomic_bool checkpoint_barrier{};
 
 private:
     /// Helper to encapsulate all slab heaps in a single heap allocated container

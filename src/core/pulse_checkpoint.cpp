@@ -231,6 +231,36 @@ struct ProcessRestore::State {
 
 // ---------------------------------------------------------------------------------- capture
 
+ProcessCheckpoint ProcessCheckpoint::CaptureAtBarrier(Core::System& system,
+                                                    std::chrono::milliseconds budget,
+                                                    u32& retries) {
+    auto& kernel = system.Kernel();
+    kernel.SetCheckpointBarrier(true);
+    struct Lower {
+        Kernel::KernelCore& kernel;
+        ~Lower() {
+            kernel.SetCheckpointBarrier(false);
+        }
+    } lower{kernel};
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    // A first short run lets the calls already inside the kernel return and park on the next one.
+    std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    for (;;) {
+        void(system.Pause());
+        try {
+            return Capture(system);
+        } catch (const CheckpointRejected& rejected) {
+            if (!rejected.retryable || std::chrono::steady_clock::now() >= deadline) {
+                void(system.Run());
+                throw;
+            }
+            ++retries;
+        }
+        void(system.Run());
+        std::this_thread::sleep_for(std::chrono::microseconds{500});
+    }
+}
+
 ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
     if (!system.IsPaused()) Reject(false, "capture requires a paused system");
     auto& kernel = system.Kernel();
@@ -284,6 +314,11 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
                 record.run = ThreadRun::Runnable;
                 break;
             case ThreadState::Waiting:
+                if (thread.IsCheckpointParked()) {
+                    // Held by the barrier before its SVC ran: resumed, it issues the call again.
+                    record.run = ThreadRun::Runnable;
+                    break;
+                }
                 if (!thread.IsCallingSvc() ||
                     thread.GetWaitReasonForDebugging() == Kernel::ThreadWaitReasonForDebugging::IPC) {
                     Reject(true, "a guest thread is waiting on IPC or a kernel lock");

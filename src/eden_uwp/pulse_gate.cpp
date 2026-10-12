@@ -44,7 +44,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 constexpr u64 JobLimit = 5120ULL << 20; // decoded bytes one restore may produce
-constexpr u32 MaxCaptureRetries = 2000;
+constexpr auto CaptureBudget = std::chrono::seconds{10};
 constexpr auto BeatTimeout = std::chrono::seconds{20};
 
 double Ms(Clock::duration duration) {
@@ -191,20 +191,9 @@ int RunPulseGate(const std::string& nro_path, const PulseGateOptions& options) {
             CycleReport report;
             auto& system = *session->system;
             std::optional<Core::Pulse::ProcessCheckpoint> checkpoint;
-            std::string last_reason;
             const auto capture_start = Clock::now();
-            for (;;) {
-                void(system.Pause());
-                try {
-                    checkpoint.emplace(Core::Pulse::ProcessCheckpoint::Capture(system));
-                    break;
-                } catch (const Core::Pulse::CheckpointRejected& rejected) {
-                    if (!rejected.retryable || ++report.retries > MaxCaptureRetries) throw;
-                    last_reason = rejected.what();
-                }
-                void(system.Run());
-                std::this_thread::sleep_for(std::chrono::microseconds{200 + rng() % 3000});
-            }
+            checkpoint.emplace(Core::Pulse::ProcessCheckpoint::CaptureAtBarrier(
+                system, CaptureBudget, report.retries));
             report.capture_ms = Ms(Clock::now() - capture_start);
             u64 captured_beat;
             {
@@ -262,7 +251,7 @@ int RunPulseGate(const std::string& nro_path, const PulseGateOptions& options) {
             const auto& s = report.stats;
             diag("PULSE cycle " + std::to_string(cycle) + ": beat " + std::to_string(captured_beat) +
                  ", retries " + std::to_string(report.retries) +
-                 (last_reason.empty() ? "" : " (" + last_reason + ")") + ", capture " +
+                 ", capture " +
                  std::to_string(report.capture_ms) + " ms, publish " +
                  std::to_string(report.publish_ms) + " ms, restore " +
                  std::to_string(report.restore_ms) + " ms, archive " +

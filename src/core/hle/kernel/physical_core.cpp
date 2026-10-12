@@ -12,6 +12,7 @@
 #include "core/arm/cpu_profile.h"
 #include "dynarmic/interface/jit_profile.h"
 #include "core/debugger/debugger.h"
+#include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
@@ -248,6 +249,22 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
 
         // Handle system calls.
         if (supervisor_call) {
+            // Pulse checkpoint barrier: hold the thread before the call runs. The A64 JIT halts
+            // with pc past the SVC, so stepping back by one instruction issues it again later.
+            if (kernel.CheckpointBarrier() && process->Is64Bit()) {
+                Svc::ThreadContext context{};
+                interface->GetContext(context);
+                context.pc -= 4;
+                interface->SetContext(context);
+                thread->GetContext() = context;
+                thread->GetStackParameters().is_checkpoint_parked = true;
+                while (kernel.CheckpointBarrier() && !thread->IsTerminationRequested()) {
+                    const s64 timeout = kernel.HardwareTimer().GetTick() + 1'000'000;
+                    if (thread->Sleep(kernel, timeout) != ResultSuccess) break;
+                }
+                thread->GetStackParameters().is_checkpoint_parked = false;
+                return;
+            }
             // Perform call.
             const auto svc_number = interface->GetSvcNumber();
             const bool trace_wait = VideoCore::FrameTrace::Active() &&

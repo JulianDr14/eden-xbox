@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <span>
@@ -65,6 +66,13 @@ class ProcessCheckpoint final {
 public:
     // System paused; the application process is a 64-bit process created from metadata.
     static ProcessCheckpoint Capture(Core::System& system);
+
+    // The system running: raises the kernel checkpoint barrier, so threads entering an SVC park
+    // before the call, and captures as soon as the in-flight calls have drained. Returns with
+    // the system paused. Throws the last rejection once `budget` runs out or one is final, with
+    // the system running again. `retries` counts the rejected attempts.
+    static ProcessCheckpoint CaptureAtBarrier(Core::System& system,
+                                              std::chrono::milliseconds budget, u32& retries);
 
     void Write(Common::Pulse::Writer& writer) const;
     [[nodiscard]] u64 DecodedSize() const;

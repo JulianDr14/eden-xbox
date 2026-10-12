@@ -467,6 +467,7 @@ public:
         std::atomic<u8> dpc_flags;
         u8 current_svc_id;
         bool is_calling_svc;
+        bool is_checkpoint_parked;
         bool is_in_exception_handler;
         bool is_pinned;
         s32 disable_count;
@@ -570,6 +571,11 @@ public:
 
     bool IsCallingSvc() const {
         return this->GetStackParameters().is_calling_svc;
+    }
+
+    /// Parked by the Pulse checkpoint barrier at the entry of an SVC it has not run yet.
+    bool IsCheckpointParked() const {
+        return this->GetStackParameters().is_checkpoint_parked;
     }
 
     u8 GetSvcId() const {
