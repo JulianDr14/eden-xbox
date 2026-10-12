@@ -511,6 +511,11 @@ enum class Text : std::uint16_t {
     PulseKept,
     PulseNotKept,
     PulseNotResumed,
+    Upscaling,
+    UpscalingBilinear,
+    UpscalingFsrSharp,
+    UpscalingFsrBalanced,
+    UpscalingFsrSoft,
 
 
     Count

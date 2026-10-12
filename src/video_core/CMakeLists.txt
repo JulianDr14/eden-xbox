@@ -517,6 +517,9 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_present_manager.h
         renderer_d3d12/d3d12_present_blit.cpp
         renderer_d3d12/d3d12_present_cpu.cpp
+        renderer_d3d12/d3d12_fsr_plan.h
+        renderer_d3d12/d3d12_present_fsr.cpp
+        renderer_d3d12/d3d12_present_fsr.h
         renderer_d3d12/d3d12_device.cpp
         renderer_d3d12/d3d12_device.h
         renderer_d3d12/d3d12_scheduler.cpp

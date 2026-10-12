@@ -20,6 +20,7 @@
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 #include "video_core/renderer_d3d12/d3d12_menu_image.h"
+#include "video_core/renderer_d3d12/d3d12_present_fsr.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/renderer_d3d12/d3d12_shader_compiler.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
@@ -63,7 +64,8 @@ void ShowLoadProgress(VideoCore::RendererBase& renderer, size_t done, size_t tot
 /// and presents them on its own thread (d3d12_present_manager.h).
 ///
 /// Implementation files: renderer_d3d12.cpp (setup, Composite, Present), d3d12_present_blit.cpp
-/// (GPU path), d3d12_present_cpu.cpp (CPU fallback), d3d12_overlay.cpp, and in diagnostics/
+/// (GPU path; its FSR 1 passes in d3d12_present_fsr.cpp), d3d12_present_cpu.cpp (CPU fallback),
+/// d3d12_overlay.cpp, and in diagnostics/
 /// d3d12_perf_report.cpp and d3d12_frame_dump.cpp.
 class RendererD3D12 final : public VideoCore::RendererBase {
 public:
@@ -122,11 +124,27 @@ private:
 
     /// Records the shader-path upload of the CPU-read guest image into guest_texture.
     void RecordUpload(const StagingBufferRef& upload);
-    /// Draws a texture into frame, letterboxed, then the overlays; tex_scale_offset maps the
-    /// screen (x right, y up in D3D12 clip space) to texture coordinates.
-    void RecordBlit(PresentFrame& frame, D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
-                    D3D12_GPU_DESCRIPTOR_HANDLE sampler_table,
-                    const std::array<float, 4>& tex_scale_offset);
+
+    /// An image to composite: its offline SRV, its size and the normalized region the screen
+    /// shows (as Tegra::NormalizeCrop: the screen's top edge samples crop.top).
+    struct CompositeSource {
+        D3D12_CPU_DESCRIPTOR_HANDLE srv;
+        u32 width;
+        u32 height;
+        Common::Rectangle<f32> crop;
+    };
+    /// Draws source into frame, letterboxed: with FSR 1 when it is selected and enlarges the
+    /// image, with the bilinear blit otherwise; then the overlays. Allocates the frame's
+    /// descriptors before recording anything of it, since allocating from a full ring flushes.
+    void RecordComposite(PresentFrame& frame, const CompositeSource& source);
+    /// The FSR passes for source on the current screen, or nullopt for the bilinear blit.
+    std::optional<Fsr::Plan> PlanFsr(const CompositeSource& source);
+    /// Transitions and clears frame, binds it and sets the letterboxed screen viewport.
+    void BeginComposite(CommandStream* cmd, PresentFrame& frame);
+    /// The bilinear blit of the source table into the bound frame.
+    void RecordBlit(CommandStream* cmd, const CompositeSource& source,
+                    D3D12_GPU_DESCRIPTOR_HANDLE source_table,
+                    D3D12_GPU_DESCRIPTOR_HANDLE sampler_table);
     /// Composites the guest image the GPU rendered (texture cache) into frame, without reading
     /// it back. False when the framebuffer is not a cached image.
     bool CompositeAccelerated(const Tegra::FramebufferConfig& framebuffer, PresentFrame& frame);
@@ -157,6 +175,7 @@ private:
     DescriptorRing descriptor_ring;
     SamplerHeap sampler_heap;
     BlitImageHelper blit_helper;
+    PresentFsr present_fsr;
     RasterizerD3D12 rasterizer;
     /// After everything it uses: its present thread stops before they go away.
     PresentManager present_manager;
@@ -185,6 +204,17 @@ private:
     /// The frontend menu while open, and the last framebuffer composited, to redraw it paused.
     std::optional<MenuImage> game_menu;
     std::optional<Tegra::FramebufferConfig> last_framebuffer;
+    /// What the present last logged about FSR, so it logs again only when that changes.
+    struct FsrLogState {
+        bool active{};
+        u32 source_width{};
+        u32 source_height{};
+        u32 output_width{};
+        u32 output_height{};
+        f32 sharpness{};
+        bool operator==(const FsrLogState&) const = default;
+    };
+    std::optional<FsrLogState> fsr_logged;
     bool logged_accelerated{};
     u32 accelerated_frames{};
     bool logged_fallback{};

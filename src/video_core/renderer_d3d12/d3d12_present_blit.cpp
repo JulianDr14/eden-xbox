@@ -3,9 +3,12 @@
 
 #include <array>
 #include <exception>
+#include <optional>
+#include <span>
 #include <utility>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "core/frontend/emu_window.h"
 #include "video_core/framebuffer_config.h"
 #include "video_core/host_shaders/blit_color_float_frag_spv.h"
@@ -13,7 +16,8 @@
 #include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/renderer_d3d12.h"
 
-// Presentation of the GPU-rendered guest image: a full-screen blit into the back buffer.
+// Presentation of the guest image: a full-screen bilinear blit into the back buffer, or FSR 1
+// when it is selected (d3d12_present_fsr.h).
 
 namespace D3D12 {
 
@@ -132,18 +136,12 @@ bool RendererD3D12::CompositeAccelerated(const Tegra::FramebufferConfig& framebu
         }
         return false;
     }
-    // Same crop and flips as the Vulkan presenter (Tegra::NormalizeCrop): the screen's top edge
-    // samples crop.top and its bottom edge crop.bottom. The blit's quad runs from the bottom of
-    // the screen (y = -1 in D3D12 clip space, coordinate offset) to the top (offset + scale).
-    const Common::Rectangle<f32> crop =
-        Tegra::NormalizeCrop(framebuffer, texture->width, texture->height);
-    const std::array<float, 4> scale_offset{crop.right - crop.left, crop.top - crop.bottom,
-                                            crop.left, crop.bottom};
-    constexpr u64 LINEAR_SAMPLER_KEY = 0;
-    const D3D12_GPU_DESCRIPTOR_HANDLE sampler_table =
-        sampler_heap.GetTable({&LINEAR_SAMPLER_KEY, 1}, {&linear_sampler, 1});
-    const D3D12_GPU_DESCRIPTOR_HANDLE srv_table = descriptor_ring.Upload({&texture->srv, 1});
-    RecordBlit(frame, srv_table, sampler_table, scale_offset);
+    // Same crop and flips as the Vulkan presenter (Tegra::NormalizeCrop).
+    RecordComposite(frame, {.srv = texture->srv,
+                            .width = texture->width,
+                            .height = texture->height,
+                            .crop = Tegra::NormalizeCrop(framebuffer, texture->width,
+                                                         texture->height)});
     if (!logged_accelerated) {
         LOG_INFO(Render, "D3D12: presenting the GPU-rendered guest image ({}x{} image, {}x{} "
                  "framebuffer)", texture->width, texture->height, framebuffer.width,
@@ -153,12 +151,88 @@ bool RendererD3D12::CompositeAccelerated(const Tegra::FramebufferConfig& framebu
     return true;
 }
 
-void RendererD3D12::RecordBlit(PresentFrame& frame, D3D12_GPU_DESCRIPTOR_HANDLE srv_table,
-                               D3D12_GPU_DESCRIPTOR_HANDLE sampler_table,
-                               const std::array<float, 4>& tex_scale_offset) {
-    CommandStream* const cmd = scheduler.CommandList();
-    frame.Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
+void RendererD3D12::RecordComposite(PresentFrame& frame, const CompositeSource& source) {
+    // Everything that may flush the list comes first: the FSR target (its creation defers the old
+    // one to the current tick), then every descriptor of the frame. The source and, with FSR, the
+    // EASU target go into one range, so no second allocation can retire the first.
+    std::optional<Fsr::Plan> fsr = PlanFsr(source);
+    if (fsr && !present_fsr.PrepareTarget(*fsr)) {
+        fsr.reset();
+    }
+    constexpr u64 LINEAR_SAMPLER_KEY = 0;
+    const D3D12_GPU_DESCRIPTOR_HANDLE sampler_table =
+        sampler_heap.GetTable({&LINEAR_SAMPLER_KEY, 1}, {&linear_sampler, 1});
+    const std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 2> srvs{source.srv, present_fsr.TargetSrv()};
+    const u32 srv_count = fsr ? 2 : 1;
+    const D3D12_GPU_DESCRIPTOR_HANDLE source_table =
+        descriptor_ring.Upload(std::span{srvs}.first(srv_count));
 
+    // Descriptor heaps are command-list state; nothing below can reset the list.
+    CommandStream* const cmd = scheduler.CommandList();
+    ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
+    cmd->SetDescriptorHeaps(2, heaps);
+    if (fsr) {
+        const D3D12_GPU_DESCRIPTOR_HANDLE target_table{source_table.ptr +
+                                                       descriptor_ring.Stride()};
+        present_fsr.RecordEasu(cmd, *fsr, source_table, sampler_table);
+        BeginComposite(cmd, frame);
+        present_fsr.RecordRcas(cmd, *fsr, target_table);
+    } else {
+        BeginComposite(cmd, frame);
+        RecordBlit(cmd, source, source_table, sampler_table);
+    }
+    // After the scaling, as ffx_fsr1.h asks of the UI.
+    DrawShaderIndicator(cmd, frame.rtv);
+    DrawPerformanceOverlay(cmd, frame.rtv);
+    DrawGameMenu(cmd, frame);
+}
+
+std::optional<Fsr::Plan> RendererD3D12::PlanFsr(const CompositeSource& source) {
+    // Read on the GPU thread, which is also where the frontend changes it (RunOnGpuThread).
+    // A failure to build FSR is logged once by PresentFsr, and FSR then counts as off.
+    const bool enabled =
+        Settings::values.scaling_filter.GetValue() == Settings::ScalingFilter::Fsr &&
+        present_fsr.EnsurePipelines();
+    const auto& screen = render_window.GetFramebufferLayout().screen;
+    std::optional<Fsr::Plan> plan;
+    if (enabled) {
+        plan = Fsr::MakePlan(source.width, source.height, source.crop, screen.GetWidth(),
+                             screen.GetHeight(), Settings::values.fsr_sharpening_slider.GetValue());
+    }
+
+    // One line whenever what the screen shows changes, not every frame.
+    const FsrLogState state{
+        .active = plan.has_value(),
+        .source_width = source.width,
+        .source_height = source.height,
+        .output_width = screen.GetWidth(),
+        .output_height = screen.GetHeight(),
+        .sharpness = plan ? plan->sharpness : 0.0f,
+    };
+    if (enabled && fsr_logged != state) {
+        if (plan) {
+            LOG_INFO(Render, "D3D12: FSR 1 {}x{} -> {}x{} ({:.2f}x{:.2f}), RCAS {:.2f} stops{}",
+                     source.width, source.height, plan->output_width, plan->output_height,
+                     plan->scale_x, plan->scale_y, plan->sharpness,
+                     plan->WithinTunedRange() ? "" : "; beyond EASU's 2x, softer");
+        } else {
+            LOG_INFO(Render, "D3D12: FSR 1 selected, bilinear blit: the {}x{} screen does not "
+                     "enlarge the {}x{} image", screen.GetWidth(), screen.GetHeight(),
+                     source.width, source.height);
+        }
+        fsr_logged = state;
+    } else if (!enabled && fsr_logged) {
+        LOG_INFO(Render, "D3D12: FSR 1 off, bilinear blit");
+        fsr_logged.reset();
+    }
+    if (!enabled) {
+        present_fsr.ReleaseTarget();
+    }
+    return plan;
+}
+
+void RendererD3D12::BeginComposite(CommandStream* cmd, PresentFrame& frame) {
+    frame.Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = frame.rtv;
     constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     cmd->ClearRenderTargetView(rtv, black, 0, nullptr);
@@ -178,25 +252,25 @@ void RendererD3D12::RecordBlit(PresentFrame& frame, D3D12_GPU_DESCRIPTOR_HANDLE 
                              static_cast<LONG>(swapchain.Height())};
     cmd->RSSetViewports(1, &viewport);
     cmd->RSSetScissorRects(1, &scissor);
+}
 
-    // Descriptor heaps are command-list state. The allocations were completed before any staging
-    // request or command recording, so no operation below can reset this list before the draw.
-    ID3D12DescriptorHeap* const heaps[] = {descriptor_ring.Heap(), sampler_heap.Heap()};
-    cmd->SetDescriptorHeaps(2, heaps);
-
+void RendererD3D12::RecordBlit(CommandStream* cmd, const CompositeSource& source,
+                               D3D12_GPU_DESCRIPTOR_HANDLE source_table,
+                               D3D12_GPU_DESCRIPTOR_HANDLE sampler_table) {
+    // The quad runs from the bottom of the screen (y = -1 in D3D12 clip space: tex_offset) to the
+    // top (tex_offset + tex_scale), so the top edge samples crop.top.
+    const Common::Rectangle<f32>& crop = source.crop;
+    const std::array<float, 4> tex_scale_offset{crop.right - crop.left, crop.top - crop.bottom,
+                                                crop.left, crop.bottom};
     cmd->SetGraphicsRootSignature(blit_root_signature.Get());
     scheduler.SetPipelineState(blit_pipeline.Get());
-    // tex_scale, tex_offset
     cmd->SetGraphicsRoot32BitConstants(0, 4, tex_scale_offset.data(), 0);
     const u32 runtime_data[12]{};
     cmd->SetGraphicsRoot32BitConstants(1, 12, runtime_data, 0);
-    cmd->SetGraphicsRootDescriptorTable(2, srv_table);
+    cmd->SetGraphicsRootDescriptorTable(2, source_table);
     cmd->SetGraphicsRootDescriptorTable(3, sampler_table);
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->DrawInstanced(3, 1, 0, 0);
-    DrawShaderIndicator(cmd, rtv);
-    DrawPerformanceOverlay(cmd, rtv);
-    DrawGameMenu(cmd, frame);
 }
 
 } // namespace D3D12

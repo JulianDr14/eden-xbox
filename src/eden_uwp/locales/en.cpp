@@ -486,5 +486,10 @@ const Catalog EnglishCatalog = MakeCatalog({
     {Text::PulseKept, L"Session saved: pick the game to carry on where you left it"},
     {Text::PulseNotKept, L"The session could not be saved ({0}). Your saved games are not touched."},
     {Text::PulseNotResumed, L"The session could not be resumed, so the game started over. The session is kept."},
+    {Text::Upscaling, L"Image upscaling"},
+    {Text::UpscalingBilinear, L"Bilinear"},
+    {Text::UpscalingFsrSharp, L"FSR 1 · sharp"},
+    {Text::UpscalingFsrBalanced, L"FSR 1 · balanced"},
+    {Text::UpscalingFsrSoft, L"FSR 1 · soft"},
 });
 } // namespace EdenXbox::I18n

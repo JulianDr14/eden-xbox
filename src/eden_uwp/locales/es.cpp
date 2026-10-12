@@ -486,5 +486,10 @@ const Catalog SpanishCatalog = MakeCatalog({
     {Text::PulseKept, L"Sesión guardada: elige el juego para seguir donde lo dejaste"},
     {Text::PulseNotKept, L"No se pudo guardar la sesión ({0}). Tus partidas guardadas no se tocan."},
     {Text::PulseNotResumed, L"No se pudo reanudar la sesión y el juego empezó de nuevo. La sesión se conserva."},
+    {Text::Upscaling, L"Escalado de imagen"},
+    {Text::UpscalingBilinear, L"Bilineal"},
+    {Text::UpscalingFsrSharp, L"FSR 1 · nítido"},
+    {Text::UpscalingFsrBalanced, L"FSR 1 · equilibrado"},
+    {Text::UpscalingFsrSoft, L"FSR 1 · suave"},
 });
 } // namespace EdenXbox::I18n

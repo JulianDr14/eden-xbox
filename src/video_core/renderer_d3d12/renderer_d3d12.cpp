@@ -80,6 +80,7 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
       sampler_heap{device.Get(), scheduler},
       blit_helper{device, scheduler, shader_compiler, descriptor_ring, sampler_heap,
                   sampler_descriptors},
+      present_fsr{device, shader_compiler, scheduler, view_descriptors, rtv_descriptors},
       rasterizer{gpu_, device_memory_, device, scheduler, shader_compiler, buffer_cache_runtime,
                  texture_cache_runtime, descriptor_ring, sampler_heap, blit_helper,
                  staging_pool},
@@ -202,19 +203,20 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
             } else if (const bool has_image = ReadGuestLayer(framebuffer);
                        blit_ready && has_image) {
                 PrepareGuestImage(static_cast<u32>(crop_width), static_cast<u32>(crop_height));
-                // Descriptor allocation may flush when a heap wraps. Do it before obtaining
-                // staging memory, whose lifetime is tied to the then-current scheduler tick.
-                constexpr u64 LINEAR_SAMPLER_KEY = 0;
-                const D3D12_GPU_DESCRIPTOR_HANDLE sampler_table =
-                    sampler_heap.GetTable({&LINEAR_SAMPLER_KEY, 1}, {&linear_sampler, 1});
-                const D3D12_GPU_DESCRIPTOR_HANDLE srv_table =
-                    descriptor_ring.Upload({&guest_srv, 1});
+                // Staging memory lives until the scheduler tick it was requested in. The copy is
+                // recorded before RecordComposite allocates descriptors (which may flush), so it
+                // always lands in that tick's list.
                 const StagingBufferRef upload =
                     staging_pool.Request(guest_upload_size, MemoryUsage::Upload);
                 CopyGuestImage(framebuffer, upload.mapped_span.data(),
                                guest_footprint.Footprint.RowPitch);
                 RecordUpload(upload);
-                RecordBlit(*frame, srv_table, sampler_table, {1.0f, 1.0f, 0.0f, 0.0f});
+                // CopyGuestImage already cropped and flipped the image; the blit has always shown
+                // its first row at the bottom of the screen.
+                RecordComposite(*frame, {.srv = guest_srv,
+                                         .width = guest_width,
+                                         .height = guest_height,
+                                         .crop = {0.0f, 1.0f, 1.0f, 0.0f}});
                 Present(std::move(frame));
             } else {
                 const StagingBufferRef upload =

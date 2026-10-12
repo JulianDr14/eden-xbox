@@ -17,6 +17,7 @@
 
 #include "common/settings_enums.h"
 #include "eden_uwp/localization.h"
+#include "eden_uwp/upscaling.h"
 
 namespace EdenXbox {
 
@@ -32,6 +33,7 @@ struct SystemSettings {
     bool show_performance_stats{}; ///< Persistent global HUD preference, off on first install.
     bool show_adult_mods{};                           ///< The mods store lists mods rated for adults.
     bool pulse_sessions{true}; ///< Back to home keeps the game where it is (pulse_sessions.h).
+    Upscaling upscaling{Upscaling::Bilinear};         ///< Set from the in-game menu.
 
     bool operator==(const SystemSettings&) const = default;
 };
