@@ -8,6 +8,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <fmt/format.h>
 
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
@@ -360,7 +361,9 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
         if (state == KMemoryState::Ipc || state == KMemoryState::NonSecureIpc ||
             state == KMemoryState::NonDeviceIpc ||
             (attribute != KMemoryAttribute::None && attribute != KMemoryAttribute::Locked)) {
-            Reject(true, "guest memory is lent to an IPC or device operation");
+            Reject(true, fmt::format("guest memory is lent to an IPC or device operation "
+                                     "(block {:#x}+{:#x} state {:#x} attribute {:#x})",
+                                     block.address, block.size, block.state, block.attribute));
         }
         const bool normal = state == KMemoryState::Normal;
         if (attribute == KMemoryAttribute::Locked && !normal) {
