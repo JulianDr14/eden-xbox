@@ -30,6 +30,7 @@
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/pulse_checkpoint.h"
+#include "dynarmic/interface/code_memory.h"
 #include "eden_uwp/headless_emu_window.h"
 #include "eden_uwp/pulse_gate.h"
 #include "eden_uwp/uwp_rom_storage.h"
@@ -144,6 +145,7 @@ struct CycleReport {
     double capture_ms{};
     double publish_ms{};
     double restore_ms{};
+    u64 jit_after_destroy{}; // JIT code still committed once the old System is gone
     u64 archive_bytes{};
     Core::Pulse::CheckpointStats stats;
 };
@@ -222,6 +224,7 @@ int RunPulseGate(const std::string& nro_path, const PulseGateOptions& options) {
 
             // Destroy the process and the whole System, then rebuild from the archive alone.
             session.reset();
+            report.jit_after_destroy = Dynarmic::CommittedCodeBytes();
             const auto restore_start = Clock::now();
             session.emplace();
             Core::Pulse::ProcessRestore restore{
@@ -268,7 +271,8 @@ int RunPulseGate(const std::string& nro_path, const PulseGateOptions& options) {
                  " B, threads " + std::to_string(s.threads) + " (" +
                  std::to_string(s.waiting_threads) + " waiting), objects " +
                  std::to_string(s.objects) + ", handles " + std::to_string(s.handles) +
-                 ", timing events " + std::to_string(s.timing_events) + " | " + last);
+                 ", timing events " + std::to_string(s.timing_events) + ", JIT after destroy " +
+                 std::to_string(report.jit_after_destroy >> 20) + " MiB | " + last);
             reports.push_back(report);
         }
     } catch (const std::exception& error) {

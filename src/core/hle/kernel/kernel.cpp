@@ -6,6 +6,7 @@
 
 #include <array>
 #include <atomic>
+#include <map>
 #include <bitset>
 #include <functional>
 #include <memory>
@@ -189,8 +190,24 @@ struct KernelCore::Impl {
         {
             std::scoped_lock lk{registered_objects_lock};
             if (registered_objects.size()) {
-                LOG_DEBUG(Kernel, "{} kernel objects were dangling on shutdown!",
-                          registered_objects.size());
+                // eden-xbox: by type, and every dangling process (it keeps its JITs alive).
+                std::map<std::string, size_t> by_type;
+                for (auto* object : registered_objects) {
+                    ++by_type[object->GetTypeName()];
+                    if (auto* process = object->DynamicCast<KProcess*>()) {
+                        LOG_INFO(Kernel,
+                                 "Dangling process {:016X} pid {} state {} references {}",
+                                 process->GetProgramId(), process->GetProcessId(),
+                                 static_cast<u32>(process->GetState()),
+                                 process->GetReferenceCount());
+                    }
+                }
+                std::string summary;
+                for (const auto& [type, count] : by_type) {
+                    summary += fmt::format("{}{} x{}", summary.empty() ? "" : ", ", type, count);
+                }
+                LOG_INFO(Kernel, "{} kernel objects were dangling on shutdown: {}",
+                         registered_objects.size(), summary);
                 registered_objects.clear();
             }
         }

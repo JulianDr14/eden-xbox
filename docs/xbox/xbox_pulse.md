@@ -227,7 +227,7 @@ ID reservado, `ActivateRestoredWaiter`, rearme del temporizador hardware,
   inconsistencias hechas a mano (solapes, IDs duplicados, evento sin lectura,
   afinidad sin el núcleo ideal, FIFO duplicado, ordinal de temporizador repetido). PASS.
 
-### Gate de fase 2 en la Series (pendiente)
+### Gate de fase 2 en la Series
 
 Homebrew `tools/xbox/pulse_nro` (libnx, `__appInit` solo `smInitialize`, heap fijo
 de 32 MiB): cuatro hilos con mutex, dos condvars, un evento de kernel, esperas
@@ -250,5 +250,28 @@ publicación y restauración, bytes de archivo, memoria y metadatos, hilos (y cu
 en espera), objetos, handles y eventos de timing. Al final escribe `PULSE gate PASS`
 con máximos, o `PULSE gate FAIL` con el motivo.
 
-Hasta ver `PULSE gate PASS` con 100 ciclos en la consola, la fase 2 **no está
-cerrada**. Tampoco se ha medido el pico de memoria del proceso durante el ciclo.
+**Resultado (11 oct 2026, paquete 0.2.87.12):** `PULSE gate PASS: 100 cycles, 100
+captured with threads in long waits`. Captura máx. 3,4 ms, publicación máx. 178 ms,
+restauración máx. 3,1 s, archivo máx. 74 457 B (34,7 MB de memoria guest, unos 23 KB
+de metadatos), máximo 1 reintento. 5 hilos, 4 objetos, 8 handles, 9 eventos de timing.
+
+Lo que hizo falta en la consola para llegar ahí:
+
+- `IsInExceptionHandler()` no es estado: Eden lo pone en todos los hilos al crearlos.
+- libnx bloquea con PermissionLocked la página RELRO; la captura la acepta y la
+  restauración reaplica permiso y bloqueo antes de comparar el mapa.
+- Los dos temporizadores de `TimeWorker` se llamaban igual (`Time::SteadyClockEvent`).
+- `KSession::Initialize` tomaba el proceso del hilo actual, nulo en el hilo host de la
+  restauración: ahora recibe el dueño.
+- Los servicios de núcleo guest solo arrancan con el `System` en marcha, y `vi` espera
+  a `dispdrv` antes de crear `ScreenComposition`. La restauración ejecuta el `System`
+  nuevo hasta que todos los servicios llegan a `RunServer` (el esqueleto aún no tiene
+  hilos) y los eventos capturados se buscan también en un registro de tipos vivos.
+
+**Abierto: fuga por ciclo.** El código JIT comprometido crece unos 15 MiB por ciclo
+(72 MiB → 1,58 GiB en 100 ciclos; commit de la app 3,5 de 5 GiB), así que el
+`KProcess` de la aplicación de cada `System` destruido no llega a `Finalize`. Cada
+apagado deja además 66 hilos de servicio colgados (también el primero, sin Pulse).
+El paquete 0.2.87.13 registra los objetos colgados por tipo, cada proceso colgado con su
+contador de referencias y el JIT vivo tras destruir cada `System`. Hasta cerrar la fuga
+el ciclo no es apto para uso repetido: con este ritmo agota la memoria en unos 230 ciclos.
