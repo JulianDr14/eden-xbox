@@ -108,6 +108,9 @@ struct Profile {
     bool ignore_nan_fp_comparisons{};
     /// Some drivers have broken support for OpVectorExtractDynamic on subgroup mask inputs
     bool has_broken_spirv_subgroup_mask_vector_extract_dynamic{};
+    /// Loops whose exit also tests the loop safety counter hang the GPU (the Xbox Series D3D12
+    /// driver), so they are emitted without it
+    bool has_broken_loop_safety_counter{};
 
     u32 gl_max_compute_smem_size{};
 

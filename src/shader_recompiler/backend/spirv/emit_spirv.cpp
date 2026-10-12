@@ -165,7 +165,8 @@ void Traverse(EmitContext& ctx, IR::Program& program) {
             break;
         case IR::AbstractSyntaxNode::Type::Repeat: {
             Id cond{ctx.Def(node.data.repeat.cond)};
-            if (!Settings::values.disable_shader_loop_safety_checks) {
+            if (!Settings::values.disable_shader_loop_safety_checks &&
+                !ctx.profile.has_broken_loop_safety_counter) {
                 const Id pointer_type{ctx.TypePointer(spv::StorageClass::Private, ctx.U32[1])};
                 const Id safety_counter{ctx.AddGlobalVariable(
                     pointer_type, spv::StorageClass::Private, ctx.Const(0x2000u))};

@@ -371,6 +371,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .has_broken_fp32_denorm_flush = false,
         .ignore_nan_fp_comparisons = false,
         .has_broken_spirv_subgroup_mask_vector_extract_dynamic = false,
+        // A vertex shader whose loop exit ANDs the counter with the guest condition hung the
+        // Series GPU on its first draw, with valid DXIL; the same shader without it draws fine.
+        .has_broken_loop_safety_counter = true,
         .has_broken_robust = false,
         // D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT: raw views start on 16 bytes.
         .min_ssbo_alignment = 16,
