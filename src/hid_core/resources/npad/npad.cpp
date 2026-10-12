@@ -17,6 +17,7 @@
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/kernel_helpers.h"
+#include "core/hle/service/pulse_service.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
 #include "hid_core/hid_result.h"
@@ -1381,6 +1382,56 @@ void NPad::EnableAppletToGetInput(u64 aruid) {
     for (auto& abstract_pad : abstracted_pads) {
         abstract_pad.EnableAppletToGetInput(aruid);
     }
+}
+
+void NPad::PulseSave(u64 aruid, Pulse::StateWriter& out) const {
+    std::scoped_lock lock{mutex};
+    Pulse::StateWriter data;
+    const bool registered = npad_resource.PulseSave(aruid, data);
+    out.Bool(registered);
+    if (!registered) return;
+    out.Bytes(data.bytes);
+    const auto aruid_index = npad_resource.GetIndexFromAruid(aruid);
+    for (const auto& controller : controller_data[aruid_index]) {
+        out.Bool(controller.shared_memory != nullptr);
+        out.U32(controller.shared_memory ? static_cast<u32>(controller.shared_memory->assignment_mode)
+                                         : 0);
+    }
+}
+
+void NPad::PulseLoad(Kernel::KernelCore& kernel, u64 aruid, Pulse::StateReader& in) {
+    if (!in.Bool()) return; // the application never reached the npad
+    if (Activate(aruid).IsError()) throw std::invalid_argument("Pulse: npad activation");
+    Core::HID::NpadStyleSet style_set{};
+    bool style_set_known{};
+    {
+        std::scoped_lock lock{mutex};
+        npad_resource.PulseLoad(aruid, in);
+        const auto aruid_index = npad_resource.GetIndexFromAruid(aruid);
+        for (auto& controller : controller_data[aruid_index]) {
+            const bool active = in.Bool();
+            const u32 mode = in.U32();
+            if (mode > static_cast<u32>(NpadJoyAssignmentMode::Single)) {
+                throw std::invalid_argument("Pulse: npad assignment mode");
+            }
+            if (active && controller.shared_memory) {
+                controller.shared_memory->assignment_mode = static_cast<NpadJoyAssignmentMode>(mode);
+            }
+        }
+        style_set_known = npad_resource.GetSupportedNpadStyleSet(style_set, aruid).IsSuccess();
+    }
+    // Through the setter: it also tells the frontend which styles to emulate, and reconnects.
+    if (style_set_known) {
+        SetSupportedNpadStyleSet(kernel, aruid, style_set);
+    } else {
+        std::scoped_lock lock{mutex};
+        OnUpdate(kernel, {});
+    }
+}
+
+const Kernel::KEvent* NPad::PulseStyleSetEvent(u64 aruid, std::size_t npad_index) const {
+    std::scoped_lock lock{mutex};
+    return npad_resource.PulseStyleSetEvent(aruid, npad_index);
 }
 
 } // namespace Service::HID

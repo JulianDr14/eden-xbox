@@ -30,6 +30,11 @@ namespace Service {
 class Event;
 }
 
+namespace Service::Pulse {
+class StateReader;
+class StateWriter;
+} // namespace Service::Pulse
+
 namespace Service::VI {
 
 class SharedBufferManager;
@@ -74,6 +79,15 @@ public:
     std::shared_ptr<android::BufferQueueProducer> PulseCreateStrayLayer(u64 layer_id, u64 display_id,
                                                                        s32 consumer_binder_id,
                                                                        s32 producer_binder_id);
+    std::shared_ptr<android::BufferQueueProducer> PulseCreateLayer(u64 layer_id, u64 display_id,
+                                                                  s32 consumer_binder_id,
+                                                                  s32 producer_binder_id,
+                                                                  u64 owner_aruid, bool open);
+    // Pulse: a managed layer (am creates it for an aruid, vi opens it), saved whole and recreated
+    // closed with its ids, properties, binder refcounts and buffer queue.
+    void PulseSaveLayer(u64 layer_id, Pulse::StateWriter& out);
+    u64 PulseLoadLayer(Pulse::StateReader& in);
+    void PulseOpenLayer(u64 layer_id);
     struct PulseLayer {
         u64 display_id;
         s32 consumer_binder_id;

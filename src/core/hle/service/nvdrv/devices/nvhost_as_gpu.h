@@ -64,6 +64,11 @@ public:
 
     Kernel::KEvent* QueryEvent(u32 event_id) override;
 
+    // Pulse: the address space the guest built (allocations, mappings, remaps) by nvmap handle
+    // and offset; a restore pins the handles again and rebuilds the GMMU from it.
+    bool PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const override;
+    void PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) override;
+
     struct VaRegion {
         u64 offset;
         u32 page_size;
@@ -73,6 +78,8 @@ public:
     static_assert(sizeof(VaRegion) == 0x18);
 
 private:
+    friend class nvhost_gpu; // Pulse: a restored channel takes its GMMU back
+
     struct IoctlAllocAsEx {
         u32_le flags{}; // usually passes 1
         s32_le as_fd{}; // ignored; passes 0
@@ -151,13 +158,15 @@ private:
     NvResult MapBufferEx(IoctlMapBufferEx& params);
     NvResult UnmapBuffer(IoctlUnmapBuffer& params);
     NvResult FreeSpace(IoctlFreeSpace& params);
-    NvResult BindChannel(IoctlBindChannel& params);
+    NvResult BindChannel(IoctlBindChannel& params, DeviceFD fd);
 
     void GetVARegionsImpl(IoctlGetVaRegions& params);
     NvResult GetVARegions1(IoctlGetVaRegions& params);
     NvResult GetVARegions3(IoctlGetVaRegions& params, std::span<VaRegion> regions);
 
     [[nodiscard]] bool FreeMappingLocked(u64 offset) noexcept;
+    // Pulse: drops the remaps recorded over a range a mapping or an unmap replaces.
+    void PulseForgetRemaps(u64 offset, u64 size);
 
     Module& module;
 
@@ -172,6 +181,8 @@ private:
         bool fixed : 1;
         bool big_page : 1; // Only valid if fixed == false
         bool sparse_alloc : 1;
+        u64 handle_offset{}; // Pulse: ptr less the handle's device address
+        u32 kind{};          // Pulse: the PTE kind it was mapped with
 
         Mapping(NvCore::NvMap::Handle::Id handle_, DAddr ptr_, u64 offset_, u64 size_, bool fixed_, bool big_page_, bool sparse_alloc_)
             : ptr(ptr_), offset(offset_), size(size_), handle(handle_)
@@ -194,7 +205,18 @@ private:
     //!< Holds allocations created by AllocSpace from
     //!< which fixed buffers can be mapped into
     std::map<u64, Allocation> allocation_map;
-    std::mutex mutex; //!< Locks all AS operations
+    mutable std::mutex mutex; //!< Locks all AS operations
+
+    //!< Pulse: what Remap and remapping MapBufferEx left mapped, by GPU address, without overlaps.
+    //!< handle 0 is a range returned to sparse.
+    struct PulseRemap {
+        u64 size;
+        NvCore::NvMap::Handle::Id handle;
+        u64 handle_offset;
+        u32 kind;
+        bool big_page;
+    };
+    std::map<u64, PulseRemap> pulse_remaps;
 
     struct VM {
         static constexpr u32 YUZU_PAGESIZE{0x1000};

@@ -10,6 +10,7 @@
 #include "core/hle/service/apm/apm_controller.h"
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/pm/pm.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 #include "core/hle/service/set/settings_types.h"
 
@@ -27,6 +28,13 @@ class ICommonStateGetter final : public ServiceFramework<ICommonStateGetter> {
 public:
     explicit ICommonStateGetter(Core::System& system_, std::shared_ptr<Applet> applet_);
     ~ICommonStateGetter() override;
+
+    std::string_view PulseKind() const override {
+        return "ICommonStateGetter";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        PulseReferenceRoot(system, capture);
+    }
 
 private:
     Result GetEventHandle(OutCopyHandle<Kernel::KReadableEvent> out_event);

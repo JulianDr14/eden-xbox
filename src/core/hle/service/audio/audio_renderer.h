@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "audio_core/common/audio_renderer_parameter.h"
 #include "audio_core/renderer/audio_renderer.h"
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -22,6 +23,17 @@ public:
                             Kernel::KProcess* process_handle_, u64 applet_resource_user_id,
                             s32 session_id);
     ~IAudioRenderer() override;
+
+    // Pulse: the open parameters and the renderer's logical state (System::PulseSave); never
+    // samples. A restore opens the renderer again with the same parameters, then applies it.
+    std::string_view PulseKind() const override {
+        return "IAudioRenderer";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 ? rendered_event : nullptr;
+    }
+    void PulseApply(Pulse::StateReader& state);
 
 private:
     Result GetSampleRate(Out<u32> out_sample_rate);
@@ -49,6 +61,9 @@ private:
     Kernel::KProcess* process_handle;
     Common::ScratchBuffer<u8> output_buffer;
     Common::ScratchBuffer<u8> performance_buffer;
+    AudioCore::AudioRendererParameterInternal pulse_params;
+    u64 pulse_transfer_memory_size;
+    u64 pulse_aruid;
 };
 
 } // namespace Service::Audio

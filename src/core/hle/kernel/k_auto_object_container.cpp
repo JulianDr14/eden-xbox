@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <memory>
 
 #include "core/hle/kernel/k_auto_object_container.h"
 
@@ -27,6 +28,15 @@ size_t KAutoObjectWithListContainer::GetOwnedCount(KProcess* owner) {
 
     return std::count_if(m_object_list.begin(), m_object_list.end(),
                          [&](const auto& obj) { return obj.GetOwner() == owner; });
+}
+
+std::vector<KAutoObjectWithList*> KAutoObjectWithListContainer::GetOwned(KProcess* owner) {
+    KScopedSpinLock lk(m_lock);
+    std::vector<KAutoObjectWithList*> out;
+    for (auto& obj : m_object_list) {
+        if (obj.GetOwner() == owner) out.push_back(std::addressof(obj));
+    }
+    return out;
 }
 
 } // namespace Kernel

@@ -26,6 +26,11 @@ public:
     explicit Hidbus(Core::System& system_);
     ~Hidbus() override;
 
+    // Pulse: a stateless root; an attached device's session is not restored.
+    std::string_view PulseKind() const override {
+        return "Hidbus";
+    }
+
 private:
     static const std::size_t max_number_of_handles = 0x13;
 

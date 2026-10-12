@@ -33,6 +33,9 @@ class System;
 
 namespace Tegra {
 class MemoryManager;
+namespace Control {
+struct ChannelState;
+}
 }
 
 namespace VideoCore {
@@ -3197,6 +3200,8 @@ public:
     void ProcessInlineIndexMultiData(u32 method, const u32* start_base, u32 amount);
 
 private:
+    friend struct Control::ChannelState; // Pulse checkpoints
+
     void InitializeRegisterDefaults();
 
     void ProcessMacro(Core::System& system, u32 method, const u32* base_start, u32 amount, bool is_last_call);

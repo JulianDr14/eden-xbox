@@ -4,7 +4,11 @@
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <chrono>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
 #include <span>
 
 #include "audio_core/adsp/apps/audio_renderer/audio_renderer.h"
@@ -19,6 +23,7 @@
 #include "audio_core/renderer/command/command_generator.h"
 #include "audio_core/renderer/command/command_list_header.h"
 #include "audio_core/renderer/effect/effect_info_base.h"
+#include "audio_core/renderer/effect/effect_reset.h"
 #include "audio_core/renderer/effect/effect_result_state.h"
 #include "audio_core/renderer/memory/memory_pool_info.h"
 #include "audio_core/renderer/memory/pool_mapper.h"
@@ -37,6 +42,7 @@
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_transfer_memory.h"
+#include "core/hle/service/pulse_service.h"
 #include "core/memory.h"
 
 namespace AudioCore::Renderer {
@@ -134,8 +140,11 @@ Result System::Initialize(const AudioRendererParameterInternal& params,
     render_device = params.rendering_device;
     execution_mode = params.execution_mode;
 
-    process_handle->GetMemory().ZeroBlock(transfer_memory->GetSourceAddress(),
-                                          transfer_memory_size);
+    // A Pulse restore passes no transfer memory: guest memory already holds what it had.
+    if (transfer_memory) {
+        process_handle->GetMemory().ZeroBlock(transfer_memory->GetSourceAddress(),
+                                              transfer_memory_size);
+    }
 
     // Note: We're not actually using the transfer memory because it's a pain to code for.
     // Allocate the memory normally instead and hope the game doesn't try to read anything back
@@ -547,6 +556,289 @@ Result System::Update(std::span<const u8> input, std::span<u8> performance, std:
     ticks_spent_updating += end_time - start_time;
 
     return ResultSuccess;
+}
+
+namespace {
+
+constexpr u32 PulseRendererVersion = 1;
+constexpr s32 PulseNoPool = -1;
+constexpr s32 PulseSystemPool = -2;
+
+} // Anonymous namespace
+
+void System::PulseSave(Service::Pulse::StateWriter& out) {
+    static_assert(std::is_trivially_copyable_v<MemoryPoolInfo>);
+    static_assert(std::is_trivially_copyable_v<VoiceInfo>);
+    static_assert(std::is_trivially_copyable_v<VoiceState>);
+
+    std::scoped_lock l{lock};
+    if (!initialized) throw std::logic_error("Pulse: audio renderer not initialized");
+
+    // Memory pools are stored by index: their host pointers differ in the restored process.
+    const auto pool_index = [&](const AddressInfo& address) -> s32 {
+        const auto* pool = address.GetPool();
+        if (!pool) return PulseNoPool;
+        if (pool == &memory_pool_info) return PulseSystemPool;
+        if (pool >= memory_pool_workbuffer.data() &&
+            pool < memory_pool_workbuffer.data() + memory_pool_workbuffer.size()) {
+            return static_cast<s32>(pool - memory_pool_workbuffer.data());
+        }
+        throw std::logic_error("Pulse: audio address outside the memory pools");
+    };
+
+    out.U32(PulseRendererVersion);
+    out.Bool(active);
+    out.U64(frames_elapsed);
+    out.U32(render_time_limit_percent);
+    out.Bool(drop_voice);
+    out.Raw(drop_voice_param);
+
+    out.U32(memory_pool_count);
+    for (u32 i = 0; i < memory_pool_count; i++) out.Raw(memory_pool_workbuffer[i]);
+
+    // Voices in use, with their wavebuffer addresses' pools; then every channel resource they or
+    // the game hold, with the decode state the renderer keeps per resource.
+    const auto voice_count = voice_context.GetCount();
+    std::vector<bool> resources(voice_count);
+    std::vector<u32> voices;
+    for (u32 i = 0; i < voice_count; i++) {
+        const auto& voice = voice_context.GetInfo(i);
+        if (voice.in_use) voices.push_back(i);
+        if (voice_context.GetChannelResource(i).in_use) resources[i] = true;
+        if (!voice.in_use) continue;
+        for (s8 c = 0; c < voice.channel_count && c < MaxChannels; c++) {
+            if (voice.channel_resource_ids[c] < voice_count) {
+                resources[voice.channel_resource_ids[c]] = true;
+            }
+        }
+    }
+    out.U32(voice_count);
+    out.U32(static_cast<u32>(voices.size()));
+    for (const auto i : voices) {
+        const auto& voice = voice_context.GetInfo(i);
+        out.U32(i);
+        out.Raw(voice);
+        out.S32(pool_index(voice.data_address));
+        for (const auto& wavebuffer : voice.wavebuffers) {
+            out.S32(pool_index(wavebuffer.buffer_address));
+            out.S32(pool_index(wavebuffer.context_address));
+        }
+    }
+    out.U32(static_cast<u32>(std::count(resources.begin(), resources.end(), true)));
+    for (u32 i = 0; i < voice_count; i++) {
+        if (!resources[i]) continue;
+        const auto& resource = voice_context.GetChannelResource(i);
+        out.U32(i);
+        out.Bool(resource.in_use);
+        out.Raw(resource.mix_volumes);
+        out.Raw(resource.prev_mix_volumes);
+        out.Raw(voice_context.GetState(i));
+        out.Raw(voice_context.GetDspSharedState(i));
+    }
+
+    // Effects: the type alone. The game's next update resends every effect and, finding the
+    // buffers unmapped, attaches them again and starts a fresh effect state.
+    const auto effect_count = effect_context.GetCount();
+    out.U32(effect_count);
+    for (u32 i = 0; i < effect_count; i++) {
+        out.U8(static_cast<u8>(effect_context.GetInfo(i).GetType()));
+    }
+
+    // Mixes may be sent dirty-only, so the renderer's copy is the only one.
+    const auto mix_count = mix_context.GetCount();
+    out.U32(static_cast<u32>(mix_count));
+    for (s32 i = 0; i < mix_count; i++) {
+        const auto& mix = *mix_context.GetInfo(i);
+        out.Raw(mix.volume);
+        out.U32(mix.sample_rate);
+        out.U32(static_cast<u16>(mix.buffer_count));
+        out.Bool(mix.in_use);
+        out.Bool(mix.enabled);
+        out.S32(mix.mix_id);
+        out.S32(mix.node_id);
+        out.U32(static_cast<u16>(mix.buffer_offset));
+        out.S32(mix.distance_from_final_mix);
+        out.S32(mix.dst_mix_id);
+        out.Raw(mix.mix_volumes);
+        out.S32(mix.dst_splitter_id);
+        out.U32(static_cast<u32>(mix.effect_order_buffer.size()));
+        for (const auto order : mix.effect_order_buffer) out.S32(order);
+    }
+    auto& edges = mix_context.GetEdgeMatrix();
+    const auto nodes = edges.GetNodeCount();
+    out.U32(nodes);
+    for (u32 from = 0; from < nodes; from++) {
+        for (u32 to = 0; to < nodes; to++) out.Bool(edges.Connected(from, to));
+    }
+
+    // Splitters, with their destination chains as indices.
+    const auto info_count = splitter_context.GetInfoCount();
+    const auto data_count = splitter_context.GetDataCount();
+    const auto data_index = [&](const SplitterDestinationData* data) -> s32 {
+        if (!data) return -1;
+        const auto* base = &splitter_context.GetData(0);
+        if (data < base || data >= base + data_count) {
+            throw std::logic_error("Pulse: splitter destination outside its table");
+        }
+        return static_cast<s32>(data - base);
+    };
+    out.U32(info_count);
+    for (u32 i = 0; i < info_count; i++) {
+        const auto& info = splitter_context.GetInfo(static_cast<s32>(i));
+        out.U32(info.sample_rate);
+        out.U32(info.destination_count);
+        out.Bool(info.has_new_connection);
+        out.S32(data_count ? data_index(info.destinations) : -1);
+        out.U32(info.channel_count);
+    }
+    out.U32(data_count);
+    for (u32 i = 0; i < data_count; i++) {
+        const auto& data = splitter_context.GetData(i);
+        out.S32(data.destination_id);
+        out.Raw(data.mix_volumes);
+        out.Raw(data.prev_mix_volumes);
+        out.Raw(data.biquad_filters);
+        out.S32(data_index(data.next));
+        out.Bool(data.in_use);
+        out.Bool(data.need_update);
+    }
+}
+
+void System::PulseLoad(Service::Pulse::StateReader& in) {
+    std::scoped_lock l{lock};
+    if (!initialized) throw std::logic_error("Pulse: audio renderer not initialized");
+    if (in.U32() != PulseRendererVersion) {
+        throw std::invalid_argument("Pulse: audio renderer state version");
+    }
+    const auto expect = [](bool fits, const char* what) {
+        if (!fits) throw std::invalid_argument(std::string{"Pulse: audio renderer "} + what);
+    };
+    const auto pool_at = [&](s32 index) -> MemoryPoolInfo* {
+        if (index == PulseNoPool) return nullptr;
+        if (index == PulseSystemPool) return &memory_pool_info;
+        expect(index >= 0 && static_cast<u32>(index) < memory_pool_count, "memory pool index");
+        return &memory_pool_workbuffer[index];
+    };
+
+    const bool was_active = in.Bool();
+    const u64 frames = in.U64();
+    render_time_limit_percent = in.U32();
+    drop_voice = in.Bool();
+    drop_voice_param = in.Raw<f32>();
+
+    expect(in.U32() == memory_pool_count, "memory pool count");
+    for (u32 i = 0; i < memory_pool_count; i++) {
+        memory_pool_workbuffer[i] = in.Raw<MemoryPoolInfo>();
+    }
+
+    const auto voice_count = voice_context.GetCount();
+    expect(in.U32() == voice_count, "voice count");
+    const auto voices = in.Count(sizeof(VoiceInfo));
+    for (u32 v = 0; v < voices; v++) {
+        const auto i = in.U32();
+        expect(i < voice_count, "voice index");
+        auto& voice = voice_context.GetInfo(i);
+        voice = in.Raw<VoiceInfo>();
+        voice.data_address.SetPool(pool_at(in.S32()));
+        for (auto& wavebuffer : voice.wavebuffers) {
+            wavebuffer.buffer_address.SetPool(pool_at(in.S32()));
+            wavebuffer.context_address.SetPool(pool_at(in.S32()));
+        }
+    }
+    const auto resources = in.Count(sizeof(VoiceState));
+    for (u32 r = 0; r < resources; r++) {
+        const auto i = in.U32();
+        expect(i < voice_count, "channel resource index");
+        auto& resource = voice_context.GetChannelResource(i);
+        resource.in_use = in.Bool();
+        resource.mix_volumes = in.Raw<decltype(resource.mix_volumes)>();
+        resource.prev_mix_volumes = in.Raw<decltype(resource.prev_mix_volumes)>();
+        voice_context.GetState(i) = in.Raw<VoiceState>();
+        voice_context.GetDspSharedState(i) = in.Raw<VoiceState>();
+    }
+
+    const auto effect_count = effect_context.GetCount();
+    expect(in.U32() == effect_count, "effect count");
+    for (u32 i = 0; i < effect_count; i++) {
+        const auto type = static_cast<EffectInfoBase::Type>(in.U8());
+        expect(type <= EffectInfoBase::Type::Compressor, "effect type");
+        auto& effect = effect_context.GetInfo(i);
+        ResetEffect(&effect, type);
+        if (type != EffectInfoBase::Type::Invalid) effect.PulseMarkUnmapped();
+    }
+
+    const auto mix_count = mix_context.GetCount();
+    expect(in.U32() == static_cast<u32>(mix_count), "mix count");
+    for (s32 i = 0; i < mix_count; i++) {
+        auto& mix = *mix_context.GetInfo(i);
+        mix.volume = in.Raw<f32>();
+        mix.sample_rate = in.U32();
+        mix.buffer_count = static_cast<s16>(in.U32());
+        mix.in_use = in.Bool();
+        mix.enabled = in.Bool();
+        mix.mix_id = in.S32();
+        mix.node_id = in.S32();
+        mix.buffer_offset = static_cast<s16>(in.U32());
+        mix.distance_from_final_mix = in.S32();
+        mix.dst_mix_id = in.S32();
+        mix.mix_volumes = in.Raw<decltype(mix.mix_volumes)>();
+        mix.dst_splitter_id = in.S32();
+        expect(in.U32() == mix.effect_order_buffer.size(), "mix effect order size");
+        for (auto& order : mix.effect_order_buffer) order = in.S32();
+    }
+    auto& edges = mix_context.GetEdgeMatrix();
+    const auto nodes = edges.GetNodeCount();
+    expect(in.U32() == nodes, "mix graph size");
+    for (u32 from = 0; from < nodes; from++) {
+        for (u32 to = 0; to < nodes; to++) {
+            if (in.Bool()) {
+                edges.Connect(from, to);
+            } else {
+                edges.Disconnect(from, to);
+            }
+        }
+    }
+
+    const auto info_count = splitter_context.GetInfoCount();
+    const auto data_count = splitter_context.GetDataCount();
+    const auto data_at = [&](s32 index) -> SplitterDestinationData* {
+        if (index < 0) return nullptr;
+        expect(static_cast<u32>(index) < data_count, "splitter destination index");
+        return &splitter_context.GetData(static_cast<u32>(index));
+    };
+    expect(in.U32() == info_count, "splitter count");
+    for (u32 i = 0; i < info_count; i++) {
+        auto& info = splitter_context.GetInfo(static_cast<s32>(i));
+        info.sample_rate = in.U32();
+        info.destination_count = in.U32();
+        info.has_new_connection = in.Bool();
+        info.destinations = data_at(in.S32());
+        info.channel_count = in.U32();
+    }
+    expect(in.U32() == data_count, "splitter destination count");
+    for (u32 i = 0; i < data_count; i++) {
+        auto& data = splitter_context.GetData(i);
+        data.destination_id = in.S32();
+        data.mix_volumes = in.Raw<decltype(data.mix_volumes)>();
+        data.prev_mix_volumes = in.Raw<decltype(data.prev_mix_volumes)>();
+        data.biquad_filters = in.Raw<decltype(data.biquad_filters)>();
+        data.next = data_at(in.S32());
+        data.in_use = in.Bool();
+        data.need_update = in.Bool();
+    }
+
+    // The order the renderer walks the mixes in is derived; UpdateMixes rebuilds it the same way.
+    if (behavior.IsSplitterSupported() && splitter_context.UsingSplitter()) {
+        expect(mix_context.TSortInfo(splitter_context), "mix graph");
+    } else {
+        mix_context.SortInfo();
+    }
+
+    frames_elapsed = frames;
+    if (was_active) {
+        state = State::Started;
+        active = true;
+    }
 }
 
 u32 System::GetRenderingTimeLimit() const {

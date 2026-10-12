@@ -44,6 +44,11 @@ public:
 
     Kernel::KEvent* QueryEvent(u32 event_id) override;
 
+    // Pulse: the display device keeps no state of its own; composition belongs to vi.
+    bool PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const override {
+        return true;
+    }
+
 private:
     NvCore::Container& container;
     NvCore::NvMap& nvmap;

@@ -15,6 +15,8 @@
 #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
 #include "core/hle/service/nvdrv/devices/nvhost_gpu.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
+#include "core/hle/service/nvdrv/devices/nvhost_as_gpu.h"
+#include "core/hle/service/pulse_service.h"
 #include "core/memory.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/engines/puller.h"
@@ -453,6 +455,101 @@ NvResult nvhost_gpu::ChannelSetTimeslice(IoctlSetTimeslice& params) {
     channel_timeslice = params.timeslice;
 
     return NvResult::Success;
+}
+
+bool nvhost_gpu::PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const {
+    std::scoped_lock lk(channel_mutex);
+    out.S32(nvmap_fd);
+    out.U64(user_data);
+    out.U64(zcull_params.gpu_va);
+    out.U32(zcull_params.mode);
+    for (const auto& ctx : ctxObjs) {
+        out.Bool(ctx.has_value());
+        if (!ctx) continue;
+        out.U32(ctx->class_num);
+        out.U32(ctx->flags);
+        out.U64(ctx->obj_id);
+    }
+    out.U32(channel_priority);
+    out.U32(channel_timeslice);
+    out.U32(channel_syncpoint);
+    out.S32(bound_as_fd);
+    out.U64(channel_state->program_id);
+    out.Bool(channel_state->initialized);
+    if (channel_state->initialized) {
+        std::vector<u8> engines;
+        try {
+            engines = channel_state->PulseSave();
+        } catch (const std::runtime_error& busy) {
+            throw Service::Pulse::ServiceRejected(true, busy.what());
+        }
+        out.U32(static_cast<u32>(engines.size()));
+        out.Bytes(engines);
+    }
+    return true;
+}
+
+void nvhost_gpu::PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) {
+    std::scoped_lock lk(channel_mutex);
+    nvmap_fd = in.S32();
+    user_data = in.U64();
+    zcull_params.gpu_va = in.U64();
+    zcull_params.mode = in.U32();
+    for (auto& ctx : ctxObjs) {
+        ctx.reset();
+        if (!in.Bool()) continue;
+        IoctlAllocObjCtx params{};
+        params.class_num = in.U32();
+        params.flags = in.U32();
+        params.obj_id = in.U64();
+        ctx = params;
+    }
+    channel_priority = in.U32();
+    channel_timeslice = in.U32();
+    // The constructor reserved a fresh syncpoint; the guest's fences name the captured one,
+    // which the session restored before its fds.
+    channel_syncpoint = syncpoint_manager.PulseAdopt(channel_syncpoint, in.U32());
+    bound_as_fd = in.S32();
+    channel_state->program_id = in.U64();
+    pulse_initialized = in.Bool();
+    if (pulse_initialized) {
+        pulse_engines.resize(in.Count(1));
+        in.Bytes(pulse_engines);
+    }
+}
+
+void nvhost_gpu::PulseLink(DeviceFD fd, Module& module) {
+    std::scoped_lock lk(channel_mutex);
+    if (bound_as_fd >= 0) {
+        const auto address_space = module.GetDevice<nvhost_as_gpu>(bound_as_fd);
+        if (!address_space || !address_space->gmmu) {
+            throw std::invalid_argument("Pulse: GPU channel bound to a missing address space");
+        }
+        channel_state->memory_manager = address_space->gmmu.get();
+    }
+    if (!pulse_initialized) return;
+    if (!channel_state->memory_manager) {
+        throw std::invalid_argument("Pulse: running GPU channel without an address space");
+    }
+    system.GPU().InitChannel(*channel_state, channel_state->program_id);
+    channel_state->PulseLoad(pulse_engines);
+    pulse_engines = {};
+    pulse_initialized = false;
+}
+
+void nvhost_gpu::PulseEvents(std::vector<std::pair<u32, Kernel::KEvent*>>& out) const {
+    out.emplace_back(1, sm_exception_breakpoint_int_report_event);
+    out.emplace_back(2, sm_exception_breakpoint_pause_report_event);
+    out.emplace_back(3, error_notifier_event);
+}
+
+Kernel::KEvent* nvhost_gpu::PulseEvent(u32 index) {
+    switch (index) {
+    case 1: return sm_exception_breakpoint_int_report_event;
+    case 2: return sm_exception_breakpoint_pause_report_event;
+    case 3: return error_notifier_event;
+    default: return nullptr;
+    }
 }
 
 Kernel::KEvent* nvhost_gpu::QueryEvent(u32 event_id) {

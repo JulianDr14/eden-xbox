@@ -9,7 +9,10 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/kernel/k_shared_memory.h"
+#include "core/hle/service/pulse_service.h"
 #include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/service/cmif_serialization.h"
@@ -1480,6 +1483,52 @@ Result IHidServer::SetMouseLibraryVersion(ClientAppletResourceUserId aruid) {
 std::shared_ptr<ResourceManager> IHidServer::GetResourceManager() {
     resource_manager->Initialize();
     return resource_manager;
+}
+
+void IHidServer::PulseCapture(Pulse::HandlerCapture& capture) const {
+    auto* process = system.ApplicationProcess();
+    if (!process) throw Pulse::ServiceRejected(false, "hid: no application process");
+    // The application's applet resource user id is its process id (am HidRegistration).
+    const u64 aruid = process->GetProcessId();
+    auto npad = resource_manager->GetNpad();
+    capture.state.U64(aruid);
+    npad->PulseSave(aruid, capture.state);
+    for (u32 i = 0; i < MaxSupportedNpadIdTypes; ++i) {
+        capture.ExportEvent(i, npad->PulseStyleSetEvent(aruid, i));
+    }
+}
+
+SessionRequestHandlerPtr IHidServer::PulseRestore(std::string_view kind,
+                                                  Pulse::HandlerRestore& restore) {
+    auto& in = restore.state;
+    auto resource = GetResourceManager();
+    if (kind == "IAppletResource") {
+        const u64 aruid = in.U64();
+        in.End();
+        if (!resource->PulseSharedMemory(aruid)) {
+            throw std::invalid_argument("Pulse: hid applet resource");
+        }
+        return std::make_shared<IAppletResource>(system, resource, aruid);
+    }
+    if (kind == "IActiveVibrationDeviceList") {
+        in.End();
+        return std::make_shared<IActiveVibrationDeviceList>(system, resource);
+    }
+    if (kind != PulseKind()) return SessionRequestHandler::PulseRestore(kind, restore);
+    const u64 aruid = in.U64();
+    if (!resource->PulseSharedMemory(aruid)) throw std::invalid_argument("Pulse: hid aruid");
+    resource->GetNpad()->PulseLoad(system.Kernel(), aruid, in);
+    in.End();
+    pulse_aruid = aruid;
+    return shared_from_this();
+}
+
+Kernel::KEvent* IHidServer::PulseEvent(u32 slot) {
+    if (slot >= MaxSupportedNpadIdTypes) return nullptr;
+    Kernel::KReadableEvent* event{};
+    const auto result = GetResourceManager()->GetNpad()->AcquireNpadStyleSetUpdateEventHandle(
+        system.Kernel(), pulse_aruid, &event, IndexToNpadIdType(slot));
+    return result.IsSuccess() && event ? event->GetParent() : nullptr;
 }
 
 } // namespace Service::HID

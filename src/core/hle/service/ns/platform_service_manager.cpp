@@ -198,6 +198,10 @@ Result IPlatformServiceManager::GetSharedMemoryAddressOffset(Out<u32> out_shared
     R_SUCCEED();
 }
 
+void IPlatformServiceManager::PulseFillSharedFont() {
+    std::memcpy(kernel.GetFontSharedMem().GetPointer(), impl->shared_font.data(), impl->shared_font.size());
+}
+
 Result IPlatformServiceManager::GetSharedMemoryNativeHandle(OutCopyHandle<Kernel::KSharedMemory> out_shared_memory_native_handle) {
     // Map backing memory for the font data
     LOG_DEBUG(Service_NS, "called");

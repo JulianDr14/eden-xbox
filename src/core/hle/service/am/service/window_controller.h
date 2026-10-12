@@ -4,6 +4,7 @@
 #pragma once
 
 #include "core/hle/service/cmif_types.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 
 namespace Service::AM {
@@ -16,6 +17,13 @@ public:
     explicit IWindowController(Core::System& system_, std::shared_ptr<Applet> applet,
                                WindowSystem& window_system);
     ~IWindowController() override;
+
+    std::string_view PulseKind() const override {
+        return "IWindowController";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        PulseReferenceRoot(system, capture);
+    }
 
 private:
     Result GetAppletResourceUserId(Out<AppletResourceUserId> out_aruid);

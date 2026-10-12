@@ -4,8 +4,11 @@
 // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <stdexcept>
+
 #include "core/core.h"
 #include "core/hle/service/am/display_layer_manager.h"
+#include "core/hle/service/pulse_service.h"
 #include "core/hle/service/nvnflinger/hwc_layer.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/vi/application_display_service.h"
@@ -61,6 +64,37 @@ void DisplayLayerManager::Finalize() {
 
     m_manager_display_service = nullptr;
     m_display_service = nullptr;
+}
+
+void DisplayLayerManager::PulseSave(Pulse::StateWriter& out) const {
+    if (m_buffer_sharing_enabled || !m_managed_display_recording_layers.empty()) {
+        throw Pulse::ServiceRejected(false, "am: system shared layers have no serializer");
+    }
+    const bool initialized = m_manager_display_service != nullptr;
+    out.Bool(initialized);
+    out.Bool(m_visible);
+    out.U32(initialized ? static_cast<u32>(m_managed_display_layers.size()) : 0);
+    if (!initialized) return;
+    const auto container = m_display_service->GetContainer();
+    for (const u64 layer_id : m_managed_display_layers) container->PulseSaveLayer(layer_id, out);
+}
+
+void DisplayLayerManager::PulseLoad(Core::System& system, Kernel::KProcess* process,
+                                    AppletId applet_id, LibraryAppletMode mode,
+                                    Pulse::StateReader& in) {
+    const bool initialized = in.Bool();
+    m_visible = in.Bool();
+    const auto layers = in.Count(8);
+    if (!initialized) {
+        if (layers) throw std::invalid_argument("Pulse: am layers without vi");
+        return;
+    }
+    if (!m_managed_display_layers.empty()) throw std::invalid_argument("Pulse: am layers exist");
+    if (!m_manager_display_service) this->Initialize(system, process, applet_id, mode);
+    const auto container = m_display_service->GetContainer();
+    for (u32 i = 0; i < layers; ++i) {
+        m_managed_display_layers.emplace(container->PulseLoadLayer(in));
+    }
 }
 
 Result DisplayLayerManager::CreateManagedDisplayLayer(u64* out_layer_id) {

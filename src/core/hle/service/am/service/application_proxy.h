@@ -4,6 +4,7 @@
 #pragma once
 
 #include "core/hle/service/cmif_types.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 
 namespace Service::AM {
@@ -25,6 +26,13 @@ public:
     explicit IApplicationProxy(Core::System& system_, std::shared_ptr<Applet> applet,
                                Kernel::KProcess* process, WindowSystem& window_system);
     ~IApplicationProxy();
+
+    std::string_view PulseKind() const override {
+        return "IApplicationProxy";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        PulseReferenceRoot(system, capture);
+    }
 
 private:
     Result GetAudioController(Out<SharedPointer<IAudioController>> out_audio_controller);

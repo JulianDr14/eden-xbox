@@ -4,6 +4,7 @@
 #pragma once
 
 #include "core/hle/service/cmif_types.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 
 namespace Service::AM {
@@ -17,6 +18,12 @@ public:
     explicit IStorage(Core::System& system_, std::shared_ptr<LibraryAppletStorage> impl);
     explicit IStorage(Core::System& system_, std::vector<u8>&& buffer);
     ~IStorage() override;
+
+    std::string_view PulseKind() const override {
+        return "IStorage";
+    }
+    // Pulse: the contents, restored as a buffer (a transfer memory storage is copied).
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
 
     std::shared_ptr<LibraryAppletStorage> GetImpl() const {
         return m_impl;

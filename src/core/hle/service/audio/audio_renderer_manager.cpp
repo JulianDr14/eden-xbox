@@ -69,6 +69,35 @@ Result IAudioRendererManager::OpenAudioRenderer(
     R_SUCCEED();
 }
 
+SessionRequestHandlerPtr IAudioRendererManager::PulseRestore(std::string_view kind,
+                                                             Pulse::HandlerRestore& restore) {
+    auto& in = restore.state;
+    if (kind == "IAudioDevice") {
+        const u64 aruid = in.U64();
+        const u32 revision = in.U32();
+        in.End();
+        return std::make_shared<IAudioDevice>(system, aruid, revision, num_audio_devices++);
+    }
+    if (kind != "IAudioRenderer") {
+        return SessionRequestHandler::PulseRestore(kind, restore);
+    }
+    auto parameter = in.Raw<AudioCore::AudioRendererParameterInternal>();
+    const u64 transfer_memory_size = in.U64();
+    const u64 aruid = in.U64();
+    if (impl->GetSessionCount() + 1 > AudioCore::MaxRendererSessions) {
+        throw std::invalid_argument("Pulse: audren:u has no free session");
+    }
+    const auto session_id = impl->GetSessionId();
+    if (session_id == -1) throw std::invalid_argument("Pulse: audren:u has no free session");
+    // No transfer memory: the renderer works in host memory, and the guest's copy of the
+    // buffer is already restored.
+    auto renderer = std::make_shared<IAudioRenderer>(system, *impl, parameter, nullptr,
+                                                     transfer_memory_size, restore.process,
+                                                     aruid, session_id);
+    renderer->PulseApply(in);
+    return renderer;
+}
+
 Result IAudioRendererManager::GetWorkBufferSize(Out<u64> out_size,
                                                 AudioCore::AudioRendererParameterInternal params) {
     LOG_DEBUG(Service_Audio, "called");

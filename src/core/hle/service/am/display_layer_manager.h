@@ -26,6 +26,11 @@ class IManagerDisplayService;
 enum class CaptureKind : u32;
 } // namespace Service::VI
 
+namespace Service::Pulse {
+class StateReader;
+class StateWriter;
+} // namespace Service::Pulse
+
 namespace Service::AM {
 
 class DisplayLayerManager {
@@ -36,6 +41,12 @@ public:
     void Initialize(Core::System& system, Kernel::KProcess* process, AppletId applet_id,
                     LibraryAppletMode mode);
     void Finalize();
+
+    // Pulse: the visibility and the managed layers with their buffer queues. The system shared
+    // layer of library applets has no serializer.
+    void PulseSave(Pulse::StateWriter& out) const;
+    void PulseLoad(Core::System& system, Kernel::KProcess* process, AppletId applet_id,
+                   LibraryAppletMode mode, Pulse::StateReader& in);
 
     Result CreateManagedDisplayLayer(u64* out_layer_id);
     Result CreateManagedDisplaySeparableLayer(u64* out_layer_id, u64* out_recording_layer_id);

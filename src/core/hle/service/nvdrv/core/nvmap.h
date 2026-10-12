@@ -180,6 +180,8 @@ public:
     // Recreates a handle under its captured id; throws std::invalid_argument when it is taken.
     void PulseRestoreHandle(const PulseHandle& handle, NvCore::SessionId session_id);
     void PulseRaiseNextId(u32 id);
+    // The device ranges of the pinned handles: where the GPU may have written guest memory.
+    std::vector<std::pair<DAddr, u64>> PulsePinnedRanges();
 
 private:
     std::list<std::shared_ptr<Handle>> unmap_queue{};

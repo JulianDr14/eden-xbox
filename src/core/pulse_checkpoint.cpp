@@ -12,6 +12,7 @@
 #include <unordered_set>
 #include <fmt/format.h>
 
+#include "common/logging.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
 #include "core/core_timing.h"
@@ -28,16 +29,28 @@
 #include "core/hle/kernel/k_scoped_scheduler_lock_and_sleep.h"
 #include "core/hle/kernel/k_server_session.h"
 #include "core/hle/kernel/k_session.h"
+#include "core/hle/kernel/k_shared_memory.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/pulse_wait_graph.h"
+#include "core/hle/service/hid/hid_server.h"
 #include "core/hle/service/hle_ipc.h"
+#include "core/hle/service/ns/platform_service_manager.h"
+#include "core/hle/service/nvdrv/core/container.h"
+#include "core/hle/service/nvdrv/core/nvmap.h"
+#include "core/hle/service/nvdrv/nvdrv.h"
+#include "core/hle/service/nvdrv/nvdrv_interface.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/service.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/memory.h"
 #include "core/pulse_checkpoint.h"
 #include "core/pulse_machine_state.h"
+#include "hid_core/resource_manager.h"
+#include "video_core/gpu.h"
+#include "video_core/rasterizer_interface.h"
+#include "video_core/renderer_base.h"
 
 namespace Core::Pulse {
 namespace {
@@ -152,6 +165,13 @@ public:
         if (auto* session = mutable_object->DynamicCast<Kernel::KClientSession*>()) {
             return Add(session, ObjectKind::ClientSession, 0);
         }
+        // Their payloads are written after the locks: the owner lookup takes service locks.
+        if (auto* shared = mutable_object->DynamicCast<Kernel::KSharedMemory*>()) {
+            return Add(shared, ObjectKind::SharedMemory, 0);
+        }
+        if (auto* transfer = mutable_object->DynamicCast<Kernel::KTransferMemory*>()) {
+            return Add(transfer, ObjectKind::TransferMemory, 0);
+        }
         Reject(false, std::string{"no serializer for kernel object "} +
                           mutable_object->GetTypeObj().GetName());
     }
@@ -231,6 +251,97 @@ struct ProcessRestore::State {
 
 // ---------------------------------------------------------------------------------- capture
 
+namespace {
+
+// What the GPU wrote and the host caches still hold goes back to guest memory, which the
+// checkpoint stores; the caches themselves are rebuilt after a restore. The exact readback is
+// tried first; a texture it cannot read back exactly (rescaled, aliased...) falls back to the
+// renderer's own flush of every range the GPU can reach, which keeps what a CPU read would see.
+void FlushGpuWrites(Core::System& system) {
+    std::vector<std::pair<DAddr, u64>> ranges;
+    if (const auto nvdrv = system.ServiceManager().GetService<Service::Nvidia::NVDRV>("nvdrv:s",
+                                                                                     true)) {
+        ranges = nvdrv->GetModule()->GetContainer().GetNvMapFile().PulsePinnedRanges();
+    }
+    auto& gpu = system.GPU();
+    std::string failure;
+    gpu.RunOnGpuThread([&] {
+        auto* const rasterizer = gpu.Renderer().ReadRasterizer();
+        if (!rasterizer) return;
+        try {
+            if (rasterizer->MaterializeCheckpointMemory()) return;
+        } catch (const std::exception& inexact) {
+            LOG_INFO(Core, "Pulse: GPU writes flushed by region ({})", inexact.what());
+        }
+        try {
+            for (const auto& [address, size] : ranges) rasterizer->FlushRegion(address, size);
+            rasterizer->FlushAll();
+        } catch (const std::exception& error) {
+            failure = error.what();
+        }
+    });
+    if (!failure.empty()) Reject(false, "GPU writes cannot reach guest memory: " + failure);
+}
+
+// Shared memory is never stored: its owner fills it. A checkpoint names the owner and the restore
+// maps the fresh System's memory of that owner at the captured addresses.
+enum class SharedMemoryOwner : u32 {
+    Font = 1,   // pl:u, refilled with the system font on restore
+    Irs = 2,
+    Time = 3,   // psc time contexts, written by the fresh time service
+    HidBus = 4,
+    Hid = 5,    // per applet resource user id (the argument)
+};
+
+std::shared_ptr<Service::HID::ResourceManager> HidResources(Core::System& system) {
+    const auto hid = system.ServiceManager().GetService<Service::HID::IHidServer>("hid", true);
+    return hid ? hid->GetResourceManager() : nullptr;
+}
+
+std::pair<SharedMemoryOwner, u64> SharedMemoryKey(Core::System& system,
+                                                  const Kernel::KSharedMemory* shared) {
+    auto& kernel = system.Kernel();
+    if (shared == std::addressof(kernel.GetFontSharedMem())) return {SharedMemoryOwner::Font, 0};
+    if (shared == std::addressof(kernel.GetIrsSharedMem())) return {SharedMemoryOwner::Irs, 0};
+    if (shared == std::addressof(kernel.GetTimeSharedMem())) return {SharedMemoryOwner::Time, 0};
+    if (shared == std::addressof(kernel.GetHidBusSharedMem())) return {SharedMemoryOwner::HidBus, 0};
+    if (const auto hid = HidResources(system)) {
+        if (const auto aruid = hid->PulseFindSharedMemory(shared)) {
+            return {SharedMemoryOwner::Hid, *aruid};
+        }
+    }
+    Reject(false, "shared memory of an owner without a serializer");
+}
+
+Kernel::KSharedMemory* ResolveSharedMemory(Core::System& system, u32 owner, u64 argument) {
+    auto& kernel = system.Kernel();
+    switch (static_cast<SharedMemoryOwner>(owner)) {
+    case SharedMemoryOwner::Font:
+        if (const auto pl = system.ServiceManager().GetService<Service::NS::IPlatformServiceManager>(
+                "pl:u", true)) {
+            pl->PulseFillSharedFont();
+        }
+        return std::addressof(kernel.GetFontSharedMem());
+    case SharedMemoryOwner::Irs:
+        return std::addressof(kernel.GetIrsSharedMem());
+    case SharedMemoryOwner::Time:
+        return std::addressof(kernel.GetTimeSharedMem());
+    case SharedMemoryOwner::HidBus:
+        return std::addressof(kernel.GetHidBusSharedMem());
+    case SharedMemoryOwner::Hid:
+        if (const auto hid = HidResources(system)) return hid->PulseSharedMemory(argument);
+        return nullptr;
+    default:
+        Invalid("Pulse: unknown shared memory owner");
+    }
+}
+
+void PutLe(std::vector<u8>& out, u64 value, size_t width) {
+    for (size_t i = 0; i < width; ++i) out.push_back(static_cast<u8>(value >> (i * 8)));
+}
+
+} // Anonymous namespace
+
 ProcessCheckpoint ProcessCheckpoint::CaptureAtBarrier(Core::System& system,
                                                     std::chrono::milliseconds budget,
                                                     u32& retries) {
@@ -248,7 +359,12 @@ ProcessCheckpoint ProcessCheckpoint::CaptureAtBarrier(Core::System& system,
     for (;;) {
         void(system.Pause());
         try {
-            return Capture(system);
+            // With the guest parked nothing new is queued: the GPU finishes what it has, so the
+            // channels are between command lists when nvdrv serializes them.
+            system.GPU().WaitForIdle();
+            auto checkpoint = Capture(system);
+            FlushGpuWrites(system);
+            return checkpoint;
         } catch (const CheckpointRejected& rejected) {
             if (!rejected.retryable || std::chrono::steady_clock::now() >= deadline) {
                 void(system.Run());
@@ -359,6 +475,40 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
             registry.Records()[i].flags = readable->IsSignaled(kernel) ? 1 : 0;
         }
         exclusive = process->GetExclusiveMonitor().CaptureCheckpoint();
+    }
+
+    // Memory objects the process uses without holding a handle: the shared memory it maps (a
+    // handle closed after mapping) and transfer memory only a service still references.
+    for (auto* shared : process->GetMappedSharedMemory()) registry.Identify(shared);
+    for (auto* object : kernel.ObjectListContainer().GetOwned(process)) {
+        if (auto* transfer = object->DynamicCast<Kernel::KTransferMemory*>()) {
+            registry.Identify(transfer);
+        }
+    }
+    std::unordered_map<u64, size_t> shared_by_physical; // physical start -> record index
+    std::unordered_set<u64> lent_pages;                 // physical pages of transfer memory
+    for (size_t i = 0; i < registry.Records().size(); ++i) {
+        auto& record = registry.Records()[i];
+        if (record.kind == ObjectKind::TransferMemory) {
+            const auto* transfer = static_cast<const Kernel::KTransferMemory*>(registry.Objects()[i]);
+            if (transfer->GetOwner() != process) Reject(false, "transfer memory of another process");
+            if (transfer->IsMapped()) Reject(false, "transfer memory mapped by another process");
+            const u64 address = GetInteger(transfer->GetSourceAddress());
+            const u64 size = transfer->GetSize();
+            PutLe(record.payload, address, 8);
+            PutLe(record.payload, size, 8);
+            PutLe(record.payload, static_cast<u32>(transfer->GetOwnerPermission()), 4);
+            for (u64 page = 0; page < size; page += PageSize) {
+                lent_pages.insert(Physical(*process, address + page));
+            }
+        } else if (record.kind == ObjectKind::SharedMemory) {
+            const auto* shared = static_cast<const Kernel::KSharedMemory*>(registry.Objects()[i]);
+            const auto [owner, argument] = SharedMemoryKey(system, shared);
+            PutLe(record.payload, static_cast<u32>(owner), 4);
+            PutLe(record.payload, 0, 4); // mapping count, set with the memory map
+            PutLe(record.payload, argument, 8);
+            shared_by_physical.emplace(GetInteger(shared->GetPhysicalAddress()), i);
+        }
     }
 
     // Sessions and the service interfaces behind them. Every interface the guest can reach needs
@@ -567,8 +717,33 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
             Reject(false, "normal memory outside the heap");
         }
         if (state != KMemoryState::Code && state != KMemoryState::CodeData && !normal &&
-            state != KMemoryState::Stack && state != KMemoryState::ThreadLocal) {
+            state != KMemoryState::Stack && state != KMemoryState::ThreadLocal &&
+            state != KMemoryState::Shared) {
             Reject(false, "memory state " + std::to_string(block.state & 0xff) + " has no serializer");
+        }
+        if (state == KMemoryState::Shared) {
+            // Adjacent mappings may share one coalesced block: walk it object by object.
+            if (block.attribute != 0) Reject(false, "shared memory with attributes");
+            for (u64 address = block.address; address < block.address + block.size;) {
+                const auto found = shared_by_physical.find(Physical(*process, address));
+                if (found == shared_by_physical.end()) Reject(false, "shared memory of an unknown object");
+                auto& record = registry.Records()[found->second];
+                const auto* shared =
+                    static_cast<const Kernel::KSharedMemory*>(registry.Objects()[found->second]);
+                const u64 size = shared->GetSize();
+                if (!size || address + size > block.address + block.size) {
+                    Reject(false, "partial shared memory mapping");
+                }
+                PutLe(record.payload, address, 8);
+                PutLe(record.payload, size, 8);
+                PutLe(record.payload,
+                      block.permission & static_cast<u32>(KMemoryPermission::UserMask), 4);
+                u32 count{};
+                std::memcpy(&count, record.payload.data() + 4, 4);
+                ++count;
+                std::memcpy(record.payload.data() + 4, &count, 4);
+                address += size;
+            }
         }
         if (True(attribute & KMemoryAttribute::Locked)) {
             for (u64 page = 0; page < block.size; page += PageSize) {
@@ -578,6 +753,7 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
     }
     for (const auto& block : layout.blocks) {
         const auto state = static_cast<KMemoryState>(block.state);
+        if (state == KMemoryState::Shared) continue; // its owner refills it
         for (u64 page = 0; page < block.size; page += PageSize) {
             const u64 address = block.address + page;
             if (state == KMemoryState::Stack &&
@@ -597,9 +773,12 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
             if (UserReadable(block.permission)) store_page(address);
         }
     }
-    // A locked heap page with no readable alias cannot be read back: fail closed.
+    // A locked heap page with no readable alias cannot be read back: fail closed. Transfer memory
+    // the guest cannot read is a service's work memory: rebuilt locked, its content not kept.
     for (const auto& [physical, address] : locked_sources) {
-        if (!stored.contains(physical)) Reject(false, "locked heap page with no readable mapping");
+        if (!stored.contains(physical) && !lent_pages.contains(physical)) {
+            Reject(false, "locked heap page with no readable mapping");
+        }
     }
     if (runs.empty()) Reject(false, "the application has no memory to store");
     checkpoint.runs = runs;
@@ -945,6 +1124,27 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
             }
         }
 
+        // Transfer memory: the heap range locked again with the owner's permission.
+        for (const auto& record : records) {
+            if (record.kind != ObjectKind::TransferMemory) continue;
+            Service::Pulse::StateReader in{record.payload};
+            const u64 address = in.U64();
+            const u64 size = in.U64();
+            const u32 permission = in.U32();
+            Kernel::KScopedResourceReservation reservation{
+                kernel, process, Kernel::LimitableResource::TransferMemoryCountMax};
+            if (!reservation.Succeeded()) Incompatible("Pulse: transfer memory limit reached");
+            auto* transfer = Kernel::KTransferMemory::Create(kernel);
+            if (!transfer) Incompatible("Pulse: out of kernel transfer memory");
+            state->created.push_back(transfer);
+            Check(transfer->Initialize(kernel, process, address, size,
+                                       static_cast<Kernel::Svc::MemoryPermission>(permission)),
+                  "Pulse: transfer memory rebuild failed");
+            reservation.Commit();
+            Kernel::KTransferMemory::Register(kernel, transfer);
+            bind(record.id, transfer);
+        }
+
         // Sessions to named ports: the fresh service accepts them and gives each its root.
         struct PortContext {
             Service::SessionRequestHandlerPtr root;
@@ -1133,6 +1333,34 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
                 bind(record.id, readable);
                 Check((record.flags & 1) ? readable->Signal(kernel) : readable->Clear(kernel),
                       "Pulse: service event signal failed");
+            }
+        }
+
+        // Shared memory, after the interfaces (HID creates an applet resource's memory): the fresh
+        // owner's memory, mapped where the guest had it, before the memory map is compared.
+        for (const auto& record : records) {
+            if (record.kind != ObjectKind::SharedMemory) continue;
+            Service::Pulse::StateReader in{record.payload};
+            const u32 owner = in.U32();
+            const u32 count = in.U32();
+            const u64 argument = in.U64();
+            if (count != (record.payload.size() - SharedMemoryPayloadHeader) / SharedMappingSize) {
+                Invalid("Pulse: malformed shared memory record");
+            }
+            auto* shared = ResolveSharedMemory(system, owner, argument);
+            if (!shared) Incompatible("Pulse: a shared memory owner did not rebuild its memory");
+            bind(record.id, shared);
+            for (u32 i = 0; i < count; ++i) {
+                const u64 address = in.U64();
+                const u64 size = in.U64();
+                const auto permission = static_cast<Kernel::Svc::MemoryPermission>(in.U32());
+                if (size != shared->GetSize()) Incompatible("Pulse: shared memory size differs");
+                Check(process->AddSharedMemory(kernel, shared, address, size),
+                      "Pulse: shared memory rebuild failed");
+                if (shared->Map(*process, address, size, permission).IsError()) {
+                    process->RemoveSharedMemory(kernel, shared, address, size);
+                    Incompatible("Pulse: shared memory mapping rebuild failed");
+                }
             }
         }
         stats.objects = static_cast<u32>(records.size());

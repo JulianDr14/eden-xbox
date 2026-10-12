@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "hid_core/hid_util.h"
+#include "core/hle/service/pulse_service.h"
 #include "hid_core/resources/npad/npad_data.h"
 
 namespace Service::HID {
@@ -221,6 +222,31 @@ std::size_t NPadData::GetNpadCaptureButtonAssignmentList(
     }
 
     return out_list.size();
+}
+
+void NPadData::PulseSave(Pulse::StateWriter& out) const {
+    out.U32(status.raw);
+    out.U64(static_cast<u64>(supported_npad_style_set));
+    out.U64(static_cast<u64>(npad_hold_type));
+    out.U64(static_cast<u64>(handheld_activation_mode));
+    out.U32(static_cast<u32>(supported_npad_id_types_count));
+    for (const auto id : supported_npad_id_types) out.U64(static_cast<u64>(id));
+    for (const auto button : npad_button_assignment) out.U64(static_cast<u64>(button));
+    for (const bool enabled : is_unintended_home_button_input_protection) out.Bool(enabled);
+}
+
+void NPadData::PulseLoad(Pulse::StateReader& in) {
+    status.raw = in.U32();
+    supported_npad_style_set = static_cast<Core::HID::NpadStyleSet>(in.U64());
+    npad_hold_type = static_cast<NpadJoyHoldType>(in.U64());
+    handheld_activation_mode = static_cast<NpadHandheldActivationMode>(in.U64());
+    supported_npad_id_types_count = in.U32();
+    if (supported_npad_id_types_count > supported_npad_id_types.size()) {
+        throw std::invalid_argument("Pulse: npad supported id count");
+    }
+    for (auto& id : supported_npad_id_types) id = static_cast<Core::HID::NpadIdType>(in.U64());
+    for (auto& button : npad_button_assignment) button = static_cast<Core::HID::NpadButton>(in.U64());
+    for (auto& enabled : is_unintended_home_button_input_protection) enabled = in.Bool();
 }
 
 } // namespace Service::HID

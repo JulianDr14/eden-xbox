@@ -371,6 +371,8 @@ public:
 
     Result AddSharedMemory(KernelCore& kernel, KSharedMemory* shmem, KProcessAddress address, size_t size);
     void RemoveSharedMemory(KernelCore& kernel, KSharedMemory* shmem, KProcessAddress address, size_t size);
+    /// Pulse capture: the shared memories this process maps.
+    std::vector<KSharedMemory*> GetMappedSharedMemory();
 
     Result CreateThreadLocalRegion(KernelCore& kernel, KProcessAddress* out);
     /// Pulse restore: reserves the region at a captured address (its page mapped there if new).

@@ -8,6 +8,7 @@
 
 #include "core/hle/service/am/service/library_applet_self_accessor.h"
 #include "core/hle/service/cmif_types.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 
 namespace Service::AM {
@@ -21,6 +22,13 @@ public:
     explicit ILibraryAppletAccessor(Core::System& system_, std::shared_ptr<AppletDataBroker> broker,
                                     std::shared_ptr<Applet> applet);
     ~ILibraryAppletAccessor();
+
+    std::string_view PulseKind() const override {
+        return "ILibraryAppletAccessor";
+    }
+    void PulseCapture(Pulse::HandlerCapture&) const override {
+        throw Pulse::ServiceRejected(true, "am: a library applet is open");
+    }
 
     std::shared_ptr<Applet> GetApplet() const {
         return m_applet;

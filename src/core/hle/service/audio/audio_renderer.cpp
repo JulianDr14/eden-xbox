@@ -17,8 +17,9 @@ IAudioRenderer::IAudioRenderer(Core::System& system_, Manager& manager_,
                                s32 session_id)
     : ServiceFramework{system_, "IAudioRenderer"}, service_context{system_, "IAudioRenderer"},
       rendered_event{service_context.CreateEvent("IAudioRendererEvent")}, manager{manager_},
-      impl{std::make_unique<Renderer>(system_, manager, rendered_event)}, process_handle{
-                                                                              process_handle_} {
+      impl{std::make_unique<Renderer>(system_, manager, rendered_event)},
+      process_handle{process_handle_}, pulse_params{params},
+      pulse_transfer_memory_size{transfer_memory_size}, pulse_aruid{applet_resource_user_id} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, D<&IAudioRenderer::GetSampleRate>, "GetSampleRate"},
@@ -42,6 +43,20 @@ IAudioRenderer::IAudioRenderer(Core::System& system_, Manager& manager_,
     process_handle->Open(system_.Kernel());
     impl->Initialize(params, transfer_memory, transfer_memory_size, process_handle,
                      applet_resource_user_id, session_id);
+}
+
+void IAudioRenderer::PulseCapture(Pulse::HandlerCapture& capture) const {
+    auto& out = capture.state;
+    out.Raw(pulse_params);
+    out.U64(pulse_transfer_memory_size);
+    out.U64(pulse_aruid);
+    impl->GetSystem().PulseSave(out);
+    capture.ExportEvent(0, rendered_event);
+}
+
+void IAudioRenderer::PulseApply(Pulse::StateReader& in) {
+    impl->GetSystem().PulseLoad(in);
+    in.End();
 }
 
 IAudioRenderer::~IAudioRenderer() {

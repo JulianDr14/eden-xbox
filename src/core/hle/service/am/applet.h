@@ -26,6 +26,11 @@
 #include "core/hle/service/am/process_holder.h"
 #include "core/hle/service/am/service/storage.h"
 
+namespace Service::Pulse {
+class StateReader;
+class StateWriter;
+} // namespace Service::Pulse
+
 namespace Service::AM {
 
 struct Applet {
@@ -148,6 +153,12 @@ struct Applet {
 
     // Frontend state
     std::shared_ptr<Frontend::FrontendApplet> frontend{};
+
+    // Pulse: the application's state the guest set or observes, its lifecycle and its managed
+    // layers. The creation state, the hid registration and the process come from the fresh boot;
+    // the language is computed again. A library applet in flight is retryable.
+    void PulseSave(Core::System& system, Pulse::StateWriter& out);
+    void PulseLoad(Core::System& system, Kernel::KProcess* owner, Pulse::StateReader& in);
 
     // Process state management
     void UpdateSuspensionStateLocked(bool force_message);

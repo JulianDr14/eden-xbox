@@ -33,6 +33,11 @@ class KProcess;
 class KTransferMemory;
 } // namespace Kernel
 
+namespace Service::Pulse {
+class StateReader;
+class StateWriter;
+} // namespace Service::Pulse
+
 namespace AudioCore {
 struct AudioRendererParameterInternal;
 namespace ADSP {
@@ -108,6 +113,17 @@ public:
      * @return Result code.
      */
     Result Update(std::span<const u8> input, std::span<u8> performance, std::span<u8> output);
+
+    /**
+     * Pulse checkpoints: the state the game observes through RequestUpdate and cannot send again
+     * (attached memory pools, voices with their wavebuffer progress, mixes, splitters, frame
+     * count). Sample, depop, upsampler and command buffers are regenerated; effects and sinks keep
+     * only their type and are rebuilt from the game's next update, which resends them all, so a
+     * reverb tail or a circular sink position restarts. PulseLoad needs a system initialized with
+     * the captured parameters and throws std::invalid_argument on a state that does not fit it.
+     */
+    void PulseSave(Service::Pulse::StateWriter& out);
+    void PulseLoad(Service::Pulse::StateReader& in);
 
     /**
      * Get the time limit (percent) for rendering

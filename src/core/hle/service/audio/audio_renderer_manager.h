@@ -20,6 +20,12 @@ public:
     explicit IAudioRendererManager(Core::System& system_);
     ~IAudioRendererManager() override;
 
+    std::string_view PulseKind() const override {
+        return "audren:u";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override;
+
 private:
     Result OpenAudioRenderer(Out<SharedPointer<IAudioRenderer>> out_audio_renderer,
                              AudioCore::AudioRendererParameterInternal parameter,

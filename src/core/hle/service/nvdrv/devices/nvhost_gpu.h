@@ -59,6 +59,14 @@ public:
 
     Kernel::KEvent* QueryEvent(u32 event_id) override;
 
+    // Pulse: the channel setup, its syncpoint and the engine state the guest left on it
+    // (Tegra::Control::ChannelState::PulseSave). Taken with the GPU idle; host caches rebuild.
+    bool PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const override;
+    void PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) override;
+    void PulseLink(DeviceFD fd, Module& module) override;
+    void PulseEvents(std::vector<std::pair<u32, Kernel::KEvent*>>& out) const override;
+    Kernel::KEvent* PulseEvent(u32 index) override;
+
 private:
     friend class nvhost_as_gpu;
     enum class CtxClasses : u32_le {
@@ -219,7 +227,11 @@ private:
     std::shared_ptr<Tegra::Control::ChannelState> channel_state;
     ::Common::unordered_map<DeviceFD, NvCore::SessionId> sessions;
     u32 channel_syncpoint;
-    std::mutex channel_mutex;
+    mutable std::mutex channel_mutex;
+    DeviceFD bound_as_fd{-1}; ///< The nvhost-as-gpu fd BindChannel last named, for Pulse
+    // Pulse restore, until PulseLink: the channel was running, with this engine state.
+    bool pulse_initialized{};
+    std::vector<u8> pulse_engines;
 
     // Events
     Kernel::KEvent* sm_exception_breakpoint_int_report_event;

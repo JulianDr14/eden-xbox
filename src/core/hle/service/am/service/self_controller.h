@@ -8,6 +8,7 @@
 
 #include "core/hle/service/am/am_types.h"
 #include "core/hle/service/cmif_types.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 
 namespace Kernel {
@@ -28,6 +29,13 @@ public:
     explicit ISelfController(Core::System& system_, std::shared_ptr<Applet> applet,
                              Kernel::KProcess* process);
     ~ISelfController() override;
+
+    std::string_view PulseKind() const override {
+        return "ISelfController";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        PulseReferenceRoot(system, capture);
+    }
 
 private:
     Result Exit();

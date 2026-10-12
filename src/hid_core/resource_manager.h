@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/service.h"
 
@@ -88,6 +90,10 @@ public:
     void UnregisterAppletResourceUserId(u64 aruid);
 
     Result GetSharedMemoryHandle(Kernel::KSharedMemory** out_handle, u64 aruid);
+    // Pulse: the aruid a shared memory belongs to, and on restore the one of an aruid,
+    // registering and creating its applet resource when the fresh boot has not.
+    std::optional<u64> PulseFindSharedMemory(const Kernel::KSharedMemory* shared_memory);
+    Kernel::KSharedMemory* PulseSharedMemory(u64 aruid);
     void FreeAppletResourceId(u64 aruid);
 
     void EnableInput(u64 aruid, bool is_enabled);

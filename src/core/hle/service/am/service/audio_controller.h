@@ -4,6 +4,7 @@
 #pragma once
 
 #include "core/hle/service/cmif_types.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 
 namespace Service::AM {
@@ -12,6 +13,12 @@ class IAudioController final : public ServiceFramework<IAudioController> {
 public:
     explicit IAudioController(Core::System& system_);
     ~IAudioController() override;
+
+    std::string_view PulseKind() const override {
+        return "IAudioController";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    void PulseLoad(Pulse::StateReader& in);
 
 private:
     Result SetExpectedMasterVolume(f32 main_applet_volume, f32 library_applet_volume);

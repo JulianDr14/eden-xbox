@@ -356,6 +356,18 @@ std::vector<NvMap::PulseHandle> NvMap::PulseHandles() {
     return out;
 }
 
+std::vector<std::pair<DAddr, u64>> NvMap::PulsePinnedRanges() {
+    std::scoped_lock lock(handles_lock);
+    std::vector<std::pair<DAddr, u64>> out;
+    for (const auto& [id, handle] : handles) {
+        std::scoped_lock handle_lock(handle->mutex);
+        if (handle->pins > 0 && handle->d_address) {
+            out.emplace_back(handle->d_address, handle->aligned_size);
+        }
+    }
+    return out;
+}
+
 void NvMap::PulseRestoreHandle(const PulseHandle& state, NvCore::SessionId session_id) {
     if (!state.id || state.id % HandleIdIncrement || !state.size) {
         throw std::invalid_argument("Pulse: malformed nvmap handle");

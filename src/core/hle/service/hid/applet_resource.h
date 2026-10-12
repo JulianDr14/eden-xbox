@@ -26,6 +26,12 @@ public:
                              u64 applet_resource_user_id);
     ~IAppletResource() override;
 
+    // Pulse: the aruid; its shared memory is restored as a kernel object (IHidServer rebuilds).
+    std::string_view PulseKind() const override {
+        return "IAppletResource";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+
 private:
     Result GetSharedMemoryHandle(OutCopyHandle<Kernel::KSharedMemory> out_shared_memory_handle);
 

@@ -11,6 +11,11 @@
 #include "hid_core/hid_types.h"
 #include "hid_core/resources/npad/npad_types.h"
 
+namespace Service::Pulse {
+class StateReader;
+class StateWriter;
+} // namespace Service::Pulse
+
 namespace Service::HID {
 
 struct NpadStatus {
@@ -73,6 +78,10 @@ public:
                                     std::size_t style_index);
     Core::HID::NpadButton GetCaptureButtonAssignment(std::size_t style_index) const;
     std::size_t GetNpadCaptureButtonAssignmentList(std::span<Core::HID::NpadButton> out_list) const;
+
+    // Pulse: what the application configured, field by field.
+    void PulseSave(Pulse::StateWriter& out) const;
+    void PulseLoad(Pulse::StateReader& in);
 
 private:
     NpadStatus status{};

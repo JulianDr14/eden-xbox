@@ -14,6 +14,7 @@
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/nvdrv/core/nvmap.h"
+#include "core/hle/service/nvdrv/core/syncpoint_manager.h"
 #include "core/hle/service/nvdrv/devices/nvdevice.h"
 #include "core/hle/service/pulse_service.h"
 #include "core/hle/service/nvdrv/nvdata.h"
@@ -256,6 +257,38 @@ void NVDRV::PulseCapture(Pulse::HandlerCapture& capture) const {
         if (!pulse_fds.empty()) throw Pulse::ServiceRejected(false, "nvdrv fds without a session");
         return;
     }
+    // Syncpoints and handles go first: a restored device pins handles and adopts its syncpoint.
+    // Syncpoints are shared by the container; restoring them twice is harmless.
+    const auto syncpoints = nvdrv->GetContainer().GetSyncpointManager().PulseSyncpoints();
+    out.U32(static_cast<u32>(syncpoints.size()));
+    for (const auto& syncpoint : syncpoints) {
+        out.U32(syncpoint.id);
+        out.U32(syncpoint.counter_min);
+        out.U32(syncpoint.counter_max);
+        out.Bool(syncpoint.interface_managed);
+        out.U32(syncpoint.guest_value);
+        out.U32(syncpoint.host_value);
+    }
+    auto& nvmap = nvdrv->GetContainer().GetNvMapFile();
+    std::vector<NvCore::NvMap::PulseHandle> handles;
+    for (const auto& handle : nvmap.PulseHandles()) {
+        // An unallocated handle has no session yet; nothing but this one creates handles here.
+        if (!handle.allocated || handle.session == session_id.id) handles.push_back(handle);
+    }
+    out.U32(nvmap.PulseNextId());
+    out.U32(static_cast<u32>(handles.size()));
+    for (const auto& handle : handles) {
+        out.U32(handle.id);
+        out.U64(handle.size);
+        out.U64(handle.aligned_size);
+        out.U64(handle.orig_size);
+        out.U64(handle.align);
+        out.U32(handle.flags);
+        out.U64(handle.address);
+        out.U8(handle.kind);
+        out.Bool(handle.allocated);
+        out.S32(handle.dupes);
+    }
     out.S32(nvdrv->PulseNextFd());
     out.U32(static_cast<u32>(pulse_fds.size()));
     for (const auto fd : pulse_fds) {
@@ -279,26 +312,6 @@ void NVDRV::PulseCapture(Pulse::HandlerCapture& capture) const {
             capture.ExportEvent((static_cast<u32>(fd) << 8) | index, event);
         }
     }
-    auto& nvmap = nvdrv->GetContainer().GetNvMapFile();
-    std::vector<NvCore::NvMap::PulseHandle> handles;
-    for (const auto& handle : nvmap.PulseHandles()) {
-        // An unallocated handle has no session yet; nothing but this one creates handles here.
-        if (!handle.allocated || handle.session == session_id.id) handles.push_back(handle);
-    }
-    out.U32(nvmap.PulseNextId());
-    out.U32(static_cast<u32>(handles.size()));
-    for (const auto& handle : handles) {
-        out.U32(handle.id);
-        out.U64(handle.size);
-        out.U64(handle.aligned_size);
-        out.U64(handle.orig_size);
-        out.U64(handle.align);
-        out.U32(handle.flags);
-        out.U64(handle.address);
-        out.U8(handle.kind);
-        out.Bool(handle.allocated);
-        out.S32(handle.dupes);
-    }
 }
 
 Kernel::KEvent* NVDRV::PulseEvent(u32 slot) {
@@ -321,20 +334,18 @@ SessionRequestHandlerPtr NVDRV::PulseRestore(std::string_view kind, Pulse::Handl
     session_id = container.OpenSession(restore.process);
     is_initialized = true;
 
-    const auto next_fd = in.S32();
-    const auto fd_count = in.Count(12);
-    for (u32 i = 0; i < fd_count; ++i) {
-        const auto fd = in.S32();
-        const auto name = in.String();
-        std::vector<u8> device_state(in.Count(1));
-        in.Bytes(device_state);
-        auto device = nvdrv->PulseOpen(fd, name, session_id);
-        pulse_fds.insert(fd);
-        Pulse::StateReader device_in{device_state};
-        device->PulseRestore(fd, device_in);
-        device_in.End();
+    auto& syncpoint_manager = container.GetSyncpointManager();
+    const auto syncpoint_count = in.Count(21);
+    for (u32 i = 0; i < syncpoint_count; ++i) {
+        NvCore::SyncpointManager::PulseSyncpoint syncpoint;
+        syncpoint.id = in.U32();
+        syncpoint.counter_min = in.U32();
+        syncpoint.counter_max = in.U32();
+        syncpoint.interface_managed = in.Bool();
+        syncpoint.guest_value = in.U32();
+        syncpoint.host_value = in.U32();
+        syncpoint_manager.PulseRestore(syncpoint);
     }
-    nvdrv->PulseRaiseNextFd(next_fd);
 
     auto& nvmap = container.GetNvMapFile();
     const auto next_id = in.U32();
@@ -364,6 +375,24 @@ SessionRequestHandlerPtr NVDRV::PulseRestore(std::string_view kind, Pulse::Handl
         }
     }
     nvmap.PulseRaiseNextId(next_id);
+
+    const auto next_fd = in.S32();
+    const auto fd_count = in.Count(12);
+    for (u32 i = 0; i < fd_count; ++i) {
+        const auto fd = in.S32();
+        const auto name = in.String();
+        std::vector<u8> device_state(in.Count(1));
+        in.Bytes(device_state);
+        auto device = nvdrv->PulseOpen(fd, name, session_id);
+        pulse_fds.insert(fd);
+        Pulse::StateReader device_in{device_state};
+        device->PulseRestore(fd, device_in);
+        device_in.End();
+    }
+    nvdrv->PulseRaiseNextFd(next_fd);
+    for (const auto fd : pulse_fds) {
+        nvdrv->GetDevice<Devices::nvdevice>(fd)->PulseLink(fd, *nvdrv);
+    }
     in.End();
     return shared_from_this();
 }

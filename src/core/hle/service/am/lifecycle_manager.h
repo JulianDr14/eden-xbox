@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <array>
 #include <list>
 
 #include "core/hle/service/am/am_types.h"
@@ -14,6 +15,11 @@
 namespace Core {
 class System;
 }
+
+namespace Service::Pulse {
+class StateReader;
+class StateWriter;
+} // namespace Service::Pulse
 
 namespace Service::AM {
 
@@ -147,9 +153,17 @@ public:
 
     void ResetForRelaunch();
 
+    // Pulse: the pending messages, the focus and the notification state. The events keep the
+    // signal they had at capture, restored apart.
+    void PulseSave(Pulse::StateWriter& out) const;
+    void PulseLoad(Pulse::StateReader& in);
+
 private:
     FocusState GetFocusStateWhileForegroundObscured() const;
     FocusState GetFocusStateWhileBackground(bool is_obscured) const;
+
+private:
+    std::array<bool*, 23> PulseFlags();
 
 private:
     AppletMessage PopMessageInOrderOfPriority();

@@ -21,6 +21,11 @@ public:
     explicit IRS(Core::System& system_);
     ~IRS() override;
 
+    // Pulse: a stateless root; an image processor the guest ran is not restored.
+    std::string_view PulseKind() const override {
+        return "IRS";
+    }
+
 private:
     // This is nn::irsensor::detail::AruidFormat
     struct AruidFormat {

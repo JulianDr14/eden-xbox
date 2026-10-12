@@ -26,6 +26,19 @@ public:
                           u32 device_num);
     ~IAudioDevice() override;
 
+    // Pulse: what it was opened with; the device list and volumes belong to the host.
+    std::string_view PulseKind() const override {
+        return "IAudioDevice";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.state.U64(pulse_aruid);
+        capture.state.U32(pulse_revision);
+        capture.ExportEvent(0, event);
+    }
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 ? event : nullptr;
+    }
+
 private:
     Result ListAudioDeviceName(
         OutArray<AudioDevice::AudioDeviceName, BufferAttr_HipcMapAlias> out_names,
@@ -58,6 +71,8 @@ private:
     KernelHelpers::ServiceContext service_context;
     std::unique_ptr<AudioCore::Renderer::AudioDevice> impl;
     Kernel::KEvent* event;
+    u64 pulse_aruid;
+    u32 pulse_revision;
 };
 
 } // namespace Service::Audio

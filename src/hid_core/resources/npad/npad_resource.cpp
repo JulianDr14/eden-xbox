@@ -6,6 +6,7 @@
 
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_readable_event.h"
+#include "core/hle/service/pulse_service.h"
 #include "hid_core/hid_result.h"
 #include "hid_core/hid_util.h"
 #include "hid_core/resources/npad/npad_resource.h"
@@ -696,6 +697,35 @@ Result NPadResource::SetNpadSystemExtStateEnabled(u64 aruid, bool is_enabled) {
         active_data.SetNpadAnalogStickUseCenterClamp(is_enabled);
     }
     return ResultSuccess;
+}
+
+bool NPadResource::PulseSave(u64 aruid, Pulse::StateWriter& out) const {
+    const u64 aruid_index = GetIndexFromAruid(aruid);
+    if (aruid_index >= AruidIndexMax) return false;
+    out.U32(static_cast<u32>(state[aruid_index].npad_revision));
+    state[aruid_index].data.PulseSave(out);
+    return true;
+}
+
+void NPadResource::PulseLoad(u64 aruid, Pulse::StateReader& in) {
+    const u64 aruid_index = GetIndexFromAruid(aruid);
+    if (aruid_index >= AruidIndexMax) throw std::invalid_argument("Pulse: npad aruid not registered");
+    const u32 revision = in.U32();
+    if (revision > static_cast<u32>(NpadRevision::Revision3)) {
+        throw std::invalid_argument("Pulse: npad revision");
+    }
+    state[aruid_index].npad_revision = static_cast<NpadRevision>(revision);
+    state[aruid_index].data.PulseLoad(in);
+    if (active_data_aruid == aruid) active_data = state[aruid_index].data;
+}
+
+const Kernel::KEvent* NPadResource::PulseStyleSetEvent(u64 aruid, std::size_t npad_index) const {
+    const u64 aruid_index = GetIndexFromAruid(aruid);
+    if (aruid_index >= AruidIndexMax || npad_index >= MaxSupportedNpadIdTypes) return nullptr;
+    const auto& controller_state = state[aruid_index].controller_state[npad_index];
+    return controller_state.is_styleset_update_event_initialized
+               ? controller_state.style_set_update_event
+               : nullptr;
 }
 
 } // namespace Service::HID

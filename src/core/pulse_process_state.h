@@ -243,7 +243,14 @@ enum class ObjectKind : u32 {
     ClientSession = 4,
     ServiceHandler = 5,
     ServiceEvent = 6,
+    // A service's or the kernel's shared memory, by owner key, with the guest's mappings of it.
+    SharedMemory = 7,
+    // Application heap lent through svcCreateTransferMemory: address, size, owner permission.
+    TransferMemory = 8,
 };
+inline constexpr size_t SharedMemoryPayloadHeader = 16; // u32 key kind, u32 count, u64 key argument
+inline constexpr size_t SharedMappingSize = 20;         // u64 address, u64 size, u32 permission
+inline constexpr size_t TransferMemoryPayload = 20;     // u64 address, u64 size, u32 permission
 inline constexpr u64 ProcessObjectId = 1;
 inline constexpr size_t MaxObjectPayload = (1U << 20) + 4096;
 
@@ -269,18 +276,26 @@ inline void ValidateObjects(std::span<const ObjectRecord> records) {
     for (const auto& r : records) {
         const bool with_payload = r.kind == ObjectKind::ClientSession ||
                                   r.kind == ObjectKind::ServiceHandler ||
-                                  r.kind == ObjectKind::ServiceEvent;
+                                  r.kind == ObjectKind::ServiceEvent ||
+                                  r.kind == ObjectKind::SharedMemory ||
+                                  r.kind == ObjectKind::TransferMemory;
         if (!r.id || !ids.insert(r.id).second || r.payload.size() > MaxObjectPayload ||
             r.flags > 1 || (r.flags && r.kind != ObjectKind::ReadableEvent) ||
             (r.parent && r.kind != ObjectKind::ReadableEvent && r.kind != ObjectKind::ServiceEvent) ||
             with_payload == r.payload.empty() ||
             (r.kind == ObjectKind::ServiceEvent && r.payload.size() != 4) ||
+            (r.kind == ObjectKind::SharedMemory &&
+             (r.payload.size() < SharedMemoryPayloadHeader ||
+              (r.payload.size() - SharedMemoryPayloadHeader) % SharedMappingSize != 0)) ||
+            (r.kind == ObjectKind::TransferMemory && r.payload.size() != TransferMemoryPayload) ||
             ((r.kind == ObjectKind::Process) != (r.id == ProcessObjectId))) {
             Invalid("Pulse: malformed kernel object record");
         }
         switch (r.kind) {
         case ObjectKind::Process:
         case ObjectKind::ClientSession:
+        case ObjectKind::SharedMemory:
+        case ObjectKind::TransferMemory:
             break;
         case ObjectKind::ServiceHandler:
             handlers.insert(r.id);

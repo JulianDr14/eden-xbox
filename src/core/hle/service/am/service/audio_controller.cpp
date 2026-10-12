@@ -70,4 +70,19 @@ Result IAudioController::SetTransparentVolumeRate(f32 transparent_volume_rate) {
     R_SUCCEED();
 }
 
+void IAudioController::PulseCapture(Pulse::HandlerCapture& capture) const {
+    PulseReferenceRoot(system, capture);
+    capture.state.Raw(m_main_applet_volume);
+    capture.state.Raw(m_library_applet_volume);
+    capture.state.Raw(m_transparent_volume_rate);
+    capture.state.S64(m_fade_time_ns.count());
+}
+
+void IAudioController::PulseLoad(Pulse::StateReader& in) {
+    m_main_applet_volume = in.Raw<float>();
+    m_library_applet_volume = in.Raw<float>();
+    m_transparent_volume_rate = in.Raw<float>();
+    m_fade_time_ns = std::chrono::nanoseconds{in.S64()};
+}
+
 } // namespace Service::AM

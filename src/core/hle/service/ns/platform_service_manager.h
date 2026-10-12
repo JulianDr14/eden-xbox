@@ -57,6 +57,11 @@ public:
     explicit IPlatformServiceManager(Core::System& system_, const char* service_name_);
     ~IPlatformServiceManager() override;
 
+    // Pulse: no state of its own; the font content is refilled with its shared memory.
+    std::string_view PulseKind() const override {
+        return "IPlatformServiceManager";
+    }
+
 private:
     Result RequestLoad(SharedFontType type);
     Result GetLoadState(Out<LoadState> out_load_state, SharedFontType type);
@@ -74,6 +79,10 @@ private:
     static std::shared_ptr<Impl> LoadSharedFonts(Core::System& system);
 
     std::shared_ptr<Impl> impl;
+
+public:
+    // Pulse restore: the font shared memory holds what GetSharedMemoryNativeHandle wrote.
+    void PulseFillSharedFont();
 };
 
 } // namespace NS

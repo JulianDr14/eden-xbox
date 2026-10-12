@@ -7,6 +7,7 @@
 #pragma once
 
 #include "core/hle/service/cmif_types.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 
 namespace Service::AM {
@@ -17,6 +18,13 @@ class IDisplayController final : public ServiceFramework<IDisplayController> {
 public:
     explicit IDisplayController(Core::System& system_, std::shared_ptr<Applet> applet_);
     ~IDisplayController() override;
+
+    std::string_view PulseKind() const override {
+        return "IDisplayController";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        PulseReferenceRoot(system, capture);
+    }
 
 private:
     Result GetLastForegroundCaptureImageEx(Out<bool> out_was_written,

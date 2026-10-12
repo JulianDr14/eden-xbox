@@ -70,9 +70,6 @@ IApplicationDisplayService::~IApplicationDisplayService() {
 
 void IApplicationDisplayService::PulseCapture(Pulse::HandlerCapture& capture) const {
     std::scoped_lock lk{m_lock};
-    if (!m_open_layer_ids.empty()) {
-        throw Pulse::ServiceRejected(false, "vi managed layers have no serializer");
-    }
     auto& out = capture.state;
 
     // The nvmap handles behind the layers' buffers are restored first.
@@ -83,6 +80,16 @@ void IApplicationDisplayService::PulseCapture(Pulse::HandlerCapture& capture) co
     }
     out.U32(static_cast<u32>(nvdrv_refs.size()));
     for (const u64 ref : nvdrv_refs) out.U64(ref);
+
+    // The managed layers opened here are am's: it recreates them, closed, before this reopens them.
+    SessionRequestHandlerPtr am;
+    if (!m_open_layer_ids.empty()) {
+        am = system.ServiceManager().GetService<SessionRequestHandler>("appletOE");
+        if (!am) throw Pulse::ServiceRejected(false, "vi managed layers without am");
+    }
+    out.U64(capture.Reference(am));
+    out.U32(static_cast<u32>(m_open_layer_ids.size()));
+    for (const u64 layer_id : m_open_layer_ids) out.U64(layer_id);
 
     const auto [next_layer, last_binder] = m_container->PulseNextIds();
     out.U64(next_layer);
@@ -140,6 +147,9 @@ SessionRequestHandlerPtr IApplicationDisplayService::PulseRestoreFrom(
     auto& in = restore.state;
     const auto refs = in.Count(8);
     for (u32 i = 0; i < refs; ++i) restore.Resolve(in.U64());
+    restore.Resolve(in.U64());
+    std::vector<u64> open_layers(in.Count(8));
+    for (auto& layer_id : open_layers) layer_id = in.U64();
 
     auto service = std::make_shared<IApplicationDisplayService>(system, container);
     const u64 next_layer = in.U64();
@@ -184,6 +194,10 @@ SessionRequestHandlerPtr IApplicationDisplayService::PulseRestoreFrom(
 
         server->PulseSetRefcounts(layer.consumer_binder_id, counts[0], counts[1]);
         server->PulseSetRefcounts(layer.producer_binder_id, counts[2], counts[3]);
+    }
+    for (const u64 layer_id : open_layers) {
+        container->PulseOpenLayer(layer_id);
+        service->m_open_layer_ids.insert(layer_id);
     }
     in.End();
     container->PulseRaiseNextIds(next_layer, last_binder);

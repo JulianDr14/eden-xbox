@@ -22,6 +22,9 @@ class System;
 
 namespace Tegra {
 class MemoryManager;
+namespace Control {
+struct ChannelState;
+}
 }
 
 namespace VideoCore {
@@ -99,6 +102,8 @@ public:
  */
 
 class MaxwellDMA final : public EngineInterface {
+    friend struct Control::ChannelState; // Pulse checkpoints
+
 public:
     struct PackedGPUVAddr {
         u32 upper;

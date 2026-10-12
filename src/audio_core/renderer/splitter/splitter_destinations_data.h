@@ -189,6 +189,8 @@ public:
     std::span<const BiquadFilterParameter2> GetBiquadFilters() const;
 
 private:
+    friend class System; // Pulse checkpoints
+
     /// Id of this destination
     const s32 id;
     /// Mix id this destination represents

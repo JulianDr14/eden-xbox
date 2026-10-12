@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include <boost/intrusive/rbtree.hpp>
 
 #include "common/common_funcs.h"
@@ -29,6 +31,8 @@ public:
     void Register(KAutoObjectWithList* obj);
     void Unregister(KAutoObjectWithList* obj);
     size_t GetOwnedCount(KProcess* owner);
+    /// Pulse capture: every listed object the process owns.
+    std::vector<KAutoObjectWithList*> GetOwned(KProcess* owner);
 
 private:
     KSpinLock m_lock;

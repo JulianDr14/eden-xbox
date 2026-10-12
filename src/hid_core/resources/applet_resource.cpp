@@ -160,6 +160,17 @@ Result AppletResource::GetSharedMemoryHandle(Kernel::KSharedMemory** out_handle,
     return ResultSuccess;
 }
 
+std::optional<u64> AppletResource::PulseFindSharedMemory(
+    const Kernel::KSharedMemory* shared_memory) const {
+    for (std::size_t i = 0; i < AruidIndexMax; i++) {
+        if (registration_list.flag[i] == RegistrationStatus::Initialized &&
+            shared_memory_holder[i].shared_memory == shared_memory) {
+            return registration_list.aruid[i];
+        }
+    }
+    return std::nullopt;
+}
+
 Result AppletResource::GetSharedMemoryFormat(SharedMemoryFormat** out_shared_memory_format,
                                              u64 aruid) {
     const u64 index = GetIndexFromAruid(aruid);

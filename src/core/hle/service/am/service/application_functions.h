@@ -9,6 +9,7 @@
 #include "common/uuid.h"
 #include "core/hle/service/am/am_types.h"
 #include "core/hle/service/cmif_types.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 
 namespace FileSys {
@@ -28,6 +29,13 @@ class IApplicationFunctions final : public ServiceFramework<IApplicationFunction
 public:
     explicit IApplicationFunctions(Core::System& system_, std::shared_ptr<Applet> applet);
     ~IApplicationFunctions() override;
+
+    std::string_view PulseKind() const override {
+        return "IApplicationFunctions";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        PulseReferenceRoot(system, capture);
+    }
 
 private:
     Result PopLaunchParameter(Out<SharedPointer<IStorage>> out_storage,

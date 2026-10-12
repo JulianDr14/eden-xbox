@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2022 Skyline Team and Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <stdexcept>
+
 #include "common/assert.h"
 #include "core/hle/service/nvdrv/core/syncpoint_manager.h"
 #include "video_core/host1x/host1x.h"
@@ -130,6 +132,55 @@ NvFence SyncpointManager::GetSyncpointFence(u32 id) {
         .id = static_cast<s32>(id),
         .value = syncpoint.counter_max,
     };
+}
+
+std::vector<SyncpointManager::PulseSyncpoint> SyncpointManager::PulseSyncpoints() const {
+    std::vector<PulseSyncpoint> out;
+    const auto& values = host1x.GetSyncpointManager();
+    for (u32 id = 0; id < SyncpointCount; ++id) {
+        const auto& syncpoint = syncpoints[id];
+        if (!syncpoint.reserved) continue;
+        out.push_back({
+            .id = id,
+            .counter_min = syncpoint.counter_min.load(),
+            .counter_max = syncpoint.counter_max.load(),
+            .interface_managed = syncpoint.interface_managed,
+            .guest_value = values.GetGuestSyncpointValue(id),
+            .host_value = values.GetHostSyncpointValue(id),
+        });
+    }
+    return out;
+}
+
+void SyncpointManager::PulseRestore(const PulseSyncpoint& state) {
+    if (state.id == 0 || state.id >= SyncpointCount) {
+        throw std::invalid_argument("Pulse: syncpoint id out of range");
+    }
+    {
+        std::lock_guard lock(reservation_lock);
+        auto& syncpoint = syncpoints[state.id];
+        if (!syncpoint.reserved) {
+            syncpoint.reserved = true;
+            syncpoint.interface_managed = state.interface_managed;
+        }
+        // Counters only grow: one the fresh boot already moved past the capture keeps its value.
+        if (static_cast<s32>(state.counter_min - syncpoint.counter_min) > 0) {
+            syncpoint.counter_min = state.counter_min;
+        }
+        if (static_cast<s32>(state.counter_max - syncpoint.counter_max) > 0) {
+            syncpoint.counter_max = state.counter_max;
+        }
+    }
+    host1x.GetSyncpointManager().PulseRaise(state.id, state.guest_value, state.host_value);
+}
+
+u32 SyncpointManager::PulseAdopt(u32 allocated, u32 captured) {
+    if (allocated == captured) return captured;
+    if (captured == 0 || captured >= SyncpointCount || !syncpoints[captured].reserved) {
+        throw std::invalid_argument("Pulse: a device syncpoint was not restored");
+    }
+    FreeSyncpoint(allocated);
+    return captured;
 }
 
 } // namespace Service::Nvidia::NvCore

@@ -12,6 +12,7 @@
 #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
 #include "core/hle/service/nvdrv/devices/nvhost_ctrl_gpu.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
+#include "core/hle/service/pulse_service.h"
 
 namespace Service::Nvidia::Devices {
 
@@ -377,6 +378,32 @@ NvResult nvhost_ctrl_gpu::GetGpuTime(IoctlGetGpuTime& params) {
     LOG_DEBUG(Service_NVDRV, "called");
     params.gpu_time = static_cast<u64_le>(system.CoreTiming().GetGlobalTimeNs().count());
     return NvResult::Success;
+}
+
+bool nvhost_ctrl_gpu::PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const {
+    std::scoped_lock lk(zbc_mutex);
+    out.U32(static_cast<u32>(zbc_colors.size()));
+    for (const auto& entry : zbc_colors) out.Raw(entry);
+    out.U32(static_cast<u32>(zbc_depths.size()));
+    for (const auto& entry : zbc_depths) out.Raw(entry);
+    return true;
+}
+
+void nvhost_ctrl_gpu::PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) {
+    std::scoped_lock lk(zbc_mutex);
+    zbc_colors.resize(in.Count(sizeof(ZbcColorEntry)));
+    for (auto& entry : zbc_colors) entry = in.Raw<ZbcColorEntry>();
+    zbc_depths.resize(in.Count(sizeof(ZbcDepthEntry)));
+    for (auto& entry : zbc_depths) entry = in.Raw<ZbcDepthEntry>();
+}
+
+void nvhost_ctrl_gpu::PulseEvents(std::vector<std::pair<u32, Kernel::KEvent*>>& out) const {
+    out.emplace_back(1, error_notifier_event);
+    out.emplace_back(2, unknown_event);
+}
+
+Kernel::KEvent* nvhost_ctrl_gpu::PulseEvent(u32 index) {
+    return index == 1 ? error_notifier_event : index == 2 ? unknown_event : nullptr;
 }
 
 Kernel::KEvent* nvhost_ctrl_gpu::QueryEvent(u32 event_id) {

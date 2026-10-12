@@ -1,10 +1,11 @@
 # Pulse: sesiones persistentes (11 oct 2026)
 
-Estado: fases 1–4 implementadas. La biblioteca guarda la sesión al volver al
-inicio y la reanuda al elegir el juego (fase 4, abajo). Homebrew con vídeo, audio
-y archivos se reanuda; los juegos comerciales se **rechazan con motivo** hasta la
-fase 5 (faltan serializadores de GPU, HID, AM y más servicios). No cambia el
-nombre del emulador. Sin commits automáticos.
+Estado: fases 1–4 implementadas y fase 5 en curso. La biblioteca guarda la sesión
+al volver al inicio y la reanuda al elegir el juego (fase 4, abajo). Homebrew con
+vídeo, audio y archivos se reanuda. La fase 5 añade GPU, audren, HID y AM (abajo),
+pero aún sin probar en la Series; un juego que use un servicio sin serializador
+sigue **rechazándose con motivo**. No cambia el nombre del emulador. Sin commits
+automáticos.
 
 ## Contrato de producto aprobado
 
@@ -190,7 +191,7 @@ Nada del archivo es puntero, handle host ni código JIT.
 | ID | Sección | Contenido |
 |---|---|---|
 | 0x10 | Process | programa, PID, pin de layout, pila principal, heap, mapa de memoria normalizado, alias de pilas (`MapMemory`), rangos de contenido |
-| 0x20 | Objects | KEvent/KReadableEvent (señalado) y sesiones `sm:` con su grafo de sesión |
+| 0x20 | Objects | KEvent/KReadableEvent (señalado), sesiones con su grafo, handlers y eventos de servicio (5, 6), memoria compartida por dueño con sus mapeos (7) y memoria de transferencia: dirección, tamaño y permiso (8) |
 | 0x30 | Threads | ID de grafo, ID de hilo, TLS, estado, prioridad base, núcleo ideal, afinidad, pausa del guest, contexto ARM |
 | 0x40 | Memory | páginas legibles, una copia por página física (los alias no se duplican) |
 | 0x50 | Handles | tabla de handles con generaciones y lista libre |
@@ -202,7 +203,8 @@ Captura (sistema en pausa): un hilo dentro de un SVC (`is_calling_svc`, ahora
 mantenido por `Svc::Call`) o esperando IPC/un lock interno se rechaza como
 **reintentable**: el llamador hace Run unos ms y vuelve a capturar. Todo lo que no
 tiene serializador se rechaza **sin reintento**: objetos distintos de los anteriores,
-sesiones a servicios que no son `sm:`, memoria compartida/transferida/física,
+servicios sin serializador, memoria compartida de un dueño no reconocido, memoria
+de transferencia de otro proceso, memoria física,
 estados de memoria fuera de código/heap/pila/TLS, eventos de timing con nombre
 repetido, suspensión de depurador o proceso, procesos de 32 bits.
 
@@ -403,10 +405,61 @@ actualizado: faltaba la fila de estadísticas).
 
 ### Límites honestos (fase 5)
 
-- Un juego comercial casi siempre se rechazará al volver al inicio: faltan
-  serializadores de GPU (canales, syncpoints, memoria de GPU), HID, AM/applets,
-  capas gestionadas por vi y más servicios. El motivo se muestra y se sale sin
-  sesión; el juego no se pierde porque las partidas normales no se tocan.
+- Un juego comercial aún puede rechazarse al volver al inicio si usa un servicio
+  sin serializador (set, time, acc, apm, pctl, friends…; ver fase 5). El motivo se
+  muestra y se sale sin sesión; el juego no se pierde porque las partidas normales
+  no se tocan.
 - La reanudación tarda lo que la restauración (≈3 s en la Series) más la carga.
 - El cierre forzado durante el juego no deja sesión: la garantía empieza al
   completar la vuelta al inicio.
+
+## Fase 5: servicios de juegos (12 oct 2026)
+
+Misma política que la fase 3: guardar solo lo que el juego observa y regenerar el
+resto. Compila para UWP; **no está probado en la Series**.
+
+- **Memoria compartida (kind 7)**: nunca se guarda su contenido; se nombra al
+  dueño (fuente de `pl:u`, IRS, time, hidbus, HID por aruid) y la restauración
+  mapea la memoria del System nuevo en las mismas direcciones. La fuente se vuelve
+  a rellenar. Un dueño desconocido se rechaza.
+- **Memoria de transferencia (kind 8)**: heap del juego prestado con
+  `svcCreateTransferMemory`; se guardan dirección, tamaño y permiso, y el contenido
+  viaja con el heap.
+- **GPU**: antes de capturar se vacía la GPU y se vuelcan sus escrituras a la
+  memoria del guest. Se guardan el espacio de direcciones de `nvhost-as-gpu`
+  (reservas, mapeos y remapeos por handle nvmap), los canales con su syncpoint y
+  el estado de motores que dejó el juego, y los valores de syncpoint de host1x.
+  Las cachés del host (texturas, shaders, buffers) no se guardan: se reconstruyen.
+- **audren**: solo el estado lógico del renderer (parámetros, voces, mezclas,
+  efectos, splitters); los buffers del backend se regeneran.
+- **HID**: estilos de npad soportados, asignaciones que fijó el juego (modo de
+  mano, sujeción, modo de asignación por mando) y los eventos de cambio de estilo.
+  La memoria compartida de HID es la del System nuevo para el mismo aruid.
+- **AM**: la raíz `appletOE` guarda el estado del applet de la aplicación: cola de
+  mensajes, foco y estado de actividad, flags de notificación, canales de
+  parámetros, pila de contexto, bloqueo de salida, permisos de captura, volúmenes,
+  etc., y exporta los eventos que entregan sus interfaces. Las interfaces hijas no
+  tienen estado propio: referencian la raíz, que las reconstruye. El idioma se
+  calcula de nuevo; si el modo de operación o de rendimiento cambió desde la
+  captura, el juego recibe la notificación de cambio.
+- **Capas gestionadas**: AM guarda cada capa gestionada (ids, propiedades, refcounts
+  y cola del productor) y la recrea cerrada; vi referencia AM y vuelve a abrir las
+  que el juego tenía abiertas.
+- **Rechazos reintentables**: un applet de biblioteca abierto (teclado, selector de
+  usuario…), un accesor de `IStorage` abierto o el applet ocupado. El motivo se
+  muestra y se puede volver a intentar al cerrarlo.
+
+### Límites honestos (fase 5)
+
+- Sin evidencia en consola todavía: todo lo anterior compila, nada más.
+- Servicios sin serializador (set, time, acc, apm, pctl, friends, nifm…) siguen
+  rechazando sin reintento. Es probable que el siguiente rechazo de un juego real
+  venga de ahí.
+- La memoria de transferencia que solo retiene un servicio, sin mapeo en el
+  proceso, no se cubre.
+- IRS y hidbus se restauran sin estado; la vibración no se restaura.
+- Un `IStorage` respaldado por memoria de transferencia vuelve como copia en un
+  buffer.
+- La capa de buffer compartido del sistema (applets de biblioteca) no tiene
+  serializador.
+- Las capturas anteriores a este formato no se pueden leer (vi y AM cambiaron).

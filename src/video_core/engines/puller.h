@@ -43,6 +43,8 @@ class RasterizerInterface;
 namespace Tegra::Engines {
 
 class Puller final {
+    friend struct Control::ChannelState; // Pulse checkpoints
+
 public:
     struct MethodCall {
         u32 method{};

@@ -90,6 +90,8 @@ public:
     void SetDestinations(SplitterDestinationData* destinations);
 
 private:
+    friend class System; // Pulse checkpoints
+
     /// Id of this splitter
     s32 id;
     /// Sample rate of this splitter

@@ -6,6 +6,7 @@
 
 #include "common/assert.h"
 #include "core/hle/service/am/lifecycle_manager.h"
+#include "core/hle/service/pulse_service.h"
 
 namespace Service::AM {
 
@@ -397,6 +398,65 @@ bool LifecycleManager::UpdateRequestedFocusState() {
 
     // We didn't change the focus state.
     return false;
+}
+
+std::array<bool*, 23> LifecycleManager::PulseFlags() {
+    return {&m_focus_state_changed_notification_enabled,
+            &m_operation_mode_changed_notification_enabled,
+            &m_hdcp_state_changed_notification_enabled,
+            &m_performance_mode_changed_notification_enabled,
+            &m_resume_notification_enabled,
+            &m_requested_request_to_display_state,
+            &m_acknowledged_request_to_display_state,
+            &m_has_resume,
+            &m_has_focus_state_changed,
+            &m_has_album_recording_saved,
+            &m_has_album_screen_shot_taken,
+            &m_has_auto_power_down,
+            &m_has_sleep_required_by_low_battery,
+            &m_has_sleep_required_by_high_temperature,
+            &m_has_sd_card_removed,
+            &m_has_performance_mode_changed,
+            &m_has_operation_mode_changed,
+            &m_has_requested_request_to_prepare_sleep,
+            &m_has_acknowledged_request_to_prepare_sleep,
+            &m_has_requested_exit,
+            &m_has_acknowledged_exit,
+            &m_applet_message_available,
+            &m_forced_suspend};
+}
+
+void LifecycleManager::PulseSave(Pulse::StateWriter& out) const {
+    out.U32(static_cast<u32>(m_unordered_messages.size()));
+    for (const auto message : m_unordered_messages) out.U32(static_cast<u32>(message));
+    for (const bool* flag : const_cast<LifecycleManager*>(this)->PulseFlags()) out.Bool(*flag);
+    out.U32(static_cast<u32>(m_focus_handling_mode));
+    out.U32(static_cast<u32>(m_activity_state));
+    out.U32(static_cast<u32>(m_suspend_mode));
+    out.U8(static_cast<u8>(m_requested_focus_state));
+    out.U8(static_cast<u8>(m_acknowledged_focus_state));
+}
+
+void LifecycleManager::PulseLoad(Pulse::StateReader& in) {
+    m_unordered_messages.clear();
+    const auto messages = in.Count(4);
+    for (u32 i = 0; i < messages; ++i) {
+        m_unordered_messages.push_back(static_cast<AppletMessage>(in.U32()));
+    }
+    for (bool* flag : this->PulseFlags()) *flag = in.Bool();
+    const auto focus_handling = in.U32();
+    const auto activity = in.U32();
+    const auto suspend = in.U32();
+    if (focus_handling > static_cast<u32>(FocusHandlingMode::NoSuspend) ||
+        activity > static_cast<u32>(ActivityState::BackgroundObscured) ||
+        suspend > static_cast<u32>(SuspendMode::ForceSuspend)) {
+        throw std::invalid_argument("Pulse: am lifecycle state");
+    }
+    m_focus_handling_mode = static_cast<FocusHandlingMode>(focus_handling);
+    m_activity_state = static_cast<ActivityState>(activity);
+    m_suspend_mode = static_cast<SuspendMode>(suspend);
+    m_requested_focus_state = static_cast<FocusState>(in.U8());
+    m_acknowledged_focus_state = static_cast<FocusState>(in.U8());
 }
 
 } // namespace Service::AM

@@ -324,6 +324,25 @@ Result ResourceManager::GetSharedMemoryHandle(Kernel::KSharedMemory** out_handle
     return applet_resource->GetSharedMemoryHandle(out_handle, aruid);
 }
 
+std::optional<u64> ResourceManager::PulseFindSharedMemory(
+    const Kernel::KSharedMemory* shared_memory) {
+    std::scoped_lock lock{shared_mutex};
+    return applet_resource->PulseFindSharedMemory(shared_memory);
+}
+
+Kernel::KSharedMemory* ResourceManager::PulseSharedMemory(u64 aruid) {
+    if (applet_resource->GetIndexFromAruid(aruid) >= AruidIndexMax) {
+        if (RegisterAppletResourceUserId(aruid, true).IsError()) return nullptr;
+    }
+    const auto* data = applet_resource->GetAruidData(aruid);
+    if (!data || !data->flag.is_assigned) {
+        if (CreateAppletResource(aruid).IsError()) return nullptr;
+    }
+    Kernel::KSharedMemory* handle{};
+    if (GetSharedMemoryHandle(&handle, aruid).IsError()) return nullptr;
+    return handle;
+}
+
 void ResourceManager::FreeAppletResourceId(u64 aruid) {
     std::scoped_lock lock{shared_mutex};
     applet_resource->FreeAppletResourceId(aruid);

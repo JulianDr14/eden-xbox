@@ -9,6 +9,7 @@
 #include <array>
 #include <mutex>
 #include <memory>
+#include <optional>
 
 #include "common/bit_field.h"
 #include "common/common_types.h"
@@ -96,6 +97,8 @@ public:
 
     u64 GetActiveAruid();
     Result GetSharedMemoryHandle(Kernel::KSharedMemory** out_handle, u64 aruid);
+    // Pulse: the aruid whose shared memory this is, if any.
+    std::optional<u64> PulseFindSharedMemory(const Kernel::KSharedMemory* shared_memory) const;
     Result GetSharedMemoryFormat(SharedMemoryFormat** out_shared_memory_format, u64 aruid);
     AruidData* GetAruidData(u64 aruid);
     AruidData* GetAruidDataByIndex(std::size_t aruid_index);

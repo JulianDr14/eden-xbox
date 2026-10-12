@@ -18,8 +18,13 @@ KTransferMemory::KTransferMemory(KernelCore& kernel)
 KTransferMemory::~KTransferMemory() = default;
 
 Result KTransferMemory::Initialize(KernelCore& kernel, KProcessAddress addr, std::size_t size, Svc::MemoryPermission own_perm) {
+    R_RETURN(Initialize(kernel, GetCurrentProcessPointer(kernel), addr, size, own_perm));
+}
+
+Result KTransferMemory::Initialize(KernelCore& kernel, KProcess* owner, KProcessAddress addr,
+                                   std::size_t size, Svc::MemoryPermission own_perm) {
     // Set members.
-    m_owner = GetCurrentProcessPointer(kernel);
+    m_owner = owner;
 
     // Get the owner page table.
     auto& page_table = m_owner->GetPageTable();

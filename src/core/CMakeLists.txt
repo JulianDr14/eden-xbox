@@ -409,6 +409,7 @@ add_library(core STATIC
     hle/service/acc/profile_manager.h
     hle/service/am/am.cpp
     hle/service/am/am.h
+    hle/service/am/am_pulse.h
     hle/service/am/am_results.h
     hle/service/am/am_types.h
     hle/service/am/applet.cpp

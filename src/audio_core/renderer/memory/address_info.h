@@ -34,6 +34,10 @@ public:
      *
      * @return The CpuAddr address
      */
+    MemoryPoolInfo* GetPool() const {
+        return memory_pool;
+    }
+
     CpuAddr GetCpuAddr() const {
         return cpu_address;
     }

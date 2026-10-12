@@ -7,6 +7,8 @@
 #pragma once
 
 #include <memory>
+#include <span>
+#include <vector>
 
 #include "common/common_types.h"
 #include "video_core/engines/fermi_2d.h"
@@ -38,6 +40,13 @@ struct ChannelState {
     void Init(Core::System& system, u64 program_id);
 
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
+
+    /// Pulse checkpoints: what the guest set up on the engines (registers, uploaded macros, bound
+    /// subchannels), taken with the GPU idle. Host caches are not part of it: they rebuild from
+    /// the registers. Save throws std::runtime_error while a command or a macro is half fed;
+    /// Load needs an initialized channel and throws std::invalid_argument on malformed state.
+    std::vector<u8> PulseSave() const;
+    void PulseLoad(std::span<const u8> state);
 
     struct Payload {
         explicit Payload(Core::System& system, MemoryManager& memory_manager, ChannelState& channel_state);

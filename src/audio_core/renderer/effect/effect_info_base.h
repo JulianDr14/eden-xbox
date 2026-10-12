@@ -216,6 +216,11 @@ public:
         usage_state = usage;
     }
 
+    /// Pulse restore: the next update attaches the buffers again and starts a fresh state.
+    void PulseMarkUnmapped() {
+        buffer_unmapped = true;
+    }
+
     /**
      * Check if this effects need to have its workbuffer information updated.
      * Version 1.

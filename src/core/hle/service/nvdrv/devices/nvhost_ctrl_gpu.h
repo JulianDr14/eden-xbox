@@ -36,6 +36,12 @@ public:
 
     Kernel::KEvent* QueryEvent(u32 event_id) override;
 
+    // Pulse: the ZBC tables and the two events; the rest are queries of fixed GPU traits.
+    bool PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const override;
+    void PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) override;
+    void PulseEvents(std::vector<std::pair<u32, Kernel::KEvent*>>& out) const override;
+    Kernel::KEvent* PulseEvent(u32 index) override;
+
 private:
     enum class ZBCTypes {
         color = 1,
@@ -212,7 +218,7 @@ private:
     Kernel::KEvent* unknown_event;
 
     // ZBC Tables
-    std::mutex zbc_mutex{};
+    mutable std::mutex zbc_mutex{};
     std::vector<ZbcColorEntry> zbc_colors{};
     std::vector<ZbcDepthEntry> zbc_depths{};
     const u32 supported_types = 2u;

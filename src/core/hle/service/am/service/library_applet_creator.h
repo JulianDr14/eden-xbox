@@ -8,6 +8,7 @@
 
 #include "core/hle/service/am/am_types.h"
 #include "core/hle/service/cmif_types.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 
 namespace Service::AM {
@@ -22,6 +23,13 @@ public:
     explicit ILibraryAppletCreator(Core::System& system_, std::shared_ptr<Applet> applet,
                                    WindowSystem& window_system);
     ~ILibraryAppletCreator() override;
+
+    std::string_view PulseKind() const override {
+        return "ILibraryAppletCreator";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        PulseReferenceRoot(system, capture);
+    }
 
 private:
     Result CreateLibraryApplet(

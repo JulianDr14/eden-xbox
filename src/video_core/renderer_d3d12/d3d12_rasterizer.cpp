@@ -408,7 +408,7 @@ void RasterizerD3D12::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
 }
 void RasterizerD3D12::FlushAll() { scheduler.Finish(); }
 
-void RasterizerD3D12::MaterializeCheckpointMemory() {
+bool RasterizerD3D12::MaterializeCheckpointMemory() {
     // Do not hold a guest scheduler lock across these waits. This follows the renderer's existing
     // cache-lock order; callbacks retired by Scheduler must not take either cache mutex.
     scheduler.Finish();
@@ -430,6 +430,7 @@ void RasterizerD3D12::MaterializeCheckpointMemory() {
     scheduler.Finish();
     ThrowIfFailed(query_cache.GetDevice().Get()->GetDeviceRemovedReason(),
                   "Pulse materialize GPU memory");
+    return true;
 }
 
 void RasterizerD3D12::FlushRegion(DAddr address, u64 size, VideoCommon::CacheType which) {

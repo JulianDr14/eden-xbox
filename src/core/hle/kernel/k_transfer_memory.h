@@ -34,6 +34,9 @@ public:
     ~KTransferMemory() override;
 
     Result Initialize(KernelCore& kernel, KProcessAddress address, std::size_t size, Svc::MemoryPermission owner_perm);
+    // Pulse restore: the owner is named, the host thread has no current process.
+    Result Initialize(KernelCore& kernel, KProcess* owner, KProcessAddress address, std::size_t size,
+                      Svc::MemoryPermission owner_perm);
 
     void Finalize(KernelCore& kernel) override;
 
@@ -56,6 +59,13 @@ public:
     }
 
     size_t GetSize() const;
+
+    Svc::MemoryPermission GetOwnerPermission() const {
+        return m_owner_perm;
+    }
+    bool IsMapped() const {
+        return m_is_mapped;
+    }
 
     Result Map(KernelCore& kernel, KProcessAddress address, size_t size, Svc::MemoryPermission map_perm);
     Result Unmap(KernelCore& kernel, KProcessAddress address, size_t size);

@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 #include "common/common_types.h"
 #include "core/hle/service/nvdrv/nvdata.h"
@@ -88,6 +89,22 @@ public:
      * @return A fence that will be signalled once this syncpoint hits its maximum value
      */
     NvFence GetSyncpointFence(u32 id);
+
+    // Pulse: the reserved syncpoints with their counters. A guest holds their ids and values
+    // in fences, so a restore reserves the same ids and raises them to the same values.
+    struct PulseSyncpoint {
+        u32 id{};
+        u32 counter_min{};
+        u32 counter_max{};
+        bool interface_managed{};
+        u32 guest_value{};
+        u32 host_value{};
+    };
+    std::vector<PulseSyncpoint> PulseSyncpoints() const;
+    // Reserves the id when it is free (one the boot reserved again is kept) and raises its values.
+    void PulseRestore(const PulseSyncpoint& state);
+    // Moves a syncpoint a device reserved at creation to the id it had when captured.
+    u32 PulseAdopt(u32 allocated, u32 captured);
 
     static constexpr std::array<u32, static_cast<u32>(ChannelType::Max)> channel_syncpoints{
         0x0,  // `MsEnc` is unimplemented

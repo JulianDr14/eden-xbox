@@ -24,6 +24,10 @@ class StateReader;
 class StateWriter;
 } // namespace Service::Pulse
 
+namespace Service::Nvidia {
+class Module;
+}
+
 namespace Service::Nvidia::Devices {
 
 /// Represents an abstract nvidia device node. It is to be subclassed by concrete device nodes to
@@ -87,6 +91,9 @@ public:
         return false;
     }
     virtual void PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) {}
+    // After every fd of the session is restored: ties to other fds (a channel to its address
+    // space) are made here.
+    virtual void PulseLink(DeviceFD fd, Module& module) {}
     // The service events the fd hands out (QueryEvent), under indices below 256 stable for the
     // device.
     virtual void PulseEvents(std::vector<std::pair<u32, Kernel::KEvent*>>& out) const {}

@@ -654,6 +654,13 @@ void KProcess::RemoveSharedMemory(KernelCore& kernel, KSharedMemory* shmem, KPro
     shmem->Close(kernel);
 }
 
+std::vector<KSharedMemory*> KProcess::GetMappedSharedMemory() {
+    KScopedLightLock lk(m_state_lock);
+    std::vector<KSharedMemory*> out;
+    for (auto& info : m_shared_memory_list) out.push_back(info.GetSharedMemory());
+    return out;
+}
+
 Result KProcess::CreateThreadLocalRegion(KernelCore& kernel, KProcessAddress* out) {
     KThreadLocalPage* tlp = nullptr;
     KProcessAddress tlr = 0;

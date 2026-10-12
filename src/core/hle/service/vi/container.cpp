@@ -15,6 +15,7 @@
 #include "core/hle/service/nvnflinger/hos_binder_driver_server.h"
 #include "core/hle/service/nvnflinger/display.h"
 #include "core/hle/service/nvnflinger/surface_flinger.h"
+#include "core/hle/service/pulse_service.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/vi/container.h"
 #include "core/hle/service/vi/vi_results.h"
@@ -193,6 +194,13 @@ Result Container::SetLayerIsOverlay(u64 layer_id, bool is_overlay) {
 
 std::shared_ptr<android::BufferQueueProducer> Container::PulseCreateStrayLayer(
     u64 layer_id, u64 display_id, s32 consumer_binder_id, s32 producer_binder_id) {
+    return this->PulseCreateLayer(layer_id, display_id, consumer_binder_id, producer_binder_id, {},
+                                  true);
+}
+
+std::shared_ptr<android::BufferQueueProducer> Container::PulseCreateLayer(
+    u64 layer_id, u64 display_id, s32 consumer_binder_id, s32 producer_binder_id, u64 owner_aruid,
+    bool open) {
     std::scoped_lock lk{m_lock};
     const auto server = m_binder_driver->GetServer();
     if (layer_id == 0 || m_layers.GetLayerById(layer_id) ||
@@ -206,8 +214,12 @@ std::shared_ptr<android::BufferQueueProducer> Container::PulseCreateStrayLayer(
     m_layers.PulseSetNextId(layer_id - 1);
     u64 created_layer{};
     s32 created_producer{};
-    const bool ok = this->CreateLayerLocked(&created_layer, display_id, {}).IsSuccess() &&
-                    this->OpenLayerLocked(&created_producer, created_layer, {}).IsSuccess();
+    bool ok = this->CreateLayerLocked(&created_layer, display_id, owner_aruid).IsSuccess();
+    if (ok && open) {
+        ok = this->OpenLayerLocked(&created_producer, created_layer, owner_aruid).IsSuccess();
+    } else if (ok) {
+        created_producer = m_layers.GetLayerById(created_layer)->GetProducerBinderId();
+    }
     server->PulseSetLastId((std::max)(last_binder, server->PulseLastId()));
     m_layers.PulseSetNextId((std::max)(next_layer, m_layers.PulseNextId()));
     if (!ok || created_layer != layer_id || created_producer != producer_binder_id) {
@@ -246,6 +258,83 @@ void Container::PulseSetLayer(u64 layer_id, const PulseLayer& state) {
     flinger_layer->z_index = state.z_index;
     flinger_layer->is_overlay = state.is_overlay;
     flinger_layer->layer_stack_mask = state.layer_stack_mask;
+}
+
+void Container::PulseSaveLayer(u64 layer_id, Pulse::StateWriter& out) {
+    std::shared_ptr<android::BufferQueueProducer> producer;
+    {
+        std::scoped_lock lk{m_lock};
+        auto* const layer = m_layers.GetLayerById(layer_id);
+        const auto flinger_layer =
+            layer ? m_surface_flinger->FindLayer(layer->GetConsumerBinderId()) : nullptr;
+        if (!flinger_layer || !layer->GetDisplay()) {
+            throw Pulse::ServiceRejected(false, "a vi managed layer is not on a display");
+        }
+        const auto server = m_binder_driver->GetServer();
+        producer = std::static_pointer_cast<android::BufferQueueProducer>(
+            server->TryGetBinder(layer->GetProducerBinderId()));
+        if (!producer) throw Pulse::ServiceRejected(false, "a vi layer lost its producer binder");
+        out.U64(layer_id);
+        out.U64(layer->GetOwnerAruid());
+        out.U64(layer->GetDisplay()->GetId());
+        out.S32(layer->GetConsumerBinderId());
+        out.S32(layer->GetProducerBinderId());
+        out.Bool(flinger_layer->visible);
+        out.U32(static_cast<u32>(flinger_layer->blending));
+        out.S32(flinger_layer->z_index);
+        out.Bool(flinger_layer->is_overlay);
+        out.U32(flinger_layer->layer_stack_mask);
+        for (const s32 id : {layer->GetConsumerBinderId(), layer->GetProducerBinderId()}) {
+            const auto [strong, weak] = server->PulseRefcounts(id);
+            out.S32(strong);
+            out.S32(weak);
+        }
+    }
+    Pulse::StateWriter queue;
+    producer->PulseCapture(queue);
+    out.U32(static_cast<u32>(queue.bytes.size()));
+    out.Bytes(queue.bytes);
+}
+
+u64 Container::PulseLoadLayer(Pulse::StateReader& in) {
+    const u64 layer_id = in.U64();
+    const u64 owner_aruid = in.U64();
+    PulseLayer layer{};
+    layer.display_id = in.U64();
+    layer.consumer_binder_id = in.S32();
+    layer.producer_binder_id = in.S32();
+    layer.visible = in.Bool();
+    layer.blending = in.U32();
+    layer.z_index = in.S32();
+    layer.is_overlay = in.Bool();
+    layer.layer_stack_mask = in.U32();
+    s32 counts[4];
+    for (auto& count : counts) count = in.S32();
+    std::vector<u8> queue(in.Count(1));
+    in.Bytes(queue);
+
+    const auto producer =
+        this->PulseCreateLayer(layer_id, layer.display_id, layer.consumer_binder_id,
+                               layer.producer_binder_id, owner_aruid, false);
+    this->PulseSetLayer(layer_id, layer);
+    Pulse::StateReader queue_in{queue};
+    producer->PulseRestore(queue_in);
+
+    std::scoped_lock lk{m_lock};
+    const auto server = m_binder_driver->GetServer();
+    server->PulseSetRefcounts(layer.consumer_binder_id, counts[0], counts[1]);
+    server->PulseSetRefcounts(layer.producer_binder_id, counts[2], counts[3]);
+    return layer_id;
+}
+
+void Container::PulseOpenLayer(u64 layer_id) {
+    std::scoped_lock lk{m_lock};
+    auto* const layer = m_layers.GetLayerById(layer_id);
+    s32 producer_binder_id{};
+    if (!layer ||
+        this->OpenLayerLocked(&producer_binder_id, layer_id, layer->GetOwnerAruid()).IsError()) {
+        throw std::invalid_argument("Pulse: vi managed layer not reopened");
+    }
 }
 
 std::pair<u64, s32> Container::PulseNextIds() {

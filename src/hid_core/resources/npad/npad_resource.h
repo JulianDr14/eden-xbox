@@ -112,6 +112,12 @@ public:
 
     Result SetNpadSystemExtStateEnabled(u64 aruid, bool is_enabled);
 
+    // Pulse: an aruid's revision and configuration; its style set event when the guest asked
+    // for it (index of the npad id).
+    bool PulseSave(u64 aruid, Pulse::StateWriter& out) const;
+    void PulseLoad(u64 aruid, Pulse::StateReader& in);
+    const Kernel::KEvent* PulseStyleSetEvent(u64 aruid, std::size_t npad_index) const;
+
 private:
     NPadData active_data{};
     AruidRegisterList registration_list{};

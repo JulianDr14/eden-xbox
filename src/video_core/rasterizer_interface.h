@@ -86,6 +86,13 @@ public:
     /// Notify rasterizer that all caches should be flushed to Switch memory
     virtual void FlushAll() = 0;
 
+    /// Pulse checkpoints, on the GPU thread with the guest parked: writes every GPU-modified
+    /// texture and buffer back to guest memory, or throws when one cannot be read back exactly.
+    /// False: the renderer has no such readback (the caller flushes region by region).
+    virtual bool MaterializeCheckpointMemory() {
+        return false;
+    }
+
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     virtual void FlushRegion(DAddr addr, u64 size,
                              VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;

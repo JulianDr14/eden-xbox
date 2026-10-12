@@ -6,6 +6,7 @@
 
 #include "common/logging.h"
 #include "core/hle/kernel/k_shared_memory.h"
+#include "core/hle/service/pulse_service.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/hid/applet_resource.h"
 #include "hid_core/resource_manager.h"
@@ -20,6 +21,10 @@ IAppletResource::IAppletResource(Core::System& system_, std::shared_ptr<Resource
         {0, C<&IAppletResource::GetSharedMemoryHandle>, "GetSharedMemoryHandle"},
     };
     RegisterHandlers(functions);
+}
+
+void IAppletResource::PulseCapture(Pulse::HandlerCapture& capture) const {
+    capture.state.U64(aruid);
 }
 
 IAppletResource::~IAppletResource() {

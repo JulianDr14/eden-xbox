@@ -9,6 +9,7 @@
 #include "core/hle/service/am/service/storage.h"
 #include "core/hle/service/am/am_types.h"
 #include "core/hle/service/cmif_types.h"
+#include "core/hle/service/am/am_pulse.h"
 #include "core/hle/service/service.h"
 
 namespace Service::AM {
@@ -20,6 +21,13 @@ class IProcessWindingController final : public ServiceFramework<IProcessWindingC
 public:
     explicit IProcessWindingController(Core::System& system_, std::shared_ptr<Applet> applet_);
     ~IProcessWindingController() override;
+
+    std::string_view PulseKind() const override {
+        return "IProcessWindingController";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        PulseReferenceRoot(system, capture);
+    }
 
 private:
     Result GetLaunchReason(Out<AppletProcessLaunchReason> out_launch_reason);

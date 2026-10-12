@@ -71,6 +71,14 @@ public:
 
     void Finalize(KernelCore& kernel) override;
 
+    // Pulse: the memory is one contiguous physical range, which identifies a mapping of it.
+    KPhysicalAddress GetPhysicalAddress() const {
+        return m_physical_address;
+    }
+    std::size_t GetSize() const {
+        return m_size;
+    }
+
     bool IsInitialized() const override {
         return m_is_initialized;
     }

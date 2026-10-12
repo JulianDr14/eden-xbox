@@ -24,6 +24,11 @@ public:
                                         std::shared_ptr<ResourceManager> resource);
     ~IActiveVibrationDeviceList() override;
 
+    // Pulse: restored empty; the guest's activated devices are not kept (vibration only).
+    std::string_view PulseKind() const override {
+        return "IActiveVibrationDeviceList";
+    }
+
 private:
     static constexpr std::size_t MaxVibrationDevicesHandles{0x100};
 

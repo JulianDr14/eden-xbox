@@ -34,7 +34,18 @@ public:
 
     std::shared_ptr<ResourceManager> GetResourceManager();
 
+    // Pulse: the npad configuration of the application's aruid and the style set events it
+    // holds; also rebuilds IAppletResource and IActiveVibrationDeviceList.
+    std::string_view PulseKind() const override {
+        return "IHidServer";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) override;
+    Kernel::KEvent* PulseEvent(u32 slot) override;
+
 private:
+    u64 pulse_aruid{};
+
     Result CreateAppletResource(OutInterface<IAppletResource> out_applet_resource,
                                 ClientAppletResourceUserId aruid);
     Result ActivateDebugPad(ClientAppletResourceUserId aruid);

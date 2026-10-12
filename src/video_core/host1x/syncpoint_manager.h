@@ -60,6 +60,10 @@ public:
     /// Cancel blocking waits during emulation teardown without advancing guest counters.
     void CancelWaits();
 
+    /// Pulse restore: moves a syncpoint forward to the values a checkpoint holds, running the
+    /// actions and waking the waits they satisfy. Never moves one back.
+    void PulseRaise(u32 syncpoint_id, u32 guest_value, u32 host_value);
+
     bool IsReadyGuest(u32 syncpoint_id, u32 expected_value) const {
         return syncpoints_guest[syncpoint_id].load(std::memory_order_acquire) >= expected_value;
     }

@@ -123,6 +123,12 @@ public:
     void SetRevision(u64 aruid, NpadRevision revision);
     NpadRevision GetRevision(u64 aruid);
 
+    // Pulse: the configuration the application set (styles, ids, hold type, handheld mode,
+    // policies) and each npad's assignment mode; the controllers reconnect through OnUpdate.
+    void PulseSave(u64 aruid, Pulse::StateWriter& out) const;
+    void PulseLoad(Kernel::KernelCore& kernel, u64 aruid, Pulse::StateReader& in);
+    const Kernel::KEvent* PulseStyleSetEvent(u64 aruid, std::size_t npad_index) const;
+
     Result RegisterAppletResourceUserId(u64 aruid);
     void UnregisterAppletResourceUserId(u64 aruid);
     void SetNpadExternals(std::shared_ptr<AppletResource> resource,

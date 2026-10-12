@@ -45,4 +45,14 @@ std::vector<u8> IStorage::GetData() const {
     return m_impl->GetData();
 }
 
+void IStorage::PulseCapture(Pulse::HandlerCapture& capture) const {
+    PulseReferenceRoot(system, capture);
+    const auto data = this->GetData();
+    if (data.size() > Pulse::MaxHandlerState / 2) {
+        throw Pulse::ServiceRejected(false, "am: a storage too large to checkpoint");
+    }
+    capture.state.U32(static_cast<u32>(data.size()));
+    capture.state.Bytes(data);
+}
+
 } // namespace Service::AM

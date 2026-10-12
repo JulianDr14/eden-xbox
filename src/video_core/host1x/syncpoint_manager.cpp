@@ -80,6 +80,24 @@ void SyncpointManager::CancelWaits() {
     wait_host_cv.notify_all();
 }
 
+void SyncpointManager::PulseRaise(u32 syncpoint_id, u32 guest_value, u32 host_value) {
+    const auto raise = [&](std::atomic<u32>& syncpoint, std::list<RegisteredAction>& action_storage,
+                           u32 value) {
+        if (syncpoint.load(std::memory_order_acquire) >= value) return;
+        syncpoint.store(value, std::memory_order_release);
+        auto it = action_storage.begin();
+        while (it != action_storage.end() && it->expected_value <= value) {
+            it->action();
+            it = action_storage.erase(it);
+        }
+    };
+    std::scoped_lock lk(guard);
+    raise(syncpoints_guest.at(syncpoint_id), guest_action_storage[syncpoint_id], guest_value);
+    raise(syncpoints_host.at(syncpoint_id), host_action_storage[syncpoint_id], host_value);
+    wait_guest_cv.notify_all();
+    wait_host_cv.notify_all();
+}
+
 void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                                  std::list<RegisteredAction>& action_storage) {
     auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
