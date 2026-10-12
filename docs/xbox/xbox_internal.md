@@ -110,6 +110,19 @@ el PC viven fuera del repo, en `..\eden-data\` (`keys\`, `firmware\` con los `.n
 - **Opciones de diagnóstico** (`-BootCfg @("...")`):
   - `log_filter=*:Debug` para el detalle del log;
   - `renderer=null` para saber si un bloqueo es de GPU o de CPU.
+  - `gpu_breadcrumbs=1` (activa también `dred=1`): la GPU escribe un marcador al empezar y al
+    terminar cada draw, dispatch, clear y copia. Si el device se cuelga, el log dice
+    `D3D12 GPU hang: the GPU never finished seq=N` con su pipeline. Hace la GPU más lenta;
+    solo para diagnosticar;
+  - `pso_eviction=0` para no liberar los PSO inactivos (salvo en emergencia de memoria).
+  - `dump_shader=<hash>` (hasta 4 líneas): vuelca IR y SPIR-V del shader junto al log. Con `dred=1`,
+    los draws cuyo VS está en la lista anotan las palabras 64..79 del cbuf 0 y 52..59 del cbuf 3
+    (`watched VS` en el log, y en la ventana del cuelgue). Esos pipelines también
+    escriben su DXIL enlazado (`dxil_<hash>_<etapa>.dxil`).
+  - `skip_shader=<hash>` (hasta 4 líneas): no graba los draws cuyo pipeline usa ese shader, para
+    confirmar si son ellos los que cuelgan la GPU.
+  - `drop_gs=<hash>` (hasta 4 líneas): arma los pipelines de ese VS sin su geometry shader (se
+    dibujan mal), para separar un cuelgue del VS solo del de la pareja VS+GS.
 - **Para ver el progreso:** en `eden\log` quedan `frame.bmp` y un `frame_<n>.bmp` cada ~10 s.
 - **Si el proceso muere sin línea `CRASH`:**
   - buscar `C++ throw` en el diag;
@@ -2705,3 +2718,249 @@ política al guardar. La conversión conserva los demás bytes y omite binarios.
 No se hace commit ni se prepara el índice. Los .bat/.cmd quedan normalizados
 a LF en Git cuando se añadan, manteniendo CRLF en el árbol de trabajo.
 Fuente: https://git-scm.com/docs/gitattributes/
+
+## 12 octubre 2026: Series 0.2.87.18, Game B GPU hang y crash al recuperar
+
+Evidencia de Descargas archivada en `build-uwp/diagnostics/series-0.2.87.18-game-b-hung`
+(diag, log y graphics_bugs). Game B se selecciona a +166000ms después de volver
+de Game A a biblioteca. A +630594ms diag / 628.455s log aparece device removed
+0x887A0006 (DXGI_ERROR_DEVICE_HUNG). Antes: último pipeline registrado a 620.375s,
+VS f2e2369171e9196c / PS a9ad55e1d807af52, RT0 28, DSV55, dos RT; swapchain
+sin aceptar frame por 1000ms a 621.386s. Es correlación, NO prueba del shader culpable.
+DRED estaba desactivado en ambos dispositivos; sin breadcrumbs/history útiles
+no se identifica el comando/recurso exacto. Repetición con dred=1 y diagnóstico
+GPU es el siguiente gate; conservar reproducción de escena y probar arranque
+Game B directo para separar antecedente Game A, sin atribuirle causalidad todavía.
+
+GPU thread solicita shutdown controlado. Core completa join GPU, servicios y
+kernel, llega a GPU destruction; ~250ms después del error hay access violation
+leyendo memoria reserved dentro de umd12ddi_arden.dll+0x30363. PDB local (manifest
+0.2.87.18, concordancia de funciones principales con log) resuelve caller
++0x991c3d como Scheduler::~Scheduler+0x15d y +0x94d7e6 como
+RendererD3D12::~RendererD3D12+0x1c6. No se dispone de identidad PDB incrustada
+en el diag para certificar cada offset. El crash host ocurre durante destrucción
+D3D12 posterior al hang, no durante JIT guest. No demuestra por sí solo bug del
+driver: investigar vida útil/orden de recursos y allocator/list al device removal.
+
+Memoria al fallo 3758/5120MiB (~1362MiB margen); GPU última ventana ~1108MiB
+con budget DXGI4147MiB. Sin evidencia de alcanzar cap ni bad_alloc. Errores
+playtime.bin y UnpinHandle aparecen durante cierre después del hang; no son
+su primer desencadenante. SRV incompatible registrado ~187s antes tampoco
+identifica por sí solo la causa. No se cambia renderer ni se certifica corrección.
+Fuente del HRESULT: https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/dxgi-error
+### APPX 0.2.87.19: diagnóstico Game B con DRED
+
+Petición usuario: 18+1 con DRED activo. Manifest pasa 0.2.87.18 -> 0.2.87.19
+UTF-8 sin BOM. Empaquetado y firma correctos con binario existente, sin rebuild:
+`tools/xbox/package-appx.ps1 -BootNro tools/xbox/boot_nro/boot.nro -Library -BootCfg 'dred=1'`.
+Verificado dentro del ZIP APPX: versión0.2.87.19 y boot.cfg dred=1/library=1/play=1.
+EXE/PDB archivados en build-uwp/symbols/0.2.87.19. No implica fix del hang ni
+crash de destrucción; gate Series/reproducción y disponibilidad DRED pendientes.
+Sin commit.
+### Gate Series0.2.87.19 Game B con DRED (12 octubre2026)
+
+Descargas contiene log.zip (52323B) y diag18062B; archivados junto a extracción
+pequeña en diagnostics/series-0.2.87.19-game-b-dred. Game B arranca directamente
+sin Game A previo en esta ejecución. Diag confirma versión19/dred1; log confirma
+DRED on. Vuelve device hung0x887A0006 a212.244s log/+212625ms diag. Sin embargo
+shutdown completo a+213406ms, retorno15, biblioteca a+213563ms y cierre usuario
++219984ms: NO se repite el access violation host de18. Esto no certifica arreglo
+(el binario es el mismo; DRED modifica instrumentación y esta carga es distinta).
+
+DRED devuelve0commandlists/0unfinished, sin contexto útil ni pagefault registrado;
+no interpretar0 como ausencia de comandos fallidos. History propio conserva128
+operaciones. Último progreso fence16203, submit16204 cambia PSO de0x254499ef180
+a0x254575251f0; submissions16204..16210 mantienen completed16203. PSO alterno
+0x252e7ab0ec0. Wait16205 termina con UINT64_MAX, sentinel device removal, NO
+trabajo completado. PSO final de submit no identifica primer draw fallido ni
+conjunto completo de shaders/recursos del batch. Último pipeline built antes
+del timeout VS ece06c3189cae0d4 PS9f1dc447e676a443 a203.494708s; timeout swapchain
+204.498864s. Difiere del último pipeline construido en18; no culpar un shader
+por orden de logs ni confundir build asíncrono con ejecución GPU.
+
+Memoria al fallo3529/5120MiB (1591margen), máximo heartbeat3814MiB, GPU985MiB
+última ventana/budget4147. Sin evidencia OOM. Última ventana normal cercana a60FPS
+aprox (ver log para cifra exacta), no explica hang. Siguiente diagnóstico: registro
+CPU acotado por batch de identidades PSO/shaders y operaciones/recursos para
+suplir DRED vacío; evitar log masivo por draw. Investigar también arranque PC
+con capa debug para comandos inválidos. Sin cambios renderer/build/commit.
+## 12 octubre2026: diagnóstico ampliado Game B GPU hang (0.2.87.20)
+
+Autorizado por usuario: activar todos los perfiladores necesarios para localizar
+hang. DRED19 se habilita pero Series entrega0listas, por tanto se añade respaldo
+CPU continuo, separado de128submits/waits. Ring65536x512bytes=32MiB fijos,
+solo escribe con dred1, sin conservar referencias COM; secuencia/overwrite y
+truncamiento511bytes explícitos. No escribe cada draw al archivo durante gameplay:
+se vuelca al detectar device removal. Entradas son intención de grabación CPU,
+NO prueba de ejecución GPU; con async recorder respetar distinción RECORD END/
+submit/fence y comparar tick, no inferir causalidad de proximidad.
+
+Ring incluye bindPSO, draw con VS/PS/tick/parametros/tablas/RT yDSV, recursos
+imagen guest/host ystorage, CBV/SSBO/texel/copia descriptor, vertex/index VA,
+barreras transición/UAV/aliasing, copias buffer/textura/resource, clears,
+draws/dispatch internos yExecuteIndirect. Graphics build registra identidad PSO
+con seis hashes de stages; permite cruzar punteroPSO con shaders aunque DRED vacío.
+Punteros pueden reutilizarse: interpretar orden temporal de build/bind, no como
+identidad persistente. ImageHandle es fuente de view; depth feedback o vista
+convertida puede usar otro recurso, cuya copia/barrera queda en command stream.
+Ring puede sobrescribir primeras operaciones si batch enorme: cabecera informa
+cuántas perdió, no prometer captura íntegra. Dump detail conTapMute evita65k
+incidentes duplicados enbugtracker; el log principal conserva entradasCritical.
+
+APPX diagnóstico previsto: dred1,descriptor_checks1,profilefull (CPU yGPU timers),
+audio_profile1,profile_hz250,profile_window5,debug_layergbv ydeveloper_hotkeys1.
+EnSeries capa debug/GBV depende delruntime ypuede noestar instalada; comprobarlog,
+no afirmar validación activa solo por bootcfg. T manual8s disponible porhotkey.
+Sinreadbacks forzados por draw, dumpsBMP ni captura infinita al logger durante
+juego: estos serializan GPU o agotan log ypueden ocultar reproducción delhang.
+Sampling genera eden_profile.txt; descargarcarpeta log completa junto aldiag.
+Esta prueba altera overhead: no certificar FPS ni cambiar caches/presupuestoJIT,
+memoriaguest/5120MiB ni scheduling por hipótesis. Sinfixdelhang ni commit.
+
+Gate grabador existente:300000comandos ordenados, inline, recordpoints, error,
+shutdown, oversized pasan. IncrementalUWP enprogreso; Series/manualpendiente.
+Fuentes: backend actual CommandStream/Scheduler/GraphicsPipeline y
+https://learn.microsoft.com/en-us/windows/win32/direct3d12/use-dred
+https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-d3d12-debug-layer-gpu-based-validation
+Gate0.2.87.20 cerradoPC: incremental49+44ops correcto; gatehomebrew3s solo
+instrumentación (noFPS/estabilidad): GBV/debuglayer/DREDon, sampling250Hz/5s
+produce eden_profile80335B, RenderError/Critical0, Qnoaplica, retorno0/cierrecompleto.
+Retirada real de device sintética pasa callback/esperas/shutdown/retorno0;
+historialnuevo vuelca32entradas,0overwrite incluyendo barreras/copias. No ejercita
+wrap/truncamiento65k ni prueba reproducciónGame B. Evidencia
+pc-0.2.87.20-full-profile-{homebrew,removal}. Error inicial local-run desdepwsh7:
+Appx no soporta plataforma; usar System32/WindowsPowerShell/v1.0/powershell.exe.
+APPX20 firmado; versión/12flags yhashEXE verificados dentroZIP, sinrun_seconds
+ni gpu_failure_probe final. Incluye tambiénmemory_audit1/pso_probe1 (esteúltimo
+serializa creaciónPSO ypuede alterar timing). EXE/PDB en symbols/0.2.87.20.
+Sincommit; Series/hangreal/overhead/capacidad65k pendientes. Descargarcualquier
+eden_profile.txt junto al logzip/diag, no soloeden_log.txt.
+### Series0.2.87.20: diagnóstico bloquea arranque, doble shutdown (12oct2026)
+
+Descargas archivada en diagnostics/series-0.2.87.20-game-b-create-device.
+Diag contiene tres intentos Game B versión20; todos D3D12CreateDevice falla
+0x887A0005 antes de system.Run/prewarm/sampling. Log confirma GBVon yDREDon
+inmediatamente antes del fallo; GPU-based validation es principal sospechoso
+nuevo respecto19, NO causalidad A/B demostrada ni afirmar falta de interfaz:
+esta consola sí devuelve ID3D12Debug1 y acepta SetEnableGPUBasedValidation.
+Quitar debug_layer=gbv del siguiente paqueteSeries, mantenerDRED/historialCPU/
+perfiladores. No hubo ejecuciónguest ni captura delhangoriginal0x887A0006.
+No eden_profile.txt nuevo enDescargas (profiler inicia después deLoad).
+
+StatusLoad5; Core::Impl::Load ya ejecuta ShutdownMainProcess ante SetupForApplicationProcess
+fallido (core.cpp365). Frontend uwp_boot.cpp628 llama shutdown de nuevo. Log
+muestra dosciclos: primero termina kerneldestruction, segundo falla enkernelcores.
+PDB archivado20: RVA49d8dd=Kernel::KThread::Run+0x3d,
+3e92c5=Kernel::KernelCore::ShutdownCores+0x145,3ba392=ShutdownMainProcess+0x272,
+21bee8=RunHeadlessBoot+0x2308. Lectura0x6fa, compatible con objeto inválido en
+segundo cierre. Doble shutdown confirmado por flujo/log; requiere corregir
+propiedad delcierre por resultadoLoad (no eliminar indiscriminadamente toda
+limpieza: hay salidasLoad tempranas que aún no hacen shutdown). EstadoLoad5
+no es falta firmware ni agotamientoRAM:251/5120MiB alúltimofallo.
+
+Mi configuración20 añadióGBV por petición de diagnósticoampliado; PCgate pasó,
+pero no certifica compatibilidadSeries. Error inicial nuevo bloquea búsqueda de
+hangoriginal; no atribuirlo a shader ni modificación delhistorialCPU sin evidencia.
+Sin nuevos cambioscódigo/APPX/commit duranteesta revisión.
+### Candidato0.2.87.21: desbloquear diagnóstico Series yevitar doble cierre
+
+Retirar debug_layer=gbv delAPPXSeries; DRED,ringGPU,descriptor_checks,profilefull,
+audio_profile,memory_audit,pso_probe ysampling250Hz/5s se conservan. No sustituir
+GBV por debug_layer1 sin gate: quitar ambas solicitudes hasta aislarcompatibilidad.
+No afirmar que esto corrige hangoriginal: solo recupera configuración de creación
+normal deldevice que19ejercitaba, conservando diagnósticoCPU adicional20.
+
+Frontend guarda load_already_shutdown después de retornar Loadfallido ysolo si
+Core marcó IsShuttingDown. EnUWPese estado lo marca Core durantecierre síncrono,
+no se usa como predicado general de otrosfrontends. Loaddeéxito nunca omitecierre;
+fallostempranos sincleanupCore siguen llamando Pause/ShutdownMainProcess.
+Se aplica también alcallbackLoaddePulse; sincertificarrestorePulse conestegate.
+Trasfallolimpiar siempreinput/observer/HID/bugtracker, pero noaccederHost1x/GPU,
+Pause nikernelshutdown ya destruidos. Sinmodificarcoreglobal niotrosfrontends.
+
+IncrementalUWP3ops correcto. GateAppContainer conNROinválido4bytes devuelve
+status42, únicocicloShutdownCore ymensaje 'skipping Pause and second shutdown',
+retorno2/sinCRASH. Evidencia pc-0.2.87.21-load-failure. Es rutaLoadfallida real
+concleanupCore; no reproduce D3D12CreateDevicefallido enSeries(status5), todavía
+pendiente. Sincommit. Arranquenormal/retiradadevice/APPX envalidación.
+Gate21finalPC: homebrew3s conconfigdiagnóstica sinGBV/debuglayer retorna0,
+RenderError/Critical0 yshutdownúnico. Retirada realdevice sintética retorna0,
+probePASS, sinCRASH nisaltarshutdownnecesario. Evidencia pc-0.2.87.21-{homebrew,removal}.
+No sonpruebasFPS/estabilidad nirectificaciónSerie. APPX21 firmado/ZIPverificado:
+11flags, sin debug_layer, run_seconds ni gpu_failure_probe; hashEXE coincidebuild.
+EXE/PDB archivados symbols/0.2.87.21. GateSeriesarranque/hangoriginalpendiente;
+conservarlogscompletos(incluidoeden_profile.txt) ydiag. Sincommit.
+### Series 0.2.87.21: captura Game B del 12 de octubre de 2026
+
+Evidencia conservada en `build-uwp/diagnostics/series-0.2.87.21-game-b-hang/`
+(diag, directorio log y extracción `first-incomplete-batch-28828.txt`).
+La ruta del paquete confirma 0.2.87.21. Reaparece device removed `0x887A0006`
+tras unos 8 minutos. El último fence completado es 28827; el primer lote enviado
+sin finalización observada es 28828. El sentinel UINT64_MAX tras retirada no
+significa que haya terminado el trabajo. El anillo conserva el lote 28828 completo:
+12.231 entradas, 768 draws, 24 dispatches, 253 CopyBuffer y 21 CopyTexture.
+Son comandos registrados por CPU, no breadcrumbs de ejecución GPU. No se puede
+atribuir el hang al último PSO ni a la copia de descriptor donde se detectó.
+DRED sigue devolviendo cero command lists y cero unfinished en Series.
+
+Una comprobación de continuidad before/after para cada pareja exacta de recurso
+y subrecurso no encuentra discrepancias dentro de 28828. Esto no valida estados
+globales, aliasing, vida útil, descriptores ni shaders. No se ha aislado todavía
+el comando causante; no hay evidencia suficiente para aplicar una corrección
+del hang basándose únicamente en esta captura.
+
+No hay señal de agotamiento del límite del proceso: último muestreo 3643/5120 MiB,
+texturas 640 MiB en 10 heaps, buffers 193 MiB, staging 128 MiB y JIT 117 MiB.
+La recuperación sí funciona: cancelación de waits antes de Pause, shutdown
+completo y `RunHeadlessBoot returned 15`, vuelta a biblioteca con 338 MiB.
+No se observa el AV secundario de las versiones anteriores. El siguiente
+diagnóstico debe distinguir ejecución dentro de 28828, conservando recuperación;
+la traza CPU actual ya localiza el lote pero no el draw/dispatch que cuelga GPU.
+
+### Parche del contador de bucles y herramientas de diagnóstico (12 octubre 2026)
+
+El candidato actual añade `Profile::has_broken_loop_safety_counter`, con valor
+predeterminado falso, y lo activa en el perfil D3D12. `emit_spirv.cpp` omite el
+contador de seguridad cuando esa peculiaridad está activa, sin cambiar la
+condición de salida propia del guest. La observación registrada en el código es
+un vertex shader con DXIL válido cuyo primer draw cuelga la GPU Series cuando
+la salida combina la condición guest con el contador; sin el contador dibuja.
+Esto motiva el workaround del driver, pero no certifica todos los shaders ni
+estabilidad prolongada. El perfil D3D12 lo activa también en PC; los demás
+backends conservan el comportamiento anterior. Se pierde esa protección frente
+a bucles guest que no terminan en D3D12.
+
+Las herramientas añadidas permiten investigar el siguiente hang desde `boot.cfg`:
+
+| Opción | Comportamiento y límites |
+|---|---|
+| `gpu_breadcrumbs=1` | Activa también DRED. Escribe tokens GPU antes/después de los comandos instrumentados mediante `WriteBufferImmediate` y los cruza con el historial CPU al retirar el device. Altera el tiempo de ejecución; no usar para certificar FPS. La disponibilidad del recurso y de `ID3D12GraphicsCommandList2` condiciona el resultado. |
+| `pso_eviction=0` | Conserva PSO inactivos para aislar su expulsión como variable. La expulsión de emergencia por presión de memoria sigue activa; por defecto la política normal está habilitada. |
+| `dump_shader=<hash hexadecimal>` | Vuelca IR/SPIR-V del stage seleccionado junto al log. Admite hashes separados por comas, hasta cuatro identidades. Si coincide con VertexB, vuelca también los stages DXIL del pipeline como `dxil_<VS>_<stage>.dxil`. |
+| `skip_shader=<hash hexadecimal>` | Omite draws gráficos cuyos stages contienen ese hash. Puede repetirse para hasta cuatro identidades; no es un arreglo y altera la imagen. No omite dispatches compute. |
+| `drop_gs=<hash hexadecimal de VertexB>` | Construye los pipelines de ese VS sin su geometry shader. Puede repetirse para hasta cuatro identidades; altera la semántica y solo sirve para aislar una hipótesis. |
+
+Con diagnóstico GPU activo y un VS seleccionado por `dump_shader`, también se
+registran rangos concretos de cbufs: c0 palabras 64–79 y c3 palabras 52–59.
+El historial incluye ambos; el log registra cambios de c3 con c0 como contexto.
+No es un volcado completo de constant buffers ni una captura reproducible de
+todos los recursos. Los ficheros DXIL se generan al compilar el pipeline y sus
+nombres pueden sobrescribirse para distintas variantes del mismo VS.
+
+Separación en dos commits autorizada por el usuario, sin push:
+
+1. **Parche:** campo en `profile.h`, condición en `emit_spirv.cpp` y únicamente
+   el hunk del perfil en `d3d12_pipeline_cache.cpp`. Mensaje sugerido:
+   `shader: work around D3D12 driver hangs with loop safety counters`.
+   Explicar el fallo del driver y el alcance del workaround sin nombrar el juego.
+2. **Diagnóstico:** breadcrumbs GPU, control de expulsión PSO, dumps DXIL/cbufs,
+   `skip_shader`, `drop_gs` y la documentación correspondiente. Mensaje sugerido:
+   `d3d12: add opt-in GPU hang diagnostics`.
+
+No separar por archivos completos: `d3d12_pipeline_cache.cpp` mezcla ambos
+grupos. El árbol contiene además recuperación de Load fallido en `uwp_boot.cpp`
+y la versión de paquete 0.2.87.28 en el manifest; esos cambios no pertenecen al
+parche del contador y requieren clasificación explícita antes de preparar los
+commits. Se conservan las herramientas; la corrección de Load fallido y el manifest quedan fuera de estos dos commits. No se autoriza push.
+Esta actualización documental se contrastó con el diff; no ejecuta un nuevo
+gate GPU ni añade resultados de consola que no estén registrados arriba.

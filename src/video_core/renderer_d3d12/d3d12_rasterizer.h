@@ -165,6 +165,9 @@ private:
     void BindDrawState(const GraphicsPipeline& pipeline, const PipelineBindings& bindings,
                        const Framebuffer& framebuffer, const DrawParams& params,
                        Maxwell::PrimitiveTopology topology);
+    /// With dred=1, traces the guest constant buffers of a draw whose vertex shader dump_shader
+    /// names.
+    void TraceWatchedVertexShader(u64 vertex_shader);
     void InvalidateCommandListState();
     void InvalidateGraphicsState();
     /// Sets the root constants, tables and integer sampler CBV of a draw that differ from the

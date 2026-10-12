@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <span>
@@ -39,10 +40,29 @@ class ShaderNotify;
 
 namespace D3D12 {
 
-/// Diagnostics: the shader with this unique hash writes its translated IR and SPIR-V next to the
-/// log (shader_<hash>_<stage>.ir.txt / .spv) when a pipeline using it is built. 0 (the default)
-/// dumps nothing. Set before boot (boot.cfg "dump_shader=").
+/// Diagnostics: shaders with these unique hashes (up to 4, one call each) write their translated
+/// IR and SPIR-V next to the log (shader_<hash>_<stage>.ir.txt / .spv) when a pipeline using them
+/// is built, and pipelines with such a vertex shader also write their linked DXIL
+/// (dxil_<hash>_<stage>.dxil) and log their guest constant buffers on each draw. Set before boot
+/// (boot.cfg "dump_shader=", hashes separated by commas).
 void SetDumpedShader(u64 unique_hash);
+bool IsDumpedShader(u64 unique_hash);
+
+/// Diagnostics: draws whose pipeline uses a shader with one of these unique hashes (up to 4) are
+/// not recorded, to tell whether those draws are what hangs the GPU. Set before boot (boot.cfg
+/// "skip_shader=", one line per hash).
+void SetSkippedShader(u64 unique_hash);
+bool UsesSkippedShader(const std::array<u64, 6>& unique_hashes);
+
+/// Diagnostics: pipelines with one of these vertex shaders (up to 4) are built without their
+/// geometry shader, to tell whether the VS alone or the VS+GS pair hangs the GPU. Draws come out
+/// wrong. Set before boot (boot.cfg "drop_gs=", one line per hash).
+void SetGeometryDroppedShader(u64 unique_hash);
+
+/// Diagnostics: false keeps idle pipelines' PSOs resident unless memory is nearly exhausted, to
+/// tell a problem with rebuilt PSOs from one in what they draw. Set before boot (boot.cfg
+/// "pso_eviction=0").
+void SetPipelineEviction(bool enabled);
 
 class ShaderCompiler;
 class TextureCacheRuntime;

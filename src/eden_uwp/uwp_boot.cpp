@@ -106,6 +106,8 @@ namespace D3D12 {
 void SetTracedFrame(u32 frame, u32 count);
 void TraceNextFrames(u32 count);
 void SetDumpedShader(u64 unique_hash);
+void SetSkippedShader(u64 unique_hash);
+void SetGeometryDroppedShader(u64 unique_hash);
 void SetFrameDiagnostics(bool enabled);
 void SetPsoCostProbe(bool enabled);      // d3d12_graphics_pipeline.h
 std::string DescribePsoCost();            // likewise
@@ -119,6 +121,8 @@ void SetAstcGpuSync(bool enabled); // d3d12_texture_cache.h
 void SetAstcGpuFresh(bool enabled); // d3d12_texture_cache.h
 void SetGpuBasedValidation(bool enabled); // d3d12_device.h
 void SetDredEnabled(bool enabled);         // d3d12_device.h
+void SetGpuBreadcrumbsEnabled(bool enabled); // d3d12_device.h
+void SetPipelineEviction(bool enabled);      // d3d12_pipeline_cache.h
 void SetDescriptorRemovalChecks(bool enabled); // d3d12_device.h
 void SetAsyncRecording(bool enabled);          // d3d12_scheduler.h
 using AppMemoryQuery = bool (*)(u64& used, u64& limit); // d3d12_device.h
@@ -258,6 +262,11 @@ struct BootConfig {
     bool gpu_validation{};
     /// DRED breadcrumbs and page-fault tracking ("dred=1"); diagnostic and deliberately opt-in.
     bool dred{};
+    /// GPU-written breadcrumbs around every command ("gpu_breadcrumbs=1", turns dred on): a hang
+    /// report names the command the GPU never finished. Slows the GPU down.
+    bool gpu_breadcrumbs{};
+    /// Release idle pipelines' PSOs ("pso_eviction=0" keeps them unless memory nearly runs out).
+    bool pso_eviction{true};
     /// Look for a removed device after every descriptor a draw writes ("descriptor_checks=1"), to
     /// name the view that removed it; costs a kernel call per descriptor.
     bool descriptor_checks{};
@@ -443,6 +452,8 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     D3D12::SetAstcGpuFresh(config.astc_fresh);
     D3D12::SetDescriptorRemovalChecks(config.descriptor_checks);
     D3D12::SetDredEnabled(config.dred);
+    D3D12::SetGpuBreadcrumbsEnabled(config.gpu_breadcrumbs);
+    D3D12::SetPipelineEviction(config.pso_eviction);
     VideoCore::Perf::SetDetailedGpuProfile(config.gpu_profile);
     VideoCore::Perf::SetForceSwapIntervalOne(config.force_swap_interval_one);
     Settings::values.async_presentation.SetValue(config.async_present);
@@ -2149,6 +2160,13 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         } else if (line == "dred=1") {
                             config.dred = true;
                             WriteDiag("boot.cfg: DRED breadcrumbs and page-fault tracking enabled");
+                        } else if (line == "gpu_breadcrumbs=1") {
+                            config.dred = true;
+                            config.gpu_breadcrumbs = true;
+                            WriteDiag("boot.cfg: GPU breadcrumbs around every command (and DRED)");
+                        } else if (line == "pso_eviction=0") {
+                            config.pso_eviction = false;
+                            WriteDiag("boot.cfg: idle pipelines keep their PSOs");
                         } else if (line == "gpu_profile=1") {
                             config.gpu_profile = true;
                             WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
@@ -2277,9 +2295,28 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             config.log_filter = line.substr(11);
                             WriteDiag("boot.cfg: log filter " + config.log_filter);
                         } else if (line.starts_with("dump_shader=")) {
-                            const u64 hash = std::strtoull(line.c_str() + 12, nullptr, 16);
-                            D3D12::SetDumpedShader(hash);
+                            const char* cursor = line.c_str() + 12;
+                            for (char* end{}; *cursor != '\0'; cursor = *end == ',' ? end + 1 : end) {
+                                const u64 hash = std::strtoull(cursor, &end, 16);
+                                if (end == cursor) {
+                                    break;
+                                }
+                                D3D12::SetDumpedShader(hash);
+                            }
                             WriteDiag("boot.cfg: dumping shader " + line.substr(12));
+                        } else if (line.starts_with("skip_shader=")) {
+                            const u64 hash = std::strtoull(line.c_str() + 12, nullptr, 16);
+                            if (hash != 0) {
+                                D3D12::SetSkippedShader(hash);
+                                WriteDiag("boot.cfg: skipping draws with shader " + line.substr(12));
+                            }
+                        } else if (line.starts_with("drop_gs=")) {
+                            const u64 hash = std::strtoull(line.c_str() + 8, nullptr, 16);
+                            if (hash != 0) {
+                                D3D12::SetGeometryDroppedShader(hash);
+                                WriteDiag("boot.cfg: building VS " + line.substr(8) +
+                                          " without its geometry shader");
+                            }
                         } else if (line.starts_with("trace_frames=")) {
                             config.traced_frames = std::max<u32>(
                                 1, static_cast<u32>(std::strtoul(line.c_str() + 13, nullptr, 10)));

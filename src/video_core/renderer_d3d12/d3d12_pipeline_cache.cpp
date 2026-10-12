@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <exception>
@@ -44,7 +45,33 @@ namespace D3D12 {
 
 namespace {
 
-std::atomic<u64> dumped_shader{};
+std::array<std::atomic<u64>, 4> dumped_shaders{};
+std::array<std::atomic<u64>, 4> skipped_shaders{};
+std::atomic_bool any_skipped_shader{};
+std::array<std::atomic<u64>, 4> gs_dropped_shaders{};
+
+void AddShaderHash(std::array<std::atomic<u64>, 4>& slots, u64 unique_hash) {
+    for (auto& slot : slots) {
+        u64 expected = 0;
+        if (slot.compare_exchange_strong(expected, unique_hash, std::memory_order_relaxed) ||
+            expected == unique_hash) {
+            return;
+        }
+    }
+}
+
+bool HasShaderHash(const std::array<std::atomic<u64>, 4>& slots, u64 unique_hash) {
+    if (unique_hash == 0) {
+        return false;
+    }
+    for (const auto& slot : slots) {
+        if (slot.load(std::memory_order_relaxed) == unique_hash) {
+            return true;
+        }
+    }
+    return false;
+}
+std::atomic_bool pipeline_eviction{true};
 
 /// Writes a translated stage's IR and SPIR-V next to the log (SetDumpedShader).
 void DumpShader(u64 unique_hash, size_t stage, const Shader::IR::Program& program,
@@ -56,6 +83,21 @@ void DumpShader(u64 unique_hash, size_t stage, const Shader::IR::Program& progra
         reinterpret_cast<const char*>(spirv.data()),
         static_cast<std::streamsize>(spirv.size_bytes()));
     LOG_INFO(Render, "D3D12: shader {:016x} stage {} dumped ({})", unique_hash, stage, base);
+}
+
+/// Writes a linked pipeline's DXIL stages next to the log, named after its vertex shader.
+void DumpDxil(u64 vertex_shader, std::span<const std::vector<u8>> stages) {
+    const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir);
+    for (size_t stage = 0; stage < stages.size(); ++stage) {
+        if (stages[stage].empty()) {
+            continue;
+        }
+        const std::string name = fmt::format("dxil_{:016x}_{}.dxil", vertex_shader, stage);
+        std::ofstream{directory / name, std::ios::binary | std::ios::trunc}.write(
+            reinterpret_cast<const char*>(stages[stage].data()),
+            static_cast<std::streamsize>(stages[stage].size()));
+    }
+    LOG_INFO(Render, "D3D12: pipeline DXIL of VS {:016x} dumped", vertex_shader);
 }
 
 using Shader::Backend::SPIRV::EmitSPIRV;
@@ -300,7 +342,36 @@ ShaderCaps QueryShaderCaps(const Device& device) {
 } // Anonymous namespace
 
 void SetDumpedShader(u64 unique_hash) {
-    dumped_shader.store(unique_hash, std::memory_order_relaxed);
+    AddShaderHash(dumped_shaders, unique_hash);
+}
+
+bool IsDumpedShader(u64 unique_hash) {
+    return HasShaderHash(dumped_shaders, unique_hash);
+}
+
+void SetSkippedShader(u64 unique_hash) {
+    AddShaderHash(skipped_shaders, unique_hash);
+    any_skipped_shader.store(true, std::memory_order_relaxed);
+}
+
+bool UsesSkippedShader(const std::array<u64, 6>& unique_hashes) {
+    if (!any_skipped_shader.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    for (const u64 hash : unique_hashes) {
+        if (HasShaderHash(skipped_shaders, hash)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void SetGeometryDroppedShader(u64 unique_hash) {
+    AddShaderHash(gs_dropped_shaders, unique_hash);
+}
+
+void SetPipelineEviction(bool enabled) {
+    pipeline_eviction.store(enabled, std::memory_order_relaxed);
 }
 
 PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
@@ -420,7 +491,9 @@ void PipelineCache::TickResidency(const CacheMemorySnapshot& snapshot, Scheduler
     using Policy = PipelineResidencyPolicy;
     ++residency_frame;
     const u64 idle_frames = Policy::IdleFrames(snapshot.app_used, snapshot.app_limit);
-    const size_t checks = (std::min)(Policy::SWEEP_PER_FRAME, residency_sweep.size());
+    const bool evict = pipeline_eviction.load(std::memory_order_relaxed) ||
+                       idle_frames == Policy::EMERGENCY_IDLE_FRAMES;
+    const size_t checks = evict ? (std::min)(Policy::SWEEP_PER_FRAME, residency_sweep.size()) : 0;
     for (size_t i = 0; i < checks; ++i) {
         if (residency_cursor >= residency_sweep.size()) {
             residency_cursor = 0;
@@ -697,6 +770,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
     const bool uses_vertex_a{key.unique_hashes[0] != 0};
     const bool uses_vertex_b{key.unique_hashes[1] != 0};
+    const bool drops_geometry{HasShaderHash(gs_dropped_shaders, key.unique_hashes[1])};
+    const bool dumps_dxil{IsDumpedShader(key.unique_hashes[1])};
 
     // Layer passthrough generation for devices that cannot write the layer outside a GS
     Shader::IR::Program* layer_source_program{};
@@ -747,6 +822,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         if (key.unique_hashes[index] == 0 && !is_emulated_stage) {
             continue;
         }
+        if (drops_geometry && index == static_cast<u32>(Maxwell::ShaderType::Geometry))
+            [[unlikely]] {
+            LOG_INFO(Render, "D3D12: VS {:016x} built without its GS {:016x}",
+                     key.unique_hashes[1], key.unique_hashes[4]);
+            continue;
+        }
         if (index == 0) {
             BUG_TRACK(Unimplemented, "VertexA without VertexB (VS A {:016x})", key.unique_hashes[0]);
             const Common::BugTracker::TapMute bug_tracker_mute;
@@ -760,9 +841,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         const auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage)};
         ConvertLegacyToGeneric(program, runtime_info);
         spirv[stage_index] = EmitSPIRV(profile, runtime_info, program, binding);
-        if (const u64 dump = dumped_shader.load(std::memory_order_relaxed);
-            dump != 0 && key.unique_hashes[index] == dump) [[unlikely]] {
-            DumpShader(dump, stage_index, program, spirv[stage_index]);
+        if (IsDumpedShader(key.unique_hashes[index])) [[unlikely]] {
+            DumpShader(key.unique_hashes[index], stage_index, program, spirv[stage_index]);
         }
         stage_indices.push_back(stage_index);
         previous_stage = &program;
@@ -772,7 +852,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     // SPIR-V to DXIL goes with the PSO build, on a worker: done here it stalled the GPU thread for
     // 150-490 ms per 300 frames when entering new areas (0.2.59 profile). Translating the guest
     // shaders stays here, since it reads guest memory through the environments.
-    auto compile_dxil = [this, spirv = std::move(spirv), stage_indices](u64 trace_pipeline) {
+    auto compile_dxil = [this, spirv = std::move(spirv), stage_indices, dumps_dxil,
+                         vertex_shader = key.unique_hashes[1]](u64 trace_pipeline) {
         boost::container::static_vector<ShaderCompiler::PipelineStage, Maxwell::MaxShaderStage>
             stages;
         for (const size_t stage_index : stage_indices) {
@@ -804,6 +885,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 dxil.stages[stage_indices[i]] = std::move(compiled[i].dxil);
             }
             dxil.charge = Common::MemoryCharge(Common::MemoryAccount::ShaderBytecode, bytes);
+            if (dumps_dxil) [[unlikely]] {
+                DumpDxil(vertex_shader, dxil.stages);
+            }
             return dxil;
         }, [](const ChargedDxilStages& dxil) {
             size_t bytes = sizeof(dxil);

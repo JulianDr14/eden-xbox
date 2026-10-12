@@ -20,6 +20,7 @@
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_pipeline_helper.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
+#include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/shader_notify.h"
 #include "video_core/surface.h"
 #include "video_core/textures/texture.h"
@@ -149,6 +150,12 @@ void ComputePipeline::Configure(const ComputeBindContext& context, PipelineBindi
 
     BarrierBatch barriers{context.scheduler};
     for (const auto& [view_id, is_storage] : image_transitions) {
+        if (GpuDiagnosticsEnabled()) {
+            const auto& view = texture_cache.GetImageView(view_id);
+            TraceGpuDetail(fmt::format("compute image tick={} CS={:016x} guest={:x} resource={} storage={}",
+                context.scheduler.CurrentTick(), unique_hash, view.GpuAddr(),
+                static_cast<void*>(view.ImageHandle()), is_storage));
+        }
         texture_cache.GetImageView(view_id).TransitionImage(
             is_storage ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
                        : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,

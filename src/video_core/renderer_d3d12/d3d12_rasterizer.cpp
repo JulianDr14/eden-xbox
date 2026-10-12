@@ -155,6 +155,9 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         }
         return; // D3D12 rejected the PSO (logged when it was built)
     }
+    if (UsesSkippedShader(pipeline->Key().unique_hashes)) [[unlikely]] {
+        return; // skip_shader
+    }
     VideoCore::Perf::ScopedNsTimer record_timer{VideoCore::Perf::Counter::DrawRecordNs};
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
     framebuffer->PrepareAttachments(scheduler, bindings.depth_sampled);
@@ -301,6 +304,11 @@ void RasterizerD3D12::DispatchCompute() {
     cmd->SetComputeRootSignature(layout.Handle());
     scheduler.SetPipelineState(pipeline->Handle());
     MarkGpuCommands(cmd, "dispatch CS", pipeline->UniqueHash(), 0);
+    if (GpuDiagnosticsEnabled()) {
+        TraceGpuDetail(fmt::format("dispatch tick={} PSO={} CS={:016x} groups={}x{}x{} table={:x}",
+            scheduler.CurrentTick(), static_cast<void*>(pipeline->Handle()), pipeline->UniqueHash(),
+            dim[0], dim[1], dim[2], bindings.resource_table.ptr));
+    }
     cmd->SetComputeRoot32BitConstants(PipelineLayout::PUSH_CONSTANTS_INDEX, PUSH_CONSTANT_WORDS,
                                       bindings.push_constants.data(), 0);
     dxil_spirv_compute_runtime_data runtime_data{};

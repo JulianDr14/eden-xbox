@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cwchar>
 #include <iterator>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -83,9 +85,19 @@ bool gpu_based_validation = false;
 bool dred_enabled = false;
 std::mutex diagnostic_mutex;
 std::array<std::string, 128> diagnostic_history;
+// Separate from submissions/waits: a busy draw cannot erase the fence history.
+// Fixed 32 MiB, no retained resource references; truncation/overwrites reported on dump.
+std::array<std::array<char, 512>, 65536> diagnostic_details{};
+u64 detail_sequence{};
 u64 diagnostic_sequence{};
 std::atomic_flag diagnostic_dumped{};
 std::atomic<AppMemoryQuery> app_memory_query{nullptr};
+bool breadcrumbs_enabled = false;
+// Two tokens: [0] the last command the GPU started, [1] the last it finished. A readback heap
+// stays mapped, and its memory is still readable after the device is removed.
+ComPtr<ID3D12Resource> breadcrumb_buffer;
+const volatile u32* breadcrumb_values{};
+std::atomic<D3D12_GPU_VIRTUAL_ADDRESS> breadcrumb_address{};
 } // Anonymous namespace
 
 void SetGpuBasedValidation(bool enabled) {
@@ -97,10 +109,52 @@ void SetDredEnabled(bool enabled) {
     diagnostic_dumped.clear();
     std::scoped_lock lock{diagnostic_mutex};
     diagnostic_sequence = 0;
+    detail_sequence = 0;
     diagnostic_history.fill({});
 }
 
 bool GpuDiagnosticsEnabled() { return dred_enabled; }
+
+u64 TraceGpuDetail(std::string_view description) {
+    if (!dred_enabled) return 0;
+    std::scoped_lock lock{diagnostic_mutex};
+    const u64 sequence = detail_sequence++;
+    auto& entry = diagnostic_details[sequence % diagnostic_details.size()];
+    const size_t length = std::min(description.size(), entry.size() - 1);
+    std::copy_n(description.data(), length, entry.data());
+    entry[length] = '\0';
+    if (description.size() > length) {
+        entry[length - 3] = '.';
+        entry[length - 2] = '.';
+        entry[length - 1] = '.';
+    }
+    return sequence + 1;
+}
+
+void SetGpuBreadcrumbsEnabled(bool enabled) {
+    breadcrumbs_enabled = enabled;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS GpuBreadcrumbAddress() {
+    return breadcrumb_address.load(std::memory_order_relaxed);
+}
+
+void WriteGpuBreadcrumb(ID3D12GraphicsCommandList* list, D3D12_GPU_VIRTUAL_ADDRESS address,
+                        u32 token, bool finished) {
+    ComPtr<ID3D12GraphicsCommandList2> list2;
+    if (FAILED(list->QueryInterface(IID_PPV_ARGS(&list2)))) {
+        return;
+    }
+    // MARKER_IN writes as the GPU reaches the command; MARKER_OUT once all work before it is done.
+    const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER parameter{
+        .Dest = address + (finished ? sizeof(u32) : 0),
+        .Value = token,
+    };
+    const D3D12_WRITEBUFFERIMMEDIATE_MODE mode = finished
+                                                     ? D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT
+                                                     : D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_IN;
+    list2->WriteBufferImmediate(1, &parameter, &mode);
+}
 
 void TraceGpuOperation(std::string description) {
     if (!dred_enabled) return;
@@ -125,6 +179,42 @@ void MarkGpuCommands(CommandStream* cmd, const char* kind, u64 first, u64 second
 void SetAppMemoryQuery(AppMemoryQuery query) {
     app_memory_query.store(query, std::memory_order_release);
 }
+
+namespace {
+void CreateBreadcrumbBuffer(ID3D12Device* device) {
+    breadcrumb_address.store(0, std::memory_order_relaxed);
+    breadcrumb_values = nullptr;
+    breadcrumb_buffer.Reset();
+    if (!dred_enabled || !breadcrumbs_enabled) {
+        return;
+    }
+    const D3D12_HEAP_PROPERTIES heap{.Type = D3D12_HEAP_TYPE_READBACK};
+    const D3D12_RESOURCE_DESC desc{
+        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+        .Width = 256,
+        .Height = 1,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .SampleDesc = {.Count = 1},
+        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+    };
+    // WriteBufferImmediate needs COPY_DEST, which is also a readback buffer's only state.
+    ComPtr<ID3D12Resource> buffer;
+    void* mapped = nullptr;
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                               D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                               IID_PPV_ARGS(&buffer))) ||
+        FAILED(buffer->Map(0, nullptr, &mapped))) {
+        LOG_WARNING(Render, "D3D12: GPU breadcrumbs unavailable (no readback buffer)");
+        return;
+    }
+    std::memset(mapped, 0, static_cast<size_t>(desc.Width));
+    breadcrumb_buffer = std::move(buffer);
+    breadcrumb_values = static_cast<const volatile u32*>(mapped);
+    breadcrumb_address.store(breadcrumb_buffer->GetGPUVirtualAddress(), std::memory_order_relaxed);
+    LOG_INFO(Render, "D3D12: GPU breadcrumbs on (diagnostic, slower GPU)");
+}
+} // Anonymous namespace
 
 Device::Device() {
     removal_tripwire::removal_tripped.store(false);
@@ -218,6 +308,7 @@ Device::Device() {
         throw std::runtime_error("D3D12: CreateEventExW failed");
     }
 
+    CreateBreadcrumbBuffer(device.Get());
     LogCapabilities();
     initial_budget = QueryVideoMemory().Budget;
     // On a unified architecture (the Xbox) texture and buffer heaps are app commit too.
@@ -311,6 +402,90 @@ const char* BreadcrumbOpName(D3D12_AUTO_BREADCRUMB_OP op) {
     }
 }
 
+/// The detail sequence number a breadcrumb token (sequence + 1, truncated to 32 bits) stands for:
+/// the newest one recorded with those low bits.
+std::optional<u64> TokenSequence(u32 token) {
+    if (token == 0) {
+        return std::nullopt;
+    }
+    u64 value = (detail_sequence & ~u64{0xFFFFFFFF}) | token;
+    if (value > detail_sequence) {
+        value -= u64{1} << 32;
+    }
+    return value - 1;
+}
+
+/// The details that CommandStream brackets with breadcrumbs.
+bool IsBreadcrumbedCommand(std::string_view text) {
+    constexpr std::array<std::string_view, 6> prefixes{
+        "DrawInstanced ", "DrawIndexed ", "Dispatch ", "ExecuteIndirect ", "clear ", "Copy",
+    };
+    return std::ranges::any_of(prefixes, [text](std::string_view prefix) {
+        return text.starts_with(prefix);
+    });
+}
+
+/// With gpu_breadcrumbs=1: the command the GPU never finished and the details around it. Called
+/// with diagnostic_mutex held.
+void DumpBreadcrumbs(u64 detail_first) {
+    if (breadcrumb_values == nullptr) {
+        return;
+    }
+    const auto detail = [](u64 sequence) -> std::string_view {
+        return diagnostic_details[sequence % diagnostic_details.size()].data();
+    };
+    const auto describe = [](const std::optional<u64>& sequence) {
+        return sequence ? fmt::to_string(*sequence) : std::string{"none"};
+    };
+    const std::optional<u64> started = TokenSequence(breadcrumb_values[0]);
+    const std::optional<u64> finished = TokenSequence(breadcrumb_values[1]);
+    LOG_CRITICAL(Render, "D3D12 GPU breadcrumbs: last command started seq={}, last finished seq={}",
+                 describe(started), describe(finished));
+
+    // Commands finish in order, so the first one after the last finished is where the GPU stopped.
+    std::optional<u64> unfinished;
+    for (u64 i = finished ? (std::max)(*finished + 1, detail_first) : detail_first;
+         i < detail_sequence; ++i) {
+        if (IsBreadcrumbedCommand(detail(i))) {
+            unfinished = i;
+            break;
+        }
+    }
+    if (!unfinished) {
+        LOG_CRITICAL(Render, "D3D12 GPU hang: every recorded command finished");
+        return;
+    }
+    LOG_CRITICAL(Render, "D3D12 GPU hang: the GPU never finished seq={} {}", *unfinished,
+                 detail(*unfinished));
+    // The line naming its pipeline and shaders is recorded a few details before the command.
+    constexpr u64 PIPELINE_LOOKBEHIND = 256;
+    for (u64 i = *unfinished; i > detail_first && *unfinished - i < PIPELINE_LOOKBEHIND; --i) {
+        const std::string_view text = detail(i - 1);
+        if (text.starts_with("draw tick=") || text.starts_with("dispatch tick=") ||
+            text.starts_with("compute image tick=")) {
+            LOG_CRITICAL(Render, "D3D12 GPU hang: its pipeline, seq={} {}", i - 1, text);
+            break;
+        }
+    }
+
+    constexpr u64 WINDOW_BEFORE = 48;
+    constexpr u64 WINDOW_MAX = 400;
+    const u64 window_first = (std::max)(detail_first, *unfinished > WINDOW_BEFORE
+                                                          ? *unfinished - WINDOW_BEFORE
+                                                          : u64{0});
+    const u64 window_end =
+        (std::min)({detail_sequence, (std::max)(*unfinished, started.value_or(0)) + 8,
+                    window_first + WINDOW_MAX});
+    const Common::BugTracker::TapMute window_mute;
+    for (u64 i = window_first; i < window_end; ++i) {
+        const char* const mark = i == *unfinished ? "  <== NEVER FINISHED"
+                                 : i == finished  ? "  <== last finished"
+                                 : i == started   ? "  <== last started"
+                                                  : "";
+        LOG_CRITICAL(Render, "D3D12 GPU hang window: seq={} {}{}", i, detail(i), mark);
+    }
+}
+
 } // Anonymous namespace
 
 void Device::ReportDeviceRemoved() {
@@ -341,6 +516,18 @@ void DumpDeviceDiagnostics(ID3D12Device* device) {
         for (u64 i = first; i < diagnostic_sequence; ++i)
             LOG_CRITICAL(Render, "D3D12 GPU history: {}",
                          diagnostic_history[i % diagnostic_history.size()]);
+        const u64 detail_first = detail_sequence > diagnostic_details.size()
+                                     ? detail_sequence - diagnostic_details.size() : 0;
+        LOG_CRITICAL(Render, "D3D12 GPU details: {} total, {} overwritten; entries max 511 bytes",
+                     detail_sequence, detail_first);
+        {
+            const Common::BugTracker::TapMute detail_mute;
+            for (u64 i = detail_first; i < detail_sequence; ++i) {
+                LOG_CRITICAL(Render, "D3D12 GPU detail: seq={} {}", i,
+                             diagnostic_details[i % diagnostic_details.size()].data());
+            }
+        }
+        DumpBreadcrumbs(detail_first);
     }
     ComPtr<ID3D12DeviceRemovedExtendedData> dred;
     if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred)))) {

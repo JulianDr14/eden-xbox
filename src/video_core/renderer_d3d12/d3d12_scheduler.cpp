@@ -224,6 +224,8 @@ u64 Scheduler::Flush() {
     const u64 signaled = current_tick.load(std::memory_order_relaxed);
     EndTimestamp(signaled);
     if (GpuDiagnosticsEnabled()) {
+        TraceGpuDetail(fmt::format("batch RECORD END tick={} completed={} PSO={}", signaled,
+                                     fence->GetCompletedValue(), static_cast<void*>(current_pipeline)));
         TraceGpuOperation(fmt::format("submit tick={} completed={} PSO={}", signaled,
                                      fence->GetCompletedValue(), static_cast<void*>(current_pipeline)));
     }

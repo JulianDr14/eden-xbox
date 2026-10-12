@@ -8,6 +8,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <d3d12.h>
@@ -71,6 +72,20 @@ void SetGpuBasedValidation(bool enabled);
 void SetDredEnabled(bool enabled);
 bool GpuDiagnosticsEnabled();
 void TraceGpuOperation(std::string description);
+/// Bounded CPU history, independent of driver breadcrumbs. Only populated with dred=1.
+/// Returns the entry's sequence number plus one, the token a GPU breadcrumb writes for it, or 0
+/// when diagnostics are off.
+u64 TraceGpuDetail(std::string_view description);
+/// GPU breadcrumbs ("gpu_breadcrumbs=1", with dred=1) for devices created from now on: the GPU
+/// writes the detail token of each draw, dispatch, clear and copy to a readback buffer when it
+/// starts it and when it finishes it, so a hang report names the command the GPU never finished.
+/// DRED keeps no breadcrumbs on the console. A finish marker waits for the work before it, which
+/// costs GPU overlap, so this is diagnostic only.
+void SetGpuBreadcrumbsEnabled(bool enabled);
+/// The breadcrumb buffer's address, 0 without breadcrumbs.
+D3D12_GPU_VIRTUAL_ADDRESS GpuBreadcrumbAddress();
+void WriteGpuBreadcrumb(ID3D12GraphicsCommandList* list, D3D12_GPU_VIRTUAL_ADDRESS address,
+                        u32 token, bool finished);
 /// With dred=1, a DRED breadcrumb context naming what the next GPU commands run (pipeline
 /// hashes), so a removal report says which draw the GPU stopped in. No-op otherwise.
 class CommandStream;

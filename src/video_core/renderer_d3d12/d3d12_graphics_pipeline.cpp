@@ -457,6 +457,12 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     // (DEPTH_SAMPLED_STATE) and the draw binds the read-only DSV.
     BarrierBatch barriers{context.scheduler};
     for (const auto& [view_id, is_storage] : image_transitions) {
+        if (GpuDiagnosticsEnabled()) {
+            const auto& view = texture_cache.GetImageView(view_id);
+            TraceGpuDetail(fmt::format("graphics image tick={} PSO={} guest={:x} resource={} storage={}",
+                context.scheduler.CurrentTick(), static_cast<void*>(pipeline_state.Get()),
+                view.GpuAddr(), static_cast<void*>(view.ImageHandle()), is_storage));
+        }
         ImageView& image_view = texture_cache.GetImageView(view_id);
         if (!is_storage && depth_image != VideoCommon::ImageId{} &&
             image_view.image_id == depth_image) {
@@ -670,6 +676,12 @@ void GraphicsPipeline::Build() {
         return;
     }
     pso_charge = Common::MemoryCharge(Common::MemoryAccount::PipelineStates, 0);
+    if (GpuDiagnosticsEnabled()) {
+        LOG_INFO(Render, "D3D12 PSO identity: PSO={} shaders={:016x}/{:016x}/{:016x}/{:016x}/{:016x}/{:016x} RTs={} RT0={} DSV={}",
+            static_cast<void*>(pipeline_state.Get()), key.unique_hashes[0], key.unique_hashes[1],
+            key.unique_hashes[2], key.unique_hashes[3], key.unique_hashes[4], key.unique_hashes[5],
+            num_attachments, static_cast<u32>(desc.RTVFormats[0]), static_cast<u32>(desc.DSVFormat));
+    }
     LOG_INFO(Render,
              "D3D12: pipeline built for VS {:016x} PS {:016x} ({} attributes, {} RTs, RT0 {}, "
              "DSV {}, {} + {} descriptors, features VS {:x} PS {:x})",

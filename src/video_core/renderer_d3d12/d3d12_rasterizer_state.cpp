@@ -5,10 +5,15 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <string>
+#include <unordered_map>
+#include <fmt/format.h>
 
 #include <spirv_to_dxil.h>
 
 #include "common/bug_tracker.h"
+#include "common/logging.h"
+#include "video_core/memory_manager.h"
 #include "video_core/renderer_d3d12/d3d12_log.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
@@ -18,6 +23,42 @@
 // root arguments, set only when they differ from what the command list holds.
 
 namespace D3D12 {
+
+namespace {
+
+/// The words of a guest constant buffer in [first, first + count), "-" past its end.
+std::string ConstBufferWords(Tegra::MemoryManager& gpu_memory,
+                             const Tegra::Engines::ConstBufferInfo& info, u32 first, u32 count) {
+    std::string words = fmt::format("addr={:x} size={} [{}]", info.address, info.size, first);
+    for (u32 index = first; index < first + count; ++index) {
+        if (!info.enabled || (index + 1) * sizeof(u32) > info.size) {
+            words += " -";
+            continue;
+        }
+        u32 value{};
+        gpu_memory.ReadBlockUnsafe(info.address + index * sizeof(u32), &value, sizeof(value));
+        words += fmt::format(" {:x}", value);
+    }
+    return words;
+}
+
+} // Anonymous namespace
+
+void RasterizerD3D12::TraceWatchedVertexShader(u64 vertex_shader) {
+    // dump_shader's vertex shaders: the words their buffers 0 and 3 hold around what the morph
+    // loop reads (c0 272..300 storage buffer pointers, c3 224 stride and 228 count).
+    const auto& buffers = maxwell3d->state.shader_stages[0].const_buffers;
+    const std::string c0 = ConstBufferWords(*gpu_memory, buffers[0], 64, 16);
+    const std::string c3 = ConstBufferWords(*gpu_memory, buffers[3], 52, 8);
+    TraceGpuDetail(fmt::format("watched VS={:016x} c0 {} | c3 {}", vertex_shader, c0, c3));
+    // The log only gets c3 when it changes: c0 moves every frame.
+    static std::unordered_map<u64, std::string> last_logged;
+    if (std::string& last = last_logged[vertex_shader]; last != c3) {
+        LOG_INFO(Render, "D3D12: watched VS {:016x} tick {} c3 {} (c0 {})", vertex_shader,
+                 scheduler.CurrentTick(), c3, c0);
+        last = c3;
+    }
+}
 
 void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
                                     const PipelineBindings& bindings,
@@ -43,6 +84,31 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
 
     const auto color_targets = framebuffer.ColorTargets();
     const D3D12_CPU_DESCRIPTOR_HANDLE depth = framebuffer.DepthTarget(bindings.depth_sampled);
+    if (GpuDiagnosticsEnabled()) {
+        TraceGpuDetail(fmt::format(
+            "draw tick={} PSO={} VS={:016x} PS={:016x} vertices={} instances={} indexed={} first={} base={} topology={} table={:x} samplers={:x} DSV={:x} depth_fmt={}",
+            scheduler.CurrentTick(), static_cast<void*>(pipeline.Handle()),
+            pipeline.Key().unique_hashes[1], pipeline.Key().unique_hashes[5],
+            params.num_vertices, params.num_instances, params.is_indexed, params.first_index,
+            params.base_vertex, static_cast<u32>(topology), bindings.resource_table.ptr,
+            bindings.sampler_table.ptr, depth.ptr, static_cast<u32>(framebuffer.DepthFormat())));
+        if (IsDumpedShader(pipeline.Key().unique_hashes[1])) [[unlikely]] {
+            TraceWatchedVertexShader(pipeline.Key().unique_hashes[1]);
+        }
+        if (framebuffer.DepthImageId() != VideoCommon::ImageId{} && framebuffer.Images()) {
+            TraceGpuDetail(fmt::format("depth tick={} resource={} sampled={}", scheduler.CurrentTick(),
+                static_cast<void*>((*framebuffer.Images())[framebuffer.DepthImageId()].Handle()), bindings.depth_sampled));
+        }
+        for (size_t index = 0; index < color_targets.size(); ++index) {
+            ID3D12Resource* resource = nullptr;
+            if (framebuffer.HasColor(index) && framebuffer.Images()) {
+                resource = (*framebuffer.Images())[framebuffer.ColorImageId(index)].Handle();
+            }
+            TraceGpuDetail(fmt::format("RT tick={} slot={} descriptor={:x} resource={} format={}",
+                scheduler.CurrentTick(), index, color_targets[index].ptr,
+                static_cast<void*>(resource), static_cast<u32>(framebuffer.ColorFormat(index))));
+        }
+    }
     bool targets_changed = !command_state.valid ||
                            command_state.num_color_targets != color_targets.size() ||
                            command_state.depth_target != depth.ptr;

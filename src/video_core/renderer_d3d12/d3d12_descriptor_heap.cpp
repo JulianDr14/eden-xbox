@@ -259,12 +259,20 @@ void GuestDescriptorQueue::AddConstantBuffer(D3D12_GPU_VIRTUAL_ADDRESS address, 
         .SizeInBytes = address != 0 ? (size + 255u) & ~255u : 0u,
     };
     device->CreateConstantBufferView(&desc, Next());
+    if (GpuDiagnosticsEnabled()) {
+        TraceGpuDetail(fmt::format("CBV table={:x} slot={} address={:x} size={}",
+            range.gpu.ptr, written - 1, address, desc.SizeInBytes));
+    }
     CheckRemovedAfterDescriptor(device, [&] {
         return fmt::format("CBV at 0x{:x} of {} bytes", desc.BufferLocation, desc.SizeInBytes);
     });
 }
 
 void GuestDescriptorQueue::AddStorageBuffer(ID3D12Resource* resource, u64 offset, u32 size) {
+    if (GpuDiagnosticsEnabled()) {
+        TraceGpuDetail(fmt::format("storage buffer table={:x} slot={} resource={} offset={} size={}",
+            range.gpu.ptr, written, static_cast<void*>(resource), offset, size));
+    }
     if (count == 0) {
         return;
     }
@@ -306,6 +314,11 @@ void GuestDescriptorQueue::AddStorageBuffer(ID3D12Resource* resource, u64 offset
 
 void GuestDescriptorQueue::AddTexelBuffer(ID3D12Resource* resource, u64 offset, u32 size,
                                           DXGI_FORMAT format, u32 element_size, bool with_uav) {
+    if (GpuDiagnosticsEnabled()) {
+        TraceGpuDetail(fmt::format("texel buffer table={:x} slot={} resource={} offset={} size={} format={} uav={}",
+            range.gpu.ptr, written, static_cast<void*>(resource), offset, size,
+            static_cast<u32>(format), with_uav));
+    }
     if (count == 0) {
         return;
     }
@@ -346,6 +359,10 @@ void GuestDescriptorQueue::AddTexelBuffer(ID3D12Resource* resource, u64 offset, 
 }
 
 void GuestDescriptorQueue::AddCopy(D3D12_CPU_DESCRIPTOR_HANDLE descriptor) {
+    if (GpuDiagnosticsEnabled()) {
+        TraceGpuDetail(fmt::format("descriptor copy table={:x} slot={} source={:x}",
+            range.gpu.ptr, written, descriptor.ptr));
+    }
     if (count == 0) {
         return;
     }

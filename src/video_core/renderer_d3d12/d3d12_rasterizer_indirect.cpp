@@ -61,6 +61,9 @@ void RasterizerD3D12::DrawIndirect() {
     if (!pipeline->Handle()) {
         return; // D3D12 rejected the PSO (logged when it was built)
     }
+    if (UsesSkippedShader(pipeline->Key().unique_hashes)) [[unlikely]] {
+        return; // skip_shader
+    }
     ID3D12CommandSignature* const signature = pipeline->Layout().DrawSignature(params.is_indexed);
     Buffer* const buffer = buffer_cache.GetDrawIndirectBuffer().first;
     const u32 offset = buffer_cache.GetDrawIndirectBuffer().second;
