@@ -2500,7 +2500,11 @@ static void Call64(Core::System& system, u32 imm, std::span<uint64_t, 8> args) {
 void Call(Core::System& system, u32 imm) {
     auto& kernel = system.Kernel();
     auto& process = GetCurrentProcess(kernel);
-    GetCurrentThread(kernel).GetStackParameters().current_svc_id = static_cast<u8>(imm);
+    auto& stack_parameters = GetCurrentThread(kernel).GetStackParameters();
+    stack_parameters.current_svc_id = static_cast<u8>(imm);
+    // Pulse captures a thread only outside an SVC or at a wait it can rebuild: a blocking call
+    // can migrate the fiber, so the flag lives with the thread, not the core.
+    stack_parameters.is_calling_svc = true;
     std::array<uint64_t, 8> args;
     kernel.CurrentPhysicalCore().SaveSvcArguments(process, args);
     //kernel.EnterSVCProfile();
@@ -2514,6 +2518,7 @@ void Call(Core::System& system, u32 imm) {
     }
     //kernel.ExitSVCProfile();
     kernel.CurrentPhysicalCore().LoadSvcArguments(process, args);
+    GetCurrentThread(kernel).GetStackParameters().is_calling_svc = false;
 }
 
 } // namespace Kernel::Svc

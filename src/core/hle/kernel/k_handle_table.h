@@ -14,6 +14,7 @@
 #include "core/hle/kernel/k_auto_object.h"
 #include "core/hle/kernel/k_spin_lock.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/pulse_handle_state.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/svc_common.h"
 #include "core/hle/kernel/svc_results.h"
@@ -68,6 +69,11 @@ public:
         return m_max_count;
     }
 
+    // Stopped kernel only. Preserve handle generations and free-list order;
+    // reserved handles from unfinished native operations are not reconstructible.
+    HandleTableCheckpoint CaptureCheckpoint(KernelCore& kernel, const IdentifyCheckpointObject& identify) const;
+    void RestoreCheckpoint(KernelCore& kernel, const HandleTableCheckpoint& state,
+                           const ResolveCheckpointObject& resolve);
     void Finalize(KernelCore& kernel);
     bool Remove(KernelCore& kernel, Handle handle);
 

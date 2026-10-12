@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <utility>
+
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
@@ -318,6 +320,19 @@ Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool
         stack_rnd = KSystemControl::GenerateRandomRange(0, remaining_size / RegionAlignment) * RegionAlignment;
         kmap_rnd = KSystemControl::GenerateRandomRange(0, remaining_size / RegionAlignment) * RegionAlignment;
     }
+    if (const auto pin = std::exchange(m_region_random_pin, std::nullopt)) {
+        // A restored process reuses the captured placements; anything else is a different layout.
+        for (const u64 value : *pin) {
+            R_UNLESS(value <= remaining_size && Common::IsAligned(value, RegionAlignment) &&
+                         (enable_aslr || value == 0),
+                     ResultInvalidState);
+        }
+        alias_rnd = (*pin)[0];
+        heap_rnd = (*pin)[1];
+        stack_rnd = (*pin)[2];
+        kmap_rnd = (*pin)[3];
+    }
+    m_region_random = {alias_rnd, heap_rnd, stack_rnd, kmap_rnd};
 
     // Setup heap and alias regions.
     m_alias_region_start = alloc_start + alias_rnd;
@@ -2835,6 +2850,39 @@ Result KPageTableBase::MapPages(KProcessAddress address, size_t num_pages, KMemo
                                   KMemoryAttribute::None, KMemoryBlockDisableMergeAttribute::Normal,
                                   KMemoryBlockDisableMergeAttribute::None);
 
+    R_SUCCEED();
+}
+
+Result KPageTableBase::MapPhysicalPagesAt(KProcessAddress address, size_t num_pages,
+                                          KPhysicalAddress phys_addr, KMemoryState state,
+                                          KMemoryPermission perm) {
+    // As MapPages at a fixed address, but of pages the caller already owns (Pulse restore of a
+    // thread-local page at its captured address).
+    const size_t size = num_pages * PageSize;
+    R_UNLESS(this->CanContain(address, size, state), ResultInvalidCurrentMemory);
+
+    KScopedLightLock lk(m_general_lock);
+
+    size_t num_allocator_blocks;
+    R_TRY(this->CheckMemoryState(std::addressof(num_allocator_blocks), address, size,
+                                 KMemoryState::All, KMemoryState::Free, KMemoryPermission::None,
+                                 KMemoryPermission::None, KMemoryAttribute::None,
+                                 KMemoryAttribute::None));
+
+    Result allocator_result;
+    KMemoryBlockManagerUpdateAllocator allocator(std::addressof(allocator_result),
+                                                 m_memory_block_slab_manager, num_allocator_blocks);
+    R_TRY(allocator_result);
+
+    KScopedPageTableUpdater updater(this);
+
+    const KPageProperties properties = {perm, false, false, DisableMergeAttribute::DisableHead};
+    R_TRY(this->Operate(updater.GetPageList(), address, num_pages, phys_addr, true, properties,
+                        OperationType::Map, false));
+
+    m_memory_block_manager.Update(std::addressof(allocator), address, num_pages, state, perm,
+                                  KMemoryAttribute::None, KMemoryBlockDisableMergeAttribute::Normal,
+                                  KMemoryBlockDisableMergeAttribute::None);
     R_SUCCEED();
 }
 

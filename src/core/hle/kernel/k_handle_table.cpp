@@ -4,11 +4,113 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <unordered_map>
+#include "common/scope_exit.h"
 #include "core/hle/kernel/k_handle_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 
 namespace Kernel {
+
+HandleTableCheckpoint KHandleTable::CaptureCheckpoint(
+    KernelCore& kernel, const IdentifyCheckpointObject& identify) const {
+    if (!KScheduler::IsSchedulerLockedByCurrentThread(kernel) || !identify) {
+        throw std::invalid_argument("Pulse: handle capture requires stopped kernel");
+    }
+    HandleTableCheckpoint state{};
+    std::array<KAutoObject*, MaxTableSize> objects{};
+    u16 count{};
+    {
+        KScopedSpinLock lk{m_lock};
+        if (!m_table_size || m_table_size > MaxTableSize) {
+            throw std::invalid_argument("Pulse: uninitialized handle table");
+        }
+        state.entries.resize(m_table_size);
+        state.next_linear_id = m_next_linear_id;
+        state.max_count = m_max_count;
+        state.free_head = static_cast<s16>(m_free_head_index);
+        count = m_count;
+        for (size_t i = 0; i < m_table_size; ++i) {
+            objects[i] = m_objects[i];
+            if (objects[i]) state.entries[i].linear_id = m_entry_infos[i].linear_id;
+            else state.entries[i].next_free = m_entry_infos[i].next_free_index;
+        }
+    }
+    // The barrier keeps objects alive. Do not call the graph registry under a
+    // handle-table spin lock: it may need locks belonging to other subsystems.
+    std::unordered_map<u64, const KAutoObject*> identities;
+    std::unordered_map<const KAutoObject*, u64> references;
+    size_t occupied{};
+    for (size_t i = 0; i < state.entries.size(); ++i) {
+        if (!objects[i]) continue;
+        const auto id = identify(objects[i]);
+        if (!id) throw std::invalid_argument("Pulse: handle object has no serializer");
+        const auto [entry, inserted] = identities.emplace(id, objects[i]);
+        const auto [reference, first] = references.emplace(objects[i], id);
+        if ((!inserted && entry->second != objects[i]) || (!first && reference->second != id)) {
+            throw std::invalid_argument("Pulse: inconsistent handle object identity");
+        }
+        state.entries[i].object = id;
+        ++occupied;
+    }
+    if (occupied != count) throw std::invalid_argument("Pulse: handle reservation is still pending");
+    ValidateHandleTableCheckpoint(state);
+    return state;
+}
+
+void KHandleTable::RestoreCheckpoint(KernelCore& kernel, const HandleTableCheckpoint& state,
+                                     const ResolveCheckpointObject& resolve) {
+    if (!KScheduler::IsSchedulerLockedByCurrentThread(kernel) || !resolve) {
+        throw std::invalid_argument("Pulse: handle restore requires stopped kernel");
+    }
+    ValidateHandleTableCheckpoint(state);
+    std::array<KAutoObject*, MaxTableSize> objects{};
+    std::unordered_map<u64, KAutoObject*> references;
+    std::unordered_map<const KAutoObject*, u64> identities;
+    for (size_t i = 0; i < state.entries.size(); ++i) {
+        const auto id = state.entries[i].object;
+        if (!id) continue;
+        if (auto found = references.find(id); found != references.end()) {
+            objects[i] = found->second;
+        } else {
+            auto* object = resolve(id);
+            if (!object || !identities.emplace(object, id).second) {
+                throw std::invalid_argument("Pulse: unresolved or aliased handle object");
+            }
+            references.emplace(id, object);
+            objects[i] = object;
+        }
+    }
+    size_t opened{};
+    SCOPE_EXIT {
+        for (size_t i = 0; i < opened; ++i) if (objects[i]) objects[i]->Close(kernel);
+    };
+    // Each live handle owns a reference, including duplicate handles to one object.
+    for (size_t i = 0; i < state.entries.size(); ++i) {
+        if (objects[i] && !objects[i]->Open(kernel)) {
+            throw std::invalid_argument("Pulse: dead handle object");
+        }
+        opened = i + 1;
+    }
+    {
+        KScopedSpinLock lk{m_lock};
+        if (m_count || (m_table_size && m_table_size != state.entries.size()) ||
+            std::any_of(m_objects.begin(), m_objects.end(), [](auto* object) { return object != nullptr; })) {
+            throw std::invalid_argument("Pulse: handle restore requires a fresh empty table");
+        }
+        m_table_size = static_cast<u16>(state.entries.size());
+        m_next_linear_id = state.next_linear_id;
+        m_max_count = state.max_count;
+        m_free_head_index = state.free_head;
+        m_count = 0;
+        for (size_t i = 0; i < m_table_size; ++i) {
+            m_objects[i] = objects[i];
+            if (objects[i]) { m_entry_infos[i].linear_id = state.entries[i].linear_id; ++m_count; }
+            else m_entry_infos[i].next_free_index = state.entries[i].next_free;
+        }
+    }
+    opened = 0; // Ownership transferred to the reconstructed table.
+}
 
 void KHandleTable::Finalize(KernelCore& kernel) {
     // Get the table and clear our record of it.

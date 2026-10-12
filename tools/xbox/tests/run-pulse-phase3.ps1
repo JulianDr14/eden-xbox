@@ -12,10 +12,12 @@ $pulseFmt = Get-Content 'build-uwp/CMakeCache.txt' | Where-Object { $_.StartsWit
 if (!$pulseFmt) { throw 'Configured fmt source missing' }
 $pulseFmt = $pulseFmt.Substring($pulseFmt.IndexOf('=') + 1)
 $pulseGate = New-Item -ItemType Directory -Force 'build-uwp/pulse-gate'
-$pulseFlags = '/nologo /O2 /MD /std:c++20 /utf-8 /EHsc /DNOMINMAX /I src /I "' + $pulseFmt + '/include" ' + ($pulseIncludes -join ' ')
+$pulseFlags = '/nologo /O2 /MD /std:c++20 /utf-8 /EHsc /DNOMINMAX /I src /I src/dynarmic/src /I "' + $pulseFmt + '/include" ' + ($pulseIncludes -join ' ')
 $pulseCommon = 'build-uwp\src\common\common.lib build-uwp\_deps\fmt-build\fmt.lib'
 $pulseTests = @(
+    @{ Name = 'pulse-exclusive'; Source = 'pulse-exclusive'; Objects = 'src\dynarmic\src\dynarmic\backend\x64\exclusive_monitor.cpp build-uwp\src\dynarmic\src\dynarmic\CMakeFiles\dynarmic.dir\common\spin_lock_x64.cpp.obj'; Libraries = "$pulseCommon WindowsApp.lib ntdll.lib" },
     @{ Name = 'pulse-wait'; Source = 'pulse-wait'; Objects = ''; Libraries = '' },
+    @{ Name = 'pulse-process'; Source = 'pulse-process'; Objects = ''; Libraries = '' },
     @{ Name = 'pulse-machine'; Source = 'pulse-machine'; Objects = ''; Libraries = "$pulseCommon build-uwp\_deps\lz4-build\lz4.lib WindowsApp.lib ntdll.lib" },
     @{ Name = 'pulse-readback'; Source = 'gc-readback'; Objects = ''; Libraries = '' },
     @{ Name = 'pulse-services'; Source = 'pulse-services'; Objects = ''; Libraries = '' },

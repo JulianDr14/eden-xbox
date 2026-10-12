@@ -419,6 +419,28 @@ TimingCheckpoint CoreTiming::CaptureCheckpoint(
     return state;
 }
 
+std::vector<std::shared_ptr<EventType>> CoreTiming::CheckpointQueuedEventTypes() {
+    std::scoped_lock lock{advance_lock, basic_lock};
+    if (!paused || (timer_thread.joinable() && !paused_set)) {
+        throw std::logic_error("Pulse: timing must be synchronously paused");
+    }
+    if (event_queue.size() > MaxCheckpointEvents) {
+        throw std::invalid_argument("Pulse: too many timing events");
+    }
+    std::vector<std::shared_ptr<EventType>> types;
+    std::unordered_set<const EventType*> seen;
+    for (const auto& pending : event_queue) {
+        auto type = pending.type.lock();
+        if (!type) {
+            throw std::invalid_argument("Pulse: timing event without a live owner");
+        }
+        if (seen.insert(type.get()).second) {
+            types.push_back(std::move(type));
+        }
+    }
+    return types;
+}
+
 void CoreTiming::RestoreCheckpoint(const TimingCheckpoint& state,
                                   std::span<const CheckpointEventBinding> bindings) {
     std::scoped_lock lock{advance_lock, basic_lock};

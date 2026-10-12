@@ -53,6 +53,11 @@ public:
 
     static void RunServer(std::unique_ptr<ServerManager>&& server);
 
+    /// Pulse: the HLE manager serving a server session, or null if no server has accepted it
+    /// (yet). Sessions are tracked from RegisterSession until they are destroyed.
+    static std::shared_ptr<SessionRequestManager> FindSessionManager(
+        const Kernel::KServerSession* session);
+
 private:
     void LinkToDeferredList(MultiWaitHolder* holder);
     void LinkDeferred();

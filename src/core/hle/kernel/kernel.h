@@ -10,7 +10,9 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include "common/container/unordered_map.h"
 #include <vector>
 
@@ -19,6 +21,7 @@
 #include "core/hle/kernel/k_auto_object.h"
 #include "core/hle/kernel/k_slab_heap.h"
 #include "core/hle/kernel/k_typed_address.h"
+#include "core/hle/kernel/pulse_process_layout.h"
 #include "core/hle/kernel/svc_common.h"
 
 namespace Common {
@@ -311,6 +314,19 @@ public:
     /// Gets the memory layout.
     const KMemoryLayout& MemoryLayout() const;
 
+    /// Pulse restore only: the next process created from metadata reuses these random layout
+    /// choices instead of drawing new ones. Consumed by that process; cleared on failure.
+    void PinNextProcessLayout(std::optional<ProcessLayoutPin> pin) {
+        next_process_layout = pin;
+    }
+    std::optional<ProcessLayoutPin> TakeProcessLayoutPin() {
+        return std::exchange(next_process_layout, std::nullopt);
+    }
+
+    /// Pulse restore only: thread IDs below this value are never handed out again, so restored
+    /// guest IDs cannot be reused by threads created afterwards.
+    void ReserveThreadIds(u64 next_id);
+
 private:
     friend class KProcess;
     friend class KThread;
@@ -337,6 +353,7 @@ private:
     std::unique_ptr<Impl> impl;
 
     bool exception_exited{};
+    std::optional<ProcessLayoutPin> next_process_layout;
 
 private:
     /// Helper to encapsulate all slab heaps in a single heap allocated container

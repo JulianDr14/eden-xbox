@@ -46,7 +46,10 @@ add_library(core STATIC
     debugger/gdbstub_arch.h
     device_memory.cpp
     device_memory.h
+    pulse_checkpoint.cpp
+    pulse_checkpoint.h
     pulse_machine_state.h
+    pulse_process_state.h
     device_memory_manager.h
     device_memory_manager.inc
     file_sys/bis_factory.cpp
@@ -254,6 +257,8 @@ add_library(core STATIC
     hle/kernel/k_event_info.h
     hle/kernel/k_handle_table.cpp
     hle/kernel/k_handle_table.h
+    hle/kernel/pulse_handle_state.h
+    hle/kernel/pulse_process_layout.h
     hle/kernel/k_hardware_timer.cpp
     hle/kernel/k_hardware_timer.h
     hle/kernel/k_hardware_timer_base.h
@@ -334,6 +339,8 @@ add_library(core STATIC
     hle/kernel/k_thread_queue.cpp
     hle/kernel/k_thread_queue.h
     hle/kernel/pulse_wait_state.h
+    hle/kernel/pulse_wait_graph.h
+    hle/kernel/pulse_wait_graph.cpp
     hle/kernel/k_timer_task.h
     hle/kernel/k_trace.h
     hle/kernel/k_transfer_memory.cpp

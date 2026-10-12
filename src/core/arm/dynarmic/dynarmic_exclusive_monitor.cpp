@@ -11,6 +11,27 @@ DynarmicExclusiveMonitor::DynarmicExclusiveMonitor(Memory::Memory& memory_, std:
 
 DynarmicExclusiveMonitor::~DynarmicExclusiveMonitor() = default;
 
+ExclusiveMonitorCheckpoint DynarmicExclusiveMonitor::CaptureCheckpoint() {
+    const auto source = monitor.CaptureCheckpoint();
+    ExclusiveMonitorCheckpoint state{};
+    state.core_count = static_cast<u32>(source.processor_count);
+    for (size_t i = 0; i < state.reservations.size(); ++i) {
+        state.reservations[i] = {source.reservations[i].address,
+                                source.reservations[i].value, source.reservations[i].active};
+    }
+    return state;
+}
+
+void DynarmicExclusiveMonitor::RestoreCheckpoint(const ExclusiveMonitorCheckpoint& state) {
+    Dynarmic::ExclusiveMonitor::Checkpoint target{};
+    target.processor_count = state.core_count;
+    for (size_t i = 0; i < target.reservations.size(); ++i) {
+        target.reservations[i] = {state.reservations[i].address,
+                                 state.reservations[i].value, state.reservations[i].active};
+    }
+    monitor.RestoreCheckpoint(target);
+}
+
 u8 DynarmicExclusiveMonitor::ExclusiveRead8(std::size_t core_index, VAddr addr) {
     return monitor.ReadAndMark<u8>(core_index, addr, [&]() -> u8 { return memory.Read8(addr); });
 }

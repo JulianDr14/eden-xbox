@@ -133,6 +133,8 @@ public:
         std::span<const CheckpointEventBinding> bindings);
     void RestoreCheckpoint(const TimingCheckpoint& state,
                            std::span<const CheckpointEventBinding> bindings);
+    /// Pulse: each distinct event type currently queued, in queue order. Paused timing only.
+    [[nodiscard]] std::vector<std::shared_ptr<EventType>> CheckpointQueuedEventTypes();
 
     /// Schedules an event in core timing
     void ScheduleEvent(std::chrono::nanoseconds ns_into_future,

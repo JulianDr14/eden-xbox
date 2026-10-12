@@ -25,9 +25,32 @@ public:
         }
     }
 
+    // Caller holds the checkpoint barrier and scheduler lock. Equal deadlines
+    // have observable FIFO order and must not be rebuilt in thread-ID order.
+    u64 GetCheckpointTaskOrdinal(s64 deadline, const KTimerTask* target = nullptr) {
+        KScopedSpinLock lk{m_lock};
+        u64 ordinal{};
+        size_t visited{};
+        for (const auto& task : m_task_tree) {
+            if (++visited > 65536) throw std::invalid_argument("Pulse: kernel timer task limit");
+            if (&task == target) {
+                if (task.GetTime() != deadline) throw std::invalid_argument("Pulse: timer deadline mismatch");
+                return ordinal;
+            }
+            if (task.GetTime() == deadline) ++ordinal;
+        }
+        if (target) throw std::invalid_argument("Pulse: missing kernel timer task");
+        return ordinal;
+    }
+
 protected:
     KSpinLock& GetLock() {
         return m_lock;
+    }
+
+    /// Time of the earliest registered task, 0 if there is none. Caller holds the lock.
+    s64 GetNextTaskTime() const {
+        return m_next_task != nullptr ? m_next_task->GetTime() : 0;
     }
 
     s64 DoInterruptTaskImpl(s64 cur_time) {

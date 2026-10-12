@@ -40,9 +40,13 @@ public:
     }
 
     Result Initialize(KernelCore& kernel, KProcess* process);
+    /// Pulse restore: maps the page at a captured address instead of a free one.
+    Result InitializeAt(KernelCore& kernel, KProcess* process, KProcessAddress address);
     Result Finalize();
 
     KProcessAddress Reserve();
+    /// Pulse restore: reserves one specific region; false if it is outside or already used.
+    bool ReserveAt(KProcessAddress addr);
     void Release(KProcessAddress addr);
 
     bool IsAllUsed() const {

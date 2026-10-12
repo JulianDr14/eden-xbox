@@ -7,6 +7,7 @@
 #pragma once
 
 #include <map>
+#include <optional>
 
 #include "core/arm/arm_interface.h"
 #include "core/file_sys/program_metadata.h"
@@ -20,6 +21,7 @@
 #include "core/hle/kernel/k_system_resource.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/k_thread_local_page.h"
+#include "core/hle/kernel/pulse_process_layout.h"
 #include "core/memory.h"
 
 namespace Kernel {
@@ -89,6 +91,10 @@ private:
     KProcessAddress m_main_thread_handle_addr{};
     KHandleTable m_handle_table;
     KProcessAddress m_plr_address{};
+    KProcessAddress m_main_thread_stack_address{};
+    u64 m_aslr_space_offset{};
+    std::optional<ProcessLayoutPin> m_layout_pin{};
+    bool m_restoring_checkpoint{};
     ThreadList m_thread_list{};
     SharedMemoryInfoList m_shared_memory_list{};
     KProcessPageTable m_page_table;
@@ -235,6 +241,21 @@ public:
     size_t GetMainStackSize() const {
         return m_main_thread_stack_size;
     }
+    KProcessAddress GetMainStackAddress() const {
+        return m_main_thread_stack_address;
+    }
+
+    /// Pulse: created with a pinned layout, so its loader must not Run it: the restore
+    /// coordinator does that with RunForCheckpointRestore.
+    bool IsRestoringCheckpoint() const {
+        return m_restoring_checkpoint;
+    }
+
+    /// Pulse: the random layout choices this process was created with (see ProcessLayoutPin).
+    ProcessLayoutPin GetLayoutPin() const {
+        return {m_aslr_space_offset, m_page_table.GetBasePageTable().GetRegionRandom(),
+                GetInteger(m_plr_address), m_entropy};
+    }
 
     KMemoryManager::Pool GetMemoryPool() const {
         return m_memory_pool;
@@ -352,6 +373,8 @@ public:
     void RemoveSharedMemory(KernelCore& kernel, KSharedMemory* shmem, KProcessAddress address, size_t size);
 
     Result CreateThreadLocalRegion(KernelCore& kernel, KProcessAddress* out);
+    /// Pulse restore: reserves the region at a captured address (its page mapped there if new).
+    Result CreateThreadLocalRegionAt(KernelCore& kernel, KProcessAddress addr);
     Result DeleteThreadLocalRegion(KernelCore& kernel, KProcessAddress addr);
 
     KProcessAddress GetProcessLocalRegionAddress() const {
@@ -454,6 +477,10 @@ public:
     void RegisterThread(KernelCore& kernel, KThread* thread);
     void UnregisterThread(KernelCore& kernel, KThread* thread);
     Result Run(KernelCore& kernel, s32 priority, size_t stack_size);
+    /// Pulse restore: Run without its main thread. Maps the main stack at its captured address
+    /// and prepares the handle table; the coordinator then rebuilds every thread itself.
+    Result RunForCheckpointRestore(KernelCore& kernel, KProcessAddress stack_address,
+                                   size_t stack_size);
     Result Reset(KernelCore& kernel);
 
     void SetDebugBreak(KernelCore& kernel) {
@@ -488,6 +515,9 @@ public:
     Result WaitAddressArbiter(uintptr_t address, Svc::ArbitrationType arb_type, s32 value, s64 timeout) {
         R_RETURN(m_address_arbiter.WaitForAddress(address, arb_type, value, timeout));
     }
+
+    std::unique_ptr<KThreadQueue> CreateCheckpointConditionWait(
+        KernelCore& kernel, const ThreadWaitCheckpoint& state, const ResolveWaitObject& resolve);
 
     std::unique_ptr<KThreadQueue> CreateCheckpointAddressWait(
         KernelCore& kernel, const ThreadWaitCheckpoint& state);

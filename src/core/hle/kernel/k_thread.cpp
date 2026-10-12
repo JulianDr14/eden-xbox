@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <utility>
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
@@ -230,7 +231,12 @@ namespace Kernel {
         if (owner != nullptr) {
             // Setup the TLS, if needed.
             if (type == ThreadType::User) {
-                R_TRY(owner->CreateThreadLocalRegion(kernel, std::addressof(m_tls_address)));
+                if (m_checkpoint_tls_address != 0) {
+                    R_TRY(owner->CreateThreadLocalRegionAt(kernel, m_checkpoint_tls_address));
+                    m_tls_address = std::exchange(m_checkpoint_tls_address, KProcessAddress{});
+                } else {
+                    R_TRY(owner->CreateThreadLocalRegion(kernel, std::addressof(m_tls_address)));
+                }
                 owner->GetMemory().ZeroBlock(m_tls_address, Svc::ThreadLocalRegionSize);
             }
 
@@ -309,6 +315,21 @@ namespace Kernel {
         R_RETURN(InitializeThread(system.Kernel(), thread, func, arg, user_stack_top, prio, virt_core, owner, ThreadType::User, system.GetCpuManager().GetGuestThreadFunc(system.Kernel())));
     }
 
+    Result KThread::InitializeCheckpointUserThread(Core::System& system, KThread* thread,
+                                                   u64 thread_id, KProcessAddress tls_address,
+                                                   KProcessAddress user_stack_top, s32 prio,
+                                                   s32 virt_core, KProcess* owner) {
+        R_UNLESS(thread_id != 0 && tls_address != 0, ResultInvalidArgument);
+        thread->m_checkpoint_tls_address = tls_address;
+        const Result result = InitializeUserThread(system, thread, {}, 0, user_stack_top, prio,
+                                                   virt_core, owner);
+        thread->m_checkpoint_tls_address = {};
+        R_TRY(result);
+        thread->m_thread_id = thread_id;
+        system.Kernel().ReserveThreadIds(thread_id + 1);
+        R_SUCCEED();
+    }
+
     Result KThread::InitializeServiceThread(Core::System& system, KThread* thread, std::function<void()>&& func, s32 prio, s32 virt_core, KProcess* owner) {
         system.Kernel().GlobalSchedulerContext().AddThread(thread);
         std::function<void()> func2{[&system, func_{std::move(func)}] {
@@ -337,6 +358,12 @@ namespace Kernel {
     }
 
     void KThread::Finalize(KernelCore& kernel) {
+        // A discarded reconstruction can still own an intrusive wait node. Unlink
+        // it before the normal finalizer asserts that no mutex owner remains.
+        if (m_checkpoint_wait_queue && m_wait_queue == m_checkpoint_wait_queue.get()) {
+            KScopedSchedulerLock sl(kernel);
+            m_checkpoint_wait_queue->AbandonCheckpointWait(kernel, this);
+        }
         // If the thread has an owner process, unregister it.
         if (m_parent != nullptr) {
             m_parent->UnregisterThread(kernel, this);
@@ -1086,6 +1113,45 @@ namespace Kernel {
         }
     }
 
+    WaitObjectReference KThread::CaptureCheckpointLockOwner(const IdentifyWaitObject& identify) const {
+        if (!identify || !m_waiting_lock_info || GetIsKernelAddressKey()) {
+            throw std::invalid_argument("Pulse: unsupported mutex owner");
+        }
+        const auto id = identify(m_waiting_lock_info->GetOwner());
+        if (!id) throw std::invalid_argument("Pulse: mutex owner has no serializer");
+        u64 ordinal{};
+        for (const auto& waiter : m_waiting_lock_info->GetThreadTree()) {
+            if (&waiter == this) return {id, ordinal};
+            if (waiter.GetPriority() == GetPriority()) ++ordinal;
+            if (ordinal >= 65536) break;
+        }
+        throw std::invalid_argument("Pulse: mutex waiter missing from owner");
+    }
+
+    void KThread::LinkCheckpointUserWaiter(KernelCore& kernel, KThread* thread, u64 ordinal) {
+        ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
+        if (!thread || thread == this || thread->GetOwnerProcess() != GetOwnerProcess() ||
+            thread->GetWaitingLockInfo() || thread->GetConditionVariableTree() ||
+            thread->GetIsKernelAddressKey() || GetPriority() > thread->GetPriority()) {
+            throw std::invalid_argument("Pulse: invalid mutex graph or unrestored priorities");
+        }
+        size_t depth{};
+        for (const KThread* owner = this; owner; owner = owner->GetLockOwner(kernel)) {
+            if (owner == thread || ++depth > 4096) {
+                throw std::invalid_argument("Pulse: cyclic or excessive mutex owner chain");
+            }
+        }
+        u64 count{};
+        if (const auto* lock = FindHeldLock(kernel, thread->GetAddressKey(), false)) {
+            for (const auto& waiter : lock->GetThreadTree()) {
+                if (waiter.GetPriority() == thread->GetPriority()) ++count;
+                if (count >= 65536) break;
+            }
+        }
+        if (count != ordinal) throw std::invalid_argument("Pulse: mutex waiter restore order");
+        AddWaiterImpl(kernel, thread);
+    }
+
     void KThread::AddWaiter(KernelCore& kernel, KThread* thread) {
         this->AddWaiterImpl(kernel, thread);
 
@@ -1417,7 +1483,8 @@ namespace Kernel {
         return m_host_context;
     }
 
-    ThreadWaitCheckpoint KThread::CaptureWaitCheckpoint(const IdentifyWaitObject& identify) const {
+    ThreadWaitCheckpoint KThread::CaptureWaitCheckpoint(KernelCore& kernel, const IdentifyWaitObject& identify) const {
+        ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
         if (m_thread_type != ThreadType::User || GetState() != ThreadState::Waiting ||
             !m_wait_queue) {
             throw std::runtime_error("Pulse: thread is not at a supported guest SVC wait");
@@ -1427,10 +1494,16 @@ namespace Kernel {
         if ((state.kind == CheckpointWaitKind::Sleep && svc != Svc::SvcId::SleepThread) ||
             (state.kind == CheckpointWaitKind::Synchronization &&
              svc != Svc::SvcId::WaitSynchronization) ||
-            (state.kind == CheckpointWaitKind::AddressArbiter && svc != Svc::SvcId::WaitForAddress)) {
+            (state.kind == CheckpointWaitKind::AddressArbiter && svc != Svc::SvcId::WaitForAddress) ||
+            (state.kind == CheckpointWaitKind::Mutex && svc != Svc::SvcId::ArbitrateLock) ||
+            (state.kind == CheckpointWaitKind::ConditionVariable &&
+             svc != Svc::SvcId::WaitProcessWideKeyAtomic)) {
             throw std::runtime_error("Pulse: nested or unsupported SVC continuation");
         }
         state.deadline = GetTime();
+        if (state.deadline > 0) {
+            state.timer_ordinal = kernel.HardwareTimer().GetCheckpointTaskOrdinal(state.deadline, this);
+        }
         ValidateWaitCheckpoint(state);
         return state;
     }
@@ -1439,9 +1512,12 @@ namespace Kernel {
                                         const ResolveWaitObject& resolve) {
         ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
         ValidateWaitCheckpoint(state);
-        if (m_thread_type != ThreadType::User || GetState() != ThreadState::Initialized ||
-            m_wait_queue || m_checkpoint_wait_queue || GetTime() != 0) {
+        if (!IsFreshCheckpointThread()) {
             throw std::invalid_argument("Pulse: wait restore requires a fresh user thread");
+        }
+        if (state.deadline > 0 &&
+            kernel.HardwareTimer().GetCheckpointTaskOrdinal(state.deadline) != state.timer_ordinal) {
+            throw std::invalid_argument("Pulse: kernel timer restore order");
         }
         std::unique_ptr<KThreadQueue> queue;
         switch (state.kind) {
@@ -1454,15 +1530,22 @@ namespace Kernel {
         case CheckpointWaitKind::AddressArbiter:
             queue = m_parent->CreateCheckpointAddressWait(kernel, state);
             break;
+        case CheckpointWaitKind::Mutex:
+        case CheckpointWaitKind::ConditionVariable:
+            queue = m_parent->CreateCheckpointConditionWait(kernel, state, resolve);
+            break;
         default:
             throw std::invalid_argument("Pulse: unsupported wait restore kind");
         }
         if (state.deadline > 0) queue->SetHardwareTimer(&kernel.HardwareTimer());
         m_checkpoint_wait_queue = std::move(queue);
         m_checkpoint_wait_kind = state.kind;
+        m_stack_parameters.is_calling_svc = true;
         m_stack_parameters.current_svc_id = static_cast<u8>(state.kind == CheckpointWaitKind::Sleep ?
             Svc::SvcId::SleepThread : state.kind == CheckpointWaitKind::Synchronization ?
-            Svc::SvcId::WaitSynchronization : Svc::SvcId::WaitForAddress);
+            Svc::SvcId::WaitSynchronization : state.kind == CheckpointWaitKind::Mutex ?
+            Svc::SvcId::ArbitrateLock : state.kind == CheckpointWaitKind::ConditionVariable ?
+            Svc::SvcId::WaitProcessWideKeyAtomic : Svc::SvcId::WaitForAddress);
         SetSyncedIndex(-1);
         try {
             if (state.kind != CheckpointWaitKind::Sleep) {
@@ -1472,14 +1555,26 @@ namespace Kernel {
             BeginWait(kernel, m_checkpoint_wait_queue.get());
             SetWaitReasonForDebugging(state.kind == CheckpointWaitKind::Sleep ?
                 ThreadWaitReasonForDebugging::Sleep : state.kind == CheckpointWaitKind::Synchronization ?
-                ThreadWaitReasonForDebugging::Synchronization : ThreadWaitReasonForDebugging::Arbitration);
+                ThreadWaitReasonForDebugging::Synchronization : state.kind == CheckpointWaitKind::AddressArbiter ?
+                ThreadWaitReasonForDebugging::Arbitration : ThreadWaitReasonForDebugging::ConditionVar);
             if (state.deadline > 0) kernel.HardwareTimer().RegisterAbsoluteTask(this, state.deadline);
         } catch (...) {
             if (GetState() == ThreadState::Waiting) CancelWait(kernel, ResultCancelled, true);
             m_checkpoint_wait_queue.reset();
             m_checkpoint_wait_kind = CheckpointWaitKind::None;
+            m_stack_parameters.is_calling_svc = false;
             throw;
         }
+    }
+
+    void KThread::ActivateRestoredWaiter(KernelCore& kernel) {
+        ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
+        if (m_thread_type != ThreadType::User || m_parent == nullptr ||
+            GetState() != ThreadState::Waiting || !HasRestoredWaitContinuation()) {
+            throw std::invalid_argument("Pulse: activation requires a restored waiting thread");
+        }
+        m_parent->IncrementRunningThreadCount(kernel);
+        this->Open(kernel);
     }
 
     void KThread::CompleteRestoredWait(KernelCore& kernel) {
@@ -1495,6 +1590,7 @@ namespace Kernel {
         m_checkpoint_wait_queue->ReleaseCheckpointReferences(kernel);
         m_checkpoint_wait_queue.reset();
         m_checkpoint_wait_kind = CheckpointWaitKind::None;
+        m_stack_parameters.is_calling_svc = false;
     }
 
     void SetCurrentThread(KernelCore& kernel, KThread* thread) {

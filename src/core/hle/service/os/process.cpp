@@ -77,8 +77,8 @@ bool Process::Run() {
         return false;
     }
 
-    // Start.
-    if (m_process) {
+    // Start. A Pulse restore starts its process itself, without a new main thread.
+    if (m_process && !m_process->IsRestoringCheckpoint()) {
         m_process->Run(m_system.Kernel(), m_main_thread_priority, m_main_thread_stack_size);
     }
 

@@ -22,6 +22,9 @@ public:
     explicit DynarmicExclusiveMonitor(Memory::Memory& memory_, std::size_t core_count_);
     ~DynarmicExclusiveMonitor() override;
 
+    ExclusiveMonitorCheckpoint CaptureCheckpoint() override;
+    void RestoreCheckpoint(const ExclusiveMonitorCheckpoint& state) override;
+
     u8 ExclusiveRead8(std::size_t core_index, VAddr addr) override;
     u16 ExclusiveRead16(std::size_t core_index, VAddr addr) override;
     u32 ExclusiveRead32(std::size_t core_index, VAddr addr) override;

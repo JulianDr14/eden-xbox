@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <utility>
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_condition_variable.h"
@@ -63,19 +64,60 @@ bool UpdateLockAtomic(KernelCore& kernel, u32* out, KProcessAddress address, u32
     return true;
 }
 
+ThreadWaitCheckpoint CaptureConditionWait(const IdentifyWaitObject& identify, const KThread* thread,
+                                         KConditionVariable::ThreadTree* tree, KThread* reference_owner) {
+    if (!thread || thread->GetIsKernelAddressKey()) {
+        throw std::invalid_argument("Pulse: unsupported condition wait");
+    }
+    const bool condition = tree != nullptr;
+    ThreadWaitCheckpoint state{condition ? CheckpointWaitKind::ConditionVariable : CheckpointWaitKind::Mutex,
+                               0, {}, GetInteger(thread->GetAddressKey()), 0};
+    state.tag = thread->GetAddressKeyValue();
+    if (condition) state.condition_key = thread->GetConditionVariableKey();
+    if (!condition) {
+        if (!identify || !reference_owner || !(state.reference_owner = identify(reference_owner))) {
+            throw std::invalid_argument("Pulse: mutex continuation owner has no serializer");
+        }
+    }
+    if (condition && thread->IsWaitingForConditionVariable()) {
+        if (thread->GetConditionVariableTree() != tree) {
+            throw std::invalid_argument("Pulse: mismatched condition tree");
+        }
+        for (const auto& waiter : *tree) {
+            if (&waiter == thread) return state;
+            if (waiter.GetConditionVariableKey() == state.condition_key &&
+                waiter.GetPriority() == thread->GetPriority()) ++state.ordinal;
+            if (state.ordinal >= 65536) break;
+        }
+        throw std::invalid_argument("Pulse: condition waiter missing from tree");
+    }
+    state.objects.push_back(thread->CaptureCheckpointLockOwner(identify));
+    return state;
+}
+
 class ThreadQueueImplForKConditionVariableWaitForAddress final : public KThreadQueue {
 public:
     explicit ThreadQueueImplForKConditionVariableWaitForAddress(KernelCore& kernel)
         : KThreadQueue(kernel)
     {}
 
+    void SetReferenceOwner(KThread* owner) { m_reference_owner = owner; }
+
+    ThreadWaitCheckpoint CaptureCheckpoint(const IdentifyWaitObject& identify, const KThread* thread) const override {
+        return CaptureConditionWait(identify, thread, nullptr, m_reference_owner);
+    }
+
     virtual void CancelWait(KernelCore& kernel, KThread* waiting_thread, Result wait_result, bool cancel_timer_task) override {
         // Remove the thread as a waiter from its owner.
-        waiting_thread->GetLockOwner(kernel)->RemoveWaiter(kernel, waiting_thread);
+        if (auto* owner = waiting_thread->GetLockOwner(kernel)) {
+            owner->RemoveWaiter(kernel, waiting_thread);
+        }
 
         // Invoke the base cancel wait handler.
         KThreadQueue::CancelWait(kernel, waiting_thread, wait_result, cancel_timer_task);
     }
+private:
+    KThread* m_reference_owner{};
 };
 
 class ThreadQueueImplForKConditionVariableWaitConditionVariable final : public KThreadQueue {
@@ -87,6 +129,10 @@ public:
         : KThreadQueue(kernel)
         , m_tree(t)
     {}
+
+    ThreadWaitCheckpoint CaptureCheckpoint(const IdentifyWaitObject& identify, const KThread* thread) const override {
+        return CaptureConditionWait(identify, thread, m_tree, nullptr);
+    }
 
     void CancelWait(KernelCore& kernel, KThread* waiting_thread, Result wait_result, bool cancel_timer_task) override {
         // Remove the thread as a waiter from its owner.
@@ -105,6 +151,116 @@ public:
     }
 };
 
+// Own only a reconstructible continuation. The current lock owner may change
+// while waiting; the original ArbitrateLock stack reference is a separate ID.
+class RestoredConditionWait final : public KThreadQueue {
+public:
+    RestoredConditionWait(KernelCore& kernel, KConditionVariable::ThreadTree* tree,
+                          const ThreadWaitCheckpoint& state, const ResolveWaitObject& resolve)
+        : KThreadQueue(kernel), m_kernel(kernel), m_tree(tree), m_state(state) {
+        const auto resolve_thread = [&](u64 id) {
+            auto* object = resolve ? resolve(id) : nullptr;
+            auto* thread = object ? object->DynamicCast<KThread*>() : nullptr;
+            if (!thread || !thread->GetOwnerProcess()) {
+                throw std::invalid_argument("Pulse: unresolved user mutex owner");
+            }
+            return thread;
+        };
+        if (!state.objects.empty()) m_owner = resolve_thread(state.objects[0].id);
+        if (state.reference_owner) {
+            m_reference_owner = resolve_thread(state.reference_owner);
+            if (m_owner && ((state.objects[0].id == state.reference_owner) !=
+                            (m_owner == m_reference_owner))) {
+                throw std::invalid_argument("Pulse: inconsistent mutex owner identity");
+            }
+            if (!m_reference_owner->Open(kernel)) {
+                m_reference_owner = nullptr;
+                throw std::invalid_argument("Pulse: dead mutex continuation owner");
+            }
+        }
+    }
+
+    ~RestoredConditionWait() override {
+        ASSERT(!m_thread);
+        ReleaseCheckpointReferences(m_kernel);
+    }
+
+    ThreadWaitCheckpoint CaptureCheckpoint(const IdentifyWaitObject& identify, const KThread* thread) const override {
+        return CaptureConditionWait(identify, thread, m_tree, m_reference_owner);
+    }
+
+    void LinkCheckpointWait(KThread* thread) override {
+        ASSERT(!m_thread);
+        if (!thread || (m_reference_owner &&
+            m_reference_owner->GetOwnerProcess() != thread->GetOwnerProcess())) {
+            throw std::invalid_argument("Pulse: cross-process mutex continuation owner");
+        }
+        if (m_owner) {
+            thread->SetUserAddressKey(m_state.address, m_state.tag);
+            // Keep the condition key even after it has moved to a mutex queue.
+            if (m_tree) {
+                thread->SetConditionVariable(m_tree, m_state.address, m_state.condition_key, m_state.tag);
+                thread->ClearConditionVariable();
+            }
+            m_owner->LinkCheckpointUserWaiter(m_kernel, thread, m_state.objects[0].ordinal);
+        } else {
+            u64 ordinal{};
+            for (const auto& waiter : *m_tree) {
+                if (waiter.GetConditionVariableKey() == m_state.condition_key &&
+                    waiter.GetPriority() == thread->GetPriority()) ++ordinal;
+                if (ordinal >= 65536) break;
+            }
+            if (ordinal != m_state.ordinal) {
+                throw std::invalid_argument("Pulse: condition waiter restore order");
+            }
+            thread->SetConditionVariable(m_tree, m_state.address, m_state.condition_key, m_state.tag);
+            m_tree->insert(*thread);
+        }
+        m_thread = thread;
+    }
+
+    void EndWait(KernelCore& kernel, KThread* thread, Result result) override {
+        // SignalToAddress and SignalImpl already unlinked the waiter.
+        ASSERT(thread == m_thread && !thread->GetLockOwner(kernel) && !thread->IsWaitingForConditionVariable());
+        m_thread = nullptr;
+        KThreadQueue::EndWait(kernel, thread, result);
+    }
+
+    void CancelWait(KernelCore& kernel, KThread* thread, Result result, bool cancel_timer) override {
+        Unlink(kernel, thread);
+        KThreadQueue::CancelWait(kernel, thread, result, cancel_timer);
+    }
+
+    void AbandonCheckpointWait(KernelCore& kernel, KThread* thread) override {
+        Unlink(kernel, thread);
+        KThreadQueue::AbandonCheckpointWait(kernel, thread);
+    }
+
+    void ReleaseCheckpointReferences(KernelCore& kernel) override {
+        ASSERT(!m_thread);
+        if (auto* owner = std::exchange(m_reference_owner, nullptr)) owner->Close(kernel);
+    }
+
+private:
+    void Unlink(KernelCore& kernel, KThread* thread) {
+        if (!m_thread) return;
+        ASSERT(thread == m_thread);
+        if (auto* owner = thread->GetLockOwner(kernel)) owner->RemoveWaiter(kernel, thread);
+        if (m_tree && thread->IsWaitingForConditionVariable()) {
+            m_tree->erase(m_tree->iterator_to(*thread));
+            thread->ClearConditionVariable();
+        }
+        m_thread = nullptr;
+    }
+
+    KernelCore& m_kernel;
+    KConditionVariable::ThreadTree* m_tree;
+    ThreadWaitCheckpoint m_state;
+    KThread* m_owner{};
+    KThread* m_reference_owner{};
+    KThread* m_thread{};
+};
+
 } // namespace
 
 KConditionVariable::KConditionVariable(Core::System& system)
@@ -112,6 +268,16 @@ KConditionVariable::KConditionVariable(Core::System& system)
 {}
 
 KConditionVariable::~KConditionVariable() = default;
+
+std::unique_ptr<KThreadQueue> KConditionVariable::CreateCheckpointWait(
+    KernelCore& kernel, const ThreadWaitCheckpoint& state, const ResolveWaitObject& resolve) {
+    ValidateWaitCheckpoint(state);
+    if (state.kind != CheckpointWaitKind::Mutex && state.kind != CheckpointWaitKind::ConditionVariable) {
+        throw std::invalid_argument("Pulse: invalid condition wait kind");
+    }
+    return std::make_unique<RestoredConditionWait>(kernel,
+        state.kind == CheckpointWaitKind::ConditionVariable ? &m_tree : nullptr, state, resolve);
+}
 
 Result KConditionVariable::SignalToAddress(KernelCore& kernel, KProcessAddress addr) {
     KThread* owner_thread = GetCurrentThreadPointer(kernel);
@@ -178,6 +344,8 @@ Result KConditionVariable::WaitForAddress(KernelCore& kernel, Handle handle, KPr
             .GetObjectWithoutPseudoHandle<KThread>(kernel, handle)
             .ReleasePointerUnsafe();
         R_UNLESS(owner_thread != nullptr, ResultInvalidHandle);
+
+        wait_queue.SetReferenceOwner(owner_thread);
 
         // Update the lock.
         cur_thread->SetUserAddressKey(addr, value);

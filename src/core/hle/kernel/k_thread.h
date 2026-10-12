@@ -269,10 +269,17 @@ public:
 
     // Capture with all producers parked. Restore only into a fresh, unscheduled
     // user thread; the coordinator must have rebuilt the process/object graph.
-    ThreadWaitCheckpoint CaptureWaitCheckpoint(const IdentifyWaitObject& identify) const;
+    ThreadWaitCheckpoint CaptureWaitCheckpoint(KernelCore& kernel, const IdentifyWaitObject& identify) const;
     void RestoreWaitCheckpoint(KernelCore& kernel, const ThreadWaitCheckpoint& state,
                                const ResolveWaitObject& resolve);
     void CompleteRestoredWait(KernelCore& kernel);
+    /// Pulse restore: what Run does for a thread whose wait was rebuilt (it never passes through
+    /// Initialized -> Runnable): count it as running and take its running reference.
+    void ActivateRestoredWaiter(KernelCore& kernel);
+    bool IsFreshCheckpointThread() const noexcept {
+        return m_thread_type == ThreadType::User && GetState() == ThreadState::Initialized &&
+               !m_wait_queue && !m_checkpoint_wait_queue && GetTime() == 0;
+    }
     bool HasRestoredWaitContinuation() const noexcept {
         return m_checkpoint_wait_kind != CheckpointWaitKind::None;
     }
@@ -443,6 +450,13 @@ public:
                                        uintptr_t arg, KProcessAddress user_stack_top, s32 prio,
                                        s32 virt_core, KProcess* owner);
 
+    /// Pulse restore: a user thread with its captured thread ID and thread-local region. Its
+    /// context, priorities and wait are set by the coordinator before it is run.
+    static Result InitializeCheckpointUserThread(Core::System& system, KThread* thread,
+                                                 u64 thread_id, KProcessAddress tls_address,
+                                                 KProcessAddress user_stack_top, s32 prio,
+                                                 s32 virt_core, KProcess* owner);
+
     static Result InitializeServiceThread(Core::System& system, KThread* thread,
                                           std::function<void()>&& thread_func, s32 prio,
                                           s32 virt_core, KProcess* owner);
@@ -597,6 +611,10 @@ public:
     void AddWaiter(KernelCore& kernel, KThread* thread);
 
     void RemoveWaiter(KernelCore& kernel, KThread* thread);
+    WaitObjectReference CaptureCheckpointLockOwner(const IdentifyWaitObject& identify) const;
+    // Effective priorities must already be restored for every thread. Do not run
+    // inheritance while rebuilding a partial graph: it would reorder equal peers.
+    void LinkCheckpointUserWaiter(KernelCore& kernel, KThread* thread, u64 ordinal);
 
     Result GetThreadContext3(KernelCore& kernel, Svc::ThreadContext* out);
 
@@ -897,6 +915,7 @@ private:
     KVirtualAddress m_kernel_stack_top{};
     u32* m_light_ipc_data{};
     KProcessAddress m_tls_address{};
+    KProcessAddress m_checkpoint_tls_address{};
     KLightLock m_activity_pause_lock;
     SyncObjectBuffer m_sync_object_buffer{};
     s64 m_schedule_count{};

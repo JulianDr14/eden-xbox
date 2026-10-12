@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <mutex>
+#include <unordered_map>
+
 #include "common/scope_exit.h"
 
 #include "core/core.h"
@@ -50,6 +53,14 @@ private:
     const SessionRequestHandlerFactory m_handler_factory;
     Kernel::KernelCore& m_kernel;
 };
+
+namespace {
+// Every live HLE server session, for the Pulse checkpoint coordinator. The kernel object outlives
+// its entry: Session closes it only after DestroySession has removed it.
+std::mutex g_session_directory_mutex;
+std::unordered_map<const Kernel::KServerSession*, std::weak_ptr<SessionRequestManager>>
+    g_session_directory;
+} // namespace
 
 class Session : public MultiWaitHolder, public Common::IntrusiveListBaseNode<Session> {
 public:
@@ -119,6 +130,11 @@ ServerManager::~ServerManager() {
     while (session_it != m_sessions.end()) {
         auto* const session = std::addressof(*session_it);
         session_it = m_sessions.erase(session_it);
+        {
+            std::scoped_lock lk{g_session_directory_mutex};
+            g_session_directory.erase(
+                static_cast<const Kernel::KServerSession*>(session->GetNativeHandle()));
+        }
         delete session;
     }
 
@@ -139,6 +155,10 @@ void ServerManager::RunServer(std::unique_ptr<ServerManager>&& server_manager) {
 Result ServerManager::RegisterSession(Kernel::KServerSession* server_session,
                                       std::shared_ptr<SessionRequestManager> manager) {
     // We are taking ownership of the server session, so don't open it.
+    {
+        std::scoped_lock lk{g_session_directory_mutex};
+        g_session_directory.insert_or_assign(server_session, manager);
+    }
     auto* session = new Session(m_system.Kernel(), server_session, std::move(manager));
 
     // Begin tracking the server session.
@@ -434,11 +454,23 @@ Result ServerManager::OnDeferralEvent() {
     R_SUCCEED();
 }
 
+std::shared_ptr<SessionRequestManager> ServerManager::FindSessionManager(
+    const Kernel::KServerSession* session) {
+    std::scoped_lock lk{g_session_directory_mutex};
+    const auto it = g_session_directory.find(session);
+    return it != g_session_directory.end() ? it->second.lock() : nullptr;
+}
+
 void ServerManager::DestroySession(Session* session) {
     // Unlink.
     {
         std::scoped_lock lk{m_deferred_list_mutex};
         m_sessions.erase(m_sessions.iterator_to(*session));
+    }
+    {
+        std::scoped_lock lk{g_session_directory_mutex};
+        g_session_directory.erase(
+            static_cast<const Kernel::KServerSession*>(session->GetNativeHandle()));
     }
 
     // Free the session.

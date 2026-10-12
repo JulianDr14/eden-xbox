@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
+#include <optional>
 #include <type_traits>
 
 #include "common/common_funcs.h"
@@ -220,6 +222,8 @@ private:
     u32 m_address_space_width{};
     bool m_is_kernel{};
     bool m_enable_aslr{};
+    std::array<u64, 4> m_region_random{};
+    std::optional<std::array<u64, 4>> m_region_random_pin{};
     bool m_enable_device_address_space_merge{};
     bool m_allowed_exec_device_mapping{};
     KMemoryBlockSlabManager* m_memory_block_slab_manager{};
@@ -250,6 +254,15 @@ public:
     bool IsKernel() const {
         return m_is_kernel;
     }
+    // Pulse: the alias/heap/stack/kernel-map offsets drawn at creation, and a pin that makes the
+    // next InitializeForProcess reuse captured ones (it fails instead of drawing new values).
+    const std::array<u64, 4>& GetRegionRandom() const {
+        return m_region_random;
+    }
+    void PinRegionRandom(const std::array<u64, 4>& values) {
+        m_region_random_pin = values;
+    }
+
     bool IsAslrEnabled() const {
         return m_enable_aslr;
     }
@@ -556,6 +569,8 @@ public:
 
     Result MapPages(KProcessAddress address, size_t num_pages, KMemoryState state,
                     KMemoryPermission perm);
+    Result MapPhysicalPagesAt(KProcessAddress address, size_t num_pages, KPhysicalAddress phys_addr,
+                              KMemoryState state, KMemoryPermission perm);
     Result UnmapPages(KProcessAddress address, size_t num_pages, KMemoryState state);
 
     Result MapPageGroup(KProcessAddress* out_addr, const KPageGroup& pg,
@@ -700,6 +715,16 @@ public:
 
     size_t GetAliasRegionExtraSize() const {
         return m_alias_region_extra_size;
+    }
+
+    /// Pulse: the heap set by svcSetHeapSize, and memory mapped with svcMapPhysicalMemory.
+    size_t GetCurrentHeapSize() const {
+        KScopedLightLock lk(m_general_lock);
+        return m_current_heap_end - m_heap_region_start;
+    }
+    size_t GetMappedPhysicalMemorySize() const {
+        KScopedLightLock lk(m_general_lock);
+        return m_mapped_physical_memory_size;
     }
 
     size_t GetNormalMemorySize() const {

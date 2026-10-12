@@ -56,13 +56,13 @@ bool KClientPort::IsSignaled(KernelCore& kernel) const {
     return m_num_sessions.load() < m_max_sessions;
 }
 
-Result KClientPort::CreateSession(KernelCore& kernel, KClientSession** out) {
+Result KClientPort::CreateSession(KernelCore& kernel, KClientSession** out, KProcess* owner) {
     // Declare the session we're going to allocate.
     KSession* session{};
 
     // Reserve a new session from the resource limit.
-    KScopedResourceReservation session_reservation(kernel, GetCurrentProcessPointer(kernel),
-                                                   LimitableResource::SessionCountMax);
+    KScopedResourceReservation session_reservation(
+        kernel, owner ? owner : GetCurrentProcessPointer(kernel), LimitableResource::SessionCountMax);
     R_UNLESS(session_reservation.Succeeded(), ResultLimitReached);
 
     // Allocate a session normally.

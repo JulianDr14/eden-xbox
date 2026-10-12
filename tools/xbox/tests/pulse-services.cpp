@@ -33,6 +33,16 @@ int main() {
                         [](const auto&) -> u64 { return 0; });
                 });
             }
+            const auto bytes = EncodeSessionGraph(state);
+            state = {};
+            state = DecodeSessionGraph(bytes);
+            for (size_t size = 0; size < bytes.size(); ++size) {
+                MustReject([&] { DecodeSessionGraph(std::span{bytes}.first(size)); });
+            }
+            for (size_t offset : {size_t{0}, size_t{4}, size_t{8}, size_t{12}}) {
+                auto bad = bytes; bad[offset] = 0xff;
+                MustReject([&] { DecodeSessionGraph(bad); });
+            }
             unsigned calls = 0;
             const std::function<std::shared_ptr<Handler>(u64)> resolve = [&](u64 id) {
                 ++calls;
@@ -59,7 +69,7 @@ int main() {
             invalid.domain_handlers.resize(65537);
             MustReject([&] { (void)ResolveSessionGraph<Handler>(invalid, resolve); });
         }
-        std::cout << "Pulse services: 100 graph cycles, shared owners, holes, limits and rejection passed\n";
+        std::cout << "Pulse services: 100 wire/graph cycles, shared owners, holes, limits and rejection passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

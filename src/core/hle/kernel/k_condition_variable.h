@@ -32,6 +32,8 @@ public:
     static Result WaitForAddress(KernelCore& kernel, Handle handle, KProcessAddress addr, u32 value);
 
     // Condition variable.
+    std::unique_ptr<KThreadQueue> CreateCheckpointWait(
+        KernelCore& kernel, const ThreadWaitCheckpoint& state, const ResolveWaitObject& resolve);
     void Signal(u64 cv_key, s32 count);
     Result Wait(KProcessAddress addr, u64 key, u32 value, s64 timeout);
 

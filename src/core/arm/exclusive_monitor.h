@@ -4,6 +4,8 @@
 #pragma once
 
 #include <memory>
+#include <array>
+#include <stdexcept>
 
 #include "common/common_types.h"
 
@@ -13,9 +15,26 @@ class Memory;
 
 namespace Core {
 
+struct ExclusiveMonitorCheckpoint {
+    struct Reservation {
+        u64 address{};
+        u128 value{};
+        bool active{};
+    };
+    u32 core_count{};
+    std::array<Reservation, 4> reservations{};
+};
+
 class ExclusiveMonitor {
 public:
     virtual ~ExclusiveMonitor();
+
+    virtual ExclusiveMonitorCheckpoint CaptureCheckpoint() {
+        throw std::runtime_error("Pulse: exclusive monitor backend is unsupported");
+    }
+    virtual void RestoreCheckpoint(const ExclusiveMonitorCheckpoint&) {
+        throw std::runtime_error("Pulse: exclusive monitor backend is unsupported");
+    }
 
     virtual u8 ExclusiveRead8(std::size_t core_index, VAddr addr) = 0;
     virtual u16 ExclusiveRead16(std::size_t core_index, VAddr addr) = 0;

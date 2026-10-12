@@ -83,6 +83,7 @@
 #include "eden_uwp/game_menu_surface.h"
 #include "eden_uwp/headless_emu_window.h"
 #include "eden_uwp/prewarm_budget.h"
+#include "eden_uwp/pulse_gate.h"
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/uwp_controllers.h"
 #include "eden_uwp/keyboard_bindings.h"
@@ -332,6 +333,10 @@ struct BootConfig {
     bool async_shaders{true};
     /// Buttons to press at given times ("input=25:L+R" lines).
     std::vector<InputStep> input_script;
+    /// Pulse phase-2 gate ("pulse_cycles=", with tools/xbox/pulse_nro as boot.nro): capture,
+    /// destroy and restore the homebrew this many times (pulse_gate.h). 0 runs normally.
+    u32 pulse_cycles{};
+    u32 pulse_seed{1}; ///< "pulse_seed=": the random delays between captures
 };
 
 /// Games never emit the sentinels; without an explicit time they run this long.
@@ -436,6 +441,16 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                   ? "step: logging up, renderer Direct3D12 on a " + std::to_string(surface.width) +
                         "x" + std::to_string(surface.height) + " CoreWindow"
                   : std::string("step: logging up, renderer Null"));
+
+    if (config.pulse_cycles) {
+        return RunPulseGate(nro_path, {.cycles = config.pulse_cycles,
+                                       .seed = config.pulse_seed,
+                                       .core_window = config.null_renderer ? nullptr
+                                                                           : surface.core_window,
+                                       .width = surface.width,
+                                       .height = surface.height,
+                                       .diag = [](const std::string& line) { WriteDiag(line); }});
+    }
 
     Core::System system{};
     g_gpu_command_failed.store(false, std::memory_order_release);
@@ -2050,6 +2065,22 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                                 config.memory_limit_mib = static_cast<u32>(parsed);
                             } else {
                                 WriteDiag("boot.cfg: invalid memory_limit_mib, ignored");
+                            }
+                        } else if (line.starts_with("pulse_cycles=") ||
+                                   line.starts_with("pulse_seed=")) {
+                            const bool cycles = line.starts_with("pulse_cycles=");
+                            const std::string_view value =
+                                std::string_view{line}.substr(line.find('=') + 1);
+                            u32 parsed{};
+                            const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+                            if (result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
+                                (cycles && parsed > 100000)) {
+                                WriteDiag("boot.cfg: invalid " + line + ", ignored");
+                            } else if (cycles) {
+                                config.pulse_cycles = parsed;
+                                WriteDiag("boot.cfg: Pulse gate, " + std::to_string(parsed) + " cycles");
+                            } else {
+                                config.pulse_seed = parsed;
                             }
                         } else if (line.starts_with("jit_cache_mib=")) {
                             const std::string_view value = std::string_view{line}.substr(14);

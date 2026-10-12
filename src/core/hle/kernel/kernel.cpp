@@ -1063,6 +1063,12 @@ u64 KernelCore::CreateNewThreadID() {
     return impl->next_thread_id++;
 }
 
+void KernelCore::ReserveThreadIds(u64 next_id) {
+    u64 current = impl->next_thread_id.load();
+    while (current < next_id && !impl->next_thread_id.compare_exchange_weak(current, next_id)) {
+    }
+}
+
 u64 KernelCore::CreateNewKernelProcessID() {
     return impl->next_kernel_process_id++;
 }

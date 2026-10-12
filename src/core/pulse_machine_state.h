@@ -10,6 +10,7 @@
 #include <vector>
 #include "common/pulse_archive.h"
 #include "core/hle/kernel/svc_types.h"
+#include "core/arm/exclusive_monitor.h"
 
 namespace Core::Pulse {
 
@@ -65,6 +66,63 @@ inline Kernel::Svc::ThreadContext DecodeContext(std::span<const u8> input) {
     context.fpsr = static_cast<u32>(get(4));
     context.tpidr = get(8);
     return context;
+}
+
+inline constexpr size_t ExclusiveStateSize = 136;
+using EncodedExclusiveState = std::array<u8, ExclusiveStateSize>;
+
+inline void ValidateExclusiveState(const ExclusiveMonitorCheckpoint& state) {
+    if (!state.core_count || state.core_count > state.reservations.size()) {
+        throw Common::Pulse::Failure(Common::Pulse::Error::Invalid, "Pulse: exclusive core count");
+    }
+    for (size_t i = 0; i < state.reservations.size(); ++i) {
+        const auto& r = state.reservations[i];
+        if (((i >= state.core_count || !r.active) && (r.active || r.address || r.value != u128{})) ||
+            (r.active && r.address == 0xdeaddeaddeaddeadULL)) {
+            throw Common::Pulse::Failure(Common::Pulse::Error::Invalid, "Pulse: invalid exclusive reservation");
+        }
+    }
+}
+
+inline EncodedExclusiveState EncodeExclusiveState(const ExclusiveMonitorCheckpoint& state) {
+    ValidateExclusiveState(state);
+    EncodedExclusiveState bytes{};
+    size_t offset{};
+    const auto put = [&](u64 value, size_t width) {
+        for (size_t i = 0; i < width; ++i) bytes[offset++] = static_cast<u8>(value >> (i * 8));
+    };
+    put(state.core_count, 4);
+    put(0, 4);
+    for (const auto& r : state.reservations) {
+        put(r.address, 8); put(r.value[0], 8); put(r.value[1], 8);
+        put(r.active ? 1 : 0, 4); put(0, 4);
+    }
+    return bytes;
+}
+
+inline ExclusiveMonitorCheckpoint DecodeExclusiveState(std::span<const u8> bytes) {
+    if (bytes.size() != ExclusiveStateSize) {
+        throw Common::Pulse::Failure(Common::Pulse::Error::Invalid, "Pulse: exclusive section size");
+    }
+    size_t offset{};
+    const auto get = [&](size_t width) {
+        u64 value{};
+        for (size_t i = 0; i < width; ++i) value |= u64{bytes[offset++]} << (i * 8);
+        return value;
+    };
+    ExclusiveMonitorCheckpoint state{};
+    state.core_count = static_cast<u32>(get(4));
+    if (get(4)) throw Common::Pulse::Failure(Common::Pulse::Error::Invalid, "Pulse: exclusive reserved bits");
+    for (auto& r : state.reservations) {
+        r.address = get(8); r.value[0] = get(8); r.value[1] = get(8);
+        const auto active = get(4);
+        if (active > 1 || get(4)) {
+            throw Common::Pulse::Failure(Common::Pulse::Error::Invalid, "Pulse: exclusive reserved bits");
+        }
+        r.active = active != 0;
+    }
+    ValidateExclusiveState(state);
+    return state;
 }
 
 // Physical guest allocations, NOT the kernel slab (which contains host C++ objects).

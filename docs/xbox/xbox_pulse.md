@@ -136,8 +136,8 @@ Los errores IO/cuota están inyectados; no confundirlos con esos gates físicos.
 |---|---|
 | 0: inventario exhaustivo/registro de tipos | Inventario inicial; pendiente cierre |
 | 1: formato/storage | Archivo, catálogo y consumo implementados; gates desktop. AppContainer/Series y durabilidad física pendientes |
-| 2: barrera/CPU/memoria/kernel/timing | Pendiente; no existe SaveCheckpoint/RestoreCheckpoint funcional |
-| 3: servicios/FS/GPU/audio | Pendiente |
+| 2: barrera/CPU/memoria/kernel/timing | Coordinador de proceso implementado y compilado; gate de 100 ciclos en Series **pendiente de ejecutar** (ver abajo) |
+| 3: servicios/FS/GPU/audio | Piezas por componente (sesiones IPC, FS, XAudio2, readback D3D12); **sin integrar** en el coordinador ni gate audiovisual |
 | 4: biblioteca/múltiples sesiones | Pendiente |
 | 5: compatibilidad/rendimiento | Pendiente |
 
@@ -173,3 +173,82 @@ registered_objects_lock no garantiza objetos inicializados/vivos para serializar
 Hace falta la barrera de propietarios y raíces/refcounts válidos. El inventario
 de tipos debe partir de KClassTokenGenerator::ObjectType, traits reales, slabs,
 handles y servicios; no de interpretar un registro de diagnóstico como ownership.
+
+## Fase 2: coordinador de proceso (11 oct 2026)
+
+Modelo: **esqueleto determinista + superposición**. La restauración vuelve a cargar
+el mismo programa en un `System` nuevo y detenido, con las decisiones aleatorias del
+proceso fijadas (`Kernel::ProcessLayoutPin`: offset ASLR, offsets de las regiones
+alias/heap/stack/kmap, región local del proceso y entropía). `Service::Process::Run`
+no arranca un proceso que se está restaurando; el coordinador reconstruye el resto.
+Nada del archivo es puntero, handle host ni código JIT.
+
+`src/core/pulse_checkpoint.{h,cpp}` (`Core::Pulse::ProcessCheckpoint` /
+`ProcessRestore`), formato en `src/core/pulse_process_state.h`. Secciones v1:
+
+| ID | Sección | Contenido |
+|---|---|---|
+| 0x10 | Process | programa, PID, pin de layout, pila principal, heap, mapa de memoria normalizado, alias de pilas (`MapMemory`), rangos de contenido |
+| 0x20 | Objects | KEvent/KReadableEvent (señalado) y sesiones `sm:` con su grafo de sesión |
+| 0x30 | Threads | ID de grafo, ID de hilo, TLS, estado, prioridad base, núcleo ideal, afinidad, pausa del guest, contexto ARM |
+| 0x40 | Memory | páginas legibles, una copia por página física (los alias no se duplican) |
+| 0x50 | Handles | tabla de handles con generaciones y lista libre |
+| 0x60 | Waits | SVC bloqueados como continuaciones explícitas (sleep, sync, arbiter, mutex, condvar) |
+| 0x70 | Exclusive | reservas del monitor exclusivo |
+| 0x80 | Timing | cola CoreTiming por nombre de evento y relojes; el temporizador hardware se rearma desde las esperas |
+
+Captura (sistema en pausa): un hilo dentro de un SVC (`is_calling_svc`, ahora
+mantenido por `Svc::Call`) o esperando IPC/un lock interno se rechaza como
+**reintentable**: el llamador hace Run unos ms y vuelve a capturar. Todo lo que no
+tiene serializador se rechaza **sin reintento**: objetos distintos de los anteriores,
+sesiones a servicios que no son `sm:`, memoria compartida/transferida/física,
+estados de memoria fuera de código/heap/pila/TLS, eventos de timing con nombre
+repetido, suspensión de depurador o proceso, procesos de 32 bits.
+
+Restauración: secciones en orden; la última termina la reconstrucción dentro del
+callback de `Store::RestoreAndConsume`, así un fallo no consume la captura.
+El mapa de memoria reconstruido se compara con el capturado antes de escribir un
+solo byte. Las referencias siguen a las SVC (creación, handle, running/waiting).
+
+Cambios de kernel: pin de layout (`KernelCore::PinNextProcessLayout`), TLS en
+dirección fija (`KThreadLocalPage::InitializeAt`, `KPageTableBase::MapPhysicalPagesAt`),
+`KProcess::RunForCheckpointRestore`, `KThread::InitializeCheckpointUserThread` con
+ID reservado, `ActivateRestoredWaiter`, rearme del temporizador hardware,
+`KClientPort::CreateSession` con proceso dueño, directorio de sesiones de
+`ServerManager`.
+
+### Evidencia actual
+
+- Compilan Store CRT/UWP todos los objetos tocados, `pulse_gate.cpp` y
+  `uwp_boot.cpp`. **No** se ha enlazado el ejecutable completo ni ejecutado nada.
+- `tools/xbox/tests/pulse-process.cpp` (en `run-pulse-phase3.ps1`): ida y vuelta de
+  las cinco secciones nuevas; todos los truncamientos y bytes sobrantes rechazados;
+  cada corrupción de un byte rechazada o recodificada idéntica (4571 aceptadas);
+  inconsistencias hechas a mano (solapes, IDs duplicados, evento sin lectura,
+  afinidad sin el núcleo ideal, FIFO duplicado, ordinal de temporizador repetido). PASS.
+
+### Gate de fase 2 en la Series (pendiente)
+
+Homebrew `tools/xbox/pulse_nro` (libnx, `__appInit` solo `smInitialize`, heap fijo
+de 32 MiB): cuatro hilos con mutex, dos condvars, un evento de kernel, esperas
+largas de 1,5 a 3 s, IPC síncrona con `sm:` y atómicos LDAXR/STLXR. Comprueba sus
+invariantes y emite `PULSE_HB <latido> ...` o `PULSE_FAIL`.
+
+```powershell
+# TMP debe apuntar a una carpeta escribible para el compilador de devkitPro
+C:\devkitPro\msys2\usr\bin\make.exe -C tools\xbox\pulse_nro
+tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp
+powershell -File tools\xbox\package-appx.ps1 -BootNro tools\xbox\pulse_nro\pulse.nro -BootCfg 'pulse_cycles=100','pulse_seed=1'
+```
+
+`pulse_cycles=N` (`src/eden_uwp/pulse_gate.cpp`) arranca la homebrew y repite N veces:
+espera aleatoria de 50 a 1550 ms, captura (con reintentos), `Store::Publish`,
+destrucción del `System` entero, `System` nuevo, `RestoreAndConsume` y Run. Exige
+que el primer latido tras restaurar sea exactamente el siguiente al capturado y
+que no aparezca `PULSE_FAIL`. El diag registra por ciclo reintentos, ms de captura,
+publicación y restauración, bytes de archivo, memoria y metadatos, hilos (y cuántos
+en espera), objetos, handles y eventos de timing. Al final escribe `PULSE gate PASS`
+con máximos, o `PULSE gate FAIL` con el motivo.
+
+Hasta ver `PULSE gate PASS` con 100 ciclos en la consola, la fase 2 **no está
+cerrada**. Tampoco se ha medido el pico de memoria del proceso durante el ciclo.

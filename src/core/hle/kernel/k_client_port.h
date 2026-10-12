@@ -18,6 +18,7 @@ class KLightClientSession;
 class KClientSession;
 class KernelCore;
 class KPort;
+class KProcess;
 
 class KClientPort final : public KSynchronizationObject {
     KERNEL_AUTOOBJECT_TRAITS(KClientPort, KSynchronizationObject);
@@ -54,7 +55,9 @@ public:
     void Destroy(KernelCore& kernel) override;
     bool IsSignaled(KernelCore& kernel) const override;
 
-    Result CreateSession(KernelCore& kernel, KClientSession** out);
+    /// owner: the process charged for the session; the current one when null (Pulse restore
+    /// creates sessions from a host thread, which has no current process).
+    Result CreateSession(KernelCore& kernel, KClientSession** out, KProcess* owner = nullptr);
     Result CreateLightSession(KernelCore& kernel, KLightClientSession** out);
 
 private:

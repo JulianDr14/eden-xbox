@@ -34,6 +34,17 @@ std::unique_ptr<KThreadQueue> KProcess::CreateCheckpointAddressWait(
     return m_address_arbiter.CreateCheckpointWait(kernel, state);
 }
 
+std::unique_ptr<KThreadQueue> KProcess::CreateCheckpointConditionWait(
+    KernelCore& kernel, const ThreadWaitCheckpoint& state, const ResolveWaitObject& resolve) {
+    ValidateWaitCheckpoint(state);
+    if (!GetPageTable().Contains(KProcessAddress{state.address}, sizeof(u32)) ||
+        (state.kind == CheckpointWaitKind::ConditionVariable &&
+         !GetPageTable().Contains(KProcessAddress{state.condition_key}, sizeof(u32)))) {
+        throw std::invalid_argument("Pulse: condition wait address outside restored process");
+    }
+    return m_cond_var.CreateCheckpointWait(kernel, state, resolve);
+}
+
 namespace {
 
 Result TerminateChildren(KernelCore& kernel, KProcess* process, const KThread* thread_to_not_terminate) {
@@ -196,8 +207,13 @@ void KProcess::Finalize(KernelCore& kernel) {
 Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParameter& params, KResourceLimit* res_limit, bool is_real) {
     // TODO: remove this special case
     if (is_real) {
-        // Create and clear the process local region.
-        R_TRY(this->CreateThreadLocalRegion(kernel, std::addressof(m_plr_address)));
+        // Create and clear the process local region (where a restored process had it).
+        if (m_layout_pin) {
+            R_TRY(this->CreateThreadLocalRegionAt(kernel, m_layout_pin->plr_address));
+            m_plr_address = m_layout_pin->plr_address;
+        } else {
+            R_TRY(this->CreateThreadLocalRegion(kernel, std::addressof(m_plr_address)));
+        }
         this->GetMemory().ZeroBlock(m_plr_address, Svc::ThreadLocalRegionSize);
     }
 
@@ -243,8 +259,11 @@ Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParamete
         UNREACHABLE();
     }
 
-    // Generate random entropy.
+    // Generate random entropy (a restored process keeps the values it already read).
     GenerateRandom(m_entropy);
+    if (m_layout_pin) {
+        m_entropy = m_layout_pin->entropy;
+    }
 
     // Clear remaining fields.
     m_num_running_threads = 0;
@@ -687,6 +706,55 @@ Result KProcess::CreateThreadLocalRegion(KernelCore& kernel, KProcessAddress* ou
     R_SUCCEED();
 }
 
+Result KProcess::CreateThreadLocalRegionAt(KernelCore& kernel, KProcessAddress addr) {
+    R_UNLESS(addr != 0 && Common::IsAligned(GetInteger(addr), Svc::ThreadLocalRegionSize),
+             ResultInvalidAddress);
+    const KProcessAddress page_address = Common::AlignDown(GetInteger(addr), PageSize);
+
+    const auto reserve = [&](KThreadLocalPage* tlp, bool in_partial) -> bool {
+        if (!tlp->ReserveAt(addr)) {
+            return false;
+        }
+        if (tlp->IsAllUsed()) {
+            if (in_partial) {
+                m_partially_used_tlp_tree.erase(m_partially_used_tlp_tree.iterator_to(*tlp));
+            }
+            m_fully_used_tlp_tree.insert(*tlp);
+        } else if (!in_partial) {
+            m_partially_used_tlp_tree.insert(*tlp);
+        }
+        return true;
+    };
+
+    // A page that already holds other regions (the process-local region, another thread).
+    {
+        KScopedSchedulerLock sl(kernel);
+        R_UNLESS(m_fully_used_tlp_tree.find_key(page_address) == m_fully_used_tlp_tree.end(),
+                 ResultInvalidState);
+        if (auto it = m_partially_used_tlp_tree.find_key(page_address);
+            it != m_partially_used_tlp_tree.end()) {
+            R_UNLESS(reserve(std::addressof(*it), true), ResultInvalidState);
+            R_SUCCEED();
+        }
+    }
+
+    // A new page, mapped at the captured address.
+    KThreadLocalPage* tlp = KThreadLocalPage::Allocate(kernel);
+    R_UNLESS(tlp != nullptr, ResultOutOfMemory);
+    ON_RESULT_FAILURE {
+        KThreadLocalPage::Free(kernel, tlp);
+    };
+    R_TRY(tlp->InitializeAt(kernel, this, page_address));
+    ON_RESULT_FAILURE_2 {
+        tlp->Finalize();
+    };
+    {
+        KScopedSchedulerLock sl(kernel);
+        R_UNLESS(reserve(tlp, false), ResultInvalidState);
+    }
+    R_SUCCEED();
+}
+
 Result KProcess::DeleteThreadLocalRegion(KernelCore& kernel, KProcessAddress addr) {
     KThreadLocalPage* page_to_free = nullptr;
 
@@ -955,6 +1023,7 @@ Result KProcess::Run(KernelCore& kernel, s32 priority, size_t stack_size) {
 
         stack_top = stack_bottom + stack_size;
         m_main_thread_stack_size = stack_size;
+        m_main_thread_stack_address = stack_bottom;
     }
 
     // Ensure our stack is safe to clean up on exit.
@@ -1044,6 +1113,49 @@ Result KProcess::Run(KernelCore& kernel, s32 priority, size_t stack_size) {
     // We succeeded! Commit our memory reservation.
     mem_reservation.Commit();
 
+    R_SUCCEED();
+}
+
+Result KProcess::RunForCheckpointRestore(KernelCore& kernel, KProcessAddress stack_address,
+                                         size_t stack_size) {
+    KScopedLightLock lk(m_state_lock);
+
+    const auto state = m_state;
+    R_UNLESS(state == State::Created && m_restoring_checkpoint, ResultInvalidState);
+    ASSERT(m_main_thread_stack_size == 0);
+
+    // The same checks and reservation as Run, at the captured stack address.
+    R_UNLESS(Common::IsAligned(stack_size, PageSize) &&
+                 Common::IsAligned(GetInteger(stack_address), PageSize),
+             ResultInvalidSize);
+    R_UNLESS(stack_size + m_code_size <= m_max_process_memory, ResultOutOfMemory);
+    R_UNLESS(stack_size + m_code_size >= m_code_size, ResultOutOfMemory);
+    KScopedResourceReservation mem_reservation(kernel, this, Svc::LimitableResource::PhysicalMemoryMax,
+                                               stack_size);
+    R_UNLESS(mem_reservation.Succeeded(), ResultLimitReached);
+
+    if (stack_size) {
+        R_TRY(m_page_table.MapPages(stack_address, stack_size / PageSize, KMemoryState::Stack,
+                                    KMemoryPermission::UserReadWrite));
+        m_main_thread_stack_size = stack_size;
+        m_main_thread_stack_address = stack_address;
+    }
+    ON_RESULT_FAILURE {
+        if (m_main_thread_stack_size) {
+            ASSERT(R_SUCCEEDED(m_page_table.UnmapPages(stack_address, m_main_thread_stack_size / PageSize,
+                                                       KMemoryState::Stack)));
+            m_main_thread_stack_size = 0;
+        }
+    };
+
+    R_TRY(m_page_table.SetMaxHeapSize(m_max_process_memory -
+                                      (m_main_thread_stack_size + m_code_size)));
+    R_TRY(this->InitializeHandleTable(kernel, m_capabilities.GetHandleTableSize()));
+
+    this->ChangeState(kernel, State::Running);
+    this->Open(kernel);
+    mem_reservation.Commit();
+    m_restoring_checkpoint = false;
     R_SUCCEED();
 }
 
@@ -1206,7 +1318,17 @@ Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMeta
     // Ensure we maintain a clean state on exit.
     SCOPE_EXIT {
         res_limit->Close(kernel);
+        m_layout_pin.reset();
     };
+
+    // A Pulse restore reproduces the captured layout instead of drawing a new one.
+    m_layout_pin = kernel.TakeProcessLayoutPin();
+    m_restoring_checkpoint = m_layout_pin.has_value();
+    if (m_layout_pin) {
+        aslr_space_offset = m_layout_pin->aslr_offset;
+        m_page_table.GetBasePageTable().PinRegionRandom(m_layout_pin->region_random);
+    }
+    m_aslr_space_offset = aslr_space_offset;
 
     // Declare flags and code address.
     Svc::CreateProcessFlag flag{};

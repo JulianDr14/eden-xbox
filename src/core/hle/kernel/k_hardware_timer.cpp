@@ -69,6 +69,15 @@ void KHardwareTimer::DisableInterrupt() {
     m_wakeup_time = (std::numeric_limits<s64>::max)();
 }
 
+void KHardwareTimer::RearmAfterCheckpointRestore() {
+    KScopedDisableDispatch dd{m_kernel};
+    KScopedSpinLock lk(this->GetLock());
+    this->DisableInterrupt();
+    if (const s64 next_time = this->GetNextTaskTime(); next_time > 0) {
+        this->EnableInterrupt(next_time);
+    }
+}
+
 s64 KHardwareTimer::GetTick() const {
     return m_kernel.System().CoreTiming().GetGlobalTimeNs().count();
 }

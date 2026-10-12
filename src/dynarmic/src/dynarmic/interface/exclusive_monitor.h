@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <boost/container/static_vector.hpp>
 
 #include <dynarmic/common/spin_lock.h>
@@ -62,6 +63,54 @@ public:
 
         Unlock();
         return result;
+    }
+
+    struct CheckpointReservation {
+        VAddr address{};
+        Vector value{};
+        bool active{};
+    };
+    struct Checkpoint {
+        size_t processor_count{};
+        std::array<CheckpointReservation, 4> reservations{};
+    };
+
+    // All guest CPUs and HLE exclusive operations must be parked by the caller.
+    // No JIT code, locks, pointers or layout-dependent static_vector are saved.
+    Checkpoint CaptureCheckpoint() {
+        Checkpoint state{};
+        Lock();
+        state.processor_count = exclusive_addresses.size();
+        for (size_t i = 0; i < state.processor_count; ++i) {
+            if (exclusive_addresses[i] != INVALID_EXCLUSIVE_ADDRESS) {
+                state.reservations[i] = {exclusive_addresses[i], exclusive_values[i], true};
+            }
+        }
+        Unlock();
+        return state;
+    }
+
+    void RestoreCheckpoint(const Checkpoint& state) {
+        if (state.processor_count != exclusive_addresses.size()) {
+            throw std::invalid_argument("Pulse: exclusive monitor processor count");
+        }
+        for (size_t i = 0; i < state.reservations.size(); ++i) {
+            const auto& r = state.reservations[i];
+            if ((i >= state.processor_count || !r.active) &&
+                (r.active || r.address || r.value != Vector{})) {
+                throw std::invalid_argument("Pulse: noncanonical inactive reservation");
+            }
+            if (r.active && r.address == INVALID_EXCLUSIVE_ADDRESS) {
+                throw std::invalid_argument("Pulse: invalid exclusive reservation address");
+            }
+        }
+        Lock();
+        for (size_t i = 0; i < state.processor_count; ++i) {
+            const auto& r = state.reservations[i];
+            exclusive_addresses[i] = r.active ? r.address : INVALID_EXCLUSIVE_ADDRESS;
+            exclusive_values[i] = r.value;
+        }
+        Unlock();
     }
 
     /// Unmark everything.

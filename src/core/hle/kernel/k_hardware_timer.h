@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "core/hle/kernel/k_hardware_timer_base.h"
 
 namespace Core::Timing {
@@ -33,6 +35,13 @@ public:
                 this->EnableInterrupt(task_time);
             }
         }
+    }
+
+    // Pulse restore: the restored CoreTiming queue never carries this timer's event (its tasks
+    // are rebuilt with the waits). Arm it again for the earliest task. Stopped kernel only.
+    void RearmAfterCheckpointRestore();
+    const std::shared_ptr<Core::Timing::EventType>& GetEventType() const {
+        return m_event_type;
     }
 
 private:

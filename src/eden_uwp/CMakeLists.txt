@@ -8,6 +8,8 @@
 add_executable(eden-uwp WIN32
     headless_emu_window.h
     uwp_boot.cpp
+    pulse_gate.cpp
+    pulse_gate.h
     alloc_watch.cpp
     alloc_watch.h
     uwp_input.cpp
