@@ -506,22 +506,29 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     // Before Load, so HID starts with player 1 connected and bound to the gamepad engine.
     GamepadInput input{config.input_script};
     system.HIDCore().ReloadInputDevices();
+    // Set only after a failed Load has returned from Core's own synchronous cleanup.
+    // Other early Load failures still require the frontend to tear down the kernel.
+    bool load_already_shutdown = false;
     const auto shutdown = [&] {
         Common::SamplingProfiler::Stop(); // writes the window in progress, if it runs
         if (config.gpu_failure_probe) WriteDiag("GPU recovery shutdown: input.Stop");
         input.Stop();
         Kernel::Svc::SetDebugStringObserver(nullptr); // detach before teardown
-        if (g_gpu_command_failed.load(std::memory_order_acquire)) {
-            // A discarded GPU batch may never signal a guest syncpoint. Release CPU owners
-            // before Pause waits for them; Core shutdown repeats this idempotent cancellation.
-            WriteDiag("GPU recovery shutdown: cancel waits before Pause");
-            system.Host1x().GetSyncpointManager().CancelWaits();
-            system.GPU().NotifyShutdown();
+        if (load_already_shutdown) {
+            WriteDiag("shutdown: failed Load already cleaned up Core; skipping Pause and second shutdown");
+        } else {
+            if (g_gpu_command_failed.load(std::memory_order_acquire)) {
+                // A discarded GPU batch may never signal a guest syncpoint. Release CPU owners
+                // before Pause waits for them; Core shutdown repeats this idempotent cancellation.
+                WriteDiag("GPU recovery shutdown: cancel waits before Pause");
+                system.Host1x().GetSyncpointManager().CancelWaits();
+                system.GPU().NotifyShutdown();
+            }
+            if (config.gpu_failure_probe) WriteDiag("GPU recovery shutdown: system.Pause");
+            void(system.Pause());
+            if (config.gpu_failure_probe) WriteDiag("GPU recovery shutdown: ShutdownMainProcess");
+            system.ShutdownMainProcess();
         }
-        if (config.gpu_failure_probe) WriteDiag("GPU recovery shutdown: system.Pause");
-        void(system.Pause());
-        if (config.gpu_failure_probe) WriteDiag("GPU recovery shutdown: ShutdownMainProcess");
-        system.ShutdownMainProcess();
         if (config.gpu_failure_probe) WriteDiag("GPU recovery shutdown: HID unload");
         system.HIDCore().UnloadInputDevices();
         Common::BugTracker::RequestFlush(); // this game's summary, before the next one starts
@@ -601,8 +608,10 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         try {
             PulseSessions::Resume(system, *pulse_identity, [&](const Kernel::ProcessLayoutPin& pin) {
                 system.Kernel().PinNextProcessLayout(pin);
-                loaded = true; // a failed Load still needs ShutdownMainProcess
+                loaded = true;
                 load_result = system.Load(emu_window, nro_path, load_parameters);
+                load_already_shutdown = load_result != Core::SystemResultStatus::Success &&
+                                        system.IsShuttingDown();
                 if (load_result != Core::SystemResultStatus::Success) {
                     throw std::runtime_error("system.Load failed");
                 }
@@ -627,15 +636,19 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
             PulseSessions::SetNotice(I18n::ToUtf8(I18n::Tr(I18n::Text::PulseNotResumed)));
         }
     }
-    if (!resumed) load_result = system.Load(emu_window, nro_path, load_parameters);
+    if (!resumed) {
+        load_result = system.Load(emu_window, nro_path, load_parameters);
+        load_already_shutdown = load_result != Core::SystemResultStatus::Success &&
+                                system.IsShuttingDown();
+    }
     WriteDiag("step: system.Load() returned status " +
               std::to_string(static_cast<int>(load_result)) + " | " + MemoryReport());
     WriteDiag("memory map: " + LargestAllocations());
     if (load_result != Core::SystemResultStatus::Success) {
         LOG_CRITICAL(Frontend, "Headless boot: failed to load {} (status {})", nro_path,
                      static_cast<int>(load_result));
-        // A failed Load leaves kernel objects behind; without ShutdownMainProcess the kernel's
-        // teardown in ~System reads freed memory and crashes.
+        // Some early Load failures leave kernel objects; others already shut Core down.
+        // Stop frontend owners in both cases, but never run the kernel's teardown twice.
         shutdown();
         return 2;
     }
