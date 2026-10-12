@@ -357,10 +357,10 @@ bool TextureCacheRuntime::SupportsView(DXGI_FORMAT format, D3D12_FORMAT_SUPPORT1
     return reported || guaranteed;
 }
 Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_, GPUVAddr gpu_addr_,
-             VAddr cpu_addr_)
+             VAddr cpu_addr_, bool native_blocks)
     : VideoCommon::ImageBase{info_, gpu_addr_, cpu_addr_}, runtime{&runtime_},
       format{runtime_.Format(info_.format)} {
-    if (decode_bc_arrays.load(std::memory_order_relaxed) && info_.type == ImageType::e2D &&
+    if (!native_blocks && decode_bc_arrays.load(std::memory_order_relaxed) && info_.type == ImageType::e2D &&
         info_.resources.layers > 1 && info_.num_samples == 1) {
         if (const std::optional<FormatInfo> decoded = DecodedBcFormat(info_.format)) {
             format = *decoded;
@@ -515,6 +515,10 @@ Image& Image::operator=(Image&& other) noexcept {
         state = other.state;
         needs_placed_init = other.needs_placed_init;
         write_version = other.write_version;
+        guest_blocks = std::move(other.guest_blocks);
+        guest_blocks_coverage = std::move(other.guest_blocks_coverage);
+        guest_blocks_version = other.guest_blocks_version;
+        guest_blocks_upload_pending = other.guest_blocks_upload_pending;
         depth_feedback = std::move(other.depth_feedback);
         depth_feedback_failed = other.depth_feedback_failed;
         slice_array = std::move(other.slice_array);

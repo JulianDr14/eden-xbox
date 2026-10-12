@@ -249,6 +249,81 @@ void Image::UploadMemory(const StagingBufferRef& map, std::span<const BufferImag
     // The staging pool keeps this resource mapped for its complete lifetime. Passing the pointer
     // avoids a Map/GetHeapProperties/Unmap round trip for every small texture upload.
     UploadMemoryImpl(map.buffer, map.offset, map.mapped_span.data(), copies);
+    if (std::exchange(guest_blocks_upload_pending, false)) {
+        guest_blocks_version = write_version;
+    }
+}
+
+void Image::PreserveGuestBlocks(std::span<const u8> data,
+                                std::span<const BufferImageCopy> copies) {
+    if (!IsBcDecoded() || copies.empty()) {
+        return;
+    }
+    // The generic cache calls this with the original, unswizzled layout, before ConvertImage
+    // rewrites both the bytes and BufferImageCopy pitches/offsets. Reuse the native upload and
+    // allocator: the additional allocation is compressed-sized and retired through the scheduler.
+    if (!EnsureGuestBlocks()) {
+        guest_blocks_version = 0;
+        return;
+    }
+    const auto staging = runtime->UploadStagingBuffer(data.size());
+    std::memcpy(staging.mapped_span.data(), data.data(), data.size());
+    guest_blocks->UploadMemory(staging, copies);
+    s32 expected_level = 0;
+    const bool full_upload = copies.size() == static_cast<size_t>(info.resources.levels) &&
+        std::ranges::all_of(copies, [&](const BufferImageCopy& copy) {
+            const auto level = copy.image_subresource.base_level;
+            return level == expected_level++ && level >= 0 && level < info.resources.levels &&
+                copy.image_subresource.base_layer == 0 &&
+                copy.image_subresource.num_layers == info.resources.layers &&
+                copy.image_offset == VideoCommon::Offset3D{} &&
+                copy.image_extent.width == std::max(1U, info.size.width >> level) &&
+                copy.image_extent.height == std::max(1U, info.size.height >> level) &&
+                copy.image_extent.depth == 1;
+        });
+    if (full_upload) {
+        guest_blocks_coverage.Fill();
+    } else {
+        for (const auto& copy : copies) {
+            IncludeGuestBlocks({.dst_subresource = copy.image_subresource,
+                                .dst_offset = copy.image_offset, .extent = copy.image_extent});
+        }
+    }
+    guest_blocks_upload_pending = true;
+}
+
+Image* Image::EnsureGuestBlocks() {
+    if (!IsBcDecoded()) return nullptr;
+    if (!guest_blocks) {
+        guest_blocks = std::make_unique<Image>(*runtime, info, gpu_addr, cpu_addr, true);
+        guest_blocks_coverage.Reset(info.size.width, info.size.height,
+                                    info.resources.levels, info.resources.layers);
+    }
+    if (!GuestBlocks()) {
+        guest_blocks_coverage.Clear();
+        guest_blocks_version = write_version;
+    }
+    return guest_blocks.get();
+}
+
+bool Image::HasGuestBlocks(const ImageCopy& copy) const {
+    if (!GuestBlocks()) return false;
+    for (s32 layer = 0; layer < copy.src_subresource.num_layers; ++layer) {
+        if (!guest_blocks_coverage.Contains(
+                Subresource(copy.src_subresource.base_level, copy.src_subresource.base_layer + layer),
+                copy.src_offset.x / 4, copy.src_offset.y / 4,
+                (copy.extent.width + 3) / 4, (copy.extent.height + 3) / 4)) return false;
+    }
+    return true;
+}
+
+void Image::IncludeGuestBlocks(const ImageCopy& copy) {
+    for (s32 layer = 0; layer < copy.dst_subresource.num_layers; ++layer) {
+        guest_blocks_coverage.Include(
+            Subresource(copy.dst_subresource.base_level, copy.dst_subresource.base_layer + layer),
+            copy.dst_offset.x / 4, copy.dst_offset.y / 4,
+            (copy.extent.width + 3) / 4, (copy.extent.height + 3) / 4);
+    }
 }
 
 void Image::DownloadMemory(ID3D12Resource* buffer, size_t offset,

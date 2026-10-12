@@ -727,3 +727,10 @@ Build ordenado conservando cachés/objetos; antiguos1748MiB apartados y carpeta
 posteriormente ausente tras comando manual de borrado autorizado (herramienta
 rechazó eliminación automática). Gameplay/USB físico/recuperación/Series pendientes.
 No commit ni push; detalles en docs/xbox/xbox_internal.md.
+
+Corrección BC3/UINT128 (12 oct2026): logs Game A,192 omisiones/frames8096–8099;
+25/22 son PixelFormat, noDXGI. Bloques originales conservados también en arrays
+GPU-only, cobertura porbloque/mip/capa yversion/fences; workaround de muestreoBC
+Series intacto. UWP/enlace ygateGPUdesktop con readback exacto/192copias6capas
+pasan. Gameplay/Series/memoria/FPS pendientes; docs/xbox/xbox_bc_block_copy.md.
+Sin commit ni push.

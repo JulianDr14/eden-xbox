@@ -9,6 +9,7 @@
 #include "common/alignment.h"
 #include "common/logging.h"
 #include "video_core/renderer_d3d12/d3d12_blit_image.h"
+#include "video_core/renderer_d3d12/d3d12_bc_copy.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/surface.h"
 
@@ -28,6 +29,9 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
         return;
     }
     if (!Image::AreCopyCompatible(src, dst)) {
+        if (CopyDecodedBlocks(dst, src, copies)) {
+            return;
+        }
         if (dst.IsBcDecoded() && CopyBlocksIntoDecoded(dst, src, copies)) {
             return;
         }
@@ -36,6 +40,11 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
                  "{}) skipped", src.info.format, dst.info.format);
         return;
     }
+    // Keep exact blocks coherent for copies between decoded arrays. Capture validity before
+    // transitioning dst to a writable state (which invalidates its previous version).
+    Image* const src_blocks = src.GuestBlocks();
+    Image* const dst_blocks = src_blocks && src.info.format == dst.info.format
+                                  ? dst.EnsureGuestBlocks() : nullptr;
     if (src.IsDepthStencilPlanar() || dst.IsDepthStencilPlanar()) {
         // Plane by plane, and only between the same host layout (D24S8 or D32S8): anything else
         // reinterprets depth bits and needs a conversion shader.
@@ -77,13 +86,105 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
                                                        copy.dst_offset.z, &source, &box);
         }
     }
+    const auto whole_blocks = [](const Image& image, const ImageCopy& copy, bool source) {
+        const auto& sub = source ? copy.src_subresource : copy.dst_subresource;
+        const auto& offset = source ? copy.src_offset : copy.dst_offset;
+        const u32 width = std::max(1U, image.info.size.width >> sub.base_level);
+        const u32 height = std::max(1U, image.info.size.height >> sub.base_level);
+        return PlanBcCopyAxis(offset.x, copy.extent.width, width, 0, UINT32_MAX) &&
+               PlanBcCopyAxis(offset.y, copy.extent.height, height, 0, UINT32_MAX);
+    };
+    if (src_blocks && dst_blocks && src.info.format == dst.info.format &&
+        std::ranges::all_of(copies, [&](const ImageCopy& copy) {
+            return whole_blocks(src, copy, true) && whole_blocks(dst, copy, false) &&
+                   src.HasGuestBlocks(copy);
+        })) {
+        CopyImage(*dst_blocks, *src_blocks, copies);
+        for (const auto& copy : copies) dst.IncludeGuestBlocks(copy);
+        dst.guest_blocks_version = dst.write_version;
+    }
+}
+
+bool TextureCacheRuntime::CopyDecodedBlocks(Image& dst, Image& src,
+                                            std::span<const ImageCopy> copies) {
+    Image* const blocks = src.GuestBlocks();
+    // D3D12's documented structured/BC reinterpretation pairs. Do not interpret decoded
+    // colors as blocks, or route arbitrary same-sized DXGI formats through CopyTextureRegion.
+    if (!blocks || dst.TransferFormat().converted || src.info.type != ImageType::e2D ||
+        dst.info.type != ImageType::e2D || dst.info.num_samples != 1) {
+        return false;
+    }
+    const auto target_format = dst.ViewFormat();
+    const u32 bytes = VideoCore::Surface::BytesPerBlock(src.info.format);
+    if (!((bytes == 16 && (target_format == DXGI_FORMAT_R32G32B32A32_UINT ||
+                           target_format == DXGI_FORMAT_R32G32B32A32_SINT)) ||
+          (bytes == 8 && (target_format == DXGI_FORMAT_R32G32_UINT ||
+                          target_format == DXGI_FORMAT_R32G32_SINT)))) {
+        return false;
+    }
+    const auto source_desc = blocks->Handle()->GetDesc();
+    const auto target_desc = dst.Handle()->GetDesc();
+    // Validate the entire batch before recording any copy. Failed validation leaves the existing
+    // explicit CopySkipped diagnostic, and never submits a partially executed batch as success.
+    for (const auto& copy : copies) {
+        const auto& s = copy.src_subresource;
+        const auto& d = copy.dst_subresource;
+        if (s.base_level < 0 || s.base_level >= source_desc.MipLevels || d.base_level < 0 ||
+            d.base_level >= target_desc.MipLevels || s.base_layer < 0 || d.base_layer < 0 ||
+            s.num_layers <= 0 || s.num_layers != d.num_layers ||
+            s.num_layers > source_desc.DepthOrArraySize - s.base_layer ||
+            d.num_layers > target_desc.DepthOrArraySize - d.base_layer || copy.src_offset.z != 0 ||
+            copy.dst_offset.z != 0 || copy.extent.depth != 1) {
+            return false;
+        }
+        if (!PlanBcCopyAxis(copy.src_offset.x, copy.extent.width,
+                            std::max(1U, src.info.size.width >> s.base_level), copy.dst_offset.x,
+                            std::max(1U, dst.info.size.width >> d.base_level)) ||
+            !PlanBcCopyAxis(copy.src_offset.y, copy.extent.height,
+                            std::max(1U, src.info.size.height >> s.base_level), copy.dst_offset.y,
+                            std::max(1U, dst.info.size.height >> d.base_level))) {
+            return false;
+        }
+        if (!src.HasGuestBlocks(copy)) return false;
+    }
+    blocks->Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    dst.Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+    for (const auto& copy : copies) {
+        const u32 level = copy.src_subresource.base_level;
+        // D3D12 copy boxes use whole blocks even for 1x1/2x2 tail mips. The destination receives
+        // one integer texel for each block, not one for each decoded color texel.
+        const D3D12_BOX box{
+            static_cast<u32>(copy.src_offset.x),
+            static_cast<u32>(copy.src_offset.y),
+            0,
+            static_cast<u32>(copy.src_offset.x) + Common::AlignUp(copy.extent.width, 4U),
+            static_cast<u32>(copy.src_offset.y) + Common::AlignUp(copy.extent.height, 4U),
+            1};
+        for (s32 layer = 0; layer < copy.src_subresource.num_layers; ++layer) {
+            const D3D12_TEXTURE_COPY_LOCATION source{
+                .pResource = blocks->Handle(),
+                .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .SubresourceIndex =
+                    blocks->Subresource(level, copy.src_subresource.base_layer + layer)};
+            const D3D12_TEXTURE_COPY_LOCATION target{
+                .pResource = dst.Handle(),
+                .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                .SubresourceIndex = dst.Subresource(copy.dst_subresource.base_level,
+                                                    copy.dst_subresource.base_layer + layer)};
+            scheduler.CommandList()->CopyTextureRegion(&target, copy.dst_offset.x,
+                                                       copy.dst_offset.y, 0, &source, &box);
+        }
+    }
+    return true;
 }
 void TextureCacheRuntime::CopyThroughBuffer(Image& dst, Image& src,
                                             std::span<const ImageCopy> copies) {
     const u32 texel_bytes = VideoCore::Surface::BytesPerBlock(src.TransferFormat().copy_format);
     if (texel_bytes != VideoCore::Surface::BytesPerBlock(dst.TransferFormat().copy_format)) {
-        WarnOnce(logged_reinterpret_copy, "copy between formats of different texel sizes ({} -> "
-                 "{}) skipped", src.info.format, dst.info.format);
+        WarnOnce(logged_reinterpret_copy,
+                 "copy between formats of different texel sizes ({} -> "
+                 "{}) skipped",
+                 src.info.format, dst.info.format);
         return;
     }
     auto* const commands = scheduler.CommandList();
@@ -146,11 +247,50 @@ bool TextureCacheRuntime::CopyBlocksIntoDecoded(Image& dst, Image& src,
         (dst.Handle()->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0) {
         return false;
     }
+    Image* dst_blocks = nullptr;
+    bool preserve_blocks = true;
+    // The decoder and the preserved blocks must receive exactly the same valid batch. Validate
+    // before emitting either representation; do not certify a shadow after a clipped/skipped copy.
+    if (src.info.type != ImageType::e2D || dst.info.type != ImageType::e2D) {
+        return false;
+    }
+    for (const auto& copy : copies) {
+        const auto& s = copy.src_subresource;
+        const auto& d = copy.dst_subresource;
+        if (s.base_level < 0 || s.base_level >= src.info.resources.levels || d.base_level < 0 ||
+            d.base_level >= dst.info.resources.levels || s.base_layer < 0 || d.base_layer < 0 ||
+            s.num_layers <= 0 || s.num_layers != d.num_layers ||
+            s.num_layers > src.info.resources.layers - s.base_layer ||
+            d.num_layers > dst.info.resources.layers - d.base_layer || copy.src_offset.z != 0 ||
+            copy.dst_offset.z != 0 || copy.extent.depth != 1) {
+            return false;
+        }
+        if (copy.dst_offset.x % block_w != 0 || copy.dst_offset.y % block_h != 0) {
+            preserve_blocks = false; // Decoded texels remain copyable, original blocks do not.
+        }
+        const u32 dw = std::max(1U, dst.info.size.width >> d.base_level);
+        const u32 dh = std::max(1U, dst.info.size.height >> d.base_level);
+        if (copy.dst_offset.x < 0 || copy.dst_offset.y < 0 ||
+            static_cast<u32>(copy.dst_offset.x) >= dw ||
+            static_cast<u32>(copy.dst_offset.y) >= dh || copy.extent.width == 0 ||
+            copy.extent.height == 0 ||
+            copy.extent.width > (dw - copy.dst_offset.x + block_w - 1) / block_w ||
+            copy.extent.height > (dh - copy.dst_offset.y + block_h - 1) / block_h ||
+            !PlanBcCopyAxis(copy.src_offset.x, copy.extent.width,
+                            std::max(1U, src.info.size.width >> s.base_level), 0, UINT32_MAX, 1) ||
+            !PlanBcCopyAxis(copy.src_offset.y, copy.extent.height,
+                            std::max(1U, src.info.size.height >> s.base_level), 0, UINT32_MAX, 1)) {
+            return false;
+        }
+    }
+    if (preserve_blocks) dst_blocks = dst.EnsureGuestBlocks();
     static bool logged = false;
     if (!std::exchange(logged, true)) {
-        LOG_INFO(Render, "D3D12: blocks of {} {}x{} @{:x} decoded on the GPU into {} {}x{}x{} "
-                 "@{:x}", src.info.format, src.info.size.width, src.info.size.height,
-                 src.gpu_addr, dst.info.format, dst.info.size.width, dst.info.size.height,
+        LOG_INFO(Render,
+                 "D3D12: blocks of {} {}x{} @{:x} decoded on the GPU into {} {}x{}x{} "
+                 "@{:x}",
+                 src.info.format, src.info.size.width, src.info.size.height, src.gpu_addr,
+                 dst.info.format, dst.info.size.width, dst.info.size.height,
                  dst.info.resources.layers, dst.gpu_addr);
     }
     ID3D12Device* const device_handle = device.Get();
@@ -220,6 +360,17 @@ bool TextureCacheRuntime::CopyBlocksIntoDecoded(Image& dst, Image& src,
                 .pResource = decoded.Get(), .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
                 .SubresourceIndex = 0};
             commands->CopyTextureRegion(&target, 0, 0, 0, &footprint, nullptr);
+            if (dst_blocks) {
+                // Reuse the very same BC footprint used for hardware decoding. This preserves
+                // every input bit even when src's DXGI format has no direct BC copy pairing.
+                dst_blocks->Transition(D3D12_RESOURCE_STATE_COPY_DEST);
+                const D3D12_TEXTURE_COPY_LOCATION original{
+                    .pResource = dst_blocks->Handle(),
+                    .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                    .SubresourceIndex = dst_blocks->Subresource(
+                        copy.dst_subresource.base_level, copy.dst_subresource.base_layer + layer)};
+                commands->CopyTextureRegion(&original, dst_x, dst_y, 0, &footprint, nullptr);
+            }
             transfer_buffers.Release(std::move(transfer));
             TransitionResource(commands, decoded.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -254,6 +405,16 @@ bool TextureCacheRuntime::CopyBlocksIntoDecoded(Image& dst, Image& src,
             rtv_descriptors.Free(rtv);
             scheduler.DeferRelease(std::move(decoded));
         }
+    }
+    if (dst_blocks) {
+        for (auto copy : copies) {
+            const u32 width = std::max(1U, dst.info.size.width >> copy.dst_subresource.base_level);
+            const u32 height = std::max(1U, dst.info.size.height >> copy.dst_subresource.base_level);
+            copy.extent.width = std::min(copy.extent.width * block_w, width - copy.dst_offset.x);
+            copy.extent.height = std::min(copy.extent.height * block_h, height - copy.dst_offset.y);
+            dst.IncludeGuestBlocks(copy);
+        }
+        dst.guest_blocks_version = dst.write_version;
     }
     return true;
 }

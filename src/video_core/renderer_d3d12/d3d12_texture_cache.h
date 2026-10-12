@@ -16,6 +16,7 @@
 
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_d3d12/d3d12_cache_policy.h"
+#include "video_core/renderer_d3d12/d3d12_bc_copy.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_gc_readback.h"
 #include "video_core/renderer_d3d12/d3d12_resource_allocator.h"
@@ -116,6 +117,9 @@ public:
     /// array the CPU decodes (Image::IsBcDecoded): the GPU decodes them. False if it cannot.
     bool CopyBlocksIntoDecoded(Image& dst, Image& src,
                                std::span<const VideoCommon::ImageCopy> copies);
+    /// Exact BC blocks -> integer texels, using the preserved guest representation.
+    bool CopyDecodedBlocks(Image& dst, Image& src,
+                           std::span<const VideoCommon::ImageCopy> copies);
     bool ShouldReinterpret(Image&, Image&) const noexcept { return false; }
     void ReinterpretImage(Image& dst, Image& src,
                           std::span<const VideoCommon::ImageCopy> copies);
@@ -228,7 +232,7 @@ class Image : public VideoCommon::ImageBase {
     friend TextureCacheRuntime;
 public:
     Image(TextureCacheRuntime& runtime, const VideoCommon::ImageInfo& info, GPUVAddr gpu_addr,
-          VAddr cpu_addr);
+          VAddr cpu_addr, bool native_blocks = false);
     explicit Image(const VideoCommon::NullImageParams& params);
     /// The resource outlives the Image until the GPU is done with it.
     ~Image();
@@ -237,6 +241,16 @@ public:
     Image& operator=(const Image&) = delete;
     Image(Image&&) noexcept;
     Image& operator=(Image&& other) noexcept;
+
+    /// Preserve the lossless guest representation before the generic cache decodes BC arrays.
+    /// Native blocks are used only for transfers, never sampled (Xbox BC array workaround).
+    void PreserveGuestBlocks(std::span<const u8> data,
+                             std::span<const VideoCommon::BufferImageCopy> copies);
+    [[nodiscard]] Image* GuestBlocks() const noexcept {
+        return guest_blocks && !guest_blocks_upload_pending && !reinterpreted_ahead &&
+                       guest_blocks_version == write_version
+                   ? guest_blocks.get() : nullptr;
+    }
 
     void UploadMemory(ID3D12Resource* buffer, size_t offset,
                       std::span<const VideoCommon::BufferImageCopy> copies);
@@ -348,6 +362,9 @@ private:
     /// Aliasing barrier, transition to the writable state and discard (see needs_placed_init).
     void InitializePlacedResource();
     void CopyThroughBuffer(ID3D12Resource* src, ID3D12Resource* dst);
+    Image* EnsureGuestBlocks();
+    bool HasGuestBlocks(const VideoCommon::ImageCopy& copy) const;
+    void IncludeGuestBlocks(const VideoCommon::ImageCopy& copy);
     void TransitionReinterpreted(D3D12_RESOURCE_STATES next);
     /// Hash and transparency of a CPU-decoded upload (first ones only), to compare machines.
     void LogConvertedUpload(const u8* data, const CopyLayout& layout,
@@ -382,6 +399,10 @@ private:
     bool needs_placed_init{};
     /// Bumped by every transition into a writable state: every GPU write to the image follows one.
     u64 write_version{1};
+    std::unique_ptr<Image> guest_blocks;
+    BcBlockCoverage guest_blocks_coverage;
+    u64 guest_blocks_version{};
+    bool guest_blocks_upload_pending{};
     std::unique_ptr<Image> depth_feedback;
     bool depth_feedback_failed{};
     ComPtr<ID3D12Resource> slice_array;

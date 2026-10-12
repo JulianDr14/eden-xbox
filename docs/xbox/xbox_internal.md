@@ -2964,3 +2964,24 @@ parche del contador y requieren clasificación explícita antes de preparar los
 commits. Se conservan las herramientas; la corrección de Load fallido y el manifest quedan fuera de estos dos commits. No se autoriza push.
 Esta actualización documental se contrastó con el diff; no ejecuta un nuevo
 gate GPU ni añade resultados de consola que no estén registrados arriba.
+
+## 12 oct 2026: copias BC3/UINT128 de arrays decodificados
+
+Logs de Descargas: Game A, 192 CopySkipped (frames8096–8099), formatos internos
+25=BC3_UNORM y22=R32G32B32A32_UINT. Antes, el log muestra bloques UINT32x32
+convertidos por GPU en BC3 128x128x6: conservar solo subidas CPU no basta.
+La nueva representación nativa conserva bits originales en CPU-upload y GPU-decode,
+con cobertura de un bit/bloque por mip/capa, versión y retiro por fence. Nunca se
+muestrea el array BC nativo; permanece el workaround Series. Copias incompatibles,
+sin cobertura o tras escritura de colores siguen diagnosticadas, sin recodificación.
+Build incremental UWP y enlace eden-uwp pasan. Gate desktop con bibliotecas reales:
+102505 límites/alineaciones, readback exacto de arrays/mips/offsets, inversa GPU,
+array generado sin subida CPU, 192 round-trips de seis capas y cobertura ausente.
+Capas de debug sin errores; gameplay Game A/Series y coste RAM/FPS pendientes.
+Diseño, comandos, fuentes y trampas en xbox_bc_block_copy.md. Sin commit ni push.
+
+
+APPX 0.2.87.29 preparado (12 oct 2026) con la correccion de copias BC3: target eden-uwp actualizado, MakeAppx y firma correctos, version interna y ejecutable verificados. Paquete build-uwp/package/eden-xbox.appx; simbolos exe/pdb en build-uwp/symbols/0.2.87.29. Library/play y dred=1, sin dump_shader puntual. Validacion Game A/Series y logs posteriores pendientes; empaquetar no certifica el resultado visual.
+
+
+Revision logs Series APPX 0.2.87.29 (12 oct 2026): Downloads/eden_uwp_diag.txt confirma paquete .29 y Game A. eden_graphics_bugs.json registra TODAVIA 72 copias (25 -> 22) omitidas, frames2628--2631, primer evento84,023s del tracker (86,345820s logger). Antes: CopyBlocksIntoDecoded UINT32x32 -> BC3 128x128x6 mismaaddr55f790000 a69,682407s. Gate hardware NO pasa: ausencia de detalle de rechazo impide distinguir version/cobertura/geometria. Dos avisos SRV BC3 tipo5/dimension3 (frames3511/4658). Sin Render Error/Critical ni device removed encontrados. Cierre voluntario al volver biblioteca, retorno10 esperado; 6193frames y commit maximo muestreado3723MiB/5120, cierre491MiB. Error playtime.bin persiste ajeno a copias. No comparar72 vs192 como mejora: escenas/duracion diferentes. Pendiente diagnostico de rechazo y correccion antes certificar.

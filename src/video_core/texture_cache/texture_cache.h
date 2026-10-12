@@ -1322,6 +1322,9 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
         auto copies = FixSmallVectorADL(UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, unswizzle_data_buffer));
         trace_unswizzle.Finish();
+        if constexpr (requires { image.PreserveGuestBlocks(unswizzle_data_buffer, copies); }) {
+            image.PreserveGuestBlocks(unswizzle_data_buffer, copies);
+        }
         {
             const VideoCore::FrameTrace::ScopedSpan trace_convert{
                 VideoCore::FrameTrace::Event::TextureUploadConvert, gpu_addr};
@@ -1526,6 +1529,9 @@ void TextureCache<P>::QueueAsyncDecode(Image& image, ImageId image_id) {
     std::vector<u8> local_unswizzle_data_buffer(image.unswizzled_size_bytes, 0);
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(*gpu_memory, image.gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
     auto copies = UnswizzleImage(*gpu_memory, image.gpu_addr, image.info, swizzle_data, local_unswizzle_data_buffer);
+    if constexpr (requires { image.PreserveGuestBlocks(local_unswizzle_data_buffer, copies); }) {
+        image.PreserveGuestBlocks(local_unswizzle_data_buffer, copies);
+    }
     const size_t out_size = MapSizeBytes(image);
 
     auto func = [out_size, copies, info = image.info,
