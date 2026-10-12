@@ -6,7 +6,6 @@
 
 #include <array>
 #include <atomic>
-#include <map>
 #include <bitset>
 #include <functional>
 #include <memory>
@@ -57,6 +56,7 @@ struct ThreadLocalData {
     std::optional<KThread> raw_thread;
     KThread* current_thread = nullptr;
     KThread* thread = nullptr;
+    u64 generation = 0; // eden-xbox: the KernelCore these fields belong to
     u8 host_thread_id = UINT8_MAX;
     bool is_phantom_mode_for_singlecore = false;
     bool lock = false;
@@ -81,8 +81,29 @@ struct KernelCore::Impl {
     // so it will be statically given a TLS slot anyways.
     static inline thread_local ThreadLocalData tls_data = {};
 
+    // eden-xbox: tls_data outlives the kernel. A host thread that drives one System after another
+    // (the Pulse gate destroys and rebuilds it in place) kept the dummy KThread made for the first
+    // kernel and used it in every later one, a thread of a destroyed kernel whose stale state could
+    // fail the termination of the next application process (it then kept its JITs alive). Every
+    // kernel has its own generation, and a thread's data from another one is dropped on first use.
+    static inline std::atomic<u64> next_generation{};
+    const u64 generation = ++next_generation;
+
+    ThreadLocalData& LocalData() const {
+        auto& t = tls_data;
+        if (t.generation != generation) {
+            t.current_thread = nullptr;
+            t.thread = nullptr;
+            t.raw_thread.reset();
+            t.host_thread_id = UINT8_MAX;
+            t.is_phantom_mode_for_singlecore = false;
+            t.generation = generation;
+        }
+        return t;
+    }
+
     explicit Impl(Core::System& system_, KernelCore& kernel_) : system{system_} {
-        tls_data.lock = true;
+        LocalData().lock = true;
     }
 
     void SetMulticore(bool is_multi) {
@@ -190,24 +211,8 @@ struct KernelCore::Impl {
         {
             std::scoped_lock lk{registered_objects_lock};
             if (registered_objects.size()) {
-                // eden-xbox: by type, and every dangling process (it keeps its JITs alive).
-                std::map<std::string, size_t> by_type;
-                for (auto* object : registered_objects) {
-                    ++by_type[object->GetTypeName()];
-                    if (auto* process = object->DynamicCast<KProcess*>()) {
-                        LOG_INFO(Kernel,
-                                 "Dangling process {:016X} pid {} state {} references {}",
-                                 process->GetProgramId(), process->GetProcessId(),
-                                 static_cast<u32>(process->GetState()),
-                                 process->GetReferenceCount());
-                    }
-                }
-                std::string summary;
-                for (const auto& [type, count] : by_type) {
-                    summary += fmt::format("{}{} x{}", summary.empty() ? "" : ", ", type, count);
-                }
-                LOG_INFO(Kernel, "{} kernel objects were dangling on shutdown: {}",
-                         registered_objects.size(), summary);
+                LOG_DEBUG(Kernel, "{} kernel objects were dangling on shutdown!",
+                          registered_objects.size());
                 registered_objects.clear();
             }
         }
@@ -413,17 +418,18 @@ struct KernelCore::Impl {
     /// Sets the host thread ID for the caller.
     u32 SetHostThreadId(std::size_t core_id) {
         // This should only be called during core init.
-        ASSERT(tls_data.host_thread_id == UINT8_MAX);
+        auto& t = LocalData();
+        ASSERT(t.host_thread_id == UINT8_MAX);
 
         // The first four slots are reserved for CPU core threads
         ASSERT(core_id < Core::Hardware::NUM_CPU_CORES);
-        tls_data.host_thread_id = u8(core_id);
-        return tls_data.host_thread_id;
+        t.host_thread_id = u8(core_id);
+        return t.host_thread_id;
     }
 
     /// Gets the host thread ID for the caller
     u32 GetHostThreadId() const {
-        return tls_data.host_thread_id;
+        return LocalData().host_thread_id;
     }
 
     // Gets the dummy KThread for the caller, allocating a new one if this is the first time
@@ -450,7 +456,7 @@ struct KernelCore::Impl {
 
     /// Registers a new host thread by allocating a host thread ID for it
     void RegisterHostThread(KThread* existing_thread) {
-        (void)GetHostDummyThread(tls_data, existing_thread);
+        (void)GetHostDummyThread(LocalData(), existing_thread);
     }
 
     [[nodiscard]] u32 GetCurrentHostThreadID() {
@@ -462,11 +468,11 @@ struct KernelCore::Impl {
 
     // Forces singlecore
     bool IsPhantomModeForSingleCore() const {
-        return tls_data.is_phantom_mode_for_singlecore;
+        return LocalData().is_phantom_mode_for_singlecore;
     }
     void SetIsPhantomModeForSingleCore(bool value) {
         ASSERT(!is_multicore);
-        tls_data.is_phantom_mode_for_singlecore = value;
+        LocalData().is_phantom_mode_for_singlecore = value;
     }
 
     bool IsShuttingDown() const {
@@ -478,7 +484,7 @@ struct KernelCore::Impl {
     }
 
     void SetCurrentEmuThread(KThread* thread) {
-        tls_data.current_thread = thread;
+        LocalData().current_thread = thread;
     }
 
     void DeriveInitialMemoryLayout() {
@@ -1218,7 +1224,7 @@ u32 KernelCore::GetCurrentHostThreadID() const {
 }
 
 KThread* KernelCore::GetCurrentEmuThread() const {
-    return impl->GetCurrentEmuThread(Impl::tls_data);
+    return impl->GetCurrentEmuThread(impl->LocalData());
 }
 
 void KernelCore::SetCurrentEmuThread(KThread* thread) {

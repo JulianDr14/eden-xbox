@@ -268,10 +268,14 @@ Lo que hizo falta en la consola para llegar ahí:
   nuevo hasta que todos los servicios llegan a `RunServer` (el esqueleto aún no tiene
   hilos) y los eventos capturados se buscan también en un registro de tipos vivos.
 
-**Abierto: fuga por ciclo.** El código JIT comprometido crece unos 15 MiB por ciclo
-(72 MiB → 1,58 GiB en 100 ciclos; commit de la app 3,5 de 5 GiB), así que el
-`KProcess` de la aplicación de cada `System` destruido no llega a `Finalize`. Cada
-apagado deja además 66 hilos de servicio colgados (también el primero, sin Pulse).
-El paquete 0.2.87.13 registra los objetos colgados por tipo, cada proceso colgado con su
-contador de referencias y el JIT vivo tras destruir cada `System`. Hasta cerrar la fuga
-el ciclo no es apto para uso repetido: con este ritmo agota la memoria en unos 230 ciclos.
+**Fuga por ciclo (corregida, pendiente de medir en la Series).** El código JIT crecía
+unos 15 MiB por ciclo (72 MiB → 1,58 GiB en 100 ciclos; commit de la app 3,5 de 5 GiB).
+Con 0.2.87.13 se vio que no era cada ciclo: uno de cada cinco `System` destruidos
+dejaba el proceso de la aplicación en `Terminating` con sus cinco hilos y 72 MiB de JIT.
+Causa: los datos por hilo del kernel (`tls_data`, con el `KThread` dummy del hilo host)
+son `thread_local` estáticos, así que el hilo de la prueba seguía usando el dummy del
+primer kernel en todos los siguientes. Con ese estado viejo la espera de la terminación
+de un hilo podía fallar y el proceso quedaba a medio terminar. Ahora cada kernel tiene una
+generación y los datos de otra se descartan al primer uso. Cada apagado sigue dejando
+66 hilos de servicio colgados (también el primero, sin Pulse); sus fibras se liberan.
+El diagnóstico por objeto de 0.2.87.13 se retiró: leía objetos colgados ya liberados.
