@@ -130,6 +130,8 @@ struct ImageCopy {
     Offset3D src_offset;
     Offset3D dst_offset;
     Extent3D extent;
+    // AddImageAlias computes extents in storage blocks, unlike ordinary texel copies.
+    bool extent_in_blocks{};
 };
 
 struct BufferImageCopy {

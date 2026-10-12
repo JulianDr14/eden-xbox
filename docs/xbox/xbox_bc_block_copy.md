@@ -119,3 +119,51 @@ No confundir un gate desktop con certificación de hardware.
 - Modelo semántico local: `renderer_vulkan/vk_texture_cache.cpp::CopyImage` y
   `texture_cache/util.cpp` (copias en unidades del origen). Vulkan conserva los
   bloques nativos; no se extrapola su representación al workaround de Series.
+
+## Correccion de unidades de alias tras la prueba .29
+
+El gate real de PC identifico `partial block does not end at source mip edge`:
+BC3 base128x128, mip4 de8x8, extent2x2, destino UINT128 de4x2. Los originales
+estaban vigentes (version4/4), sin uploads pendientes ni reinterpretacion adelantada.
+El problema nace en `ImageBase::AddImageAlias`: divide los tamanos de ambos
+formatos por su bloque, toma el minimo y almacena `copy_size` en ambas direcciones.
+`SynchronizeAliases` -> `TextureCache::CopyImage` -> runtime D3D12 recibe por tanto
+2x2 BLOQUES. La ruta nueva interpretaba esos valores como texeles BC: rechazaba
+mips pequenos y tambien podia transferir solo un cuarto por eje en regiones alineadas.
+La validacion de bloques parciales era correcta para su contrato de texeles.
+
+`ImageCopy::extent_in_blocks` marca exclusivamente las copias creadas por
+AddImageAlias, sin cambiar sus valores ni el comportamiento Vulkan. D3D12 normaliza
+el lote a texeles logicos del origen antes de seleccionar ruta:2 bloques->8texeles,
+1bloque->4texeles, o2/1 en tails. AliasBlockExtent valida offset y cantidad en
+bloques antes de recortar solo el padding del ultimo bloque. PlanBcCopyAxis sigue
+exigiendo bloques completos/borde; la caja D3D12 sigue alineada a4. La cobertura
+se consulta con la region normalizada. No se adivinan unidades por alineacion.
+
+La normalizacion usa small_vector con16copias inline (sin allocation en el lote
+habitual), no crea recursos GPU ni agrega fences/readbacks o conversion de color.
+Los flags de representacion y versiones se mantienen. El harness reproduce
+128x128x48/7mips, exporta72copias de mips4--6/capas6--29 a4x2/4x1 UINT128,
+compara todos los bytes del destino y sentinels fuera de la region. Tambien prueba
+conversion de unidades invalida/overflow/tails y mantiene gates existentes.
+
+Busqueda publica: no se encontro una solucion publicada para el mensaje especifico
+de este fork. [GPUWeb/Dawn #363](https://github.com/gpuweb/gpuweb/issues/363)
+documenta un caso equivalente de unidades/logical vs physical mip sizes y el uso de
+cajas fisicas alineadas en D3D12; no es el mismo bug ni se copia codigo.
+[Microsoft block compression](https://github.com/MicrosoftDocs/windows-dev-docs/blob/docs/uwp/graphics-concepts/block-compression.md)
+documenta padding de tails y el par BC3/UINT128.
+[CopyTextureRegion](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-copytextureregion)
+especifica coordenadas/cajas en origen y estados COPY_SOURCE/COPY_DEST.
+[Chuck Walbourn: UWP Series X|S](https://walbourn.github.io/directx-and-uwp-on-xbox-series-x-s/)
+confirma FL11.0 y SMhasta6.4; esta correccion usa CopyTextureRegion/barreras existentes,
+sin Agility ni APIs GDK/enhanced barriers. No extrapolar capacidades GDK a UWP.
+Validacion de juego/hardware posterior al cambio pendiente de captura.
+
+GatePC tras normalizaralias: Q69s/retorno0,3154frames. Cero avisos host-decoded25->22, cero BCaxis/BCblock/aliascopyrechazados y cero RenderError/Critical/device removed encontrados. InversaGPU UINT32x32->BC3 128x128x6 observada60,334376s. Persiste1avisoSRVBC3 tipo5/dimension3 f3129 (distinto de copiasomitidas, tracker loagrupaCopySkipped). Commitmaxmuestreado3450MiB/cap5120; cierre519MiB. Logs build-uwp/test-results/bc-copy-pc-alias-fixed. Captura compatibleconcorreccion pero no acredita por log datos exactos de cada copia ni igualdad deescenas; bytesexactos demostrados porharness72copias. Confirmacionvisual usuario ySeriespendientes; sinFPSmedido ni nuevocommit/push.
+
+
+GateSeries .30 (12oct2026): Downloads confirma package0.2.87.30/Game A,3233frames,dropped_reports0. Cero copy between host-decoded25->22, BCaxis/BCblock/aliascopyrechazados, RenderError/Critical/deviceremoved encontrados. InversaGPU32x32UINT->128x128x6BC3 mismaaddr55f790000 a62,909852s. Retorno10 trasmenu volverbiblioteca, shutdowncompleto109,5s (esperado),commitmaxmuestreado3751MiB/5120,cierre520MiB. Persiste1SRVBC3tipo5/dimension3 (registradoOther, no confundir con copiarbloques),playtime.bin/NVMap/input/network ajenos. Evidencia build-uwp/test-results/bc-copy-series-0.2.87.30. Gate logsSeries pasa y harnessbyteexactoprevio pasa; usuarioaun debe confirmar aspecto visual, logno demuestra bytes de cadacopia ni escenaidentica. SinFPSmedido/commit/push.
+
+
+Cierre confirmado por el usuario (12 oct 2026): fallo de copias BC3/UINT128 omitidas cerrado en 0.2.87.30 tras pruebas CPU/GPU byte a byte, reproduccion y correccion en PC y gate de logs Series. El usuario acepta el cierre; avisos SRV/playtime independientes permanecen fuera de este fallo. No se certifican FPS ni ausencia de otros defectos del renderer.

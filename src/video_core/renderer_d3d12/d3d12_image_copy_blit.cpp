@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <utility>
+#include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
 #include "common/logging.h"
@@ -20,6 +21,34 @@ namespace D3D12 {
 using namespace TextureDetail;
 
 void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const ImageCopy> copies) {
+    if (std::ranges::any_of(copies, [](const ImageCopy& copy) { return copy.extent_in_blocks; })) {
+        // Normalize only alias copies. Guessing units from alignment would corrupt ordinary
+        // partial texel copies and silently under-copy aligned alias extents.
+        boost::container::small_vector<ImageCopy, 16> normalized(copies.begin(), copies.end());
+        for (auto& copy : normalized) {
+            if (!copy.extent_in_blocks) continue;
+            const s32 level = copy.src_subresource.base_level;
+            if (level < 0 || level >= src.info.resources.levels) {
+                WarnOnce(logged_decoded_copy, "alias copy has invalid source mip; skipped");
+                return;
+            }
+            const auto width = AliasBlockExtent(copy.extent.width, copy.src_offset.x,
+                std::max(1U, src.info.size.width >> level),
+                VideoCore::Surface::DefaultBlockWidth(src.info.format));
+            const auto height = AliasBlockExtent(copy.extent.height, copy.src_offset.y,
+                std::max(1U, src.info.size.height >> level),
+                VideoCore::Surface::DefaultBlockHeight(src.info.format));
+            if (!width || !height) {
+                WarnOnce(logged_decoded_copy, "alias copy exceeds source blocks; skipped");
+                return;
+            }
+            copy.extent.width = *width;
+            copy.extent.height = *height;
+            copy.extent_in_blocks = false;
+        }
+        CopyImage(dst, src, std::span<const ImageCopy>{normalized.data(), normalized.size()});
+        return;
+    }
     if (&dst == &src) {
         // Whole-resource state tracking cannot hold COPY_SOURCE and COPY_DEST at once.
         WarnOnce(logged_self_copy, "copies within one image are not supported yet; skipped");
@@ -107,12 +136,48 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src, std::span<const Imag
 
 bool TextureCacheRuntime::CopyDecodedBlocks(Image& dst, Image& src,
                                             std::span<const ImageCopy> copies) {
+    const auto reject = [&](const char* reason, const ImageCopy* copy = nullptr) {
+        // Bound diagnostic volume independently of WarnOnce: retain the failing predicate
+        // and representation version without logging every draw of an unsupported transfer.
+        static u32 reports = 0;
+        if (reports < 32) {
+            ++reports;
+            LOG_WARNING(Render,
+                        "D3D12: BC block copy rejected: {}; {} @{:x} -> {} @{:x}, "
+                        "shadow={} pending={} ahead={} version={}/{}, batch={}",
+                        reason, src.info.format, src.gpu_addr, dst.info.format, dst.gpu_addr,
+                        bool(src.guest_blocks), src.guest_blocks_upload_pending,
+                        src.reinterpreted_ahead, src.guest_blocks_version, src.write_version,
+                        copies.size());
+            if (copy) {
+                LOG_WARNING(Render,
+                            "D3D12: rejected BC region: src mip={} layer={} count={} "
+                            "offset={},{},{}; dst mip={} layer={} count={} offset={},{},{}; "
+                            "extent={}x{}x{}; src base={}x{} dst base={}x{}",
+                            copy->src_subresource.base_level, copy->src_subresource.base_layer,
+                            copy->src_subresource.num_layers, copy->src_offset.x,
+                            copy->src_offset.y, copy->src_offset.z,
+                            copy->dst_subresource.base_level, copy->dst_subresource.base_layer,
+                            copy->dst_subresource.num_layers, copy->dst_offset.x,
+                            copy->dst_offset.y, copy->dst_offset.z, copy->extent.width,
+                            copy->extent.height, copy->extent.depth,
+                            src.info.size.width, src.info.size.height,
+                            dst.info.size.width, dst.info.size.height);
+            }
+        }
+        return false;
+    };
     Image* const blocks = src.GuestBlocks();
     // D3D12's documented structured/BC reinterpretation pairs. Do not interpret decoded
     // colors as blocks, or route arbitrary same-sized DXGI formats through CopyTextureRegion.
     if (!blocks || dst.TransferFormat().converted || src.info.type != ImageType::e2D ||
         dst.info.type != ImageType::e2D || dst.info.num_samples != 1) {
-        return false;
+        // Other incompatible copy paths also enter here. Diagnose only decoded BC sources.
+        return src.IsBcDecoded() ? reject(!src.guest_blocks ? "missing shadow" :
+            src.guest_blocks_upload_pending ? "pending upload" :
+            src.reinterpreted_ahead ? "reinterpretation ahead" :
+            src.guest_blocks_version != src.write_version ? "stale shadow" :
+            "image type, samples or converted destination") : false;
     }
     const auto target_format = dst.ViewFormat();
     const u32 bytes = VideoCore::Surface::BytesPerBlock(src.info.format);
@@ -120,7 +185,7 @@ bool TextureCacheRuntime::CopyDecodedBlocks(Image& dst, Image& src,
                            target_format == DXGI_FORMAT_R32G32B32A32_SINT)) ||
           (bytes == 8 && (target_format == DXGI_FORMAT_R32G32_UINT ||
                           target_format == DXGI_FORMAT_R32G32_SINT)))) {
-        return false;
+        return reject("unsupported integer format pair");
     }
     const auto source_desc = blocks->Handle()->GetDesc();
     const auto target_desc = dst.Handle()->GetDesc();
@@ -135,17 +200,35 @@ bool TextureCacheRuntime::CopyDecodedBlocks(Image& dst, Image& src,
             s.num_layers > source_desc.DepthOrArraySize - s.base_layer ||
             d.num_layers > target_desc.DepthOrArraySize - d.base_layer || copy.src_offset.z != 0 ||
             copy.dst_offset.z != 0 || copy.extent.depth != 1) {
-            return false;
+            return reject("subresource or depth bounds", &copy);
         }
-        if (!PlanBcCopyAxis(copy.src_offset.x, copy.extent.width,
-                            std::max(1U, src.info.size.width >> s.base_level), copy.dst_offset.x,
-                            std::max(1U, dst.info.size.width >> d.base_level)) ||
-            !PlanBcCopyAxis(copy.src_offset.y, copy.extent.height,
-                            std::max(1U, src.info.size.height >> s.base_level), copy.dst_offset.y,
-                            std::max(1U, dst.info.size.height >> d.base_level))) {
-            return false;
+        for (u32 axis = 0; axis < 2; ++axis) {
+            const s32 source_offset = axis == 0 ? copy.src_offset.x : copy.src_offset.y;
+            const s32 target_offset = axis == 0 ? copy.dst_offset.x : copy.dst_offset.y;
+            const u32 extent = axis == 0 ? copy.extent.width : copy.extent.height;
+            const u32 source_size = std::max(1U, (axis == 0 ? src.info.size.width :
+                                                src.info.size.height) >> s.base_level);
+            const u32 target_size = std::max(1U, (axis == 0 ? dst.info.size.width :
+                                                dst.info.size.height) >> d.base_level);
+            const char* failure{};
+            if (!PlanBcCopyAxis(source_offset, extent, source_size, target_offset, target_size,
+                                4, &failure)) {
+                // Separate cap keeps the detailed predicate available without per-frame spam.
+                static u32 axis_reports = 0;
+                if (axis_reports < 32) {
+                    ++axis_reports;
+                    LOG_WARNING(Render,
+                                "D3D12: BC axis {} rejected: {}; src offset={} mip size={}, "
+                                "extent={}, block size=4; dst offset={} mip size={}; "
+                                "src resource base={}x{} dst resource base={}x{}",
+                                axis == 0 ? "X" : "Y", failure, source_offset, source_size,
+                                extent, target_offset, target_size, source_desc.Width,
+                                source_desc.Height, target_desc.Width, target_desc.Height);
+                }
+                return reject(failure, &copy);
+            }
         }
-        if (!src.HasGuestBlocks(copy)) return false;
+        if (!src.HasGuestBlocks(copy)) return reject("uninitialized block coverage", &copy);
     }
     blocks->Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
     dst.Transition(D3D12_RESOURCE_STATE_COPY_DEST);

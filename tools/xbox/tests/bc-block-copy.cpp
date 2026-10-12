@@ -66,6 +66,32 @@ int main() try {
     assert(!PlanBcCopyAxis(0, UINT32_MAX, 64, 0, 64));
     assert(!PlanBcCopyAxis(0, 4, 64, -1, 64));
     assert(!PlanBcCopyAxis(0, 8, 64, 3, 4));
+    const auto check_failure = [](s32 src, u32 extent, u32 size, s32 dst, u32 target,
+                                  u32 block, const char* expected) {
+        const char* failure{};
+        assert(!PlanBcCopyAxis(src, extent, size, dst, target, block, &failure));
+        assert(failure && std::strcmp(failure, expected) == 0);
+    };
+    check_failure(-1, 4, 8, 0, 8, 4, "negative source offset");
+    check_failure(0, 4, 8, -1, 8, 4, "negative destination offset");
+    check_failure(0, 0, 8, 0, 8, 4, "zero extent");
+    check_failure(0, 4, 8, 0, 8, 0, "zero block size");
+    check_failure(8, 4, 8, 0, 8, 4, "source offset outside mip");
+    check_failure(0, 4, 8, 8, 8, 4, "destination offset outside mip");
+    check_failure(1, 4, 8, 0, 8, 4, "source offset not block aligned");
+    check_failure(0, 9, 8, 0, 8, 4, "extent exceeds source mip");
+    check_failure(0, 2, 8, 0, 2, 4, "partial block does not end at source mip edge");
+    check_failure(0, 1, 4, 0, 1, 4, "partial block does not end at source mip edge");
+    check_failure(0, 8, 8, 0, 1, 4, "block count exceeds destination mip");
+    const char* success_reason = "old failure";
+    assert(PlanBcCopyAxis(0, 2, 2, 0, 1, 4, &success_reason) && !success_reason);
+    assert(AliasBlockExtent(2, 0, 8, 4) == 8);
+    assert(AliasBlockExtent(1, 0, 4, 4) == 4);
+    assert(AliasBlockExtent(1, 0, 2, 4) == 2);
+    assert(AliasBlockExtent(1, 0, 1, 4) == 1);
+    assert(!AliasBlockExtent(3, 0, 8, 4));
+    assert(!AliasBlockExtent(UINT32_MAX, 0, 8, 4));
+    assert(!AliasBlockExtent(1, 1, 8, 4));
     BcBlockCoverage coverage;
     coverage.Reset(16, 16, 5, 3);
     assert(!coverage.Contains(0, 0, 0, 1, 1));
@@ -187,6 +213,51 @@ int main() try {
     target.DownloadMemory(second_readback, target_copies);
     scheduler.Finish();
     assert(std::memcmp(second_readback.mapped_span.data(), expected.data(), target_size) == 0);
+
+    // Logged Game A alias geometry: 128x128 BC3, 48 layers, mips 4/5/6 exported to
+    // UINT128 4x2/4x1 images. Extents are 2x2/1x1 BLOCKS, not decoded texels.
+    auto alias_info = source_info;
+    alias_info.size = {128, 128, 1};
+    alias_info.resources = {7, 48};
+    Image alias_source{runtime, alias_info, 0, 0};
+    size_t alias_bytes{};
+    const auto alias_layout = Layout(alias_info, alias_bytes);
+    std::vector<u8> alias_raw(alias_bytes);
+    for (size_t i = 0; i < alias_bytes; ++i) alias_raw[i] = u8(i * 37 + i / 16);
+    alias_source.PreserveGuestBlocks(alias_raw, alias_layout);
+    auto alias_upload = runtime.UploadStagingBuffer(alias_source.converted_size_bytes);
+    auto alias_converted = alias_layout;
+    ConvertImage(alias_raw, alias_info, alias_upload.mapped_span, alias_converted);
+    alias_source.UploadMemory(alias_upload, alias_converted);
+    for (s32 level = 4; level <= 6; ++level) {
+        const u32 count = level == 4 ? 2 : 1;
+        auto alias_target_info = target_info;
+        alias_target_info.size = {4, count, 1};
+        alias_target_info.resources = {1, 1};
+        Image alias_target{runtime, alias_target_info, 0, 0};
+        size_t output_bytes{};
+        const auto output_layout = Layout(alias_target_info, output_bytes);
+        auto sentinel = runtime.UploadStagingBuffer(output_bytes);
+        std::memset(sentinel.mapped_span.data(), 0xcd, output_bytes);
+        for (s32 layer = 6; layer < 30; ++layer) {
+            alias_target.UploadMemory(sentinel, output_layout);
+            const ImageCopy alias_copy{.src_subresource = {level, layer, 1},
+                                       .dst_subresource = {0, 0, 1},
+                                       .src_offset = {}, .dst_offset = {},
+                                       .extent = {count, count, 1},
+                                       .extent_in_blocks = true};
+            runtime.CopyImage(alias_target, alias_source, std::span{&alias_copy, 1});
+            auto output = runtime.DownloadStagingBuffer(output_bytes);
+            alias_target.DownloadMemory(output, output_layout);
+            scheduler.Finish();
+            std::vector<u8> expected_alias(output_bytes, 0xcd);
+            const size_t input = alias_layout[level].buffer_offset + size_t(layer) * count * count * 16;
+            for (u32 row = 0; row < count; ++row)
+                std::memcpy(expected_alias.data() + row * 4 * 16,
+                            alias_raw.data() + input + row * count * 16, count * 16);
+            assert(std::memcmp(output.mapped_span.data(), expected_alias.data(), output_bytes) == 0);
+        }
+    }
 
     ShaderCompiler compiler;
     assert(compiler.IsAvailable());

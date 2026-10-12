@@ -734,3 +734,12 @@ GPU-only, cobertura porbloque/mip/capa yversion/fences; workaround de muestreoBC
 Series intacto. UWP/enlace ygateGPUdesktop con readback exacto/192copias6capas
 pasan. Gameplay/Series/memoria/FPS pendientes; docs/xbox/xbox_bc_block_copy.md.
 Sin commit ni push.
+
+
+Correccion BC alias (12 oct2026): AddImageAlias extentbloques marcadoexplicitamente y normalizadoa texelesorigen enD3D12, preservavalidaciones/cobertura. BuildUWP y72copiasGPU geometriaGame A byteexacto+sentinels/debuglimpio pasan; juegoPCrelanzado manual, Q/visual/Seriespendientes. Sincommitposterior734f44119d ni push; detalle docs/xbox/xbox_bc_block_copy.md.
+
+
+GateSeries .30 (12oct2026): Downloads confirma package0.2.87.30/Game A,3233frames,dropped_reports0. Cero copy between host-decoded25->22, BCaxis/BCblock/aliascopyrechazados, RenderError/Critical/deviceremoved encontrados. InversaGPU32x32UINT->128x128x6BC3 mismaaddr55f790000 a62,909852s. Retorno10 trasmenu volverbiblioteca, shutdowncompleto109,5s (esperado),commitmaxmuestreado3751MiB/5120,cierre520MiB. Persiste1SRVBC3tipo5/dimension3 (registradoOther, no confundir con copiarbloques),playtime.bin/NVMap/input/network ajenos. Evidencia build-uwp/test-results/bc-copy-series-0.2.87.30. Gate logsSeries pasa y harnessbyteexactoprevio pasa; usuarioaun debe confirmar aspecto visual, logno demuestra bytes de cadacopia ni escenaidentica. SinFPSmedido/commit/push.
+
+
+Cierre confirmado por el usuario (12 oct 2026): fallo de copias BC3/UINT128 omitidas cerrado en 0.2.87.30 tras pruebas CPU/GPU byte a byte, reproduccion y correccion en PC y gate de logs Series. El usuario acepta el cierre; avisos SRV/playtime independientes permanecen fuera de este fallo. No se certifican FPS ni ausencia de otros defectos del renderer.

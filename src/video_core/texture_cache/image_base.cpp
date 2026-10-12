@@ -234,6 +234,7 @@ bool AddImageAlias(ImageBase& lhs, ImageBase& rhs, ImageId lhs_id, ImageId rhs_i
             .src_offset = lhs_offset,
             .dst_offset = rhs_offset,
             .extent = copy_size,
+            .extent_in_blocks = true,
         });
         [[maybe_unused]] const ImageCopy& to_rhs_copy = rhs_alias.copies.emplace_back(ImageCopy{
             .src_subresource = rhs_subresource,
@@ -241,6 +242,7 @@ bool AddImageAlias(ImageBase& lhs, ImageBase& rhs, ImageId lhs_id, ImageId rhs_i
             .src_offset = rhs_offset,
             .dst_offset = lhs_offset,
             .extent = copy_size,
+            .extent_in_blocks = true,
         });
         ASSERT_MSG(ValidateCopy(to_lhs_copy, lhs.info, rhs.info), "Invalid RHS to LHS copy");
         ASSERT_MSG(ValidateCopy(to_rhs_copy, rhs.info, lhs.info), "Invalid LHS to RHS copy");

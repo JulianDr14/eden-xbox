@@ -14,6 +14,16 @@ struct BcCopyAxis {
     u32 blocks;
 };
 
+/// Alias extents count storage blocks. Convert to logical source texels, allowing only the
+/// final block to extend beyond the logical mip (1x1/2x2 tails still occupy a whole block).
+constexpr std::optional<u32> AliasBlockExtent(u32 blocks, s32 offset, u32 size, u32 block) {
+    if (!blocks || offset < 0 || !block || static_cast<u32>(offset) >= size ||
+        static_cast<u32>(offset) % block != 0) return std::nullopt;
+    const u32 remaining = size - static_cast<u32>(offset);
+    if (blocks > remaining / block + (remaining % block != 0)) return std::nullopt;
+    return static_cast<u32>(std::min<u64>(u64{blocks} * block, remaining));
+}
+
 /// GPU-generated arrays may have only some blocks initialized. Track exact coverage, one bit per
 /// compressed block, so an unrelated mip/layer/rectangle never reads an uninitialized shadow.
 class BcBlockCoverage {
@@ -76,19 +86,28 @@ class BcBlockCoverage {
 /// A partial last block is legal only at the mip edge. Subtraction avoids overflow on bad input.
 constexpr std::optional<BcCopyAxis> PlanBcCopyAxis(s32 source_offset, u32 extent, u32 source_size,
                                                    s32 destination_offset, u32 destination_size,
-                                                   u32 block_size = 4) {
-    if (source_offset < 0 || destination_offset < 0 || extent == 0 || block_size == 0) {
+                                                   u32 block_size = 4,
+                                                   const char** failure = nullptr) {
+    const auto reject = [failure](const char* reason) -> std::optional<BcCopyAxis> {
+        if (failure) *failure = reason;
         return std::nullopt;
-    }
+    };
+    if (failure) *failure = nullptr;
+    if (source_offset < 0) return reject("negative source offset");
+    if (destination_offset < 0) return reject("negative destination offset");
+    if (extent == 0) return reject("zero extent");
+    if (block_size == 0) return reject("zero block size");
     const auto src = static_cast<u32>(source_offset);
     const auto dst = static_cast<u32>(destination_offset);
-    if (src >= source_size || dst >= destination_size || src % block_size != 0 ||
-        extent > source_size - src || (extent % block_size != 0 && extent != source_size - src)) {
-        return std::nullopt;
-    }
+    if (src >= source_size) return reject("source offset outside mip");
+    if (dst >= destination_size) return reject("destination offset outside mip");
+    if (src % block_size != 0) return reject("source offset not block aligned");
+    if (extent > source_size - src) return reject("extent exceeds source mip");
+    if (extent % block_size != 0 && extent != source_size - src)
+        return reject("partial block does not end at source mip edge");
     const u32 blocks = extent / block_size + (extent % block_size != 0);
     if (blocks > destination_size - dst) {
-        return std::nullopt;
+        return reject("block count exceeds destination mip");
     }
     return BcCopyAxis{src + extent, blocks};
 }
