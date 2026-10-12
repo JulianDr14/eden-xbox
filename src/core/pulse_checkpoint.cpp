@@ -55,7 +55,7 @@ constexpr std::array SectionOrder{ProcessSection::Process, ProcessSection::Objec
                                   ProcessSection::Handles, ProcessSection::Waits,
                                   ProcessSection::Exclusive, ProcessSection::Timing};
 constexpr u64 MaxMetadataSection = 64ULL << 20;
-constexpr auto SessionManagerTimeout = std::chrono::seconds{5};
+constexpr auto ServiceStartTimeout = std::chrono::seconds{5};
 
 [[noreturn]] void Invalid(const char* reason) {
     throw Failure{Error::Invalid, reason};
@@ -755,7 +755,7 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
                 bind(record.id, client);
                 // The server thread registers the session asynchronously.
                 const auto* server = std::addressof(client->GetParent()->GetServerSession());
-                const auto deadline = std::chrono::steady_clock::now() + SessionManagerTimeout;
+                const auto deadline = std::chrono::steady_clock::now() + ServiceStartTimeout;
                 std::shared_ptr<Service::SessionRequestManager> manager;
                 while (!(manager = Service::ServerManager::FindSessionManager(server))) {
                     if (std::chrono::steady_clock::now() > deadline) {
@@ -840,27 +840,49 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
         const auto section = DecodeTiming(bytes);
         auto& timing = system.CoreTiming();
         const auto& hardware_timer = kernel.HardwareTimer().GetEventType();
-        // The fresh system's own events, by name.
+        // Services start on their own host threads, so a captured event's owner may not exist
+        // yet. Wait for each one; a looping event must also be queued already, or its owner would
+        // schedule it again on top of the restored queue.
+        std::unordered_set<u64> looping;
+        for (const auto& event : section.events) {
+            if (event.period_ns) looping.insert(event.binding_id);
+        }
         std::unordered_map<std::string, std::shared_ptr<Core::Timing::EventType>> fresh_types;
         std::vector<Core::Timing::CheckpointEventBinding> fresh_bindings;
-        for (const auto& type : timing.CheckpointQueuedEventTypes()) {
-            fresh_bindings.push_back({fresh_bindings.size() + 1, type});
-            if (type != hardware_timer && !fresh_types.emplace(type->name, type).second) {
-                Incompatible("Pulse: duplicated timing event name");
-            }
-        }
         std::vector<Core::Timing::CheckpointEventBinding> bindings;
+        const auto deadline = std::chrono::steady_clock::now() + ServiceStartTimeout;
+        for (;;) {
+            // The fresh system's own events, by name.
+            fresh_types.clear();
+            fresh_bindings.clear();
+            for (const auto& type : timing.CheckpointQueuedEventTypes()) {
+                fresh_bindings.push_back({fresh_bindings.size() + 1, type});
+                if (type != hardware_timer && !fresh_types.emplace(type->name, type).second) {
+                    Incompatible("Pulse: duplicated timing event name");
+                }
+            }
+            bindings.clear();
+            const std::string* missing{};
+            for (const auto& binding : section.bindings) {
+                const auto found = fresh_types.find(binding.name);
+                auto type = found != fresh_types.end()  ? found->second
+                            : looping.contains(binding.id) ? nullptr
+                                                           : Core::Timing::FindLiveEvent(binding.name);
+                if (!type || type == hardware_timer) {
+                    missing = std::addressof(binding.name);
+                    break;
+                }
+                bindings.push_back({binding.id, std::move(type)});
+            }
+            if (!missing) break;
+            if (std::chrono::steady_clock::now() > deadline) {
+                Incompatible("Pulse: timing event '" + *missing + "' missing after rebuild");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
         std::unordered_set<std::string> bound;
         u64 next_id{};
         for (const auto& binding : section.bindings) {
-            // Not queued yet in the fresh system: its owner still exists and holds the type.
-            const auto found = fresh_types.find(binding.name);
-            auto type = found != fresh_types.end() ? found->second
-                                                   : Core::Timing::FindLiveEvent(binding.name);
-            if (!type || type == hardware_timer) {
-                Incompatible("Pulse: timing event '" + binding.name + "' missing after rebuild");
-            }
-            bindings.push_back({binding.id, std::move(type)});
             bound.insert(binding.name);
             next_id = std::max(next_id, binding.id);
         }
