@@ -24,7 +24,8 @@ public:
     explicit KSession(KernelCore& kernel);
     ~KSession() override;
 
-    void Initialize(KernelCore& kernel, KClientPort* port, uintptr_t name);
+    // owner: the process the session counts against; null means the current process.
+    void Initialize(KernelCore& kernel, KClientPort* port, uintptr_t name, KProcess* owner = nullptr);
     void Finalize(KernelCore& kernel) override;
 
     bool IsInitialized() const override {

@@ -103,7 +103,7 @@ Result KClientPort::CreateSession(KernelCore& kernel, KClientSession** out, KPro
     }
 
     // Initialize the session.
-    session->Initialize(kernel, this, m_parent->GetName());
+    session->Initialize(kernel, this, m_parent->GetName(), owner);
 
     // Commit the session reservation.
     session_reservation.Commit();
