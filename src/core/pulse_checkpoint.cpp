@@ -360,13 +360,17 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
         const auto attribute = static_cast<KMemoryAttribute>(block.attribute);
         if (state == KMemoryState::Ipc || state == KMemoryState::NonSecureIpc ||
             state == KMemoryState::NonDeviceIpc ||
-            (attribute != KMemoryAttribute::None && attribute != KMemoryAttribute::Locked)) {
+            True(attribute & (KMemoryAttribute::IpcLocked | KMemoryAttribute::DeviceShared))) {
             Reject(true, fmt::format("guest memory is lent to an IPC or device operation "
                                      "(block {:#x}+{:#x} state {:#x} attribute {:#x})",
                                      block.address, block.size, block.state, block.attribute));
         }
+        // PermissionLocked (libnx locks its RELRO page) is replayed by the restore; Uncached is not.
+        if (True(attribute & ~(KMemoryAttribute::Locked | KMemoryAttribute::PermissionLocked))) {
+            Reject(false, fmt::format("memory attribute {:#x} has no serializer", block.attribute));
+        }
         const bool normal = state == KMemoryState::Normal;
-        if (attribute == KMemoryAttribute::Locked && !normal) {
+        if (True(attribute & KMemoryAttribute::Locked) && !normal) {
             Reject(false, "locked memory outside the heap");
         }
         if (normal && (block.address < layout.heap_start || block.address + block.size > heap_end)) {
@@ -376,7 +380,7 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
             state != KMemoryState::Stack && state != KMemoryState::ThreadLocal) {
             Reject(false, "memory state " + std::to_string(block.state & 0xff) + " has no serializer");
         }
-        if (attribute == KMemoryAttribute::Locked) {
+        if (True(attribute & KMemoryAttribute::Locked)) {
             for (u64 page = 0; page < block.size; page += PageSize) {
                 locked_sources.emplace(Physical(*process, block.address + page), block.address + page);
             }
@@ -657,6 +661,49 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
         for (const auto& alias : layout.aliases) {
             Check(table.MapMemory(alias.destination, alias.source, alias.size),
                   "Pulse: stack mapping rebuild failed");
+        }
+        // Runtime reprotection (libnx makes its RELRO read-only, then locks it): replay the
+        // captured permissions on the loader's data, then the permission locks.
+        for (const auto& block : layout.blocks) {
+            const auto block_state = static_cast<KMemoryState>(block.state);
+            if ((block_state != KMemoryState::CodeData && block_state != KMemoryState::Normal) ||
+                block.attribute != 0) {
+                continue;
+            }
+            for (u64 address = block.address; address < block.address + block.size;) {
+                Kernel::KMemoryInfo info{};
+                Kernel::Svc::PageInfo page{};
+                Check(table.QueryInfo(std::addressof(info), std::addressof(page), address),
+                      "Pulse: memory query failed");
+                const u64 end = std::min(info.m_address + info.m_size, block.address + block.size);
+                if (static_cast<u32>(info.m_permission) != block.permission) {
+                    Check(table.SetMemoryPermission(
+                              address, end - address,
+                              static_cast<Kernel::Svc::MemoryPermission>(
+                                  block.permission & static_cast<u32>(KMemoryPermission::UserMask))),
+                          "Pulse: permission rebuild failed");
+                }
+                address = end;
+            }
+        }
+        for (const auto& block : layout.blocks) {
+            if (False(static_cast<KMemoryAttribute>(block.attribute) &
+                      KMemoryAttribute::PermissionLocked)) {
+                continue;
+            }
+            const auto block_state = static_cast<KMemoryState>(block.state);
+            if (block_state != KMemoryState::CodeData && block_state != KMemoryState::Normal) {
+                Invalid("Pulse: permission lock outside data memory");
+            }
+            Check(table.SetMemoryPermission(
+                      block.address, block.size,
+                      static_cast<Kernel::Svc::MemoryPermission>(
+                          block.permission & static_cast<u32>(KMemoryPermission::UserMask))),
+                  "Pulse: permission rebuild failed");
+            Check(table.SetMemoryAttribute(block.address, block.size,
+                                           KMemoryAttribute::PermissionLocked,
+                                           KMemoryAttribute::PermissionLocked),
+                  "Pulse: permission lock rebuild failed");
         }
         break;
     }
