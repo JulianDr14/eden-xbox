@@ -28,6 +28,7 @@
 #include "eden_uwp/mods/mod_web.h"
 #include "eden_uwp/mods/mods_page.h"
 #include "eden_uwp/mods/mods_view.h"
+#include "eden_uwp/pulse_sessions.h"
 #include "eden_uwp/library_cache.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/system_page.h"
@@ -113,6 +114,15 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         panel.keyboard.notice = Tr(saved ? T::KeyboardSaved : T::KeyboardSaveFailed);
         keyboard_notice_until = saved ? std::chrono::steady_clock::now() + std::chrono::seconds{3} :
                                        std::chrono::steady_clock::time_point::max();
+        dirty = true;
+    };
+    // The Pulse session each game keeps, as the tiles and the options show it.
+    auto refresh_pulse = [&] {
+        for (auto& entry : scan.entries) {
+            const auto kept = PulseSessions::Find(entry.launch_path);
+            entry.pulse_saved = kept ? PulseSessions::FormatTime(kept->saved) : std::wstring{};
+            entry.pulse_current = kept && kept->current;
+        }
         dirty = true;
     };
     auto begin_capture = [&] {
@@ -893,6 +903,21 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 send(Down, GameOptionsInput::Down);
                 send(Play, GameOptionsInput::Confirm);
                 send(Quit, GameOptionsInput::Back);
+                if (game_options.confirm_discard || game_options.discard) {
+                    auto& game = scan.entries[game_options.game];
+                    if (game.pulse_saved.empty()) {
+                        game_options.confirm_discard = game_options.discard = false;
+                        notify(T::PulseNone);
+                    } else if (std::exchange(game_options.discard, false)) {
+                        notify(PulseSessions::Discard(game.launch_path) ? T::PulseDiscarded : T::PulseDiscardFailed);
+                        refresh_pulse();
+                    } else {
+                        options_notice = Tr(T::PulseDiscardConfirm);
+                        options_notice_until = std::chrono::steady_clock::time_point::max();
+                    }
+                } else if (options_notice == Tr(T::PulseDiscardConfirm)) {
+                    options_notice.clear();
+                }
                 if (game_options.page == GameOption::Updates || game_options.page == GameOption::Dlc) {
                     const auto& game = scan.entries[game_options.game];
                     if (!game.title_loaded || !game.program_id) {
@@ -1026,6 +1051,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
             catch (const std::exception& e) { scan.error = e.what(); }
             catch (const winrt::hresult_error& e) { scan.error = winrt::to_string(e.message()); }
             loading = false;
+            refresh_pulse();
             if (!configuration.busy) refresh_setup();
             selected = std::min(selected, scan.entries.empty() ? 0 : scan.entries.size() - 1);
             notice = Wide(scan.error);

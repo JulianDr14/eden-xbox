@@ -97,9 +97,14 @@ struct GameMenuSettings {
     bool can_fullscreen{};
     bool fullscreen{};
     bool show_performance_stats{};
+    /// Pulse sessions are on: leaving for home keeps the game where it is, unless the player
+    /// turns that off on the row (pulse_sessions.h).
+    bool pulse_sessions{};
 };
 
-enum class GameMenuResult : std::uint8_t { None, Resume, Library, SettingsChanged, FullScreen, Cheats, PerformanceStatsChanged };
+/// Library: back to home, keeping a Pulse session when they are on. LibraryWithoutSession: the
+/// player chose to leave without one.
+enum class GameMenuResult : std::uint8_t { None, Resume, Library, SettingsChanged, FullScreen, Cheats, PerformanceStatsChanged, LibraryWithoutSession };
 
 /// One row as drawn: a label, and the value of a setting (changed with left/right) or of a page.
 struct GameMenuRow {
@@ -200,7 +205,9 @@ private:
         case FullScreen:
             return {Tr(Text::MenuFullScreen), Tr(settings.fullscreen ? Text::Yes : Text::No), Choice};
         case Library:
-            return {Tr(Text::MenuBackToHome)};
+            if (!settings.pulse_sessions) return {Tr(Text::MenuBackToHome)};
+            return {Tr(Text::MenuBackToHome), Tr(keep_session ? Text::MenuKeepSession : Text::MenuSkipSession),
+                    Choice};
         }
         return {};
     }
@@ -215,7 +222,12 @@ private:
         case Mods:
             return GameMenuResult::None;
         case Library:
-            return action == MenuAction::Confirm ? GameMenuResult::Library : GameMenuResult::None;
+            if (action != MenuAction::Confirm) {
+                keep_session = !keep_session;
+                return GameMenuResult::None;
+            }
+            return !settings.pulse_sessions || keep_session ? GameMenuResult::Library
+                                                            : GameMenuResult::LibraryWithoutSession;
         case Style:
             settings.style = StepConsoleControllerStyle(settings.style, back);
             return GameMenuResult::SettingsChanged;
@@ -245,5 +257,6 @@ private:
     std::size_t selected{};
     std::size_t cheats_on{};
     std::size_t mods_on{};
+    bool keep_session{true};
 };
 } // namespace EdenXbox

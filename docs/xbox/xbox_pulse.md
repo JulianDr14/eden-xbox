@@ -1,9 +1,10 @@
 # Pulse: sesiones persistentes (11 oct 2026)
 
-Estado: implementación **parcial**, formato y almacenamiento aislados. No hay
-savestates funcionales de Eden ni integración en biblioteca. No habilitar Pulse
-para un juego hasta demostrar reconstrucción tras destruir el proceso.
-No cambia el nombre del emulador. Sin commits automáticos.
+Estado: fases 1–4 implementadas. La biblioteca guarda la sesión al volver al
+inicio y la reanuda al elegir el juego (fase 4, abajo). Homebrew con vídeo, audio
+y archivos se reanuda; los juegos comerciales se **rechazan con motivo** hasta la
+fase 5 (faltan serializadores de GPU, HID, AM y más servicios). No cambia el
+nombre del emulador. Sin commits automáticos.
 
 ## Contrato de producto aprobado
 
@@ -137,8 +138,8 @@ Los errores IO/cuota están inyectados; no confundirlos con esos gates físicos.
 | 0: inventario exhaustivo/registro de tipos | Inventario inicial; pendiente cierre |
 | 1: formato/storage | **Cerrada en PC**: harness de archivo/store PASS y cada ciclo de los gates de fase 2/3 publica y consume por `Store`. Riesgos residuales: corte eléctrico real y disco físico lleno (solo inyectados) |
 | 2: barrera/CPU/memoria/kernel/timing | **Cerrada**: gate de 100 ciclos PASS en la Series (0.2.87.12); fuga JIT por ciclo corregida y verificada en PC |
-| 3: servicios/FS/GPU/audio | **Integrada**: vi/nvnflinger, nvdrv, audout y fs serializados en el coordinador; gate `pulse_av` PASS en PC (ver abajo). Pendiente el banco de pruebas en la Series |
-| 4: biblioteca/múltiples sesiones | Pendiente |
+| 3: servicios/FS/GPU/audio | **Cerrada para homebrew**: vi/nvnflinger, nvdrv, audout y fs serializados; banco de 100 ciclos PASS en la Series (0.2.87.16) |
+| 4: biblioteca/múltiples sesiones | **Implementada**: guardar al volver al inicio, reanudar al elegir, distintivo, descarte, ajuste. Pendiente validar en la Series (0.2.87.17) |
 | 5: compatibilidad/rendimiento | Pendiente |
 
 ## Fuentes y decisiones
@@ -350,3 +351,62 @@ almacenamiento de la app (AppContainer) y restaura los servicios de fase 3.
 ```powershell
 powershell -File tools\xbox\package-appx.ps1 -BootNro tools\xbox\pulse_av\pulse_av.nro -BootCfg 'pulse_cycles=100','pulse_seed=1'
 ```
+
+**Resultado en la Series (0.2.87.16, 12 oct 2026):** `PULSE gate PASS` en los 100
+ciclos, unos 8 minutos. Restauración máx. 3,14 s, publicación en el almacenamiento
+de la app máx. 181 ms, archivo máx. 134 KB. Captura normalmente 10–300 ms, máx. 1 s,
+con hasta **317 reintentos**. El código JIT vuelve a 0 MiB al destruir cada
+emulador; la app se mantiene en 560–580 MiB de 5120 hasta el ciclo 100. Vídeo,
+audio y archivos siguen avanzando tras cada restauración.
+
+## Barrera de checkpoint en el kernel (12 oct 2026)
+
+Los reintentos venían de hilos guest dentro de una llamada al kernel (IPC o un
+lock) en el momento de pausar. `KernelCore::SetCheckpointBarrier` levanta una
+barrera: un hilo de 64 bits que entra en un SVC mientras está puesta retrocede el
+pc 4 bytes, se marca `is_checkpoint_parked` y duerme en intervalos de 1 ms hasta
+que se baje. La captura lo registra como ejecutable, así que al reanudar vuelve a
+emitir el SVC. `ProcessCheckpoint::CaptureAtBarrier` levanta la barrera, deja 2 ms
+para que los hilos que ya estaban dentro salgan y reintenta dentro de un
+presupuesto; la barrera se baja siempre (RAII).
+
+**Resultado en PC:** `pulse_av` semilla 7 con 10 ciclos PASS, máx. **9 reintentos**
+(antes 162), capturas 34–53 ms (una de 653 ms). `pulse.nro` semilla 3 PASS con
+0 reintentos y captura de 6,7 ms.
+
+## Fase 4: biblioteca (12 oct 2026)
+
+`src/eden_uwp/pulse_sessions.{h,cpp}` conecta la biblioteca con las fases 1–3.
+
+- **Identidad**: una ranura por archivo de juego (SHA-256 de la ruta; el homebrew
+  no tiene id de título) y por usuario del perfil. `content` resume tamaño,
+  aplicación, versión, build id y ruta; `revision` es esta compilación. Cualquier
+  diferencia hace la sesión incompatible: se conserva y no se reanuda.
+- **Volver al inicio** (menú del juego) captura con `CaptureAtBarrier` (3 s de
+  presupuesto) y publica en `LocalState/eden/pulse/sessions`. Solo después se
+  destruye el guest. La fila ofrece "sin guardar la sesión" para salir sin
+  captura. Un rechazo se muestra en la biblioteca con su motivo.
+- **Reanudar**: al elegir un juego con sesión compatible, `ProcessRestore` carga
+  el juego con el layout fijado, restaura y consume la sesión. Si falla antes de
+  cargar, arranca normal en el mismo System; si falla después, ese System se
+  descarta y el juego arranca de cero (`PULSE_RESUME_FAILED`), con aviso. La
+  sesión consumida no reaparece. Al reanudar no se ejecuta el prewarm JIT.
+- **Biblioteca**: distintivo "Pulse · fecha" en el juego y en su tarjeta (gris
+  si es de otra compilación). En las opciones del juego, "Sesión Pulse" descarta
+  tras una segunda pulsación de confirmación; nunca toca las partidas normales.
+- **Ajuste**: Sistema → "Sesiones Pulse", activado por defecto.
+- Cuota 20 GiB del `Store`, sin borrado automático. Nada de Pulse corre durante
+  el juego: ni capturas periódicas ni hilos.
+
+Tests: `tools/xbox/tests/game-menu.cpp` y `system-settings.cpp` PASS (este último
+actualizado: faltaba la fila de estadísticas).
+
+### Límites honestos (fase 5)
+
+- Un juego comercial casi siempre se rechazará al volver al inicio: faltan
+  serializadores de GPU (canales, syncpoints, memoria de GPU), HID, AM/applets,
+  capas gestionadas por vi y más servicios. El motivo se muestra y se sale sin
+  sesión; el juego no se pierde porque las partidas normales no se tocan.
+- La reanudación tarda lo que la restauración (≈3 s en la Series) más la carga.
+- El cierre forzado durante el juego no deja sesión: la garantía empieza al
+  completar la vuelta al inicio.

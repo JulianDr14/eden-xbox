@@ -496,6 +496,21 @@ enum class Text : std::uint16_t {
     ModsCategoriesLoading,
     ModsPromptCategories,
     ModsPromptListAll,
+    PulseSessions,
+    PulseSessionsHint,
+    MenuKeepSession,
+    MenuSkipSession,
+    PulseSession,
+    PulseNone,
+    PulseSavedOn,
+    PulseSavedOther,
+    PulseBadge,
+    PulseDiscardConfirm,
+    PulseDiscarded,
+    PulseDiscardFailed,
+    PulseKept,
+    PulseNotKept,
+    PulseNotResumed,
 
 
     Count

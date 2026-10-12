@@ -61,6 +61,7 @@
 #include "core/hle/kernel/svc/svc_debug_string.h" // Kernel::Svc::SetDebugStringObserver
 #include "core/hle/kernel/k_memory_manager.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/frontend/applets.h"
@@ -84,6 +85,7 @@
 #include "eden_uwp/headless_emu_window.h"
 #include "eden_uwp/prewarm_budget.h"
 #include "eden_uwp/pulse_gate.h"
+#include "eden_uwp/pulse_sessions.h"
 #include "eden_uwp/pulse_store_gate.h"
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/uwp_controllers.h"
@@ -161,6 +163,9 @@ constexpr const char* JIT_LIVENESS_SENTINEL = "EDEN_XBOX_JIT_ALIVE";
 constexpr const char* GFX_DONE_SENTINEL = "EDEN_XBOX_GFX_DONE";
 /// RunHeadlessBoot's status when the player chose "back to the library" in the in-game menu.
 constexpr int RETURN_TO_LIBRARY = 10;
+/// A Pulse session failed to resume after the game was loaded into this System: boot it again,
+/// fresh (BootConfig::pulse_resume off). The session stays where it was.
+constexpr int PULSE_RESUME_FAILED = 18;
 
 /// Where the renderer presents: the CoreWindow (as IUnknown*) and its size in physical pixels.
 /// A null window selects the Null renderer.
@@ -342,6 +347,9 @@ struct BootConfig {
     /// Pulse phase-1 gate ("pulse_store=1", pulse_store_gate.h): the Store in LocalState, with
     /// process terminations across restarts. Runs before the phase-2 gate when both are set.
     bool pulse_store{};
+    /// Played from the library: Pulse sessions (pulse_sessions.h), when the player has them on.
+    bool pulse_sessions{};
+    bool pulse_resume{true}; ///< Off after a failed resume, for the fresh boot that follows.
 };
 
 /// Games never emit the sentinels; without an explicit time they run this long.
@@ -554,7 +562,57 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     Service::AM::FrontendAppletParameters load_parameters{
         .applet_id = Service::AM::AppletId::Application,
     };
-    const Core::SystemResultStatus load_result = system.Load(emu_window, nro_path, load_parameters);
+    // Pulse: the identity this boot would save under, and the session it resumes if one matches.
+    std::optional<Common::Pulse::Identity> pulse_identity;
+    if (config.pulse_sessions && PulseSessions::Enabled()) {
+        try {
+            const auto file = system.GetFilesystem()->OpenFile(nro_path, FileSys::OpenMode::Read);
+            const auto user = system.GetProfileManager().GetUser(0);
+            if (file && user) {
+                pulse_identity = PulseSessions::IdentityFor(nro_path, user->uuid, file->GetSize(),
+                                                            content.application, content.version,
+                                                            content.build_id);
+            }
+        } catch (const std::exception& e) {
+            WriteDiag(std::string("pulse: no identity: ") + e.what());
+        }
+    }
+    Core::SystemResultStatus load_result{Core::SystemResultStatus::ErrorNotInitialized};
+    bool gpu_started = false, resumed = false;
+    if (pulse_identity && config.pulse_resume && PulseSessions::CanResume(*pulse_identity)) {
+        WriteDiag("pulse: resuming the kept session | " + MemoryReport());
+        const auto resume_start = std::chrono::steady_clock::now();
+        bool loaded = false;
+        try {
+            PulseSessions::Resume(system, *pulse_identity, [&](const Kernel::ProcessLayoutPin& pin) {
+                system.Kernel().PinNextProcessLayout(pin);
+                loaded = true; // a failed Load still needs ShutdownMainProcess
+                load_result = system.Load(emu_window, nro_path, load_parameters);
+                if (load_result != Core::SystemResultStatus::Success) {
+                    throw std::runtime_error("system.Load failed");
+                }
+                // The services the restore rebuilds talk to the GPU, as in the test bench.
+                system.GPU().Start();
+                system.GetCpuManager().OnGpuReady();
+                gpu_started = true;
+            });
+            resumed = true;
+            WriteDiag("pulse: session resumed in " +
+                      std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - resume_start)
+                                         .count()) +
+                      " ms | " + MemoryReport());
+        } catch (const std::exception& e) {
+            WriteDiag(std::string("pulse: resume failed: ") + e.what());
+            if (loaded) {
+                // This System holds a half-rebuilt process and is never run: a fresh one boots.
+                shutdown();
+                return PULSE_RESUME_FAILED;
+            }
+            PulseSessions::SetNotice(I18n::ToUtf8(I18n::Tr(I18n::Text::PulseNotResumed)));
+        }
+    }
+    if (!resumed) load_result = system.Load(emu_window, nro_path, load_parameters);
     WriteDiag("step: system.Load() returned status " +
               std::to_string(static_cast<int>(load_result)) + " | " + MemoryReport());
     WriteDiag("memory map: " + LargestAllocations());
@@ -592,9 +650,11 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     });
 
     // Start the GPU host thread (null renderer â€” no device) and release the CPU manager.
-    system.GPU().Start();
-    WriteDiag("step: GPU host thread started");
-    system.GetCpuManager().OnGpuReady();
+    if (!gpu_started) {
+        system.GPU().Start();
+        WriteDiag("step: GPU host thread started");
+        system.GetCpuManager().OnGpuReady();
+    }
 
     if (Settings::values.use_disk_shader_cache.GetValue()) {
         // As yuzu_cmd: build the pipelines earlier sessions saved (LocalState/eden/shader/<title>/
@@ -612,7 +672,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
 
     const u64 program_id = system.GetApplicationProcessProgramID();
     PrewarmBudget prewarm_budget{LoadPrewarmStep(program_id)};
-    if (config.jit_prewarm != BootConfig::JitPrewarm::Off) {
+    if (config.jit_prewarm != BootConfig::JitPrewarm::Off && !resumed) {
         // All guest cores are still stopped. Each owns a separate JIT; never
         // compile into an instance concurrently with Run or another compiler.
         if (auto* process = system.ApplicationProcess()) {
@@ -862,7 +922,8 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     const ControllerOptions options = input.Options();
                     menu.emplace(GameMenuSettings{options.style, options.swap_face_buttons,
                                                   options.deadzone, g_can_fullscreen.load(),
-                                                  g_fullscreen.load(), LoadSystemSettings().show_performance_stats},
+                                                  g_fullscreen.load(), LoadSystemSettings().show_performance_stats,
+                                                  pulse_identity.has_value()},
                                  program_id != 0);
                     if (game_title.empty()) {
                         std::string title;
@@ -911,7 +972,26 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 const GameMenuResult result = menu->Apply(action);
                 WriteDiag("menu: action " + std::to_string(static_cast<int>(action)) + ", row " +
                           std::to_string(menu->Selected()));
-                if (result == GameMenuResult::Library) {
+                if (result == GameMenuResult::Library ||
+                    result == GameMenuResult::LibraryWithoutSession) {
+                    if (result == GameMenuResult::Library && pulse_identity) {
+                        // The only capture: when the player leaves, never while playing.
+                        WriteDiag("pulse: saving the session | " + MemoryReport());
+                        const auto save_start = std::chrono::steady_clock::now();
+                        const std::string reason = PulseSessions::Save(system, *pulse_identity);
+                        const auto save_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                 std::chrono::steady_clock::now() - save_start)
+                                                 .count();
+                        if (reason.empty()) {
+                            WriteDiag("pulse: session saved in " + std::to_string(save_ms) + " ms");
+                            PulseSessions::SetNotice(I18n::ToUtf8(I18n::Tr(I18n::Text::PulseKept)));
+                        } else {
+                            WriteDiag("pulse: no session (" + reason + ") after " +
+                                      std::to_string(save_ms) + " ms");
+                            PulseSessions::SetNotice(I18n::ToUtf8(
+                                I18n::Format(I18n::Text::PulseNotKept, {Utf8ToUtf16(reason)})));
+                        }
+                    }
                     WriteDiag("menu: back to the library, shutting the game down | " +
                               MemoryReport());
                     finish_prewarm_budget(tick);
@@ -2292,6 +2372,7 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     if (library_game) {
                         config.play = true;
                         config.run_seconds = 0;
+                        config.pulse_sessions = true;
                     }
                     if (library_game || !config.game.empty()) {
                         nro_path = library_game ? *library_game : local_path + "\\games\\" + config.game;
@@ -2309,7 +2390,14 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                 // Capture any early throw to the diag file instead of a silent exit.
                 try {
                     WriteDiag("calling RunHeadlessBoot");
-                    const int rc = EdenXbox::RunHeadlessBoot(nro_path, surface, config);
+                    int rc = EdenXbox::RunHeadlessBoot(nro_path, surface, config);
+                    if (rc == EdenXbox::PULSE_RESUME_FAILED) {
+                        EdenXbox::PulseSessions::SetNotice(EdenXbox::I18n::ToUtf8(
+                            EdenXbox::I18n::Tr(EdenXbox::I18n::Text::PulseNotResumed)));
+                        WriteDiag("pulse: booting the game fresh after a failed resume");
+                        config.pulse_resume = false;
+                        rc = EdenXbox::RunHeadlessBoot(nro_path, surface, config);
+                    }
                     boot_status.store(rc);
                     WriteDiag("RunHeadlessBoot returned " + std::to_string(rc) + " | " + MemoryReport());
                 } catch (winrt::hresult_error const& e) {
@@ -2359,6 +2447,7 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                 continue;
             }
             if (show_library && boot_status.load() == EdenXbox::RETURN_TO_LIBRARY) {
+                library_error = EdenXbox::PulseSessions::TakeNotice();
                 WriteDiag("boot worker joined; back to the library");
                 continue;
             }

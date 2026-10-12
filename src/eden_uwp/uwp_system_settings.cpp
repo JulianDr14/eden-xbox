@@ -18,6 +18,7 @@ constexpr auto RegionKey = L"system_region";
 constexpr auto UserNameKey = L"system_user_name";
 constexpr auto PerformanceStatsKey = L"system_show_performance_stats";
 constexpr auto AdultModsKey = L"system_show_adult_mods";
+constexpr auto PulseSessionsKey = L"system_pulse_sessions";
 
 /// Saved as the enum's value, or -1 for "follow the system". A value that is not a selectable
 /// option (an older or newer build's) also falls back to the system.
@@ -51,6 +52,7 @@ SystemSettings LoadSystemSettings() {
                 winrt::unbox_value<winrt::hstring>(values.Lookup(UserNameKey)).c_str());
         if (values.HasKey(PerformanceStatsKey)) settings.show_performance_stats = winrt::unbox_value<bool>(values.Lookup(PerformanceStatsKey));
         if (values.HasKey(AdultModsKey)) settings.show_adult_mods = winrt::unbox_value<bool>(values.Lookup(AdultModsKey));
+        if (values.HasKey(PulseSessionsKey)) settings.pulse_sessions = winrt::unbox_value<bool>(values.Lookup(PulseSessionsKey));
     } catch (...) { /* Missing or invalid values keep following the system. */ }
     return settings;
 }
@@ -64,6 +66,7 @@ bool SaveSystemSettings(const SystemSettings& settings) {
         values.Insert(UserNameKey, winrt::box_value(winrt::hstring{SanitizeUserName(settings.user_name)}));
         values.Insert(PerformanceStatsKey, winrt::box_value(settings.show_performance_stats));
         values.Insert(AdultModsKey, winrt::box_value(settings.show_adult_mods));
+        values.Insert(PulseSessionsKey, winrt::box_value(settings.pulse_sessions));
         return true;
     } catch (...) { return false; }
 }

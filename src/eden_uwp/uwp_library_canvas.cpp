@@ -155,6 +155,9 @@ public:
             Round(520, 334, 200, 46, 14, Palette::Panel);
             ControlPrompt(Navigation::Options, Tr(T::Options), 530, 341, 170, Palette::Text);
             Text(game.relative_path.extension().wstring().substr(1), 744, 344, 18, 0x9ba9ba, 380);
+            if (!game.pulse_saved.empty())
+                Text(I18n::Format(T::PulseBadge, {game.pulse_saved}), 810, 344, 18,
+                     game.pulse_current ? Palette::Accent : Palette::TextSecondary, 400);
             Text(Tr(T::YourGames), 64, 402, 24, 0xe5edf5, 950, 36, true);
             Text(std::to_wstring(selected + 1) + L" / " + std::to_wstring(scan.entries.size()),
                  1100, 405, 19, 0x9ba9ba, 120);
@@ -165,8 +168,10 @@ public:
                 Round(x - 3, 447, 214, 185, 13, i == selected ? 0x203b3a : 0x151e2b);
                 Cover(scan.entries[i], x + 39, 454, 124);
                 Text(scan.entries[i].name, x + 3, 586, 19, 0xf4f7fa, 197, 25, true);
-                if (!scan.entries[i].display_version.empty())
-                    Text(L"v" + scan.entries[i].display_version, x + 3, 611, 14, Palette::Accent, 197, 19);
+                const auto& tile = scan.entries[i];
+                std::wstring under = tile.display_version.empty() ? L"" : L"v" + tile.display_version;
+                if (!tile.pulse_saved.empty()) under += under.empty() ? L"Pulse" : L" · Pulse";
+                if (!under.empty()) Text(under, x + 3, 611, 14, Palette::Accent, 197, 19);
             }
         }
         ControlPrompt(Navigation::Play, Tr(T::Play), 64, 654, 130);
@@ -462,7 +467,8 @@ private:
         PageHeader(L::RowX, 99, ConfigurationIcon::Language, Tr(T::SystemTitle), Tr(T::SystemSubtitle));
         static constexpr std::array<ConfigurationIcon, SystemPage::RowCount> icons{
             ConfigurationIcon::User, ConfigurationIcon::Language, ConfigurationIcon::Controller,
-            ConfigurationIcon::Region, ConfigurationIcon::Mods, ConfigurationIcon::Settings, ConfigurationIcon::Cache};
+            ConfigurationIcon::Region, ConfigurationIcon::Mods, ConfigurationIcon::Settings, ConfigurationIcon::Archive,
+            ConfigurationIcon::Cache};
         for (size_t i = 0; i < SystemPage::RowCount; ++i) {
             const auto row = static_cast<SystemPage::Row>(i);
             const float y = L::RowTop + static_cast<float>(i) * L::RowStride;
@@ -474,7 +480,8 @@ private:
             const float right = L::RowX + L::RowWidth - 28;
             const float middle = y + L::RowHeight / 2;
             const bool choice = row == SystemPage::InterfaceLanguage || row == SystemPage::GameLanguage ||
-                                row == SystemPage::Region || row == SystemPage::AdultMods || row == SystemPage::PerformanceStats;
+                                row == SystemPage::Region || row == SystemPage::AdultMods || row == SystemPage::PerformanceStats ||
+                                row == SystemPage::PulseSessions;
             if (choice) {
                 // "< value >": arrows say left/right changes it, as in the controller panel.
                 Chevron(L::RowX + 486, middle, accent, true);
@@ -653,8 +660,11 @@ private:
             const float y = L::RowTop + static_cast<float>(i) * L::RowStride;
             const bool active = i == view.page.selected;
             RowFrame(L::RowX, y, L::RowWidth, L::RowHeight, active, GameOptionIcon(options[i]));
-            Text(Tr(GameOptionTitle(options[i])), L::RowX + 72, y + 10, 22, Palette::Text, L::RowWidth - 135, 32, true);
-            Text(Tr(GameOptionHint(options[i])), L::RowX + 72, y + 42, 16, Palette::TextHint, L::RowWidth - 135, 26);
+            Text(Tr(GameOptionTitle(options[i])), L::RowX + 72, y + 6, 22, Palette::Text, L::RowWidth - 135, 32, true);
+            std::wstring hint{Tr(GameOptionHint(options[i]))};
+            if (options[i] == GameOption::Pulse && !game.pulse_saved.empty())
+                hint = I18n::Format(game.pulse_current ? T::PulseSavedOn : T::PulseSavedOther, {game.pulse_saved});
+            Text(hint, L::RowX + 72, y + 36, 16, Palette::TextHint, L::RowWidth - 135, 26);
             Chevron(L::RowX + L::RowWidth - 28, y + L::RowHeight / 2, active ? Palette::Accent : Palette::TextSecondary);
         }
         if (!view.notice.empty()) Text(view.notice, L::RowX + 4, L::Footer - 44, 16, Palette::Warning, L::RowWidth - 20, 28);

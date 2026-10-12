@@ -90,6 +90,15 @@ int main() {
     check(HandleSystemInput(page, SystemInput::Right) == SystemPageEffect::Changed && page.settings.show_adult_mods);
     check(SystemRowValue(page, SystemPage::AdultMods) == L"Se muestran");
     check(HandleSystemInput(page, SystemInput::Down) == SystemPageEffect::None &&
+          page.selected == SystemPage::PerformanceStats);
+    // Pulse sessions are on unless the player turns them off.
+    check(HandleSystemInput(page, SystemInput::Down) == SystemPageEffect::None &&
+          page.selected == SystemPage::PulseSessions && page.settings.pulse_sessions);
+    check(HandleSystemInput(page, SystemInput::Confirm) == SystemPageEffect::Changed &&
+          !page.settings.pulse_sessions);
+    check(HandleSystemInput(page, SystemInput::Confirm) == SystemPageEffect::Changed &&
+          page.settings.pulse_sessions);
+    check(HandleSystemInput(page, SystemInput::Down) == SystemPageEffect::None &&
           page.selected == SystemPage::ClearCache);
     check(HandleSystemInput(page, SystemInput::Confirm) == SystemPageEffect::ClearCache);
     check(HandleSystemInput(page, SystemInput::Down) == SystemPageEffect::None &&

@@ -24,6 +24,8 @@ struct LibraryEntry {
     std::uint64_t program_id{};              ///< Known with the title; 0 for homebrew.
     std::array<std::uint8_t, 8> build_id{}; ///< The main module's, as cheat files are named.
     std::wstring display_version; ///< Effective NACP version, e.g. 2.0.0.
+    std::wstring pulse_saved; ///< When the kept Pulse session was saved; empty without one.
+    bool pulse_current{};     ///< That session was made by this build, so it can resume.
 };
 struct LibraryScan {
     std::vector<LibraryEntry> entries;
