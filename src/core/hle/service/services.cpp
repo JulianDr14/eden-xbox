@@ -74,6 +74,7 @@ namespace Service {
 Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system,
                    std::stop_token token) {
     auto& kernel = system.Kernel();
+    size_t processes{}; // each LoopProcess ends in exactly one RunServer
 
     system.GetFileSystemController().CreateFactories(*system.GetFilesystem(), false);
 
@@ -95,8 +96,12 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         {"nvservices", &Nvidia::LoopProcess},
         {"bsdsocket",  &Sockets::LoopProcess},
     })
+    {
         kernel.RunOnHostCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); }).detach();
+        ++processes;
+    }
     kernel.RunOnHostCoreProcess("vi",         [&, token] { VI::LoopProcess(system, token); }).detach();
+    ++processes;
     // Avoid cold clones of lambdas -- succintly
     for (auto const& e : std::vector<std::pair<std::string_view, void (*)(Core::System&)>>{
         {"sm",         &SM::LoopProcess},
@@ -154,7 +159,11 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         {"i2c",        &I2C::LoopProcess},
         {"gpio",        &GPIO::LoopProcess},
     })
+    {
         kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
+        ++processes;
+    }
+    kernel.SetExpectedServerCount(processes);
 }
 
 } // namespace Service

@@ -209,6 +209,11 @@ public:
     // Runs the given server manager until shutdown.
     void RunServer(std::unique_ptr<Service::ServerManager>&& server_manager);
 
+    /// Pulse: the number of service processes that Services launched.
+    void SetExpectedServerCount(size_t count);
+    /// Pulse: whether every launched service process has reached RunServer.
+    [[nodiscard]] bool AreAllServersRunning();
+
     /// Gets the current host_thread/guest_thread pointer.
     KThread* GetCurrentEmuThread() const;
 

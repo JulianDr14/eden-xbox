@@ -645,6 +645,20 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
             process->GetProcessId() != layout.process_id) {
             Incompatible("Pulse: rebuilt process identity or layout differs");
         }
+        // Services start on their own threads, several on guest cores that only run while the
+        // system runs (vi blocks on one of them before it creates its composition event). The
+        // skeleton has no threads yet, so running here runs the services alone.
+        if (!kernel.AreAllServersRunning()) {
+            void(system.Run());
+            const auto deadline = std::chrono::steady_clock::now() + ServiceStartTimeout;
+            while (!kernel.AreAllServersRunning()) {
+                if (std::chrono::steady_clock::now() > deadline) {
+                    void(system.Pause());
+                    Incompatible("Pulse: system services did not start");
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+        }
         if (!system.IsPaused()) void(system.Pause());
         bind(ProcessObjectId, process);
         Check(process->RunForCheckpointRestore(kernel, layout.main_stack_address,

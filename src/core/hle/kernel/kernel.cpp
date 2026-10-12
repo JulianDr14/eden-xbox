@@ -829,6 +829,7 @@ struct KernelCore::Impl {
 
     std::mutex server_lock;
     std::vector<std::unique_ptr<Service::ServerManager>> server_managers;
+    size_t expected_server_count{};
 
     std::array<std::optional<Kernel::PhysicalCore>, Core::Hardware::NUM_CPU_CORES> cores;
 
@@ -1053,6 +1054,17 @@ void KernelCore::RunServer(std::unique_ptr<Service::ServerManager>&& server_mana
     if (rejected)
         manager->RequestStop();
     manager->LoopProcess();
+}
+
+void KernelCore::SetExpectedServerCount(size_t count) {
+    std::scoped_lock lk{impl->server_lock};
+    impl->expected_server_count = count;
+}
+
+bool KernelCore::AreAllServersRunning() {
+    std::scoped_lock lk{impl->server_lock};
+    return impl->expected_server_count != 0 &&
+           impl->server_managers.size() >= impl->expected_server_count;
 }
 
 u32 KernelCore::CreateNewObjectID() {
