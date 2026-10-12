@@ -235,7 +235,8 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
             if (state == ThreadState::Terminated || thread.IsTerminationRequested()) {
                 Reject(true, "a guest thread is exiting");
             }
-            if (thread.IsInExceptionHandler()) Reject(false, "a guest thread is in an exception handler");
+            // IsInExceptionHandler() is not checked: Eden sets it on every thread at creation and
+            // never clears it, so it carries no state (rebuilt threads get it the same way).
             if (thread.GetStackParameters().is_pinned) Reject(true, "a guest thread is pinned");
             for (auto type : {Kernel::SuspendType::Process, Kernel::SuspendType::Debug,
                               Kernel::SuspendType::Backtrace}) {
