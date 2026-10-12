@@ -7,8 +7,12 @@
 #include <array>
 #include <atomic>
 #include <bitset>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <set>
+#include <string>
 #include <thread>
 #include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
@@ -260,6 +264,17 @@ struct KernelCore::Impl {
         for (auto& manager : closing)
             manager->RequestStop();
         closing.clear();
+
+        // eden-xbox: let every service process finish its own teardown before the cores go down.
+        // AM destroys its applets there; cut short, an applet keeps the application process (and
+        // its JIT) alive past the kernel, and HID's timing events past the System.
+        std::unique_lock lk{server_lock};
+        if (!service_processes_cv.wait_for(lk, std::chrono::seconds{5},
+                                           [&] { return running_service_processes.empty(); })) {
+            for (const auto& name : running_service_processes) {
+                LOG_ERROR(Kernel, "Service process {} did not finish before shutdown", name);
+            }
+        }
     }
 
     void InitializePhysicalCores() {
@@ -853,6 +868,8 @@ struct KernelCore::Impl {
     std::mutex server_lock;
     std::vector<std::unique_ptr<Service::ServerManager>> server_managers;
     size_t expected_server_count{};
+    std::condition_variable service_processes_cv;
+    std::multiset<std::string, std::less<>> running_service_processes;
 
     std::array<std::optional<Kernel::PhysicalCore>, Core::Hardware::NUM_CPU_CORES> cores;
 
@@ -1082,6 +1099,22 @@ void KernelCore::RunServer(std::unique_ptr<Service::ServerManager>&& server_mana
 void KernelCore::SetExpectedServerCount(size_t count) {
     std::scoped_lock lk{impl->server_lock};
     impl->expected_server_count = count;
+}
+
+void KernelCore::BeginServiceProcess(std::string_view name) {
+    std::scoped_lock lk{impl->server_lock};
+    impl->running_service_processes.emplace(name);
+}
+
+void KernelCore::EndServiceProcess(std::string_view name) {
+    {
+        std::scoped_lock lk{impl->server_lock};
+        const auto it = impl->running_service_processes.find(name);
+        if (it != impl->running_service_processes.end()) {
+            impl->running_service_processes.erase(it);
+        }
+    }
+    impl->service_processes_cv.notify_all();
 }
 
 bool KernelCore::AreAllServersRunning() {

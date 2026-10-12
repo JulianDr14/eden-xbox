@@ -214,6 +214,11 @@ public:
     /// Pulse: whether every launched service process has reached RunServer.
     [[nodiscard]] bool AreAllServersRunning();
 
+    /// Pulse: a service process runs its own teardown (AM's applets, HID's resources) after its
+    /// server stops, so shutdown waits for every process marked begun to be marked ended.
+    void BeginServiceProcess(std::string_view name);
+    void EndServiceProcess(std::string_view name);
+
     /// Gets the current host_thread/guest_thread pointer.
     KThread* GetCurrentEmuThread() const;
 

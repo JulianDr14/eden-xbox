@@ -97,10 +97,18 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         {"bsdsocket",  &Sockets::LoopProcess},
     })
     {
-        kernel.RunOnHostCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); }).detach();
+        kernel.BeginServiceProcess(e.first);
+        kernel.RunOnHostCoreProcess(std::string(e.first), [&system, n = e.first, f = e.second] {
+            f(system);
+            system.Kernel().EndServiceProcess(n);
+        }).detach();
         ++processes;
     }
-    kernel.RunOnHostCoreProcess("vi",         [&, token] { VI::LoopProcess(system, token); }).detach();
+    kernel.BeginServiceProcess("vi");
+    kernel.RunOnHostCoreProcess("vi", [&, token] {
+        VI::LoopProcess(system, token);
+        system.Kernel().EndServiceProcess("vi");
+    }).detach();
     ++processes;
     // Avoid cold clones of lambdas -- succintly
     for (auto const& e : std::vector<std::pair<std::string_view, void (*)(Core::System&)>>{
@@ -160,7 +168,11 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
         {"gpio",        &GPIO::LoopProcess},
     })
     {
-        kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
+        kernel.BeginServiceProcess(e.first);
+        kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, n = e.first, f = e.second] {
+            f(system);
+            system.Kernel().EndServiceProcess(n);
+        });
         ++processes;
     }
     kernel.SetExpectedServerCount(processes);

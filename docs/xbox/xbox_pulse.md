@@ -268,14 +268,23 @@ Lo que hizo falta en la consola para llegar ahí:
   nuevo hasta que todos los servicios llegan a `RunServer` (el esqueleto aún no tiene
   hilos) y los eventos capturados se buscan también en un registro de tipos vivos.
 
-**Fuga por ciclo (corregida, pendiente de medir en la Series).** El código JIT crecía
-unos 15 MiB por ciclo (72 MiB → 1,58 GiB en 100 ciclos; commit de la app 3,5 de 5 GiB).
-Con 0.2.87.13 se vio que no era cada ciclo: uno de cada cinco `System` destruidos
-dejaba el proceso de la aplicación en `Terminating` con sus cinco hilos y 72 MiB de JIT.
-Causa: los datos por hilo del kernel (`tls_data`, con el `KThread` dummy del hilo host)
-son `thread_local` estáticos, así que el hilo de la prueba seguía usando el dummy del
-primer kernel en todos los siguientes. Con ese estado viejo la espera de la terminación
-de un hilo podía fallar y el proceso quedaba a medio terminar. Ahora cada kernel tiene una
-generación y los datos de otra se descartan al primer uso. Cada apagado sigue dejando
-66 hilos de servicio colgados (también el primero, sin Pulse); sus fibras se liberan.
-El diagnóstico por objeto de 0.2.87.13 se retiró: leía objetos colgados ya liberados.
+**Fuga por ciclo (corregida en PC, pendiente de medir en la Series).** El código JIT crecía
+unos 15 MiB por ciclo (72 MiB → 1,58 GiB en 100 ciclos; commit de la app 3,5 de 5 GiB), y
+0.2.87.14 se quedó sin memoria en la Series en el ciclo 77. No era cada ciclo: algunos
+`System` destruidos dejaban vivo el proceso de la aplicación con sus 72 MiB de JIT.
+Causa: cada proceso de servicio hace su propio desmontaje después de que su servidor se
+detiene (AM destruye `WindowSystem`, sus applets y su `Service::Process`), y ese desmontaje
+competía con `ShutdownCores`. Si se cortaba, el applet conservaba su `Process` y con él
+una referencia al `KProcess` de la aplicación, que sobrevivía al kernel junto con su JIT.
+El `HidRegistration` del applet retenía además el `IHidServer`, cuyo `ResourceManager`
+es dueño de los eventos de temporización con nombre: llegaban al `System` siguiente
+(«timing event 'HID::...' cannot be bound by name», gate FAIL) o colgaban el apagado en
+«services reset». Ahora `services.cpp` marca cada proceso de servicio con
+`KernelCore::BeginServiceProcess`/`EndServiceProcess`, y `CloseServices` espera a que
+todos terminen antes de bajar los núcleos (máximo 5 s; si no, registra «Service process
+... did not finish before shutdown» en vez de colgarse). Verificado en PC con la semilla 7,
+que reproducía la fuga siempre: «JIT after destroy 0 MiB» en todos los ciclos y gate PASS.
+El cambio de generación de los datos por hilo del kernel (`tls_data`) de 0.2.87.14 no era
+la causa, aunque sigue siendo correcto: el hilo host reutilizaba el `KThread` dummy del
+primer kernel. El diagnóstico por objeto de 0.2.87.13 se retiró: leía objetos colgados ya
+liberados.
