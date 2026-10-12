@@ -13,8 +13,10 @@
 
 #include "common/bug_tracker.h"
 #include "common/logging.h"
+#include "common/settings.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_d3d12/d3d12_log.h"
+#include "video_core/renderer_d3d12/d3d12_draw_targets.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
@@ -82,7 +84,12 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
     MarkGpuCommands(cmd, "draw VS/PS", pipeline.Key().unique_hashes[1],
                     pipeline.Key().unique_hashes[5]);
 
-    const auto color_targets = framebuffer.ColorTargets();
+    const auto selected_targets = DrawColorTargets(framebuffer.ColorTargets(),
+        pipeline.BoundColorTargets(), texture_runtime.NullRenderTarget(
+            MaxwellToD3D12::SampleCount(pipeline.Key().state.msaa_mode) > 1));
+    const std::span<const D3D12_CPU_DESCRIPTOR_HANDLE> color_targets{
+        selected_targets.data(), DrawColorTargetCount(framebuffer.ColorTargets().size(),
+                                                     pipeline.BoundColorTargets())};
     const D3D12_CPU_DESCRIPTOR_HANDLE depth = framebuffer.DepthTarget(bindings.depth_sampled);
     if (GpuDiagnosticsEnabled()) {
         TraceGpuDetail(fmt::format(
@@ -116,6 +123,39 @@ void RasterizerD3D12::BindDrawState(const GraphicsPipeline& pipeline,
         targets_changed |= command_state.color_targets[index] != color_targets[index].ptr;
     }
     if (targets_changed) {
+        // Diagnose overlapping guest attachments before the debug queue loses their context.
+        // Do not remove an attachment without knowing whether the shader writes it.
+        if (Settings::values.renderer_debug.GetValue()) {
+            static u32 overlap_reports{};
+            for (size_t a = 0; a < color_targets.size() && overlap_reports < 16; ++a) {
+                if (!framebuffer.HasColor(a) || !(pipeline.BoundColorTargets() >> a & 1U)) continue;
+                for (size_t b = a + 1; b < color_targets.size() && overlap_reports < 16; ++b) {
+                    if (!framebuffer.HasColor(b) || !(pipeline.BoundColorTargets() >> b & 1U) ||
+                        framebuffer.ColorImageId(a) != framebuffer.ColorImageId(b) ||
+                        framebuffer.ColorOnCopy(a) != framebuffer.ColorOnCopy(b)) continue;
+                    const auto base_a = framebuffer.ColorBase(a);
+                    const auto base_b = framebuffer.ColorBase(b);
+                    if (base_a.level != base_b.level ||
+                        s64{base_a.layer} + framebuffer.ColorLayers(a) <= base_b.layer ||
+                        s64{base_b.layer} + framebuffer.ColorLayers(b) <= base_a.layer) continue;
+                    const auto mask_a = pipeline.Key().state.attachments[a].Mask();
+                    const auto mask_b = pipeline.Key().state.attachments[b].Mask();
+                    LOG_WARNING(Render,
+                        "D3D12: overlapping RTV slots {}/{} image @{:x} copy {} "
+                        "mip {} layers {}+{}/{}+{} descriptors {:x}/{:x} formats {}/{} "
+                        "write masks {}{}{}{}/{}{}{}{} VS {:016x} PS {:016x}",
+                        a, b, framebuffer.ColorImage(a)->gpu_addr, framebuffer.ColorOnCopy(a),
+                        base_a.level, base_a.layer, framebuffer.ColorLayers(a),
+                        base_b.layer, framebuffer.ColorLayers(b), color_targets[a].ptr,
+                        color_targets[b].ptr, static_cast<u32>(framebuffer.ColorFormat(a)),
+                        static_cast<u32>(framebuffer.ColorFormat(b)),
+                        mask_a[0], mask_a[1], mask_a[2], mask_a[3],
+                        mask_b[0], mask_b[1], mask_b[2], mask_b[3],
+                        pipeline.Key().unique_hashes[1], pipeline.Key().unique_hashes[5]);
+                    ++overlap_reports;
+                }
+            }
+        }
         cmd->OMSetRenderTargets(static_cast<UINT>(color_targets.size()),
                                 color_targets.empty() ? nullptr : color_targets.data(), FALSE,
                                 depth.ptr ? &depth : nullptr);

@@ -24,6 +24,7 @@
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_barrier_batch.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
+#include "video_core/renderer_d3d12/d3d12_draw_targets.h"
 #include "video_core/renderer_d3d12/d3d12_graphics_pipeline.h"
 #include "video_core/renderer_d3d12/d3d12_log.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
@@ -189,6 +190,22 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
                                    const PipelineLayout& layout_, bool build_pso)
     : device{device_}, texture_runtime{texture_runtime_}, key{key_}, key_hash{key_.Hash()},
       layout{layout_} {
+    u8 valid_targets{};
+    for (size_t index = 0; index < key.state.color_formats.size(); ++index) {
+        if (static_cast<Tegra::RenderTargetFormat>(key.state.color_formats[index]) !=
+            Tegra::RenderTargetFormat::NONE) {
+            valid_targets |= static_cast<u8>(1U << index);
+        }
+    }
+    bound_color_targets = WritableColorTargetMask(key.state.attachments) & valid_targets;
+    // Alpha-to-coverage consumes SV_Target0 alpha even with its color writes masked.
+    if (key.state.alpha_to_coverage_enabled) {
+        bound_color_targets |= valid_targets & 1U;
+    }
+    // Keep one masked physical target for rasterization when every color write is disabled.
+    if (!bound_color_targets && valid_targets) {
+        bound_color_targets = valid_targets & static_cast<u8>(-valid_targets);
+    }
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -595,17 +612,18 @@ void GraphicsPipeline::Build() {
     if (dynamic.logic_op_enable != 0) {
         WarnOnce(warned_logic_op, "logic op");
     }
-    const size_t num_attachments = NumAttachments(state);
+    const size_t num_attachments = DrawColorTargetCount(NumAttachments(state), bound_color_targets);
     desc.BlendState.AlphaToCoverageEnable = state.alpha_to_coverage_enabled != 0;
     desc.BlendState.IndependentBlendEnable = TRUE;
     desc.NumRenderTargets = static_cast<UINT>(num_attachments);
     for (size_t index = 0; index < num_attachments; ++index) {
         desc.BlendState.RenderTarget[index] = BlendTarget(state.attachments[index]);
         const auto format = static_cast<Tegra::RenderTargetFormat>(state.color_formats[index]);
-        desc.RTVFormats[index] =
+        desc.RTVFormats[index] = DrawColorTargetFormat(
             format == Tegra::RenderTargetFormat::NONE
                 ? DXGI_FORMAT_UNKNOWN
-                : texture_runtime.Format(PixelFormatFromRenderTargetFormat(format)).view;
+                : texture_runtime.Format(PixelFormatFromRenderTargetFormat(format)).view,
+            bound_color_targets, index);
     }
 
     if (state.depth_enabled != 0) {

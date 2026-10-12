@@ -743,3 +743,11 @@ GateSeries .30 (12oct2026): Downloads confirma package0.2.87.30/Game A,3233frame
 
 
 Cierre confirmado por el usuario (12 oct 2026): fallo de copias BC3/UINT128 omitidas cerrado en 0.2.87.30 tras pruebas CPU/GPU byte a byte, reproduccion y correccion en PC y gate de logs Series. El usuario acepta el cierre; avisos SRV/playtime independientes permanecen fuera de este fallo. No se certifican FPS ni ausencia de otros defectos del renderer.
+
+SRV Game A (12oct2026):25BC3_UNORM/5ColorCube/3TEXTURE2D. Fallback dimensional y doblepropiedad descriptor corregidos con null del tipopedido, cuberangos validados, sincopiasGPU nuevas. BuildUWP/gateGPUdesktopCube seiscaras+mip/base6/readback/null ydebuglimpio pasan. Origen exacto shader/TIC yvisualGame A/Series pendientes; MSAA allocator alineacion independiente pendiente. docs/xbox/xbox_srv_dimensions.md; sincommit/push.
+
+Corrección RTV12oct: Game A slots3/4 mismo subrecurso con slot4mask0; bindings y PSO filtran targets inactivos, preservan índices y alpha-to-coverage target0. Null RTV SS/MS reutilizados; sin recursos/copias GPU. Gate2304 casos y36dibujos/readbacks pasa;12 falsos positivos null/UNKNOWN conocidos del debug layer contados explícitamente, sin otros errores. GateSRV pasa. Manual/Series/bloqueo pendientes,sin commit; docs/xbox/xbox_rtv_bindings.md.
+
+12oct nullRTdiag: #613 conocido null/UNKNOWN pasa a contadorInfo acotado sin consumir500; mismoID613 real y728 siguenError. Gatefixtures+600avisos/2erroresreales y36drawGPU pasa; UWPcorrecto. Repeticiónmanual/Series pendientes,sincommit.
+
+Cierre aceptado por el usuario (12 oct 2026): corrección de dimensiones SRV, bindings RTV y diagnóstico null/UNKNOWN cerrada para integración. Último gate PC PID23132: RenderError/Critical/728/overlap/SRV0, sin agotar límite de debug hasta119,93s; evidencia rtv-pc-diag-fixed-2026-10-12. Build UWP, regresión SRV y2304casos/36drawGPU/flood600 pasan. Se conservan documentadas las limitaciones: origen exacto shader/TIC del warning original, validación Series, visual y cierre limpio/bloqueo no certificados. El cierre aceptado no acredita resolver fallos ajenos de input/red/estabilidad. Commit solicitado, sin push.

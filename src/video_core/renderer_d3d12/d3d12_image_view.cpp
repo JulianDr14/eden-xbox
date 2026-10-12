@@ -13,6 +13,7 @@
 #include "common/logging.h"
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_barrier_batch.h"
+#include "video_core/renderer_d3d12/d3d12_srv_compatibility.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/util.h"
 
@@ -160,7 +161,10 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::ImageView
     // A render-target view often exists only to be written. Creating its SRV eagerly made loading
     // frames issue hundreds of unnecessary device calls. Handle() creates this same natural SRV
     // on first shader read, as it already does for every alternate texture type.
-    if (!info.IsRenderTarget()) {
+    // The slice-array adapter needs slot_images, supplied by the delegating constructor.
+    if (!info.IsRenderTarget() &&
+        !(natural_type == Shader::TextureType::ColorArray2D &&
+          resource_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)) {
         srvs[static_cast<size_t>(natural_type)] = CreateSrv(natural_type);
     }
     view_timer.Lap(VideoCore::Perf::Counter::TextureCacheViewSrvNs);
@@ -262,13 +266,6 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
                      ImageId id, Image& image_, SlotVector<Image>& images)
     : ImageView{runtime, info, id, image_} {
     slot_images = &images;
-    if (natural_type == Shader::TextureType::ColorArray2D &&
-        srv_params.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
-        // Before slot_images was available, CreateSrv fell back to the 3D SRV and put the same
-        // handle in both slots. Keep Color3D as its owner, but leave ColorArray2D empty so Handle()
-        // creates the slice-array SRV only if a shader actually reads this view as a 2D array.
-        srvs[static_cast<size_t>(natural_type)] = {};
-    }
 }
 ImageView::ImageView(TextureCacheRuntime&, const VideoCommon::ImageInfo& info,
                      const VideoCommon::ImageViewInfo& view, GPUVAddr addr)
@@ -318,30 +315,11 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::DepthFeedbackHandle(Shader::TextureType t
 D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_type,
                                                ID3D12Resource* override_resource) const {
     using Shader::TextureType;
-    const SrvParams& p = srv_params;
-    // A type the resource cannot be viewed as (a 2D texture read as 3D, a cube from fewer than six
-    // layers) falls back to the view's own dimension, or to the resource's when that one does not
-    // fit either (a 2D view of a 3D texture, a cube view of a 2D texture with fewer than six
-    // layers): the shader reads garbage, not a bad view. Creating an SRV whose dimension the
-    // resource cannot have removes the device.
-    const bool is_1d = p.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+    SrvParams p = srv_params;
+    ID3D12Resource* resource = override_resource ? override_resource :
+                             srv_resource ? srv_resource : image;
+    const auto resource_desc = resource ? resource->GetDesc() : D3D12_RESOURCE_DESC{};
     const bool is_3d = p.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-    const auto is_compatible = [&](TextureType candidate) {
-        switch (candidate) {
-        case TextureType::Color1D:
-        case TextureType::ColorArray1D:
-            return !image || is_1d;
-        case TextureType::Color3D:
-            return !image || is_3d;
-        case TextureType::ColorCube:
-        case TextureType::ColorArrayCube:
-            return !image || (!is_1d && !is_3d && !p.is_msaa && p.resource_layers >= 6);
-        case TextureType::Buffer:
-            return false;
-        default:
-            return !image || (!is_1d && !is_3d);
-        }
-    };
     if (texture_type == TextureType::ColorArray2D && is_3d && image) {
         // Game C samples a 3D texture as a 2D array (Vulkan's 2D_ARRAY_COMPATIBLE); D3D12
         // has no such view, and the 3D SRV this fell back to made the Series write NaN (the black
@@ -365,22 +343,37 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
             return handle;
         }
     }
-    if (!is_compatible(texture_type)) {
+    if (resource && !IsSrvDimensionCompatible(texture_type, resource_desc, p.base_layer, p.layers)) {
         const bool slices_pending = texture_type == TextureType::ColorArray2D && is_3d && image &&
                                     !slot_images; // replaced once the view knows its image
-        if (!slices_pending) WarnOnce(logged_srv_fallback, "SRV of {} as texture type {} is not possible on a resource of "
-                 "dimension {}; reading it with its own dimension", format,
-                 static_cast<u32>(texture_type), static_cast<u32>(p.dimension));
-        const TextureType resource_type = is_3d   ? TextureType::Color3D
-                                          : is_1d ? TextureType::ColorArray1D
-                                                  : TextureType::ColorArray2D;
-        const TextureType fallback = is_compatible(natural_type) ? natural_type : resource_type;
-        return override_resource ? CreateSrv(fallback, override_resource) : Handle(fallback);
+        if (!slices_pending) {
+            WarnOnce(logged_srv_fallback,
+                     "SRV of {} @{:x} as shader type {} incompatible with view type {}: "
+                     "resource dimension {} size {}x{} layers {} samples {}, "
+                     "view mips {}+{} layers {}+{}; binding a null SRV of the requested type",
+                     format, gpu_addr, static_cast<u32>(texture_type), static_cast<u32>(type),
+                     static_cast<u32>(p.dimension), resource_desc.Width, resource_desc.Height,
+                     p.resource_layers, resource_desc.SampleDesc.Count, p.base_level, p.levels,
+                     p.base_layer, p.layers);
+        }
+        // No legal view can recover missing faces or reinterpret 2D coordinates as a cube.
+        // Keep the shader's dimension and return defined zero reads, rather than binding an
+        // unrelated dimension. Each cached slot owns its descriptor (no alias/double free).
+        resource = nullptr;
+        p = SrvParams{};
+        p.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        p.layers = 6;
+        p.resource_layers = 6;
     }
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{.Format = p.format,
                                          .Shader4ComponentMapping = p.mapping};
     const u32 cubes = std::max(1U, p.layers / 6);
     switch (texture_type) {
+    case TextureType::Buffer:
+        desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        desc.Buffer.NumElements = 1;
+        break;
     case TextureType::Color1D:
         if (p.base_layer == 0) {
             desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
@@ -420,7 +413,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
             desc.Texture2DArray = {p.base_level, p.levels, p.base_layer, p.layers, 0, 0.0f};
         }
         break;
-    default: // Color2D, Color2DRect (and a buffer read from an image view)
+    default: // Color2D, Color2DRect
         if (p.base_layer != 0) {
             // A plain 2D SRV can only see layer 0: view the layer as a one-layer array.
             if (p.is_msaa) {
@@ -446,9 +439,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE ImageView::CreateSrv(Shader::TextureType texture_typ
                            static_cast<u32>(texture_type));
     });
     const D3D12_CPU_DESCRIPTOR_HANDLE handle = runtime->view_descriptors.Allocate();
-    runtime->device.Get()->CreateShaderResourceView(override_resource ? override_resource :
-                                                    srv_resource ? srv_resource : image, &desc,
-                                                    handle);
+    runtime->device.Get()->CreateShaderResourceView(resource, &desc, handle);
     CheckRemovedAfterDescriptor(runtime->device.Get(), [&] {
         return fmt::format("SRV of {} as type {} (format {} dim {} levels {}+{} layers {}+{} of "
                            "{}, resource dim {} msaa {})",

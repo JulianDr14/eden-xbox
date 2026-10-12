@@ -21,6 +21,9 @@ param([int] $TimeoutSec = 75, [switch] $NoBuild, [string] $BootNro, [int] $RunSe
       [switch] $DebugLayer, [string] $Game, [string[]] $BootCfg = @(),
       [ValidateRange(0, 1048576)] [int] $MemoryLimitMiB = 5120, [switch] $Library)
 $ErrorActionPreference = 'Stop'
+# Match package-appx's comma-separated -BootCfg handling before applying defaults.
+# Otherwise an explicit developer_hotkeys=0 later in the string gets overridden.
+$BootCfg = @($BootCfg | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 # The app caps its own commit at this (a job object, uwp_boot.cpp ApplyProcessMemoryLimit), so every
 # session of the package is limited, also the ones launched by hand. A zero cap opts out.
 $BootCfg = @($BootCfg | Where-Object { $_ -notmatch '^memory_limit_mib=' })

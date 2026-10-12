@@ -241,6 +241,10 @@ public:
         return key;
     }
 
+    [[nodiscard]] u8 BoundColorTargets() const noexcept {
+        return bound_color_targets;
+    }
+
     /// Port of Vulkan's ConfigureImpl: synchronizes and binds the guest's buffers and textures,
     /// writes the descriptor tables and transitions sampled and storage images. The render
     /// targets are updated last (UpdateRenderTargets) but not transitioned. Records no
@@ -263,6 +267,7 @@ private:
     std::array<u32, NUM_STAGES> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     bool has_images{};
+    u8 bound_color_targets{}; ///< Computed once from the immutable PSO write masks.
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;

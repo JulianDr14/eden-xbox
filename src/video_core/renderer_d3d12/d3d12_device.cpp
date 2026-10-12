@@ -19,6 +19,7 @@
 #include "common/memory_ledger.h"
 #include "common/settings.h"
 #include "video_core/renderer_d3d12/d3d12_command_stream.h"
+#include "video_core/renderer_d3d12/d3d12_debug_messages.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 
 namespace D3D12 {
@@ -335,6 +336,16 @@ void Device::LogDebugMessages() {
             continue;
         }
         const std::string_view text{message->pDescription, message->DescriptionByteLength};
+        if (IsNullRtvFormatFalsePositive(*message)) {
+            ++null_rtv_format_reports;
+            if (null_rtv_format_reports == 1 || null_rtv_format_reports % 1024 == 0) {
+                LOG_INFO(Render,
+                         "D3D12 debug layer: {} known null RTV/UNKNOWN format false positives "
+                         "counted separately (not charged to the error limit); example: {}",
+                         null_rtv_format_reports, text);
+            }
+            continue;
+        }
         switch (message->Severity) {
         case D3D12_MESSAGE_SEVERITY_CORRUPTION:
         case D3D12_MESSAGE_SEVERITY_ERROR:

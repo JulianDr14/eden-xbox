@@ -110,12 +110,15 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
       texture_allocator{device_, scheduler_}, transfer_buffers{transfer_buffers_} {
     transfer_buffers.SetReclaimer([this] { texture_allocator.TrimEmptyHeaps(true); });
     null_rtv = rtv_descriptors.Allocate();
-    const D3D12_RENDER_TARGET_VIEW_DESC null_desc{
+    D3D12_RENDER_TARGET_VIEW_DESC null_desc{
         .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
         .ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D,
         .Texture2D = {.MipSlice = 0, .PlaneSlice = 0},
     };
     device.Get()->CreateRenderTargetView(nullptr, &null_desc, null_rtv);
+    null_rtv_ms = rtv_descriptors.Allocate();
+    null_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMS;
+    device.Get()->CreateRenderTargetView(nullptr, &null_desc, null_rtv_ms);
     D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
     supports_min_max_filter =
         SUCCEEDED(device.Get()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options,
@@ -128,6 +131,8 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
 TextureCacheRuntime::~TextureCacheRuntime() {
     transfer_buffers.SetReclaimer({});
     scheduler.DrainForShutdown();
+    rtv_descriptors.Free(null_rtv);
+    rtv_descriptors.Free(null_rtv_ms);
     LOG_INFO(Render, "D3D12: {}", texture_allocator.Report());
     LOG_INFO(Render, "D3D12: GC readbacks queued {}, ready {}, stale {}, sync {}, pending {} KiB, peak {} KiB",
              gc_queued, gc_ready, gc_stale, gc_sync, gc_pending_bytes / 1024,

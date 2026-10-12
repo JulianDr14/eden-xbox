@@ -157,8 +157,8 @@ public:
     void FreeLayerTarget(D3D12_CPU_DESCRIPTOR_HANDLE handle, bool depth);
 
     /// RTV of no resource, bound in the render target slots a framebuffer leaves empty.
-    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE NullRenderTarget() const noexcept {
-        return null_rtv;
+    [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE NullRenderTarget(bool multisample = false) const noexcept {
+        return multisample ? null_rtv_ms : null_rtv;
     }
 
 private:
@@ -204,6 +204,7 @@ private:
     u64 gc_peak_pending_bytes{};
     u64 gc_queued{}, gc_ready{}, gc_stale{}, gc_sync{};
     D3D12_CPU_DESCRIPTOR_HANDLE null_rtv{};
+    D3D12_CPU_DESCRIPTOR_HANDLE null_rtv_ms{};
     BlitImageHelper* blit_helper{};
     /// Reused by single-layer ASTC uploads. Bands cap the live decode/encode workspace at 40 MiB.
     ComPtr<ID3D12Resource> astc_rgba_scratch;

@@ -25,7 +25,10 @@ La rama de trabajo es `xbox`; las reglas del proyecto están en [AGENTS.md](../.
 - [Rendimiento](xbox_performance.md): perfiles, optimizaciones y prioridades pendientes.
 - [Memoria de texturas](xbox_texture_memory.md): packing, readbacks, staging y comparación con Vulkan.
 - [Copias de bloques BC](xbox_bc_block_copy.md): preservación exacta de arrays decodificados y reinterpretación BC3/UINT128.
+- [Dimensiones de SRV](xbox_srv_dimensions.md): compatibilidad de cubemaps, fallback nulo y propiedad de descriptores.
 - [Revisión de logs del 30 de septiembre de 2026](xbox_log_review_2026-09-30.md).
 
 Los resultados históricos conservan sus límites y pendientes. Un build correcto o
 un arranque en PC no certifica gameplay, rendimiento ni funcionamiento en Series.
+
+- [RTV duplicados e inactivos](xbox_rtv_bindings.md): binding por máscara, PSO, MSAA y alpha-to-coverage.

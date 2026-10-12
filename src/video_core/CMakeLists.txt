@@ -552,6 +552,9 @@ if (ENABLE_D3D12)
         renderer_d3d12/d3d12_image_copy_blit.cpp
         renderer_d3d12/d3d12_image_transfer.cpp
         renderer_d3d12/d3d12_image_view.cpp
+        renderer_d3d12/d3d12_srv_compatibility.h
+        renderer_d3d12/d3d12_draw_targets.h
+        renderer_d3d12/d3d12_debug_messages.h
         renderer_d3d12/d3d12_sampler.cpp
         renderer_d3d12/d3d12_texture_cache_internal.h
         renderer_d3d12/d3d12_texture_formats.cpp

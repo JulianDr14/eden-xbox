@@ -167,6 +167,7 @@ private:
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12InfoQueue> info_queue; ///< debug layer only
     u32 debug_messages_logged{};
+    u64 null_rtv_format_reports{};
     std::atomic_flag removal_reported;
     ComPtr<ID3D12CommandQueue> queue;
     mutable std::mutex queue_mutex;
