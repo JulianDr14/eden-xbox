@@ -38,7 +38,7 @@ TimeWorker::TimeWorker(Core::System& system, StandardSteadyClockResource& steady
         });
 
     m_timer_file_system_timing_event = Core::Timing::CreateEvent(
-        "Time::SteadyClockEvent",
+        "Time::FileTimeEvent",
         [this](s64 time,
                std::chrono::nanoseconds ns_late) -> std::optional<std::chrono::nanoseconds> {
             m_timer_file_system->Signal(m_system.Kernel());
