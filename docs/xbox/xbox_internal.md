@@ -2694,3 +2694,14 @@ ocurre durante construcción; Close destruye antes de desregistrar. Su mutex no
 es barrera de vida útil. No recorrerlo como grafo serializable sin congelar
 propietarios/raíces y controlar referencias. Fases0/2/3/4 siguen pendientes;
 detalle actualizado en xbox_pulse.md. Sin commit ni cambio de nombre.
+
+### Política de finales de línea (11 oct 2026)
+
+El árbol mostraba 4097 archivos modificados sin diferencias de contenido al
+ignorar finales de línea: predominaba LF en Git y CRLF en el disco. Se normaliza
+el texto a LF, con CRLF solo para scripts .bat/.cmd de Windows. .gitattributes
+fija `* text=auto eol=lf` y las excepciones; .editorconfig aplica la misma
+política al guardar. La conversión conserva los demás bytes y omite binarios.
+No se hace commit ni se prepara el índice. Los .bat/.cmd quedan normalizados
+a LF en Git cuando se añadan, manteniendo CRLF en el árbol de trabajo.
+Fuente: https://git-scm.com/docs/gitattributes/
