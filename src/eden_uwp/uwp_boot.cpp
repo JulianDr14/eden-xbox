@@ -84,6 +84,7 @@
 #include "eden_uwp/headless_emu_window.h"
 #include "eden_uwp/prewarm_budget.h"
 #include "eden_uwp/pulse_gate.h"
+#include "eden_uwp/pulse_store_gate.h"
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/uwp_controllers.h"
 #include "eden_uwp/keyboard_bindings.h"
@@ -144,6 +145,7 @@ std::string MemoryReport();             // likewise
 std::string MemoryOwners();             // likewise
 std::string GuestMemoryReport(Core::System& system); // likewise
 void ApplyProcessMemoryLimit(u32 limit_mib); // likewise
+[[noreturn]] void RestartApp();              // likewise
 std::string LargestAllocations();       // likewise
 std::string HeapReport();               // likewise
 bool QueryAppMemory(u64& used, u64& limit);  // likewise
@@ -337,6 +339,9 @@ struct BootConfig {
     /// destroy and restore the homebrew this many times (pulse_gate.h). 0 runs normally.
     u32 pulse_cycles{};
     u32 pulse_seed{1}; ///< "pulse_seed=": the random delays between captures
+    /// Pulse phase-1 gate ("pulse_store=1", pulse_store_gate.h): the Store in LocalState, with
+    /// process terminations across restarts. Runs before the phase-2 gate when both are set.
+    bool pulse_store{};
 };
 
 /// Games never emit the sentinels; without an explicit time they run this long.
@@ -442,6 +447,12 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                         "x" + std::to_string(surface.height) + " CoreWindow"
                   : std::string("step: logging up, renderer Null"));
 
+    if (config.pulse_store) {
+        const auto result = RunPulseStoreGate(
+            {.diag = [](const std::string& line) { WriteDiag(line); }, .restart = [] { RestartApp(); }});
+        if (result != PulseStoreGateResult::Pass) return 17;
+        if (!config.pulse_cycles) return 0;
+    }
     if (config.pulse_cycles) {
         return RunPulseGate(nro_path, {.cycles = config.pulse_cycles,
                                        .seed = config.pulse_seed,
@@ -1265,6 +1276,23 @@ void ApplyProcessMemoryLimit(u32 limit_mib) {
     WriteDiag("memory limit: process commit capped at " + std::to_string(limit_mib) + " MiB");
 }
 
+// Pulse store gate: ends this process where it stands, as a crash or a power loss would (no
+// unwinding, no flush of anything still in the process), and asks the system to start the app
+// again. Without a restart (refused, or not supported here) the next manual launch resumes.
+[[noreturn]] void RestartApp() {
+    try {
+        const auto reason = CoreApplication::RequestRestartAsync(L"").get();
+        if (reason != AppRestartFailureReason::RestartPending) {
+            WriteDiag("restart refused (" + std::to_string(static_cast<int>(reason)) +
+                      "): launch the app again to continue");
+        }
+    } catch (...) {
+        WriteDiag("restart unavailable: launch the app again to continue");
+    }
+    TerminateProcess(GetCurrentProcess(), 73);
+    for (;;) Sleep(INFINITE);
+}
+
 // Where the app's memory is: committed bytes by kind over the whole address space, then the
 // largest allocations (base, committed MiB, kind), whose sizes tell their owners apart.
 std::string LargestAllocations() {
@@ -2066,6 +2094,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             } else {
                                 WriteDiag("boot.cfg: invalid memory_limit_mib, ignored");
                             }
+                        } else if (line == "pulse_store=1") {
+                            config.pulse_store = true;
+                            WriteDiag("boot.cfg: Pulse store gate");
                         } else if (line.starts_with("pulse_cycles=") ||
                                    line.starts_with("pulse_seed=")) {
                             const bool cycles = line.starts_with("pulse_cycles=");

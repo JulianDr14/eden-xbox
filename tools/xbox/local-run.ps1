@@ -59,8 +59,18 @@ Remove-Item -LiteralPath $diag -ErrorAction SilentlyContinue
 Start-Process "shell:AppsFolder\$($pkg.PackageFamilyName)!App"
 
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
+$relaunches = 0
 while ((Get-Date) -lt $deadline) {
     if ((Test-Path $diag) -and (Select-String -Path $diag -Pattern 'exiting|CRASH' -Quiet)) { break }
+    # The Pulse store gate ends the process on purpose and asks for a restart, which Windows refuses
+    # to an app out of the foreground: launch it again once it is gone.
+    if ((Test-Path $diag) -and -not (Get-Process -Name eden-uwp -ErrorAction SilentlyContinue)) {
+        $asked = @(Select-String -Path $diag -Pattern 'launch the app again').Count
+        if ($asked -gt $relaunches) {
+            $relaunches = $asked
+            Start-Process "shell:AppsFolder\$($pkg.PackageFamilyName)!App"
+        }
+    }
     Start-Sleep -Milliseconds 500
 }
 Get-Content $diag
