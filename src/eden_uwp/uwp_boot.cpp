@@ -106,6 +106,7 @@ namespace D3D12 {
 void SetTracedFrame(u32 frame, u32 count);
 void TraceNextFrames(u32 count);
 void TraceNextMaterialFrame(u64 pixel_shader = 0);
+void SetMaterialProbe(s32 x, s32 y);
 void SetDumpedShader(u64 unique_hash);
 void SetSkippedShader(u64 unique_hash);
 void SetGeometryDroppedShader(u64 unique_hash);
@@ -318,6 +319,7 @@ struct BootConfig {
     u32 traced_frame{};
     /// Presented frames the trace spans from traced_frame on (boot.cfg "trace_frames=").
     u32 traced_frames{1};
+    s32 material_probe_x{-1}, material_probe_y{-1};
     /// Keep D3D12 block-compressed 2D arrays compressed instead of decoding them on the CPU.
     bool bc_arrays_native{};
     /// How ASTC reaches D3D12 ("astc="): BC3 for single textures and RGBA8 for arrays. "gpu" (the
@@ -427,6 +429,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
               ", D3D12 pipeline workers on, dependent draws preserved" +
               ", JIT cache " + std::to_string(config.jit_cache_mib) + " MiB per core");
     D3D12::SetTracedFrame(config.traced_frame, config.traced_frames);
+    D3D12::SetMaterialProbe(config.material_probe_x, config.material_probe_y);
     D3D12::SetFrameDiagnostics(!config.play);
     // The GPU spends the same 5 GiB as the emulated DRAM and the JIT: the texture and buffer
     // caches evict against what the whole app has left, not DXGI's budget.
@@ -2332,6 +2335,10 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                                 WriteDiag("boot.cfg: building VS " + line.substr(8) +
                                           " without its geometry shader");
                             }
+                        } else if (line.starts_with("material_probe_x=")) {
+                            config.material_probe_x = static_cast<s32>(std::strtol(line.c_str() + 17, nullptr, 10));
+                        } else if (line.starts_with("material_probe_y=")) {
+                            config.material_probe_y = static_cast<s32>(std::strtol(line.c_str() + 17, nullptr, 10));
                         } else if (line.starts_with("trace_frames=")) {
                             config.traced_frames = std::max<u32>(
                                 1, static_cast<u32>(std::strtoul(line.c_str() + 13, nullptr, 10)));

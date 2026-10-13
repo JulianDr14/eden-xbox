@@ -197,6 +197,7 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     }
     RecordDraw(*pipeline, bindings, *framebuffer, params, draw_state.topology);
     if (trace_this_draw) {
+        if (material_trace.Active()) ProbeMaterialDraw(*pipeline, *framebuffer);
         if (!traced_filters.empty()) {
             LogDrawTrace(fmt::format("D3D12 trace #{} samplers: {} types: {}", trace_index,
                          fmt::join(traced_filters, " / "), fmt::join(traced_types, " ")));

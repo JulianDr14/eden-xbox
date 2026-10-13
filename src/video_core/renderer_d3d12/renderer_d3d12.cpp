@@ -37,6 +37,7 @@ std::atomic<bool> frame_diagnostics{true};
 std::atomic<u32> trace_requested{};
 std::atomic<bool> material_trace_requested{};
 std::atomic<u64> material_trace_shader{};
+std::atomic<s32> material_probe_x{-1}, material_probe_y{-1};
 
 IUnknown* CoreWindowOf(const Core::Frontend::EmuWindow& emu_window) {
     const auto& info = emu_window.GetWindowInfo();
@@ -65,6 +66,11 @@ void SetFrameDiagnostics(bool enabled) {
 void TraceNextMaterialFrame(u64 pixel_shader) {
     material_trace_shader.store(pixel_shader, std::memory_order_relaxed);
     material_trace_requested.store(true, std::memory_order_release);
+}
+
+void SetMaterialProbe(s32 x, s32 y) {
+    material_probe_x.store(x, std::memory_order_relaxed);
+    material_probe_y.store(y, std::memory_order_relaxed);
 }
 
 RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
@@ -214,7 +220,9 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                 }
                 if (material_trace_requested.exchange(false, std::memory_order_acquire)) {
                     const bool started = rasterizer.BeginMaterialTrace(
-                        material_trace_shader.load(std::memory_order_relaxed));
+                        material_trace_shader.load(std::memory_order_relaxed),
+                        material_probe_x.load(std::memory_order_relaxed),
+                        material_probe_y.load(std::memory_order_relaxed));
                     // Game A may present while recording a guest frame's preliminary passes.
                     // Include the next interval too; draw/text budgets span both intervals.
                     material_trace_presents_remaining = started ? 2 : 0;

@@ -132,8 +132,9 @@ public:
     /// the draws move to another one, and rt0's NaN/Inf count is logged after every draw (slow:
     /// every draw waits for the GPU).
     void SetDrawTrace(bool enabled, bool dump_targets = false);
-    /// One frame of bounded draw metadata, no GPU readbacks. Refuses an intensive trace.
-    bool BeginMaterialTrace(u64 pixel_shader = 0);
+    /// Explicit bounded capture with target snapshots and an optional native pixel probe.
+    /// Refuses an intensive trace; the caller ends it after the selected present intervals.
+    bool BeginMaterialTrace(u64 pixel_shader = 0, s32 probe_x = -1, s32 probe_y = -1);
     void EndMaterialTrace(bool intervals_complete = true);
 
 private:
@@ -288,6 +289,18 @@ private:
     u32 material_capture_id{};
     u64 material_capture_stamp{};
     void DumpMaterialTargets();
+    void ProbeMaterialDraw(const GraphicsPipeline& pipeline, const Framebuffer& framebuffer);
+    void DumpMaterialProbe(bool complete);
+    struct MaterialProbeRecord {
+        u32 draw, target, format, x, y, width, height;
+        u64 address, vertex_shader, pixel_shader;
+    };
+    static constexpr u32 MATERIAL_PROBE_LIMIT = 2048;
+    static constexpr u32 MATERIAL_PROBE_SLOT_BYTES = 32 * 256;
+    std::vector<MaterialProbeRecord> material_probe_records;
+    StagingBufferRef material_probe_buffer{};
+    s32 material_probe_x{-1}, material_probe_y{-1};
+    u32 material_probe_omitted{};
     void LogDrawTrace(std::string_view line);
     bool trace_dumps{};
     u32 trace_index{};
