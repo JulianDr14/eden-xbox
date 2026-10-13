@@ -74,6 +74,11 @@ void DecompressBlocks(std::span<const u8> input, std::span<u8> output, BufferIma
     const u32 block_width = (std::min)(width, BLOCK_SIZE);
     const u32 block_height = (std::min)(height, BLOCK_SIZE);
     const u32 pitch = width * out_bpp;
+    // Cropping the decoded block to a 1/2/3-texel mip width does not change the
+    // compressed block's 4-texel width. Otherwise the next block row is read at
+    // the wrong byte offset (for example, 3x5 BC1 advanced 10 bytes instead of 8).
+    const size_t input_row_pitch =
+        (static_cast<size_t>(copy.buffer_row_length) + BLOCK_SIZE - 1) / BLOCK_SIZE * block_size;
     if constexpr (pixel_format == PixelFormat::BC4_UNORM || pixel_format == PixelFormat::BC5_UNORM) {
         // Preserve the original cropped-block path for small/odd mip levels. Layers must
         // each have full block rows; do not merge partial last rows across array layers.
@@ -113,7 +118,7 @@ void DecompressBlocks(std::span<const u8> input, std::span<u8> output, BufferIma
                 src_offset += block_size;
                 dst_offset += block_width * out_bpp;
             }
-            input_offset += copy.buffer_row_length * block_size / block_width;
+            input_offset += input_row_pitch;
             output_offset += block_height * pitch;
         }
     }

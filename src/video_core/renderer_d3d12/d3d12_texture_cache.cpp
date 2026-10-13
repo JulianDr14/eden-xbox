@@ -369,6 +369,11 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
     // every mip's virtual dimensions. Decode only these unsupported top-level extents,
     // using the existing decoded representation for BC arrays. Internal block-copy proxies
     // intentionally keep their padded physical storage and are never sampled.
+    // Cache/format optimizations must preserve info.size at every sampled mip: a
+    // 717x717 image is not a 720x720 image with unused texels. The latter exposes
+    // block padding to wrap/linear sampling and changes LOD dimensions (358 != 360).
+    // Keep this distinction covered by tools/xbox/tests/bc-npot.cpp, including the
+    // aligned native path: only physical block-copy proxies may retain padded extents.
     const bool unaligned_bc_extent = (info_.size.width % 4 != 0 || info_.size.height % 4 != 0);
     if (!native_blocks && info_.type == ImageType::e2D && info_.num_samples == 1 &&
         (unaligned_bc_extent || (decode_bc_arrays.load(std::memory_order_relaxed) &&
