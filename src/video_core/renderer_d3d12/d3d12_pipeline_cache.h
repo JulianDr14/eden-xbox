@@ -90,7 +90,7 @@ struct ChargedDxilStages {
 ///
 /// Maxwell code goes through the shared recompiler to SPIR-V (one binding counter across the
 /// stages), then spirv_to_dxil translates and links the stages and dxil.dll signs them. The PSO is
-/// created on a worker; until it is ready the draw is skipped, like Vulkan's asynchronous shaders.
+/// created on a worker; a dependent draw waits until the exact PSO is ready.
 /// The disk cache stores the guest environments, as Vulkan does, and rebuilds from them at boot:
 /// every pipeline's DXIL, but PSOs only for the ones drawn in recent sessions (HotPipelineSet).
 /// PSOs idle for long are released and built again when drawn (PipelineResidencyPolicy).
@@ -120,8 +120,7 @@ public:
     /// app's headroom allows, a bounded slice of them a frame, and saves the hot set now and then.
     void TickResidency(const CacheMemorySnapshot& snapshot, Scheduler& scheduler);
 
-    /// The pipeline of the current Maxwell state, or null while it is still compiling (or if it
-    /// failed to compile).
+    /// The ready pipeline of the current Maxwell state, or null if shader preparation failed.
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline();
@@ -133,7 +132,7 @@ private:
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
     /// Records the draw (residency, hot set), wakes a dormant pipeline, and returns it once its PSO
-    /// is built, or null while an asynchronous build runs.
+    /// is built. Valid guest draws always wait for their exact pipeline.
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline);
 
     void SaveHotPipelines();
@@ -156,12 +155,12 @@ private:
     const ShaderCompiler& compiler;
     const TextureCacheRuntime& texture_runtime;
     VideoCore::ShaderNotify& shader_notify;
-    bool use_asynchronous_shaders{};
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};
 
     RootSignatureCache root_signatures;
+    GraphicsPsoCache graphics_psos; ///< Weak host-identity index; residency stays with pipelines.
 
     ::Common::unordered_map<ComputePipelineCacheKey, std::unique_ptr<ComputePipeline>>
         compute_cache;

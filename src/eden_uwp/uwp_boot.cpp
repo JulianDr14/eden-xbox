@@ -348,7 +348,8 @@ struct BootConfig {
     enum class Fastmem { Off, Auto, Hybrid, Full } fastmem{Fastmem::Off};
     u32 fastmem_hot_mib{384};
     Settings::CpuAccuracy cpu_accuracy{Settings::CpuAccuracy::Auto};
-    /// Draw without waiting for pipelines still compiling ("async_shaders=0" turns it off).
+    /// Legacy setting for backends with draw-skipping async shaders. D3D12 always preserves
+    /// dependent draws, while preparing DXIL/PSOs on workers regardless of this setting.
     bool async_shaders{true};
     /// Buttons to press at given times ("input=25:L+R" lines).
     std::vector<InputStep> input_script;
@@ -413,8 +414,8 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     Settings::values.cpuopt_fastmem_exclusives = fastmem_enabled;
     Common::ConfigureHostMemoryFastmem(config.fastmem_hot_mib,
                                        config.fastmem == BootConfig::Fastmem::Full);
-    // Pipelines that compile while playing stalled whole seconds on entering new areas (0.2.52):
-    // skip those draws until the pipeline is ready, as Eden does with asynchronous shaders.
+    // Keep the shared setting for other backends. D3D12 prepares on workers and always waits
+    // for the exact PSO when a dependent draw reaches the command stream.
     Settings::values.use_asynchronous_shaders.SetValue(config.async_shaders);
     WriteDiag(std::string("step: fastmem ") +
               (config.fastmem == BootConfig::Fastmem::Off      ? "off"
@@ -422,7 +423,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                : config.fastmem == BootConfig::Fastmem::Full   ? "full"
                                                                : "hybrid diagnostic") +
               (fastmem_enabled ? " (hot " + std::to_string(config.fastmem_hot_mib) + " MiB)" : "") +
-              ", asynchronous shaders " + (config.async_shaders ? "on" : "off") +
+              ", D3D12 pipeline workers on, dependent draws preserved" +
               ", JIT cache " + std::to_string(config.jit_cache_mib) + " MiB per core");
     D3D12::SetTracedFrame(config.traced_frame, config.traced_frames);
     D3D12::SetFrameDiagnostics(!config.play);

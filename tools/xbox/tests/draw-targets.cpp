@@ -5,6 +5,7 @@
 #include "video_core/renderer_d3d12/d3d12_draw_targets.h"
 #include "video_core/renderer_d3d12/d3d12_debug_messages.h"
 #include "video_core/renderer_d3d12/d3d12_graphics_pipeline.h"
+#include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include <d3d12sdklayers.h>
@@ -110,6 +111,71 @@ float4 main(uint id:SV_VertexID):SV_Position {
     float2 p[3]={float2(-1,-1),float2(-1,3),float2(3,-1)};
     return float4(p[id],0,1);
 })", "vs_5_1");
+    {
+        // Exercise the production GraphicsPipeline/Build/Wake/Evict path, including its
+        // memory ledger and scheduler retire callback (not just the standalone index).
+        const auto ps = Compile("float4 main():SV_Target{return float4(1,0,0,1);}", "ps_5_1");
+        auto bytecodes = std::make_shared<GraphicsPipeline::DxilStages>();
+        const auto copy_blob = [](const auto& blob) {
+            const auto* begin = static_cast<const u8*>(blob->GetBufferPointer());
+            return std::vector<u8>(begin, begin + blob->GetBufferSize());
+        };
+        (*bytecodes)[0] = copy_blob(vs);
+        (*bytecodes)[4] = copy_blob(ps);
+        Shader::Info vertex{}, fragment{};
+        std::array<const Shader::Info*, GraphicsPipeline::NUM_STAGES> infos{};
+        infos[0] = &vertex; infos[4] = &fragment;
+        RootSignatureCache roots{device};
+        const auto& layout = roots.Get(infos, false);
+        GraphicsPsoCache psos;
+        Common::ThreadWorker builders{4, "PsoTest"};
+        GraphicsPipelineCacheKey key{};
+        key.state.topology.Assign(Maxwell::PrimitiveTopology::Triangles);
+        key.state.polygon_mode.Assign(Vulkan::FixedPipelineState::PackPolygonMode(Maxwell::PolygonMode::Fill));
+        key.state.color_formats[0] = static_cast<u8>(Tegra::RenderTargetFormat::A8B8G8R8_UNORM);
+        key.state.attachments[0].raw = 15;
+        const auto resident_before = Common::ReadMemoryAccount(Common::MemoryAccount::PipelineStates).objects;
+        const auto creates_before = VideoCore::Perf::Get(VideoCore::Perf::Read(), VideoCore::Perf::Counter::PsoCreates);
+        {
+            // Baseline: the former per-guest construction path, with the shared index absent.
+            std::vector<std::unique_ptr<GraphicsPipeline>> independent;
+            for (u64 i = 0; i < 16; ++i) {
+                key.state.vertex_strides[0] = static_cast<u16>(i * 16);
+                independent.push_back(std::make_unique<GraphicsPipeline>(device, runtime, nullptr,
+                    &builders, key, [bytecodes](u64) { return bytecodes; }, infos, layout));
+            }
+            builders.WaitForRequests();
+            assert(Common::ReadMemoryAccount(Common::MemoryAccount::PipelineStates).objects == resident_before + 16);
+            assert(VideoCore::Perf::Get(VideoCore::Perf::Read(), VideoCore::Perf::Counter::PsoCreates) == creates_before + 16);
+        }
+        assert(Common::ReadMemoryAccount(Common::MemoryAccount::PipelineStates).objects == resident_before);
+        std::vector<std::unique_ptr<GraphicsPipeline>> pipelines;
+        for (u64 i = 0; i < 16; ++i) {
+            // Different guest keys, identical consumed host state: unused vertex strides
+            // must not cause repeated driver compilations.
+            key.state.vertex_strides[0] = static_cast<u16>(i * 16);
+            pipelines.push_back(std::make_unique<GraphicsPipeline>(device, runtime, nullptr,
+                &builders, key, [bytecodes](u64) { return bytecodes; }, infos, layout, true, &psos));
+        }
+        builders.WaitForRequests();
+        assert(pipelines[0]->Handle());
+        for (const auto& pipeline : pipelines) {
+            assert(pipeline->IsBuilt() && pipeline->Handle() == pipelines[0]->Handle());
+        }
+        assert(Common::ReadMemoryAccount(Common::MemoryAccount::PipelineStates).objects == resident_before + 1);
+        assert(VideoCore::Perf::Get(VideoCore::Perf::Read(), VideoCore::Perf::Counter::PsoCreates) == creates_before + 17);
+        for (const auto& pipeline : pipelines) { assert(pipeline->Evict(scheduler)); }
+        // Entries still belong to the deferred fence callbacks, not the weak index.
+        assert(Common::ReadMemoryAccount(Common::MemoryAccount::PipelineStates).objects == resident_before + 1);
+        scheduler.Finish(); scheduler.CollectGarbage();
+        assert(Common::ReadMemoryAccount(Common::MemoryAccount::PipelineStates).objects == resident_before);
+        pipelines[0]->Wake(builders); pipelines[0]->WaitBuilt();
+        pipelines[1]->Wake(builders); pipelines[1]->WaitBuilt();
+        assert(pipelines[0]->Handle() && pipelines[0]->Handle() == pipelines[1]->Handle());
+        assert(VideoCore::Perf::Get(VideoCore::Perf::Read(), VideoCore::Perf::Counter::PsoCreates) == creates_before + 18);
+        builders.WaitForRequests();
+        std::cout << "PASS: production PSO sharing across 16 guest keys: driver calls/resident PSOs 16 -> 1; worker publication, unique ledger, fence retirement and Wake reuse\n";
+    }
     const D3D12_ROOT_SIGNATURE_DESC root_desc{0, nullptr, 0, nullptr,
                                               D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT};
     auto root = CreateRootSignature(device.Get(), root_desc, "test root");

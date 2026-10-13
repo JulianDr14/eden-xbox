@@ -187,9 +187,10 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
                                    const GraphicsPipelineCacheKey& key_,
                                    std::function<SharedDxilStages(u64)> compile_dxil,
                                    const std::array<const Shader::Info*, NUM_STAGES>& infos,
-                                   const PipelineLayout& layout_, bool build_pso)
+                                   const PipelineLayout& layout_, bool build_pso,
+                                   GraphicsPsoCache* pso_cache_)
     : device{device_}, texture_runtime{texture_runtime_}, key{key_}, key_hash{key_.Hash()},
-      layout{layout_} {
+      layout{layout_}, pso_cache{pso_cache_} {
     u8 valid_targets{};
     for (size_t index = 0; index < key.state.color_formats.size(); ++index) {
         if (static_cast<Tegra::RenderTargetFormat>(key.state.color_formats[index]) !=
@@ -287,8 +288,10 @@ bool GraphicsPipeline::Evict(Scheduler& scheduler) {
         return false;
     }
     build_state.store(State::Dormant, std::memory_order::release);
-    scheduler.DeferRelease(std::move(pipeline_state));
-    pso_charge.Reset();
+    // Keep the shared entry discoverable and charged until its last submitted use retires.
+    // Other guest variants may still own it or acquire it while this fence is pending.
+    scheduler.DeferRelease(std::move(pipeline_state),
+                           [retired = std::move(shared_pso)] {});
     return true;
 }
 
@@ -515,7 +518,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     }
 }
 
-void GraphicsPipeline::Build() {
+void GraphicsPipeline::Build() try {
     using VideoCore::Surface::PixelFormatFromDepthFormat;
     using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
 
@@ -652,20 +655,62 @@ void GraphicsPipeline::Build() {
     desc.SampleMask = UINT_MAX;
     desc.SampleDesc = {.Count = MaxwellToD3D12::SampleCount(state.msaa_mode), .Quality = 0};
 
-    VideoCore::FrameTrace::ScopedSpan pso_span{
-        VideoCore::FrameTrace::Event::PipelinePsoLong, reinterpret_cast<uintptr_t>(this)};
-    HRESULT hr;
-    if (pso_probe_enabled.load(std::memory_order_relaxed)) {
-        std::scoped_lock probe_lock{pso_probe_mutex};
-        const s64 before = PrivateCommit();
-        hr = device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline_state));
-        if (SUCCEEDED(hr) && before != 0) {
-            pso_probe_samples.push_back(PrivateCommit() - before);
+    auto host_key = MakeGraphicsPsoKey(desc, dxil);
+    const u64 index_bytes = sizeof(GraphicsPsoCache::Entry) + 128 +
+                            host_key.state.capacity() * sizeof(u32);
+    HRESULT hr = S_OK;
+    const auto create = [&] {
+        VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PsoCreateUs};
+        VideoCore::Perf::Add(VideoCore::Perf::Counter::PsoCreates, 1);
+        VideoCore::FrameTrace::ScopedSpan pso_span{
+            VideoCore::FrameTrace::Event::PipelinePsoLong, reinterpret_cast<uintptr_t>(this)};
+        ResidentGraphicsPso result;
+        result.root = desc.pRootSignature;
+        result.index_charge = Common::MemoryCharge(Common::MemoryAccount::Pipelines, index_bytes, 0);
+        if (pso_probe_enabled.load(std::memory_order_relaxed)) {
+            std::scoped_lock probe_lock{pso_probe_mutex};
+            const s64 before = PrivateCommit();
+            hr = device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&result.handle));
+            if (SUCCEEDED(hr) && before != 0) {
+                pso_probe_samples.push_back(PrivateCommit() - before);
+            }
+        } else {
+            hr = device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&result.handle));
         }
-    } else {
-        hr = device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline_state));
+        // Failed entries must not poison the index. All current waiters receive the HRESULT.
+        if (FAILED(hr)) {
+            throw hr;
+        }
+        return result;
+    };
+    VideoCore::Perf::Add(VideoCore::Perf::Counter::PsoRequests, 1);
+    try {
+        if (pso_cache) {
+            const auto result = pso_cache->Get(std::move(host_key), create);
+            shared_pso = result.entry;
+            pipeline_state = shared_pso->value->handle;
+            switch (result.outcome) {
+            case GraphicsPsoCache::Outcome::Hit:
+                VideoCore::Perf::Add(VideoCore::Perf::Counter::PsoHits, 1);
+                break;
+            case GraphicsPsoCache::Outcome::SharedInFlight:
+                VideoCore::Perf::Add(VideoCore::Perf::Counter::PsoShared, 1);
+                break;
+            case GraphicsPsoCache::Outcome::Bypassed:
+                VideoCore::Perf::Add(VideoCore::Perf::Counter::PsoBypasses, 1);
+                break;
+            case GraphicsPsoCache::Outcome::Created:
+                break;
+            }
+        } else {
+            // Standalone gates also use a shared entry so accounting follows COM lifetime.
+            GraphicsPsoCache local_cache;
+            shared_pso = local_cache.Get(std::move(host_key), create).entry;
+            pipeline_state = shared_pso->value->handle;
+        }
+    } catch (HRESULT failure) {
+        hr = failure;
     }
-    pso_span.Finish();
     CheckRemovedAfter(device.Get(), [&] {
         return fmt::format("graphics PSO for VS {:016x} PS {:016x} (HRESULT 0x{:08X})",
                            key.unique_hashes[1], key.unique_hashes[5], static_cast<u32>(hr));
@@ -693,7 +738,6 @@ void GraphicsPipeline::Build() {
         pipeline_state.Reset();
         return;
     }
-    pso_charge = Common::MemoryCharge(Common::MemoryAccount::PipelineStates, 0);
     if (GpuDiagnosticsEnabled()) {
         LOG_INFO(Render, "D3D12 PSO identity: PSO={} shaders={:016x}/{:016x}/{:016x}/{:016x}/{:016x}/{:016x} RTs={} RT0={} DSV={}",
             static_cast<void*>(pipeline_state.Get()), key.unique_hashes[0], key.unique_hashes[1],
@@ -707,6 +751,16 @@ void GraphicsPipeline::Build() {
              static_cast<u32>(desc.RTVFormats[0]), static_cast<u32>(desc.DSVFormat),
              layout.NumResourceDescriptors(), layout.NumSamplerDescriptors(),
              ShaderFeatureFlags(stages[0]), ShaderFeatureFlags(stages[4]));
+} catch (const std::exception& exception) {
+    pipeline_state.Reset();
+    shared_pso.reset();
+    LOG_ERROR(Render, "D3D12: graphics pipeline preparation failed: {}", exception.what());
+    VideoCommon::GPUThread::ReportException("D3D12 graphics pipeline preparation failed");
+} catch (...) {
+    pipeline_state.Reset();
+    shared_pso.reset();
+    LOG_ERROR(Render, "D3D12: graphics pipeline preparation failed with an unknown exception");
+    VideoCommon::GPUThread::ReportException("D3D12 graphics pipeline preparation failed");
 }
 
 void SetPsoCostProbe(bool enabled) {

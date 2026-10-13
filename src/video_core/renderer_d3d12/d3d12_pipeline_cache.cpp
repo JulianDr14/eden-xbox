@@ -380,7 +380,6 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
                              VideoCore::ShaderNotify& shader_notify_)
     : VideoCommon::ShaderCache{device_memory_}, device{device_}, compiler{compiler_},
       texture_runtime{texture_runtime_}, shader_notify{shader_notify_},
-      use_asynchronous_shaders{Settings::values.use_asynchronous_shaders.GetValue()},
       root_signatures{device_},
       workers(GetTotalPipelineWorkers(), "D3D12PipelineBuilder", {},
               Common::ThreadPlacement::Background),
@@ -475,9 +474,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
 
     LOG_INFO(Render,
              "D3D12: pipeline cache ready ({} workers, waves up to {} lanes, int64 {}, "
-             "VP/RT index outside GS {}, asynchronous shaders {})",
+             "VP/RT index outside GS {}, dependent draws preserved)",
              GetTotalPipelineWorkers(), caps.wave_lane_count_max, caps.int64,
-             caps.vp_and_rt_index_from_any_stage, use_asynchronous_shaders);
+             caps.vp_and_rt_index_from_any_stage);
 }
 
 PipelineCache::~PipelineCache() {
@@ -589,6 +588,7 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
     auto& pipeline{pair->second};
     if (is_new) {
         VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs};
+        VideoCore::Perf::ScopedTimer frontend{VideoCore::Perf::Counter::PipelineFrontendUs};
         pipeline = CreateComputePipeline(key, shader);
     }
     if (!pipeline) {
@@ -602,6 +602,7 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
         // buffers or images it writes stale for the rest of the frame and beyond.
         VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs,
                                            VideoCore::Perf::Counter::PipelineStalls};
+        VideoCore::Perf::ScopedTimer wait{VideoCore::Perf::Counter::PipelineWaitUs};
         pipeline->WaitBuilt();
     }
     return pipeline.get();
@@ -702,6 +703,18 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     lock.unlock();
 
     workers.WaitForRequests(stop_loading);
+    const auto preparation = VideoCore::Perf::Read();
+    LOG_INFO(Render,
+             "D3D12 PSO preparation after disk load (session totals): {} requests, {} hits, "
+             "{} shared in-flight, {} capacity bypasses, {} driver creates / {:.1f} ms "
+             "accumulated worker wall time; {} resident objects",
+             VideoCore::Perf::Get(preparation, VideoCore::Perf::Counter::PsoRequests),
+             VideoCore::Perf::Get(preparation, VideoCore::Perf::Counter::PsoHits),
+             VideoCore::Perf::Get(preparation, VideoCore::Perf::Counter::PsoShared),
+             VideoCore::Perf::Get(preparation, VideoCore::Perf::Counter::PsoBypasses),
+             VideoCore::Perf::Get(preparation, VideoCore::Perf::Counter::PsoCreates),
+             VideoCore::Perf::Get(preparation, VideoCore::Perf::Counter::PsoCreateUs) / 1000.0,
+             Common::ReadMemoryAccount(Common::MemoryAccount::PipelineStates).objects);
     residency_sweep.reserve(graphics_cache.size());
     for (const auto& [key, pipeline] : graphics_cache) {
         if (pipeline) {
@@ -716,6 +729,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     if (is_new) {
         // Translating the shaders runs here, on the GPU thread, before the build is queued.
         VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs};
+        VideoCore::Perf::ScopedTimer frontend{VideoCore::Perf::Counter::PipelineFrontendUs};
         pipeline = CreateGraphicsPipeline();
         if (pipeline) {
             residency_sweep.push_back(pipeline.get());
@@ -750,17 +764,13 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) {
         pipeline->Wake(workers);
         ++pipelines_woken;
     }
-    // Small draws are usually full-screen passes that build textures once: skipping them would
-    // lose the texture, so wait for those like Vulkan does.
-    const auto& draw_state = maxwell3d->draw_manager.draw_state;
-    if (!use_asynchronous_shaders || draw_state.index_buffer.count <= 6 ||
-        draw_state.vertex_buffer.count <= 6) {
-        VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs,
-                                           VideoCore::Perf::Counter::PipelineStalls};
-        pipeline->WaitBuilt();
-        return pipeline;
-    }
-    return nullptr;
+    // A valid draw has no semantically equivalent substitute while its exact PSO is pending.
+    // Compilation stays on workers, but readiness never discards guest work.
+    VideoCore::Perf::ScopedTimer timer{VideoCore::Perf::Counter::PipelineStallUs,
+                                       VideoCore::Perf::Counter::PipelineStalls};
+    VideoCore::Perf::ScopedTimer wait{VideoCore::Perf::Counter::PipelineWaitUs};
+    pipeline->WaitBuilt();
+    return pipeline;
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
@@ -905,7 +915,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     return std::make_unique<GraphicsPipeline>(device, texture_runtime, &shader_notify,
                                               thread_worker, key, std::move(compile_dxil), infos,
-                                              layout, build_pso);
+                                              layout, build_pso, &graphics_psos);
 
 } catch (const Shader::Exception& exception) {
     BUG_TRACK_KEY(ShaderCompile, key.unique_hashes[1] ^ std::rotl(key.unique_hashes[5], 1),

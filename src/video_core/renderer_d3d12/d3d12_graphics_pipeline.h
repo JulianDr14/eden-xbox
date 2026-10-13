@@ -23,6 +23,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
+#include "video_core/renderer_d3d12/d3d12_pso_cache.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
 #include "video_core/renderer_d3d12/d3d12_stage_bindings.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
@@ -155,7 +156,8 @@ public:
                      VideoCore::ShaderNotify* shader_notify, Common::ThreadWorker* worker_thread,
                      const GraphicsPipelineCacheKey& key, std::function<SharedDxilStages(u64)> compile_dxil,
                      const std::array<const Shader::Info*, NUM_STAGES>& infos,
-                     const PipelineLayout& layout, bool build_pso = true);
+                     const PipelineLayout& layout, bool build_pso = true,
+                     GraphicsPsoCache* pso_cache = nullptr);
     ~GraphicsPipeline();
 
     GraphicsPipeline(const GraphicsPipeline&) = delete;
@@ -273,6 +275,8 @@ private:
     std::vector<GraphicsPipeline*> transitions;
 
     ComPtr<ID3D12PipelineState> pipeline_state;
+    GraphicsPsoCache* const pso_cache;
+    SharedGraphicsPso shared_pso;
 
     std::mutex build_mutex;
     std::condition_variable build_condvar;
@@ -280,8 +284,6 @@ private:
 
     u64 last_used_frame{}; ///< GPU thread only.
     bool drawn{};          ///< GPU thread only.
-    Common::MemoryCharge pso_charge; ///< While the PSO is resident.
-
     /// The object itself. Its DXIL and stage bindings are shared with other pipelines.
     Common::MemoryCharge charge{Common::MemoryAccount::Pipelines, sizeof(GraphicsPipeline)};
 };

@@ -23,6 +23,7 @@ La rama de trabajo es `xbox`; las reglas del proyecto están en [AGENTS.md](../.
 ## Rendimiento y evidencia
 
 - [Rendimiento](xbox_performance.md): perfiles, optimizaciones y prioridades pendientes.
+- [Preparación y reutilización de PSO](xbox_pipeline_preparation.md): identidad host, trabajo único, residencia por fence y gates Game A.
 - [Memoria de texturas](xbox_texture_memory.md): packing, readbacks, staging y comparación con Vulkan.
 - [Copias de bloques BC](xbox_bc_block_copy.md): preservación exacta de arrays decodificados y reinterpretación BC3/UINT128.
 - [Dimensiones de SRV](xbox_srv_dimensions.md): compatibilidad de cubemaps, fallback nulo y propiedad de descriptores.

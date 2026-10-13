@@ -27,6 +27,14 @@ enum class Counter : size_t {
     GpuBusyUs,          ///< GPU time of the submitted command lists (timestamps)
     PipelineStalls,     ///< draws or dispatches that waited for a pipeline to be built
     PipelineStallUs,
+    PipelineWaitUs,     ///< Dependent draws/dispatches only; separate from frontend translation.
+    PipelineFrontendUs,
+    PsoRequests,       ///< Host PSO lookups, not per-draw guest pipeline hits.
+    PsoHits,
+    PsoShared,         ///< Concurrent equivalent creation avoided.
+    PsoBypasses,       ///< Host index capacity reached; correctness preserved.
+    PsoCreates,
+    PsoCreateUs,       ///< Accumulated worker wall time; overlaps between workers.
     Draws,
     Dispatches,
     TextureUploads,

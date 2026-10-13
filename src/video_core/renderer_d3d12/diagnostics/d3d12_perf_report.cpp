@@ -81,9 +81,9 @@ double Ms(const VideoCore::Perf::Snapshot& delta, Counter counter) {
     return static_cast<double>(VideoCore::Perf::Get(delta, counter)) / 1000.0;
 }
 
-/// Counters of one frame or window, one line. The GPU thread's time splits into idle (waiting
-/// for the guest), fence waits (waiting for the GPU), pipeline stalls, guest flushes, resource
-/// creation, and the rest: recording draws and running the caches.
+/// Counters published on scope exit, potentially crossing presentation boundaries. Nested
+/// scopes can overlap (e.g. resource creation inside a frontend/flush). The subtraction is
+/// only a residual estimate, not an exclusive breakdown of the presented interval.
 std::string DescribePerf(const VideoCore::Perf::Snapshot& d, double interval_ms) {
     const double idle = Ms(d, Counter::GpuThreadIdleUs);
     const double fence = Ms(d, Counter::FenceWaitUs);
@@ -97,7 +97,7 @@ std::string DescribePerf(const VideoCore::Perf::Snapshot& d, double interval_ms)
     return fmt::format(
         "GPU thread: idle {:.1f} ms, fence waits {} ({:.1f} ms), pipeline stalls {} ({:.1f} ms), "
         "guest flushes {} ({:.1f} ms), new resources {} ({:.1f} ms), CPU texture decode {:.1f} ms, "
-        "other work {:.1f} ms | GPU busy {:.1f} ms, {} submits | {} draws, {} dispatches | "
+        "residual estimate {:.1f} ms (scopes may overlap) | GPU busy {:.1f} ms, {} submits | {} draws, {} dispatches | "
         "uploads {} ({:.2f} MiB, {} GPU-decoded), downloads {} ({:.2f} MiB) | staging: {} "
         "dedicated ({:.2f} MiB), {} ring waits",
         idle, get(Counter::FenceWaits), fence, get(Counter::PipelineStalls), pipelines,
@@ -329,6 +329,17 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
              LikelyCause(delta, total_ms), DescribePerf(delta, total_ms));
     LOG_INFO(Render, "D3D12 GPU thread: {}", DescribeDrawCosts(delta, total_ms));
     LOG_INFO(Render, "D3D12 frame chain: {}", DescribeFrameChain(delta));
+    LOG_INFO(Render,
+             "D3D12 pipeline preparation: frontend {:.1f} ms, dependent waits {} / {:.1f} ms; "
+             "host PSO requests {}, hits {}, shared in-flight {}, capacity bypasses {}, "
+             "driver creates {} / {:.1f} ms (accumulated worker wall time, overlaps waits/frames)",
+             Ms(delta, Counter::PipelineFrontendUs),
+             VideoCore::Perf::Get(delta, Counter::PipelineStalls),
+             Ms(delta, Counter::PipelineWaitUs), VideoCore::Perf::Get(delta, Counter::PsoRequests),
+             VideoCore::Perf::Get(delta, Counter::PsoHits),
+             VideoCore::Perf::Get(delta, Counter::PsoShared),
+             VideoCore::Perf::Get(delta, Counter::PsoBypasses),
+             VideoCore::Perf::Get(delta, Counter::PsoCreates), Ms(delta, Counter::PsoCreateUs));
     LOG_INFO(Render, "D3D12 depth feedback: {} GPU copies in total",
              texture_cache_runtime.DepthFeedbackCopies());
     if (Core::CpuProfile::Enabled()) {

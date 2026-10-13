@@ -751,3 +751,48 @@ Corrección RTV12oct: Game A slots3/4 mismo subrecurso con slot4mask0; bindings 
 12oct nullRTdiag: #613 conocido null/UNKNOWN pasa a contadorInfo acotado sin consumir500; mismoID613 real y728 siguenError. Gatefixtures+600avisos/2erroresreales y36drawGPU pasa; UWPcorrecto. Repeticiónmanual/Series pendientes,sincommit.
 
 Cierre aceptado por el usuario (12 oct 2026): corrección de dimensiones SRV, bindings RTV y diagnóstico null/UNKNOWN cerrada para integración. Último gate PC PID23132: RenderError/Critical/728/overlap/SRV0, sin agotar límite de debug hasta119,93s; evidencia rtv-pc-diag-fixed-2026-10-12. Build UWP, regresión SRV y2304casos/36drawGPU/flood600 pasan. Se conservan documentadas las limitaciones: origen exacto shader/TIC del warning original, validación Series, visual y cierre limpio/bloqueo no certificados. El cierre aceptado no acredita resolver fallos ajenos de input/red/estabilidad. Commit solicitado, sin push.
+
+
+PSO D3D12 (12 oct 2026): índice host dentro de PipelineCache comparte descripción
+D3D12 completa, bytecodes exactos y creación en curso. Índice débil de 8192 slots;
+residencia y liberación por fence, raíz retenida y contador RAII único. Los draws
+válidos siempre esperan su PSO. Build UWP, identidad/concurrencia/colisiones/reintento,
+gate producción (16 claves: 16 PSO -> 1), Wake/fences y regresiones RTV/SRV pasan.
+Game A PC: Q tras 157 s, retorno 0, Render Error/Critical 0, commit máximo muestreado
+3480 MiB. Boot evita 328 de 1153 creaciones; 19 ventanas de juego registran 220 hits
+sobre 322 solicitudes y 102 creaciones. Persisten pausas de pipelines hasta 200 ms.
+No A/B frente a Downloads Series: distinto hardware y versión guest A64/update vs
+A32/base. No mejora de frametime ni 60 sostenidos certificados. Series, visual y repetición comparable pendientes. Sin GetCachedBlob, commit ni push.
+Diseño, fuentes, métricas y límites en docs/xbox/xbox_pipeline_preparation.md.
+
+Control Game F PC PID19704: 22 ventanas completas, P95 16,81--17,09 ms,
+P99 16,90--28,33 ms, Render Error/Critical 0, commit máximo muestreado2741MiB.
+Boot evita665/1398creaciones; cobertura gameplay/visual no confirmada. Usuario
+confirma cierre sin Q: diag etiqueta Q118s pero no shutdown complete/retorno0;
+no certificar cierre limpio ni crash. Detalle en xbox_pipeline_preparation.md.
+
+
+Release Xbox 0.2.87.33 preparada (12 oct 2026): APPX firmado en
+build-uwp/series/eden-xbox.appx, símbolos EXE/PDB archivados por versión y SHA256
+verificado contra el ejecutable empaquetado. Release /O2 /DNDEBUG; métricas normales
+FPS/frametime/PSO/memoria y bug tracker activos. Sin sampling profile, perfiles
+CPU/GPU/audio detallados, debug/GBV, DRED/breadcrumbs, descriptor checks ni hotkeys.
+Boot: Library/play, Job5120, fastmem0, jit_prewarm1; demás presupuestos intactos.
+La anterior Series .32 tenía profile1: diferencia de diagnóstico que debe tenerse
+en cuenta al comparar. Gate instalación/medición/visual Series pendiente.
+No commit ni push. Configuración/hash en build-uwp/series/release-info-0.2.87.33.json.
+
+
+Gate Series PSO .33 (12 oct 2026): Downloads contiene Game A updatev0.22 y Game F,
+ambos shutdown completo/retorno10 por Volver a biblioteca, RenderError/Critical0.
+Game A:37ventanas/11100intervalos; preparación agregada6460,5->2272,7ms observada,
+reportes pipeline18->4, boot701/1447creaciones evitadas; gameplay108hits/150requests,
+42creates. FPS ponderados57,01->57,72, pero medianaP99ventana19,60->20,89ms y
+peorhitchpipelinepostcarga425->570ms: mejora parcial, no cierre de frametime.
+.32samplingON/.33OFF e historial/prewarm distintos impiden A/B causal. Commitmax
+Game A3636MiB, 3D2372MiB. 3D34ventanas,16hits/17requests/1create; pausas434--501ms
+sinPSO coinciden maxwait AcquireFrame480--497ms: siguiente foco presentación/
+reciclaje, no inventar timeout (swapchain1000ms). Bootsegundotítulo acumulativo
+incluyeGame A: no interpretarlo como total propio3D. Evidencia ytabla detallada en
+xbox_pipeline_preparation.md y build-uwp/test-results/pso-series-0.2.87.33/.
+Sin cambios funcionales, commit ni push en esta revisión; visual/ABy60 pendientes.
