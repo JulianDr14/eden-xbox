@@ -844,3 +844,13 @@ sin atribución automática. Informe en docs/xbox/xbox_terrain_seams.md.
 Guardado por temas 13oct: a00cc81079 BCNPOT; 1b684e96a5 metadataSRV/samplers;
 8c4bcebf3c F7/snapshots; a2b69a55ab sondaGPU; ebd0180b2a posicionesmultipass.
 Documentación separada, autor JulianDr14, sinpush. PC/Series visuales confirmados.
+
+13oct regresión BC NPOT: matriz717/718/719/720²+rectángulos+mipspequeños,
+22tamaños/132imágenes/834mips/213504componentesGPU pasan/debuglimpio.
+Detectadoycorregido strideBC de ancho<4 convariasfilas (3×5:10bytesvs8),
+decodercompartido; notasdeinvariante enformatoselección ystride. BuildRelease5ops
+pasa. Sincommit; APPX.34 previo no reempaquetado; detalle xbox_terrain_seams.md.
+
+Preferencia explícita del usuario (13oct): no incrementar automáticamente la
+versión al compilar/empaquetar si no es necesario. Si el binario ya está al día,
+reutilizarlo; no forzar recompilaciones. Release actual conserva0.2.87.34.

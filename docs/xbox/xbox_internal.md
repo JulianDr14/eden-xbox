@@ -3213,3 +3213,31 @@ Commits autorizados 13oct: a00cc81079 fixBCNPOT/testGPU; 1b684e96a5 metadata
 SRV/samplers; 8c4bcebf3c F7acotada/snapshots; a2b69a55ab sondaGPUregiones;
 ebd0180b2a comparaciónposicionesDXIL/GPU. Documentación en commit separado.
 Autor JulianDr14, sin coautorías automáticas ni push; evidencia local ignorada.
+
+13oct Release0.2.87.34 solicitado: manifest33->34 sinBOM. CMakeCache Release,
+CXX /O2 /Ob2 /DNDEBUG; incrementalUWP17operaciones correcto. APPX biblioteca
+firmado14849849bytes, sinDebugLayer/perfiles/sondaactiva/hotkeysdesarrollo;
+fastmem0,prewarm1,cap5120 conservados. Verificados manifest yboot.cfg dentrodel
+APPX, firma presente, EXE bin/layout/symbols SHA256idéntico. EXE34229248 y
+PDB53809152 archivados build-uwp/symbols/0.2.87.34. No instalado/ejecutado en
+esta preparación, sin nuevo commit ni push. Paquete build-uwp/package/eden-xbox.appx.
+
+13oct regresión BC NPOT ampliada: 22dimensiones incluidas717/718/719/720²,
+rectángulos y1/2/3texeles, cadenascompletas hasta1×1; BC1/BC3UNORM/sRGB,
+alfa0/1, mipsrojo/verde alternados, GetDimensionsporLOD, point/linear/wrap/
+clamp/LOD+0,25/anisoSampleLevel, bloquesoriginales exactos yfastpathalineado.
+132imágenes/834mips/213504componentesGPU pasan/debug0. Expuso3×5BC1R0,160784
+vs0: fallbackdecoder avanzaba10bytesporfila envez8 por dividir entreancho
+recortado3. Corregido ceil(row_length/4)*block_size en decode_bc.cpp (compartido),
+notasjuntoa stride yselecciónD3D12 para futurasoptimizaciónes. BuildRelease5ops
+pasa; APPX.34 anterior sinreempaquetar. Se conserva cambio deversiónpreexistente.
+Sincommit; detalle de cobertura/límites en xbox_terrain_seams.md.
+
+13oct cierre Release y commits de regresión: Ninja confirma no work to do; se
+reutiliza EXE Release ya compilado, sin recompilación ni repetición de tests.
+Usuario indica conservar versión si no es necesario subirla: paquete final
+0.2.87.34, firmado14850065bytes, biblioteca sin debug/perfiles/sonda activa,
+cap5120/fastmem0/prewarm1. Verificados XML+boot.cfg enZIP, firma presente ySHA256
+EXE delAPPX vsbin. EXE/PDB actuales en symbols/0.2.87.34, anteriores preservados
+en before-bc-stride. No instalación ni ejecución adicional. Commits autorizados
+por temas: stride/regresiones/notas de código y Release/documentación. Sinpush.

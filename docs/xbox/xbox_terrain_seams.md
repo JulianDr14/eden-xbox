@@ -508,3 +508,51 @@ El trabajo se guarda por responsabilidades, manteniendo autoría de JulianDr14:
 
 Sin push. No se incluyen juegos, bytecodes extraídos ni capturas/logs locales en
 los commits; la evidencia de build-uwp sigue fuera del historial.
+
+## Regresión ampliada de dimensiones BC y mips pequeños (13 octubre 2026)
+
+Solicitud del usuario: 717×717, 718×718, 719×719, 720×720, rectángulos y
+mips pequeños; dejar una nota junto al código para futuras optimizaciones.
+La matriz de tools/xbox/tests/bc-npot.cpp ahora prueba:
+
+- Cuadrados grandes: 717×717, 718×718, 719×719 y 720×720.
+- Rectángulos: 717×720, 720×717, 718×719, 719×718 y 720×716.
+- Pequeños: 1×1, 1×2, 2×1, 2×2, 3×3, 3×5, 5×3, 4×4, 4×8 y 8×4; conserva7×7.
+- Rectángulos estrechos: 1×719 y 719×1.
+
+BC1/BC3 UNORM y sRGB; BC3 con alfa0 y1, RGB conservado sin premultiplicar.
+Cada imagen usa la cadena completa hasta1×1. GetDimensions verifica cada mip
+contra max(1,dimension>>level). Los colores alternan rojo/verde por mip para
+que elegir un LOD incorrecto falle: integer y fractional LOD+0,25 con resultado
+matemático conocido, point/linear, wrap/clamp y sampler anisotrópico SampleLevel
+(sigue sin certificar anisotropía implícita de un draw real). Se comprueban RGBA
+lineales y canales de los otros samplers; padding BC negro/alfa opuesto, incluidas
+muestras fuera de0..1 y esquinas. Para bases noalineadas también descarga los
+bloques originales y compara todos sus bytes; las alineadas conservan BCnativo,
+incluidos mips descendientes que ya no sean múltiplo de4.
+
+La ampliación detectó un segundo defecto real: 3×5 BC1 devolvía R0,160784
+cuando se esperaba0. El fallback de DecompressBlocks en texture_cache/decode_bc.cpp
+avanzaba buffer_row_length*block_size/min(width,4): conwidth3,row_length4,
+block_size8 avanzaba10bytes en vez de8. Se corrige a ceil(row_length/4)*block_size;
+recortar texeles de salida no cambia el tamaño del bloque comprimido de entrada.
+La corrección es compartida y preserva el stride existente para anchos alineados.
+No se ajusta la expectativa del test para aceptar la lectura incorrecta.
+
+Resultado real después de recompilar: 22extents,132imágenes,834niveles de mip,
+213504componentesGPU correctos, debug layer sin warnings/errores. Incremental
+UWP Release5operaciones correcto. Notas junto a selección de formato D3D12 y
+stride compartido documentan el invariante; la primera referencia esta regresión
+para evitar reintroducir717→720 al optimizar la caché.
+
+Comando: powershell -ExecutionPolicy Bypass -File tools/xbox/tests/run-bc-npot.ps1
+La matriz usa librerías de producción y excepciones de comprobación activas en
+Release. No se amplían en esta matriz BC2/BC4–7, arrays o3D; la regresión existente
+de copiasBC también pasa arrays/offsets/5mips, conservación exacta de bloques,
+sentinelas y rechazo de representaciones obsoletas, debug limpio. Sin nuevo commit.
+La compilación incremental actual incluye el stride corregido. Tras la petición
+de preparar Release, se reempaqueta como0.2.87.34 sin recompilar: Ninja confirma
+que no hay trabajo pendiente. Se mantiene la versión por indicación del usuario.
+El APPX firmado contiene el EXE actual (SHA256 verificado), sin diagnóstico
+activo; símbolos actualizados en symbols/0.2.87.34 y anteriores conservados en
+su subcarpeta before-bc-stride. No se instala ni se repite gameplay en este paso.
