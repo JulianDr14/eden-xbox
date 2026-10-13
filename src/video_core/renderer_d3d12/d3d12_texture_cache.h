@@ -271,7 +271,7 @@ public:
     [[nodiscard]] DXGI_FORMAT FootprintFormat() const noexcept { return footprint_format; }
     /// How the guest data is laid out for transfers (converted formats: what the CPU decodes to).
     [[nodiscard]] const FormatInfo& TransferFormat() const noexcept { return format; }
-    /// A block-compressed 2D array the CPU decodes on upload (see DecodedBcFormat): its resource
+    /// A block-compressed image decoded on upload (arrays or unaligned base extent): its resource
     /// holds plain texels, so it does not copy to or from block-compressed images.
     [[nodiscard]] bool IsBcDecoded() const noexcept {
         return format.converted && !VideoCore::Surface::IsPixelFormatASTC(info.format);

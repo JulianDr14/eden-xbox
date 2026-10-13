@@ -365,8 +365,14 @@ Image::Image(TextureCacheRuntime& runtime_, const VideoCommon::ImageInfo& info_,
              VAddr cpu_addr_, bool native_blocks)
     : VideoCommon::ImageBase{info_, gpu_addr_, cpu_addr_}, runtime{&runtime_},
       format{runtime_.Format(info_.format)} {
-    if (!native_blocks && decode_bc_arrays.load(std::memory_order_relaxed) && info_.type == ImageType::e2D &&
-        info_.resources.layers > 1 && info_.num_samples == 1) {
+    // Padding a sampled BC image changes normalized coordinates, wrap boundaries and
+    // every mip's virtual dimensions. Decode only these unsupported top-level extents,
+    // using the existing decoded representation for BC arrays. Internal block-copy proxies
+    // intentionally keep their padded physical storage and are never sampled.
+    const bool unaligned_bc_extent = (info_.size.width % 4 != 0 || info_.size.height % 4 != 0);
+    if (!native_blocks && info_.type == ImageType::e2D && info_.num_samples == 1 &&
+        (unaligned_bc_extent || (decode_bc_arrays.load(std::memory_order_relaxed) &&
+                                 info_.resources.layers > 1))) {
         if (const std::optional<FormatInfo> decoded = DecodedBcFormat(info_.format)) {
             format = *decoded;
         }
