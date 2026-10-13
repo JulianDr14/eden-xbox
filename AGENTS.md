@@ -796,3 +796,51 @@ reciclaje, no inventar timeout (swapchain1000ms). Bootsegundotítulo acumulativo
 incluyeGame A: no interpretarlo como total propio3D. Evidencia ytabla detallada en
 xbox_pipeline_preparation.md y build-uwp/test-results/pso-series-0.2.87.33/.
 Sin cambios funcionales, commit ni push en esta revisión; visual/ABy60 pendientes.
+
+Costuras terreno Game A (12oct): capturas usuario PC; dependencia de distancia
+orienta mips/LOD/depth, causa no aislada. F7 captura metadata acotada sinreadback;
+atajoD eliminado a peticionusuario, WASD normal. PC Q126s/retorno0, F7primera
+1446draws/parcial2MiB, segunda159completa; nullSRV0 enbindingsregistradas,
+no descartaomision. BuildUWP/gatesCPU/SRVGPU/RTVpasan. Compactacion estados
+repetidos mantiene2MiB ysube techodraw4096; replayparcial-51,96%texto, gate
+manual lejos/cerca ySeriespendientes. No correccionvisualniFPScertificados.
+Diseno/evidencia docs/xbox/xbox_terrain_seams.md. Sincommit/push.
+
+13oct terreno: F7dosintervalos1384/1394draws completos, Q89s/retorno0.
+ParejaVS normales/colorcondepthEQUAL investigada: posicionesIR/DXILiguales;
+probeGPUdesktop65536vertices/todas salidasSOvivas da0diferencias/debug0.
+No reproduceuniformsreales ni identifica césped, causa siguependiente.
+F7 ahora añade<=3snapshots dirigidos RT0/aux/depth, cap32MiBfootprints,
+solo por solicitud; pausaGPU/disco prevista, nada cadaframenormal.
+BuildUWP correcto, gatevisual/targetsPC ySeries pendientes. Sincommit/push.
+
+13oct costuras: césped derecho después del farol localizado por usuario; sondaF7
+opt-in64x64/1024registros/16MiB, EQUAL/no-write/RT0directo, CSV+BIN nativo.
+GPU16385texeles/5formatos/mip-array/borde/debuglimpio, fixtures y build18+4ops pasan.
+PCPID10040/play1/Job5120/sonda1020,367; F7/Qmanual pendiente. Sin causa raíz/fix
+visual/Series certificados, sincommit. Detalle xbox_terrain_seams.md.
+
+13oct BCNPOT: sonda síalcanzalínea; draw868muestreaBC1717x717host720x720.
+PruebaGPUantes7x7->8x8/G0,5enborde; correcciónImage::Image decodificaBC2Dbase
+noalineada manteniendodimensiones ybloquesoriginales. Después768componentes
+GPU correctos/sRGB/alfa/wrap/clamp/mips/anisoSampleLevel; alignedBCintacto.
+Build32ops/copiasBC/SRV pasan/debuglimpio. Relaciónvisual conlíneas pendiente,
+no causaúnica certificada; costeRAM/cargaNPOTpor medir. Sonda64x32/2048tiles,
+16MiB, todosMRTactivos/GPU8193texelespasa. Sincommit/Series; detalleterenoseams.
+
+13oct BCNPOT validaciónPC: usuario confirma desaparición de líneas negras.
+PID32640/Q67s/retorno0/RenderErrorCritical0; no nuevaF7, validaciónmanual.
+Logs pc-bc-npot-fixed archivados; build32+4ops/768componentesGPU/BCcopias/SRV
+pasan. DimensionesvirtualesBC preservadas, alignedfastpath/bloquesoriginales
+conservados. Series/otrosjuegos/rendimientocontrolado pendientes; sincommit.
+Detalle y límites en docs/xbox/xbox_terrain_seams.md.
+
+13oct cierre BC NPOT: usuario confirma también en Xbox Series que las líneas
+negras desaparecieron. Validación visual manual PC y Series; no nuevos logs ni
+medición de rendimiento Series. Otros juegos/pistas y coste controlado pendientes.
+Usuario solicita commits separados por temas, sin push; identidad de JulianDr14,
+sin atribución automática. Informe en docs/xbox/xbox_terrain_seams.md.
+
+Guardado por temas 13oct: a00cc81079 BCNPOT; 1b684e96a5 metadataSRV/samplers;
+8c4bcebf3c F7/snapshots; a2b69a55ab sondaGPU; ebd0180b2a posicionesmultipass.
+Documentación separada, autor JulianDr14, sinpush. PC/Series visuales confirmados.

@@ -3108,3 +3108,108 @@ reciclaje, no inventar timeout (swapchain1000ms). Bootsegundotítulo acumulativo
 incluyeGame A: no interpretarlo como total propio3D. Evidencia ytabla detallada en
 xbox_pipeline_preparation.md y build-uwp/test-results/pso-series-0.2.87.33/.
 Sin cambios funcionales, commit ni push en esta revisión; visual/ABy60 pendientes.
+
+## 12 octubre 2026: terreno Game A, diagnóstico de materiales
+
+Tres capturas confirmadas PC, líneas dependientes de distancia según usuario.
+Logs Downloads son Series .33/Game A+Game F, no las capturas PC; el tracker conserva
+entradas del juego anterior bajo cabecera del último. Warning BC3ColorCube sobre
+una capa persiste pero no vinculado al césped. Auditoría CPU/GPU upload no encuentra
+el flush parcial OpenGL de NXbox; conservar las correcciones previas SRV/BC/RTV.
+F7 registra metadata de draws/samplersTSC originales/SRV/blend/depth/mips, sin
+readback niwaitsGPU; a peticiónusuario se elimina D intensiva, WASD llega al juego.
+PCQ126s/shutdown/retorno0: captura5231 1446draws,935seleccionados/511omitidos por
+2MiB; captura6426 159/159,263581bytes. NullSRV0 enlo registrado no descarta parte
+omitida. D16shadow bias200/100 y D32overlay-4/-2/slope-1 observados, no causalidad.
+Compactación por igualdad completa/stringref conserva2MiB y techo4096draws;
+replay parcial2094246->1006079bytes, no certifica próxima captura. Diccionario
+transitorio <=2MiBpayload+metadatos, samplers+32bytesTSC. PresupuestoCPU/parser
+fixtures/SRVGPUdebug limpio/2304casos36drawRTV pasan, buildUWP correcto.
+Trampa harness: BitField TSC requiere Assign, operator= borrado. Primera corrida
+interrumpida por peticiónusuario tras D accidental, no gate de estabilidad.
+Pendiente captura lejos/cerca compacta, shader/draw exacto y contenido dirigido,
+corrección de raíz y validaciónPC/Series/otrosjuegos. Sin cambios rendering,
+sinFPSmedido, commit ni push. Detalles/fuentes: xbox_terrain_seams.md.
+
+13oct gateF7compacto: Q82s/shutdown/retorno0, capturas266/236draws,
+234708/201750bytes, omisiones0/parserrefs0/nullSRV0 enbindingsregistradas.
+Warningcubemap una capa BC3@592b90000 a75s fueraT; no vinculado alterreno.
+Capturas solo cubemap/shadow/normales, sinpase finalRT0: integridaddeintervalo
+no demuestra frameguestcompleto. F7 ampliado adosintervalos consecutivos con
+igual4096draws/2MiB; interrupcion marca intervals_complete0, fixtureparserpasa.
+Buildincremental17operaciones yCPUbudgetpasan. Relanzado PCplay1/cap5120,
+F7lejos/cerca yQ pendientes, WASDnormal/Dsinatajo. Causavisualpendiente,
+sincommit/push. Evidencia pc-f7-compact ydiseno xbox_terrain_seams.md.
+
+13oct dosintervalosPC: Q89s/retorno0,1384/1394draws completos<2MiB,
+parser0errores,RenderError0. Nullordinary@0 PSb7ccd... enprimera, no cube del
+warning fueraT. VS0d56f259d41a58d0prepass y9b7175da4bfd6c94color (candidato
+por normalBC5compartida) usan EQUAL encolor; matematicaposiciónIR/DXILidéntica.
+Extraccióndump_shader/corridaQ/retorno0, SDKdxcdisassembly archivados fuera repo.
+ProbeGPUdesktop SOtodas salidasvivas65536vertices/4conjuntosCB/4flips:
+0diferencias/debug0. No pruebauniformsactuales, rasterización niSeries.
+CapturaDantigua incompleta, no conclusiónvisual. F7añade3snapshotsRT0/aux/depth
+porárea, basesmip/capa, identidadCOM+slot, cap32MiBfootprints ysecuencial;
+soloF7, puede pausarCPU/GPU/disco. Estadosrestaurados, skips/erroresvisibles,
+timestamps preservanarchivos. Buildfinal17ops correcto, gatePCpendiente.
+Trampas:harness necesita<string>; Rasterizer no guarda Device, obtenerlo del
+recurso. No correcciónvisual/FPScertificados,commit/push. Doc: xbox_terrain_seams.md.
+
+Gate13octF7snapshots: Q92s/retorno0,1371/1159draws completos, tresfootprints
+8294400bytes porcaptura yseisBMP legibles, RenderError0. Colorfinal muestra
+recta/rampa; líneaobjetivo delóvalo detuberías no identificada inequívocamente,
+ubicaciónsolicitada alusuario. Aux quedólightingcapa1, no normales: candidato
+conservaprimeraux demayorárea anteempates (RT0/depthsiguenúltimo). DepthBMP
+8bitcasi blanco,no pruebaULP. F7begin->complete465/409msdiagnósticos, noFPS.
+Analizadorpositiongraphs actualDXILconfirma cuatrocomponentesigualesconmetadata
+precise resuelta. Evidencia pc-snapshots yshaders; rootcause/Series pendientes.
+
+13 octubre 2026, sonda de costuras: usuario localiza césped derecho después del
+farol; primer BMP tiene trazo transversal ~x986–1081/y366–370 y acercamiento no.
+F7 opt-in material_probe_x/y copia 64x64 después de draws directos EQUAL/no-write,
+RT0 nativo single-sample, máximo1024 registros/16MiB adicionales; CSV+BIN nativos,
+sin padding ni espera por draw. Espera al cerrar/abortar antes de liberar staging.
+Analizador y fixtures pasan; GPU16385 texeles exactos/5formatos/mip-array/borde,
+debug limpio; incremental UWP18+4ops pasa. PC relanzadoPID10040/play1/Job5120,
+debuglayer/sonda1020,367, F7/Q pendientes. No causa raíz ni corrección demostrada.
+Detalles, límites y comandos en xbox_terrain_seams.md; sin commit.
+
+13oct gate BC NPOT tras sonda: F6265/PC Q129s/retorno0/RenderError0.445tiles
+completos, pero metadatos2MiB cap/1833de2592draws; no captura total. Línea dentro
+ROI y ya en primera muestra717; cambios838/868 no bastan para atribuir origen.
+Draw868 usa BC1sRGB/UNORM717x717 expuestos720x720,10mips,wrap/linear.
+Defecto de dimensiones virtuales demostrado con runtime real: test7x7antes
+GetDimensions8x8/muestraG0,5 frente1esperado/84componentesmal; después7x7/G1,
+768componentesGPU correctos (BC1/3UNORM/sRGB,wrap/clamp,LODfraccionario,aniso
+SampleLevel,RGBconalfa0/1). Preserva bloquesoriginales ybase717;720sigueBCnativo.
+Corrección mínima enImage::Image reutilizaDecodedBcFormat paraBC2DbaseNPOT,
+proxiesraw internos siguenpadded. Incremental32ops, copiasBC5mips/arrays/offsets
+ysrvdimensiones pasan/debuglimpio. Sinlecturasextra pordraw ni heurística de juego;
+memoria/carga aumenta soloNPOT (BC1RGBA8~8x, BC3~4x más bloquesoriginales), aún
+sin medición deljuego. No afirmar causa única ni arreglo visual hasta comparar.
+Sonda64x32/2048tiles mismos16MiB, todosMRTactivos incluyeprepasses; GPU8193
+texeles/5formatos/debuglimpio yfixtures pasan. Depth/MSAA no permiten copiaROI
+parcial segúnMicrosoft: se excluyen, no probarlo enconsola conoperación inválida.
+Detalles/fuentes/comandos en xbox_terrain_seams.md. Sincommit, Seriespendiente.
+
+13oct cierre visual PC BCNPOT: usuario confirma «era eso ya no se ven las lineas
+negras». CorridaPID32640 Q67s/shutdown/retorno0/RenderErrorCritical0; sin nuevaF7,
+validaciónmanual, no inventar BMPpostfix. Logs/diag pc-bc-npot-fixed archivados.
+Commitmuestreado3564MiB/margen1555alcap5120; pool832MiB/peak714 frente704/606
+anterior, escenasmanualesdistintas, no atribuir128MiBsoloalfix ni certificarFPS.
+Causa muestreo/dimensionesvirtualesBC: 717->720 leíarelleno, fixmantiene717 con
+representación decodificada existente/bloquesoriginales. Testantes0,5vs1; después
+768componentesGPU correctos; builds32+4ops/BCcopias/SRV/probes/fixtures pasan.
+Series/otrosjuegos/otraspistas/costecontrolado pendientes; sincommit/publicación.
+Documentación final y archivos en xbox_terrain_seams.md, índice actualizado.
+
+13oct confirmación Series BC NPOT: usuario informa que en consola también se ve
+correctamente. Gate visual manual PC+Series; no se recibió nuevo log/captura ni
+medición de Series, no inferir versión ni FPS. Se solicita commit por temas, sin
+push. Se separan fix BC, metadata de bindings, F7 acotada, sonda de regiones,
+comparación de posiciones y documentación. Identidad de autor del usuario.
+
+Commits autorizados 13oct: a00cc81079 fixBCNPOT/testGPU; 1b684e96a5 metadata
+SRV/samplers; 8c4bcebf3c F7acotada/snapshots; a2b69a55ab sondaGPUregiones;
+ebd0180b2a comparaciónposicionesDXIL/GPU. Documentación en commit separado.
+Autor JulianDr14, sin coautorías automáticas ni push; evidencia local ignorada.

@@ -27,6 +27,7 @@ La rama de trabajo es `xbox`; las reglas del proyecto están en [AGENTS.md](../.
 - [Memoria de texturas](xbox_texture_memory.md): packing, readbacks, staging y comparación con Vulkan.
 - [Copias de bloques BC](xbox_bc_block_copy.md): preservación exacta de arrays decodificados y reinterpretación BC3/UINT128.
 - [Dimensiones de SRV](xbox_srv_dimensions.md): compatibilidad de cubemaps, fallback nulo y propiedad de descriptores.
+- [Líneas en el terreno](xbox_terrain_seams.md): dimensiones virtuales BC corregidas; desaparición de líneas confirmada por el usuario en Game A PC y Series; diagnóstico F7.
 - [Revisión de logs del 30 de septiembre de 2026](xbox_log_review_2026-09-30.md).
 
 Los resultados históricos conservan sus límites y pendientes. Un build correcto o
