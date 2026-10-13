@@ -453,7 +453,13 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
                     out.trace_views->push_back(view_id);
                 }
                 if (out.trace_filters) {
-                    out.trace_filters->push_back(sampler.Describe());
+                    out.trace_filters->push_back(fmt::format(
+                        "stage={} binding={} cbuf={}+{:x} element={} depth={} integer={} "
+                        "srv=[{}] sampler=[{}]",
+                        stage, texture_binding, desc.cbuf_index, desc.cbuf_offset, index,
+                        desc.is_depth, desc.is_integer,
+                        image_view.DescribeSrv(desc.type, aliases_depth && depth_feedback_ready),
+                        sampler.Describe()));
                 }
                 if (out.trace_types) {
                     out.trace_types->push_back(static_cast<u32>(desc.type));

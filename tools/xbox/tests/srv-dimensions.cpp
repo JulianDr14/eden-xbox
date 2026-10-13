@@ -139,6 +139,9 @@ RWByteAddressBuffer result : register(u0);
                 {{1, static_cast<s32>(base)}, {1, static_cast<s32>(layers - base)}}};
             ImageView view{runtime, vi, {}, image};
             const auto cube = view.Handle(Shader::TextureType::ColorCube);
+            const std::string metadata = view.DescribeSrv(Shader::TextureType::ColorCube);
+            assert(metadata.find(layers - base >= 6 ? "null=false" : "null=true") != std::string::npos);
+            assert(metadata.find("mips=1+1") != std::string::npos);
             assert(cube.ptr == view.Handle(Shader::TextureType::ColorCube).ptr);
             assert(cube.ptr != view.Handle(Shader::TextureType::ColorArray2D).ptr);
             sample(cube, layers - base >= 6 ? 10 + base : 0);
@@ -159,6 +162,7 @@ RWByteAddressBuffer result : register(u0);
         ImageViewInfo vi{ImageViewType::Cube, info.format, {{0, 0}, {1, info.resources.layers}}};
         ImageView view{runtime, vi, {}, image};
         const auto cube = view.Handle(Shader::TextureType::ColorCube);
+        assert(view.DescribeSrv(Shader::TextureType::ColorCube).find("null=true") != std::string::npos);
         sample(cube, 0);
         assert(cube.ptr != view.Handle(Shader::TextureType::ColorArray2D).ptr);
     }
@@ -189,6 +193,24 @@ RWByteAddressBuffer result : register(u0);
             allocated.push_back(handle);
         }
         for (auto handle : allocated) views.Free(handle);
+    }
+    // Original TSC and translated sampler metadata survive ownership transfers.
+    {
+        Tegra::Texture::TSCEntry tsc{};
+        tsc.min_filter.Assign(Tegra::Texture::TextureFilter::Linear);
+        tsc.mag_filter.Assign(Tegra::Texture::TextureFilter::Linear);
+        tsc.mipmap_filter.Assign(Tegra::Texture::TextureMipmapFilter::Linear);
+        tsc.wrap_u.Assign(Tegra::Texture::WrapMode::Border);
+        tsc.border_color = {1.0f, 0.5f, 0.25f, 0.0f};
+        Sampler original{runtime, tsc};
+        const auto metadata = original.Describe();
+        assert(metadata.find("border [1,0.5,0.25,0]") != std::string::npos);
+        assert(metadata.find("TSC=") != std::string::npos);
+        Sampler moved{std::move(original)};
+        assert(moved.Describe() == metadata);
+        Sampler assigned{runtime, tsc};
+        assigned = std::move(moved);
+        assert(assigned.Describe() == metadata);
     }
     scheduler.Finish();
     ThrowIfFailed(device.Get()->GetDeviceRemovedReason(), "removed device");

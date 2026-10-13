@@ -17,7 +17,8 @@ namespace D3D12 {
 using namespace TextureDetail;
 
 Sampler::Sampler(TextureCacheRuntime& runtime_, const Tegra::Texture::TSCEntry& config)
-    : runtime{&runtime_}, key{next_sampler_key.fetch_add(1, std::memory_order_relaxed)} {
+    : runtime{&runtime_}, key{next_sampler_key.fetch_add(1, std::memory_order_relaxed)},
+      guest_raw{config.raw} {
     handle = runtime->sampler_descriptors.Allocate();
     const bool linear_min = config.min_filter == Tegra::Texture::TextureFilter::Linear;
     const bool linear_mag = config.mag_filter == Tegra::Texture::TextureFilter::Linear;
@@ -93,16 +94,21 @@ eden_integer_sampler_state Sampler::IntegerState(u32 last_level) const {
 }
 
 std::string Sampler::Describe() const {
-    return fmt::format("filter 0x{:x} address {}/{}/{} aniso {} lod {}..{} bias {}",
+    return fmt::format("filter 0x{:x} address {}/{}/{} aniso {} lod {}..{} bias {} "
+                       "compare {} border [{:.6g},{:.6g},{:.6g},{:.6g}] "
+                       "TSC={:016x}/{:016x}/{:016x}/{:016x}",
                        static_cast<u32>(desc.Filter), static_cast<u32>(desc.AddressU),
                        static_cast<u32>(desc.AddressV), static_cast<u32>(desc.AddressW),
-                       desc.MaxAnisotropy, desc.MinLOD, desc.MaxLOD, desc.MipLODBias);
+                       desc.MaxAnisotropy, desc.MinLOD, desc.MaxLOD, desc.MipLODBias,
+                       static_cast<u32>(desc.ComparisonFunc), desc.BorderColor[0],
+                       desc.BorderColor[1], desc.BorderColor[2], desc.BorderColor[3],
+                       guest_raw[0], guest_raw[1], guest_raw[2], guest_raw[3]);
 }
 Sampler::~Sampler() { if (runtime && handle.ptr) runtime->sampler_descriptors.Free(handle); }
-Sampler::Sampler(Sampler&& other) noexcept : runtime{std::exchange(other.runtime, nullptr)}, handle{other.handle}, key{other.key}, filter{other.filter}, desc{other.desc} {}
+Sampler::Sampler(Sampler&& other) noexcept : runtime{std::exchange(other.runtime, nullptr)}, handle{other.handle}, key{other.key}, filter{other.filter}, desc{other.desc}, guest_raw{other.guest_raw} {}
 Sampler& Sampler::operator=(Sampler&& other) noexcept {
     if (this != &other) { if (runtime && handle.ptr) runtime->sampler_descriptors.Free(handle);
-        runtime = std::exchange(other.runtime, nullptr); handle = other.handle; key = other.key; filter = other.filter; desc = other.desc; } return *this;
+        runtime = std::exchange(other.runtime, nullptr); handle = other.handle; key = other.key; filter = other.filter; desc = other.desc; guest_raw = other.guest_raw; } return *this;
 }
 
 } // namespace D3D12

@@ -437,6 +437,9 @@ public:
     /// SRV declared as the shader's texture type: D3D12 requires the view dimension to match
     /// the HLSL declaration, so each type gets its own SRV, created on first use.
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE Handle(Shader::TextureType texture_type) const noexcept;
+    /// Metadata of the prepared binding, without materializing descriptors or reading GPU data.
+    [[nodiscard]] std::string DescribeSrv(Shader::TextureType texture_type,
+                                        bool depth_feedback = false) const;
     [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE StorageView(Shader::TextureType,
                                                            Shader::ImageFormat) const noexcept {
         return uav;
@@ -552,6 +555,7 @@ private:
     u64 key{};
     D3D12_FILTER filter{};
     D3D12_SAMPLER_DESC desc{};
+    std::array<u64, 4> guest_raw{}; ///< Original TSC words, diagnostic comparison only.
 };
 
 class Framebuffer {

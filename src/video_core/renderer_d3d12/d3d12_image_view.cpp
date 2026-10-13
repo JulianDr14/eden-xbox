@@ -285,6 +285,37 @@ ImageView::ImageView(TextureCacheRuntime& runtime_, const VideoCommon::NullImage
 }
 ImageView::~ImageView() { Release(); }
 
+std::string ImageView::DescribeSrv(Shader::TextureType texture_type, bool depth_feedback) const {
+    ID3D12Resource* resource = srv_resource ? srv_resource : image;
+    u32 base_layer = srv_params.base_layer;
+    u32 layers = srv_params.layers;
+    const char* route = srv_resource && srv_resource != image ? "reinterpret" : "image";
+    if (Image* const source = SourceImage()) {
+        if (depth_feedback && source->DepthFeedback()) {
+            resource = source->DepthFeedback()->Handle();
+            route = "depth-feedback";
+        }
+        if (texture_type == Shader::TextureType::ColorArray2D &&
+            srv_params.dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && source->SliceArray()) {
+            resource = source->SliceArray();
+            base_layer = 0;
+            layers = resource->GetDesc().DepthOrArraySize;
+            route = "slice-array";
+        }
+    }
+    const auto desc = resource ? resource->GetDesc() : D3D12_RESOURCE_DESC{};
+    const bool compatible = resource &&
+        IsSrvDimensionCompatible(texture_type, desc, base_layer, layers);
+    return fmt::format("@{:x} shader={} view={} route={} null={} resource={} dxgi={}/{} "
+                       "dim={} size={}x{}x{} samples={} mips={}+{} layers={}+{} mapping={:x}",
+                       gpu_addr, static_cast<u32>(texture_type), static_cast<u32>(type), route,
+                       !compatible, static_cast<void*>(resource), static_cast<u32>(desc.Format),
+                       static_cast<u32>(srv_params.format), static_cast<u32>(desc.Dimension),
+                       desc.Width, desc.Height, desc.DepthOrArraySize, desc.SampleDesc.Count,
+                       srv_params.base_level, srv_params.levels, base_layer, layers,
+                       srv_params.mapping);
+}
+
 D3D12_CPU_DESCRIPTOR_HANDLE ImageView::Handle(Shader::TextureType texture_type) const noexcept {
     const size_t index = static_cast<size_t>(texture_type);
     if (index >= srvs.size() || !runtime) {
