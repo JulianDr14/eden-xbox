@@ -181,19 +181,22 @@ void EmitGeometryPassthrough(IR::IREmitter& ir, const IR::Program& program,
             }
 
             const IR::Attribute attr = IR::Attribute::Generic0X + (j * 4);
-            ir.SetAttribute(attr + 0, ir.GetAttribute(attr + 0, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 1, ir.GetAttribute(attr + 1, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 2, ir.GetAttribute(attr + 2, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 3, ir.GetAttribute(attr + 3, ir.Imm32(i)), ir.Imm32(0));
+            for (u32 component = 0; component < 4; ++component) {
+                if (passthrough_mask[attr + component]) {
+                    ir.SetAttribute(attr + component,
+                                    ir.GetAttribute(attr + component, ir.Imm32(i)), ir.Imm32(0));
+                }
+            }
         }
 
         if (passthrough_position) {
-            // Assign position from input
             const IR::Attribute attr = IR::Attribute::PositionX;
-            ir.SetAttribute(attr + 0, ir.GetAttribute(attr + 0, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 1, ir.GetAttribute(attr + 1, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 2, ir.GetAttribute(attr + 2, ir.Imm32(i)), ir.Imm32(0));
-            ir.SetAttribute(attr + 3, ir.GetAttribute(attr + 3, ir.Imm32(i)), ir.Imm32(0));
+            for (u32 component = 0; component < 4; ++component) {
+                if (!program.is_geometry_passthrough || passthrough_mask[attr + component]) {
+                    ir.SetAttribute(attr + component,
+                                    ir.GetAttribute(attr + component, ir.Imm32(i)), ir.Imm32(0));
+                }
+            }
         }
 
         if (passthrough_layer_attr) {
@@ -219,7 +222,13 @@ u32 GetOutputTopologyVertices(OutputTopology output_topology) {
     }
 }
 
-void LowerGeometryPassthrough(const IR::Program& program, const HostTranslateInfo& host_info) {
+} // Anonymous namespace
+
+void LowerGeometryPassthrough(IR::Program& program) {
+    if (!program.is_geometry_passthrough || program.geometry_passthrough_lowered) {
+        return;
+    }
+    program.output_vertices = GetOutputTopologyVertices(program.output_topology);
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             if (inst.GetOpcode() == IR::Opcode::Epilogue) {
@@ -230,9 +239,8 @@ void LowerGeometryPassthrough(const IR::Program& program, const HostTranslateInf
             }
         }
     }
+    program.geometry_passthrough_lowered = true;
 }
-
-} // Anonymous namespace
 
 IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Block>& block_pool,
                              Environment& env, Flow::CFG& cfg, const HostTranslateInfo& host_info) {
@@ -264,8 +272,7 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
             }
 
             if (!normalized_host_info.support_geometry_shader_passthrough) {
-                program.output_vertices = GetOutputTopologyVertices(program.output_topology);
-                LowerGeometryPassthrough(program, normalized_host_info);
+                LowerGeometryPassthrough(program);
             }
         }
         break;

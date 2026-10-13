@@ -148,14 +148,20 @@ Id DefineInput(EmitContext& ctx, Id type, bool per_invocation,
 
 Id DefineOutput(EmitContext& ctx, Id type, std::optional<u32> invocations,
                 std::optional<spv::BuiltIn> builtin = std::nullopt,
-                std::optional<Id> initializer = std::nullopt) {
+                std::optional<Id> initializer = std::nullopt, bool preserve_passthrough = true) {
     if (invocations && ctx.stage == Stage::TessellationControl) {
         type = ctx.TypeArray(type, ctx.Const(*invocations));
     }
-    return DefineVariable(ctx, type, builtin, spv::StorageClass::Output, initializer);
+    const Id variable{DefineVariable(ctx, type, builtin, spv::StorageClass::Output, initializer)};
+    if (ctx.stage == Stage::Geometry && !ctx.uses_geometry_passthrough &&
+        ctx.geometry_passthrough_lowered && preserve_passthrough) {
+        ctx.passthrough_outputs.emplace_back(variable, type);
+    }
+    return variable;
 }
 
-void DefineGenericOutput(EmitContext& ctx, size_t index, std::optional<u32> invocations) {
+void DefineGenericOutput(EmitContext& ctx, size_t index, std::optional<u32> invocations,
+                         const VaryingState& passthrough) {
     static constexpr std::string_view swizzle{"xyzw"};
     const size_t base_attr_index{static_cast<size_t>(IR::Attribute::Generic0X) + index * 4};
     u32 element{0};
@@ -169,7 +175,12 @@ void DefineGenericOutput(EmitContext& ctx, size_t index, std::optional<u32> invo
         }
         const u32 num_components{xfb_varying ? xfb_varying->components : remainder};
 
-        const Id id{DefineOutput(ctx, ctx.F32[num_components], invocations)};
+        bool preserve_passthrough{};
+        for (u32 component = element; component < element + num_components; ++component) {
+            preserve_passthrough |= !passthrough.Generic(index, component);
+        }
+        const Id id{DefineOutput(ctx, ctx.F32[num_components], invocations, {}, {},
+                                 preserve_passthrough)};
         ctx.Decorate(id, spv::Decoration::Location, static_cast<u32>(index));
         if (element > 0) {
             ctx.Decorate(id, spv::Decoration::Component, element);
@@ -471,6 +482,26 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     : Sirit::Module(profile_.supported_spirv), profile{profile_}, runtime_info{runtime_info_},
       stage{program.stage}, texture_rescaling_index{bindings.texture_scaling_index},
       image_rescaling_index{bindings.image_scaling_index} {
+    geometry_passthrough_lowered = program.geometry_passthrough_lowered;
+    uses_geometry_passthrough = program.UsesNativeGeometryPassthrough();
+    if (program.is_geometry_passthrough) {
+        const bool matching_topology =
+            (runtime_info.input_topology == InputTopology::Points &&
+             program.output_topology == OutputTopology::PointList) ||
+            (runtime_info.input_topology == InputTopology::Lines &&
+             program.output_topology == OutputTopology::LineStrip) ||
+            (runtime_info.input_topology == InputTopology::Triangles &&
+             program.output_topology == OutputTopology::TriangleStrip);
+        if (!matching_topology) {
+            throw NotImplementedException("Geometry passthrough topology mismatch or adjacency");
+        }
+        if (uses_geometry_passthrough && program.invocations != 1) {
+            throw NotImplementedException("Native geometry passthrough requires one invocation");
+        }
+    }
+    if (uses_geometry_passthrough && !profile.support_geometry_shader_passthrough) {
+        throw LogicError("Geometry passthrough requires frontend lowering for this profile");
+    }
     const bool is_unified{profile.unified_descriptor_binding};
     u32& uniform_binding{is_unified ? bindings.unified : bindings.uniform_buffer};
     u32& storage_binding{is_unified ? bindings.unified : bindings.storage_buffer};
@@ -1630,7 +1661,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
                                                     : spv::BuiltIn::Position};
             input_position = DefineInput(*this, F32[4], true, built_in);
 
-            if (profile.support_geometry_shader_passthrough) {
+            if (uses_geometry_passthrough) {
                 if (info.passthrough.AnyComponent(IR::Attribute::PositionX)) {
                     Decorate(input_position, spv::Decoration::PassthroughNV);
                 }
@@ -1710,7 +1741,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
             }
         }
 
-        if (info.passthrough.Generic(index) && profile.support_geometry_shader_passthrough) {
+        if (info.passthrough.Generic(index) && uses_geometry_passthrough) {
             Decorate(id, spv::Decoration::PassthroughNV);
         }
         if (stage != Stage::Fragment) {
@@ -1751,7 +1782,8 @@ void EmitContext::DefineOutputs(const IR::Program& program) {
     const std::optional<u32> invocations{program.invocations};
     if (runtime_info.convert_depth_mode || info.stores.AnyComponent(IR::Attribute::PositionX) ||
         stage == Stage::VertexB) {
-        output_position = DefineOutput(*this, F32[4], invocations, spv::BuiltIn::Position);
+        output_position = DefineOutput(*this, F32[4], invocations, spv::BuiltIn::Position, {},
+                                       !info.passthrough.AllComponents(IR::Attribute::PositionX));
     }
     if (info.stores[IR::Attribute::PointSize] || runtime_info.fixed_state_point_size) {
         if (stage == Stage::Fragment) {
@@ -1794,7 +1826,7 @@ void EmitContext::DefineOutputs(const IR::Program& program) {
     }
     for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
         if (info.stores.Generic(index)) {
-            DefineGenericOutput(*this, index, invocations);
+            DefineGenericOutput(*this, index, invocations, info.passthrough);
         }
     }
     switch (stage) {

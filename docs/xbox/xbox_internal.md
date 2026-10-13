@@ -3031,3 +3031,31 @@ Reproducción sin hotkeys: slot3 RGBA y slot4 máscara0 comparten subrecurso; er
 12oct diagnóstico nullRT: clasificador acotado ERROR/613 + descripción Draw/PSO UNKNOWN/puntero RTV cero/(nullptr); cuenta fuera del límite500, Info primero/cada1024, sin filtro global por ID. GateGPU36draw/readbacks+fixtures negativos+inyección600 conocidos seguida613real y728real pasa (tap confirma ambos y ningún límite); incrementalUWP correcto, warningBUILD_ID preexistente al regenerar. No cambia rendering/recursos. Reproducción manual posterior pendiente; sincommit. Ver xbox_rtv_bindings.md.
 
 Cierre aceptado por el usuario (12 oct 2026): corrección de dimensiones SRV, bindings RTV y diagnóstico null/UNKNOWN cerrada para integración. Último gate PC PID23132: RenderError/Critical/728/overlap/SRV0, sin agotar límite de debug hasta119,93s; evidencia rtv-pc-diag-fixed-2026-10-12. Build UWP, regresión SRV y2304casos/36drawGPU/flood600 pasan. Se conservan documentadas las limitaciones: origen exacto shader/TIC del warning original, validación Series, visual y cierre limpio/bloqueo no certificados. El cierre aceptado no acredita resolver fallos ajenos de input/red/estabilidad. Commit solicitado, sin push.
+
+## Geometry passthrough: Game B (12 oct 2026)
+
+Los seis warnings anteriores son de Game B en Series/D3D12: SPIR-V se usa antes
+de Mesa/DXIL. Lowering ya activo; warning confundia semantica guest con mecanismo
+nativo. Candidato conserva estado guest y marca lowering idempotente, respeta
+componentes, corrige Generic31Y/Z/W y seleccion de conversion Z VS/GS. SPIR-V
+restaura salidas por primitiva tras EmitVertex; wrapper Mesa limpia entradas GS
+muertas antes de asignar firmas (harness reprodujo desajuste SV_Position VS->GS).
+Biblioteca shader UWP y objetos caches D3D12/Vulkan pasan; Mesa incremental pasa.
+45 modulos SPIRV-Tools Vulkan1.1, 36 DXIL/enlaces/PSOs D3D12 sin errores debug y
+24 casos semanticos explicitos pasan, control negativo detecta salidas perdidas.
+No GPU draw/readback ni shaders exactos recuperados; nativeNV solo modulo, mascaras
+nativas mixtas/builtins extra por cubrir. Build final usuario, visual Game B PC/
+Series y rendimiento pendientes; no certificar paridad completa. DLL nueva solo
+Mesa externa y harness, no paquete existente; package-appx toma nueva por defecto.
+Sin commit/push. Diseno, evidencia, fuentes y comandos: xbox_geometry_passthrough.md.
+
+Gate manual PC passthrough12oct: incrementalUWP53ops correcto y paquete conMesa
+corregida. UsuarioQ86s, shutdowncompleto/retorno0. Logarchivadoen
+build-uwp/test-results/geometry-game-b-pc/manual-{log,diag}.txt:
+warningpassthrough0,RenderError0,ShaderError0,314PSOsconstruidos;
+pipelines1637->1678,programas1231->1253,commitmuestreado3618MiB/cap5120.
+Servicios/red/inputtienenerroresajenos yCriticalLoadSaveDataThumbnailstub;
+noafirmarlogentero limpio. Confirmacionvisual/partidodelusuario,Series y
+equivalenciacompleta pendientes; noFPSni cierredefinitivocertificados.
+
+Cierre passthrough PC aceptado por el usuario (12 oct 2026): confirma partido y resultado visual correctos y solicita commit. Gate manual Q86s/retorno0, warningpassthrough0/RenderError0/ShaderError0, 314PSOs. Build final y DLL corregida ya probados. Series, FPS sostenidos y cobertura general siguen pendientes; no push.

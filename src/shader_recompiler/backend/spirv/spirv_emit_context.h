@@ -7,6 +7,8 @@
 #pragma once
 
 #include <array>
+#include <utility>
+#include <vector>
 
 #include <sirit/sirit.h>
 #include "common/container/unordered_set.h"
@@ -176,6 +178,12 @@ public:
     explicit EmitContext(const Profile& profile, const RuntimeInfo& runtime_info,
                          IR::Program& program, Bindings& binding);
     ~EmitContext();
+
+    bool uses_geometry_passthrough{};
+    bool geometry_passthrough_lowered{};
+    // Ordinary GS outputs become undefined after EmitVertex. Lowered passthrough
+    // outputs are per-primitive, so retain them across all emitted vertices.
+    std::vector<std::pair<Id, Id>> passthrough_outputs; // variable, value type
 
     [[nodiscard]] Id Def(const IR::Value& value);
 

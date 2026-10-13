@@ -150,6 +150,13 @@ void EmitEpilogue(EmitContext& ctx) {
 }
 
 void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
+    // Snapshot before depth conversion: restoring the unconverted position also
+    // prevents applying the conversion twice when it is a per-primitive output.
+    std::vector<Id> passthrough_values;
+    passthrough_values.reserve(ctx.passthrough_outputs.size());
+    for (const auto& [variable, type] : ctx.passthrough_outputs) {
+        passthrough_values.push_back(ctx.OpLoad(type, variable));
+    }
     if (ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);
     }
@@ -165,6 +172,9 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
     } else {
         LOG_WARNING(Shader_SPIRV, "Stream is not immediate");
         ctx.OpEmitStreamVertex(ctx.u32_zero_value);
+    }
+    for (size_t i = 0; i < passthrough_values.size(); ++i) {
+        ctx.OpStore(ctx.passthrough_outputs[i].first, passthrough_values[i]);
     }
     // Restore fixed pipeline point size after emitting the vertex
     SetFixedPipelinePointSize(ctx);

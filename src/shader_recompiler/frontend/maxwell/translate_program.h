@@ -20,6 +20,9 @@ namespace Shader::Maxwell {
                                            ObjectPool<IR::Block>& block_pool, Environment& env,
                                            Flow::CFG& cfg, const HostTranslateInfo& host_info);
 
+// Expand guest passthrough before SSA/info collection; idempotent and preserves guest semantics.
+void LowerGeometryPassthrough(IR::Program& program);
+
 [[nodiscard]] IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b,
                                                   Environment& env_vertex_b);
 

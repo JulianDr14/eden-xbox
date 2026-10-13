@@ -168,7 +168,7 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
         info.previous_stage_stores.mask.set();
     }
     const Shader::Stage stage{program.stage};
-    const bool has_geometry{key.unique_hashes[4] != 0 && !programs[4].is_geometry_passthrough};
+    const bool has_geometry{key.unique_hashes[4] != 0 && !programs[4].UsesNativeGeometryPassthrough()};
     const bool gl_ndc{key.state.ndc_minus_one_to_one != 0};
     const float point_size{std::bit_cast<float>(key.state.point_size)};
     switch (stage) {

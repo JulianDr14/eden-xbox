@@ -26,7 +26,14 @@ struct Program {
     u32 invocations{};
     u32 local_memory_size{};
     u32 shared_memory_size{};
+    // Guest semantics, also used by stage linking and depth conversion.
     bool is_geometry_passthrough{};
+    // The guest passthrough has already been expanded into ordinary vertex emission.
+    bool geometry_passthrough_lowered{};
+
+    [[nodiscard]] bool UsesNativeGeometryPassthrough() const noexcept {
+        return is_geometry_passthrough && !geometry_passthrough_lowered;
+    }
 };
 
 [[nodiscard]] std::string DumpProgram(const Program& program);

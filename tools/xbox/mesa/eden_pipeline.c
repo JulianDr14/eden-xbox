@@ -112,6 +112,16 @@ translate_pipeline(const struct eden_spirv_to_dxil_stage *stages, unsigned count
       /* Reverse order, so outputs the next stage never reads are gone before the previous stage
        * is linked against its own predecessor. */
       for (unsigned i = count; i-- > 0;) {
+         /* Linking the fragment stage can remove GS outputs and their input
+          * loads. Drop the now-unused GS inputs before assigning the VS/GS
+          * signature rows; otherwise an unused generic shifts SV_Position in
+          * the GS signature without a matching VS output. */
+         if (nir[i]->info.stage == MESA_SHADER_GEOMETRY) {
+            NIR_PASS(_, nir[i], nir_opt_dce);
+            NIR_PASS(_, nir[i], nir_remove_dead_derefs);
+            NIR_PASS(_, nir[i], nir_remove_dead_variables, nir_var_shader_in, NULL);
+            nir_shader_gather_info(nir[i], nir_shader_get_entrypoint(nir[i]));
+         }
          struct dxil_spirv_metadata link_metadata = {0};
          dxil_spirv_nir_link(nir[i], i > 0 ? nir[i - 1] : NULL, stages[i].conf, &link_metadata);
          out[i].metadata.requires_runtime_data |= link_metadata.requires_runtime_data;

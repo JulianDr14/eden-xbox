@@ -32,3 +32,5 @@ Los resultados históricos conservan sus límites y pendientes. Un build correct
 un arranque en PC no certifica gameplay, rendimiento ni funcionamiento en Series.
 
 - [RTV duplicados e inactivos](xbox_rtv_bindings.md): binding por máscara, PSO, MSAA y alpha-to-coverage.
+
+- [Geometry shader passthrough](xbox_geometry_passthrough.md): Game B, lowering, interfaces SPIR-V/DXIL y gates de componentes.
