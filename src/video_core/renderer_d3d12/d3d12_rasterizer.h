@@ -23,6 +23,7 @@
 #include "video_core/renderer_d3d12/d3d12_conditional_rendering.h"
 #include "video_core/renderer_d3d12/d3d12_query_cache.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
+#include "video_core/renderer_d3d12/diagnostics/d3d12_material_trace.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 
 namespace Tegra {
@@ -131,6 +132,9 @@ public:
     /// the draws move to another one, and rt0's NaN/Inf count is logged after every draw (slow:
     /// every draw waits for the GPU).
     void SetDrawTrace(bool enabled, bool dump_targets = false);
+    /// One frame of bounded draw metadata, no GPU readbacks. Refuses an intensive trace.
+    bool BeginMaterialTrace(u64 pixel_shader = 0);
+    void EndMaterialTrace(bool intervals_complete = true);
 
 private:
     struct DrawParams {
@@ -271,6 +275,20 @@ private:
     u32 draw_counter{};
     // Draw trace state (diagnostics/d3d12_draw_trace.cpp).
     bool trace_draws{};
+    MaterialTraceBudget material_trace;
+    std::unordered_map<std::string, u32> material_trace_records;
+    struct MaterialTarget {
+        VideoCommon::ImageId id{};
+        ComPtr<ID3D12Resource> resource;
+        VideoCommon::SubresourceBase base{};
+        u64 area{};
+    };
+    std::array<MaterialTarget, 3> material_targets; // RT0, one auxiliary color, depth.
+    SlotVector<Image>* material_images{};
+    u32 material_capture_id{};
+    u64 material_capture_stamp{};
+    void DumpMaterialTargets();
+    void LogDrawTrace(std::string_view line);
     bool trace_dumps{};
     u32 trace_index{};
     /// Color targets then depth of the framebuffer the traced draws go to (ids, not the

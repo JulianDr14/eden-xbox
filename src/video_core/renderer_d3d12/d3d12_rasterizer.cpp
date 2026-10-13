@@ -128,12 +128,14 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     }
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
 
+    const bool trace_this_draw = trace_draws ||
+        material_trace.Select(pipeline->Key().unique_hashes[5]);
     PipelineBindings bindings;
     std::vector<VideoCommon::ImageViewId> traced_views;
     std::vector<std::string> traced_filters;
     std::vector<u32> traced_types;
     std::vector<TracedBuffer> traced_buffers;
-    if (trace_draws) {
+    if (trace_this_draw) {
         bindings.trace_views = &traced_views;
         bindings.trace_filters = &traced_filters;
         bindings.trace_types = &traced_types;
@@ -150,7 +152,7 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         BUG_TRACK_KEY(DrawSkipped, reinterpret_cast<std::uintptr_t>(pipeline),
                       "draw skipped: the pipeline was rejected (VS {:016x} PS {:016x})",
                       pipeline->Key().unique_hashes[1], pipeline->Key().unique_hashes[5]);
-        if (trace_draws) {
+        if (trace_this_draw) {
             TraceDraw("draw skipped (PSO rejected)", pipeline, nullptr, traced_views, 0, 0);
         }
         return; // D3D12 rejected the PSO (logged when it was built)
@@ -187,17 +189,17 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     }
     if (params.num_vertices == 0 || params.num_instances == 0) {
         buffer_runtime.ApplyGeometry(scheduler.CommandList());
-        if (trace_draws) {
+        if (trace_this_draw) {
             TraceDraw("draw skipped (empty)", pipeline, framebuffer, traced_views,
                       params.num_vertices, params.num_instances);
         }
         return;
     }
     RecordDraw(*pipeline, bindings, *framebuffer, params, draw_state.topology);
-    if (trace_draws) {
+    if (trace_this_draw) {
         if (!traced_filters.empty()) {
-            LOG_INFO(Render, "D3D12 trace #{} samplers: {} types: {}", trace_index,
-                     fmt::join(traced_filters, " / "), fmt::join(traced_types, " "));
+            LogDrawTrace(fmt::format("D3D12 trace #{} samplers: {} types: {}", trace_index,
+                         fmt::join(traced_filters, " / "), fmt::join(traced_types, " ")));
         }
         TraceDraw(params.is_indexed ? "draw indexed" : "draw", pipeline, framebuffer,
                   traced_views, params.num_vertices, params.num_instances);

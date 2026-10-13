@@ -35,6 +35,8 @@ std::atomic<u32> traced_frame_override{};
 std::atomic<u32> traced_frame_count{1};
 std::atomic<bool> frame_diagnostics{true};
 std::atomic<u32> trace_requested{};
+std::atomic<bool> material_trace_requested{};
+std::atomic<u64> material_trace_shader{};
 
 IUnknown* CoreWindowOf(const Core::Frontend::EmuWindow& emu_window) {
     const auto& info = emu_window.GetWindowInfo();
@@ -58,6 +60,11 @@ void TraceNextFrames(u32 count) {
 
 void SetFrameDiagnostics(bool enabled) {
     frame_diagnostics.store(enabled, std::memory_order_relaxed);
+}
+
+void TraceNextMaterialFrame(u64 pixel_shader) {
+    material_trace_shader.store(pixel_shader, std::memory_order_relaxed);
+    material_trace_requested.store(true, std::memory_order_release);
 }
 
 RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
@@ -113,6 +120,7 @@ RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
 }
 
 RendererD3D12::~RendererD3D12() {
+    rasterizer.EndMaterialTrace(false);
     try {
         present_manager.WaitIdle();
         scheduler.DrainForShutdown();
@@ -161,6 +169,10 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                 constexpr u32 DUMP_INTERVAL = 600;
                 constexpr u32 MAX_DUMPS = 12;
                 ++accelerated_frames;
+                if (material_trace_presents_remaining != 0 &&
+                    --material_trace_presents_remaining == 0) {
+                    rasterizer.EndMaterialTrace();
+                }
                 const bool diagnostics = frame_diagnostics.load(std::memory_order_relaxed);
                 const bool dump = diagnostics && accelerated_frames >= DUMP_FRAME &&
                                   (accelerated_frames - DUMP_FRAME) % DUMP_INTERVAL == 0 &&
@@ -199,6 +211,15 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                     rasterizer.SetDrawTrace(false);
                     requested_trace = false;
                     LOG_INFO(Render, "D3D12: draw trace of frame {} complete", traced_frame);
+                }
+                if (material_trace_requested.exchange(false, std::memory_order_acquire)) {
+                    const bool started = rasterizer.BeginMaterialTrace(
+                        material_trace_shader.load(std::memory_order_relaxed));
+                    // Game A may present while recording a guest frame's preliminary passes.
+                    // Include the next interval too; draw/text budgets span both intervals.
+                    material_trace_presents_remaining = started ? 2 : 0;
+                    LOG_INFO(Render, "D3D12 material frame {}: {}", accelerated_frames + 1,
+                             started ? "begin (2 present intervals; up to 3 target snapshots)" : "busy: draw trace active");
                 }
             } else if (const bool has_image = ReadGuestLayer(framebuffer);
                        blit_ready && has_image) {

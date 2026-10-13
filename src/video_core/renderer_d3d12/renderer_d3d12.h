@@ -40,6 +40,8 @@ void SetTracedFrame(u32 frame, u32 count = 1);
 /// Traces the draws of the next `count` presented frames (and writes their render targets), even
 /// in a session played by hand. Any thread.
 void TraceNextFrames(u32 count);
+/// Bounded metadata across two present intervals, optional PS filter. Safe from the UI thread.
+void TraceNextMaterialFrame(u64 pixel_shader = 0);
 
 /// Whether presents write frame*.bmp and trace a frame's draws (the default). Off for a session
 /// played by hand (boot.cfg "play=1"). Set before boot.
@@ -217,6 +219,7 @@ private:
     std::optional<FsrLogState> fsr_logged;
     bool logged_accelerated{};
     u32 accelerated_frames{};
+    u32 material_trace_presents_remaining{};
     bool logged_fallback{};
     u32 indicator_frames{}; ///< frames the shader indicator has been drawn, for its animation
     std::chrono::steady_clock::time_point last_load_present{};

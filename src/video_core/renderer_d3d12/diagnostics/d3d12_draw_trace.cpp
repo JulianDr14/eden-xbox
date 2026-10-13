@@ -5,6 +5,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +17,7 @@
 #include "common/logging.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
+#include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/util.h"
@@ -146,6 +148,9 @@ u32 DumpTexelBytes(DXGI_FORMAT format) {
 } // Anonymous namespace
 
 void RasterizerD3D12::SetDrawTrace(bool enabled, bool dump_targets) {
+    if (enabled && material_trace.Active()) {
+        EndMaterialTrace(false);
+    }
     if (!enabled && trace_dumps) {
         DumpTargets(traced_targets);
         LOG_INFO(Render, "D3D12 trace buffers: {} of {} bound buffers differ from guest memory",
@@ -172,6 +177,117 @@ void RasterizerD3D12::SetDrawTrace(bool enabled, bool dump_targets) {
     traced_non_finite.clear();
     traced_depth.clear();
     trace_non_finite_grew = false;
+}
+
+bool RasterizerD3D12::BeginMaterialTrace(u64 pixel_shader) {
+    if (trace_draws) return false;
+    EndMaterialTrace(false);
+    material_trace.Begin(pixel_shader);
+    material_trace_records.clear();
+    material_targets = {};
+    material_images = nullptr;
+    ++material_capture_id;
+    material_capture_stamp = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    trace_index = 0;
+    return true;
+}
+
+void RasterizerD3D12::EndMaterialTrace(bool intervals_complete) {
+    if (!material_trace.Active()) return;
+    if (intervals_complete) {
+        try {
+            DumpMaterialTargets();
+        } catch (const std::exception& e) {
+            LOG_WARNING(Render, "D3D12 material target dump failed: {}", e.what());
+        }
+    }
+    LOG_INFO(Render, "D3D12 material complete: matched={} selected={} bytes={} "
+                    "omitted_draws={} dropped_lines={} intervals_complete={} "
+                    "(target snapshots are diagnostic; not draw replay)",
+             material_trace.matched, material_trace.selected, material_trace.bytes,
+             material_trace.matched - material_trace.selected, material_trace.dropped_lines,
+             intervals_complete ? 1 : 0);
+    material_trace.End();
+    material_trace_records.clear();
+    material_targets = {};
+    material_images = nullptr;
+}
+
+void RasterizerD3D12::DumpMaterialTargets() {
+    if (!material_images) return;
+    std::scoped_lock lock{texture_cache.mutex};
+    const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "trace";
+    std::filesystem::create_directories(directory);
+    u64 budget = 32ULL << 20;
+    for (size_t index = 0; index < material_targets.size(); ++index) {
+        const auto& target = material_targets[index];
+        if (!target.resource) continue;
+        // Slot IDs can be recycled. Retaining the resource and checking identity avoids
+        // dereferencing a deleted image or exporting a replacement from a reused slot.
+        Image* image = nullptr;
+        for (const auto [id, candidate] : *material_images) {
+            if (id == target.id && candidate->Handle() == target.resource.Get()) {
+                image = candidate;
+                break;
+            }
+        }
+        if (!image) {
+            LOG_WARNING(Render, "D3D12 material capture {} target {} expired", material_capture_id, index);
+            continue;
+        }
+        const u32 subresource = image->Subresource(target.base.level, target.base.layer);
+        const auto desc = target.resource->GetDesc();
+        UINT64 bytes{};
+        ComPtr<ID3D12Device> capture_device;
+        ThrowIfFailed(target.resource->GetDevice(IID_PPV_ARGS(&capture_device)), "material capture device");
+        capture_device->GetCopyableFootprints(&desc, subresource, 1, 0, nullptr, nullptr, nullptr, &bytes);
+        if (bytes == 0 || bytes > budget) {
+            LOG_WARNING(Render, "D3D12 material capture {} target {} skipped: {} bytes, {} budget",
+                        material_capture_id, index, bytes, budget);
+            continue;
+        }
+        budget -= bytes;
+        const std::string name = fmt::format("material_{}_{}_{}_{}_{:x}_m{}_l{}", material_capture_stamp, material_capture_id,
+            index == 0 ? "color" : index == 1 ? "aux" : "depth", image->info.format,
+            image->gpu_addr, target.base.level, target.base.layer);
+        const auto dumped = DumpTarget(*image, &name, subresource);
+        LOG_INFO(Render, "D3D12 material capture {} target {}: {} bytes, {}", material_capture_id,
+                 index, bytes, dumped ? name : "unsupported dump format/samples");
+    }
+}
+
+void RasterizerD3D12::LogDrawTrace(std::string_view line) {
+    if (material_trace.Active()) {
+        // Identical state/bindings are printed once per capture. Full string equality (not a
+        // hash alone) prevents collisions from hiding changed formats, samplers or registers.
+        const size_t state_at = line.find(" | VS ");
+        const size_t samplers_at = line.find(" samplers: ");
+        const size_t payload_at = state_at != std::string_view::npos ? state_at : samplers_at;
+        if (payload_at != std::string_view::npos) {
+            std::string payload{line.substr(payload_at)};
+            if (const auto found = material_trace_records.find(payload);
+                found != material_trace_records.end()) {
+                const auto reference = fmt::format("{} {}_ref=#{}", line.substr(0, payload_at),
+                    state_at != std::string_view::npos ? "state" : "samplers", found->second);
+                if (material_trace.AllowBytes(reference.size() + 256)) {
+                    LOG_INFO(Render, "{}", reference);
+                }
+                return;
+            }
+            if (material_trace.AllowBytes(line.size() + 256)) {
+                // Stored payload bytes cannot exceed the emitted-text budget; selected draw
+                // count also bounds the dictionary to at most two entries per selected draw.
+                material_trace_records.emplace(std::move(payload),
+                    state_at != std::string_view::npos ? trace_index - 1 : trace_index);
+                LOG_INFO(Render, "{}", line);
+            }
+            return;
+        }
+    }
+    // Include room for the logger's timestamp/source prefix in the fixed text budget.
+    if (material_trace.Active() && !material_trace.AllowBytes(line.size() + 256)) return;
+    LOG_INFO(Render, "{}", line);
 }
 
 void RasterizerD3D12::DumpTextureNonFinite(const Image& image) {
@@ -833,6 +949,9 @@ std::optional<u64> RasterizerD3D12::DumpTarget(const Image& target, const std::s
         std::ofstream stream(path, std::ios::binary | std::ios::trunc);
         stream.write(reinterpret_cast<const char*>(file.data()),
                      static_cast<std::streamsize>(file.size()));
+        if (!stream) {
+            LOG_WARNING(Render, "D3D12: could not write target dump {}", path.string());
+        }
     }
     return non_finite;
 }
@@ -841,6 +960,30 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
                                 const Framebuffer* framebuffer,
                                 std::span<const VideoCommon::ImageViewId> views, u32 vertices,
                                 u32 instances) {
+    if (material_trace.Active() && framebuffer && pipeline && framebuffer->Images()) {
+        material_images = framebuffer->Images();
+        const auto extent = framebuffer->Extent();
+        const u64 area = u64{extent.width} * extent.height;
+        const auto remember = [&](size_t slot, VideoCommon::ImageId id,
+                                  const Image* image, VideoCommon::SubresourceBase base) {
+            if (image && image->Handle() && area >= material_targets[slot].area) {
+                const auto& previous = material_targets[slot];
+                // Keep the first auxiliary at this resolution (the scene's preliminary
+                // surface), rather than replacing it with later same-size lighting/bloom.
+                if (slot == 1 && previous.resource && previous.area == area) return;
+                if (previous.id == id && previous.resource.Get() == image->Handle() &&
+                    previous.base.level == base.level && previous.base.layer == base.layer &&
+                    previous.area == area) return;
+                material_targets[slot] = {id, image->Handle(), base, area};
+            }
+        };
+        for (size_t rt = 0; rt < VideoCommon::NUM_RT; ++rt) {
+            if (!(pipeline->BoundColorTargets() & (1U << rt)) || framebuffer->ColorOnCopy(rt)) continue;
+            remember(rt == 0 ? 0 : 1, framebuffer->ColorImageId(rt), framebuffer->ColorImage(rt),
+                     framebuffer->ColorBase(rt));
+        }
+        remember(2, framebuffer->DepthImageId(), framebuffer->DepthImage(), framebuffer->DepthBase());
+    }
     const auto describe = [](const Image* image) {
         if (!image) {
             return std::string("none");
@@ -879,6 +1022,55 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
         line += fmt::format(" | VS {:016x} PS {:016x} blend0 {:08x}", key.unique_hashes[1],
                             key.unique_hashes[5], key.state.attachments[0].raw);
         const auto& dynamic = key.state.dynamic_state;
+        line += fmt::format(" PSO={} targets={:x} topology={} bias enable={} "
+                            "guest={:.6g} host={} clamp={:.6g} slope={:.6g}",
+                            static_cast<void*>(pipeline->Handle()), pipeline->BoundColorTargets(),
+                            static_cast<u32>(key.state.topology.Value()),
+                            dynamic.depth_bias_enable.Value(), std::bit_cast<float>(key.depth_bias),
+                            static_cast<INT>(std::bit_cast<float>(key.depth_bias) / 2.0f),
+                            std::bit_cast<float>(key.depth_bias_clamp),
+                            std::bit_cast<float>(key.slope_scaled_depth_bias));
+        for (size_t rt = 0; rt < key.state.attachments.size(); ++rt) {
+            const auto& blend = key.state.attachments[rt];
+            if (!(pipeline->BoundColorTargets() & (1U << rt))) continue;
+            const auto append_guest = [&](const auto& source) {
+                line += fmt::format(" | guestBlend{} perTarget={} separateA={} "
+                                    "RGB={}/{}/{} A={}/{}/{}", rt,
+                                    maxwell3d->regs.blend_per_target_enabled, source.separate_alpha,
+                                    static_cast<u32>(source.color_source),
+                                    static_cast<u32>(source.color_dest), static_cast<u32>(source.color_op),
+                                    static_cast<u32>(source.alpha_source),
+                                    static_cast<u32>(source.alpha_dest), static_cast<u32>(source.alpha_op));
+            };
+            if (maxwell3d->regs.blend_per_target_enabled) {
+                append_guest(maxwell3d->regs.blend_per_target[rt]);
+            } else {
+                append_guest(maxwell3d->regs.blend);
+            }
+            if (!blend.enable) {
+                line += fmt::format(" | blend{} disabled mask={:x}", rt, blend.raw & 0xf);
+                continue;
+            }
+            line += fmt::format(" | blend{} enable={} packed={:08x} "
+                                "keyRGB={}/{}/{} keyA={}/{}/{} "
+                                "translatedRGB={}/{}/{} translatedA={}/{}/{}",
+                                rt, blend.enable.Value(), blend.raw,
+                                static_cast<u32>(blend.SourceRGBFactor()),
+                                static_cast<u32>(blend.DestRGBFactor()),
+                                static_cast<u32>(blend.EquationRGB()),
+                                static_cast<u32>(blend.SourceAlphaFactor()),
+                                static_cast<u32>(blend.DestAlphaFactor()),
+                                static_cast<u32>(blend.EquationAlpha()),
+                                static_cast<u32>(MaxwellToD3D12::BlendFactor(blend.SourceRGBFactor(), false)),
+                                static_cast<u32>(MaxwellToD3D12::BlendFactor(blend.DestRGBFactor(), false)),
+                                static_cast<u32>(MaxwellToD3D12::BlendOp(blend.EquationRGB())),
+                                static_cast<u32>(MaxwellToD3D12::BlendFactor(blend.SourceAlphaFactor(), true)),
+                                static_cast<u32>(MaxwellToD3D12::BlendFactor(blend.DestAlphaFactor(), true)),
+                                static_cast<u32>(MaxwellToD3D12::BlendOp(blend.EquationAlpha())));
+        }
+        const auto& blend_color = maxwell3d->regs.blend_color;
+        line += fmt::format(" constants=[{:.6g},{:.6g},{:.6g},{:.6g}]",
+                            blend_color.r, blend_color.g, blend_color.b, blend_color.a);
         line += fmt::format(" depth test {} write {} func {} stencil {} cull {}",
                             dynamic.depth_test_enable.Value(), dynamic.depth_write_enable.Value(),
                             static_cast<u32>(dynamic.DepthTestFunc()),
@@ -976,12 +1168,13 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
             DumpTextureNonFinite(*image);
             CheckTracedTexture(*image);
         }
-        line += fmt::format(" | tex {} {}x{} type {} layers {}+{} of [{}]", view.format,
+        line += fmt::format(" | tex {} {}x{} type {} mips {}+{} layers {}+{} of [{}]", view.format,
                             view.size.width, view.size.height, static_cast<u32>(view.type),
+                            view.range.base.level, view.range.extent.levels,
                             view.range.base.layer, view.range.extent.layers,
                             describe(view.SourceImage()));
     }
-    LOG_INFO(Render, "{}", line);
+    LogDrawTrace(line);
 }
 
 } // namespace D3D12
