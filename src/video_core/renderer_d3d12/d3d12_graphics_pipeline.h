@@ -157,7 +157,7 @@ public:
                      const GraphicsPipelineCacheKey& key, std::function<SharedDxilStages(u64)> compile_dxil,
                      const std::array<const Shader::Info*, NUM_STAGES>& infos,
                      const PipelineLayout& layout, bool build_pso = true,
-                     GraphicsPsoCache* pso_cache = nullptr);
+                     GraphicsPsoCache* pso_cache = nullptr, u32 lower_noperspective_mask = 0);
     ~GraphicsPipeline();
 
     GraphicsPipeline(const GraphicsPipeline&) = delete;
@@ -247,8 +247,13 @@ public:
         return bound_color_targets;
     }
 
+    [[nodiscard]] u32 LoweredNoPerspectiveMask() const noexcept {
+        return lower_noperspective_mask;
+    }
+
     /// Opt-in isolated float output probe. Preserves linked VS, input layout and rasterization.
-    ComPtr<ID3D12PipelineState> CreateMaterialProbePipeline(std::span<const u8> pixel_shader) const;
+    ComPtr<ID3D12PipelineState> CreateMaterialProbePipeline(
+        std::span<const u8> pixel_shader, std::span<const u8> geometry_shader = {}) const;
 
     /// Port of Vulkan's ConfigureImpl: synchronizes and binds the guest's buffers and textures,
     /// writes the descriptor tables and transitions sampled and storage images. The render
@@ -267,6 +272,7 @@ private:
     const GraphicsPipelineCacheKey key;
     const u64 key_hash;
     const PipelineLayout& layout;
+    const u32 lower_noperspective_mask;
     SharedDxilStages dxil; ///< Immutable linked bytecode shared across fixed-state PSOs.
     std::array<bool, NUM_STAGES> has_stage{};
     std::array<std::shared_ptr<const StageBindings>, NUM_STAGES> stage_infos;

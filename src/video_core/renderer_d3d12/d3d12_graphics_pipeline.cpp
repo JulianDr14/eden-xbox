@@ -188,9 +188,9 @@ GraphicsPipeline::GraphicsPipeline(const Device& device_,
                                    std::function<SharedDxilStages(u64)> compile_dxil,
                                    const std::array<const Shader::Info*, NUM_STAGES>& infos,
                                    const PipelineLayout& layout_, bool build_pso,
-                                   GraphicsPsoCache* pso_cache_)
+                                   GraphicsPsoCache* pso_cache_, u32 lower_noperspective_mask_)
     : device{device_}, texture_runtime{texture_runtime_}, key{key_}, key_hash{key_.Hash()},
-      layout{layout_}, pso_cache{pso_cache_} {
+      layout{layout_}, lower_noperspective_mask{lower_noperspective_mask_}, pso_cache{pso_cache_} {
     u8 valid_targets{};
     for (size_t index = 0; index < key.state.color_formats.size(); ++index) {
         if (static_cast<Tegra::RenderTargetFormat>(key.state.color_formats[index]) !=
@@ -665,7 +665,7 @@ D3D12_GRAPHICS_PIPELINE_STATE_DESC GraphicsPipeline::Describe(
 }
 
 ComPtr<ID3D12PipelineState> GraphicsPipeline::CreateMaterialProbePipeline(
-    std::span<const u8> pixel_shader) const {
+    std::span<const u8> pixel_shader, std::span<const u8> geometry_shader) const {
     // The authored diagnostic PS supports exactly two noperspective generic vectors.
     // Reject side-effecting stages and depth/MSAA paths instead of silently approximating them.
     if (!dxil || has_stage[1] || has_stage[2] || has_stage[3] ||
@@ -697,6 +697,9 @@ ComPtr<ID3D12PipelineState> GraphicsPipeline::CreateMaterialProbePipeline(
         throw std::runtime_error("material GPU probe: depth/MSAA/topology unsupported");
     }
     desc.PS = {pixel_shader.data(), pixel_shader.size()};
+    if (!geometry_shader.empty()) {
+        desc.GS = {geometry_shader.data(), geometry_shader.size()};
+    }
     desc.NumRenderTargets = 1;
     std::fill(std::begin(desc.RTVFormats), std::end(desc.RTVFormats), DXGI_FORMAT_UNKNOWN);
     desc.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
