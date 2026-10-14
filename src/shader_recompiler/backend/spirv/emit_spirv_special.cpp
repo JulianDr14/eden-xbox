@@ -140,6 +140,24 @@ void EmitPrologue(EmitContext& ctx) {
 }
 
 void EmitEpilogue(EmitContext& ctx) {
+    if (ctx.stage == Stage::VertexB && ctx.runtime_info.lower_noperspective_mask != 0) {
+        // Read final outputs, after every guest store and before clipping. Doing
+        // this at each SetAttribute would depend on the order PositionW is written.
+        const Id position{ctx.OpLoad(ctx.F32[4], ctx.output_position)};
+        const Id w{ctx.OpCompositeExtract(ctx.F32[1], position, 3U)};
+        for (u32 index = 0; index < IR::NUM_GENERICS; ++index) {
+            if ((ctx.runtime_info.lower_noperspective_mask & (1U << index)) == 0) {
+                continue;
+            }
+            const auto& output = ctx.output_generics[index][0];
+            if (output.num_components != 4 || ctx.runtime_info.xfb_count != 0) {
+                throw NotImplementedException(
+                    "NoPerspective lowering requires whole VS varyings without XFB");
+            }
+            const Id value{ctx.OpLoad(ctx.F32[4], output.id)};
+            ctx.OpStore(output.id, ctx.OpVectorTimesScalar(ctx.F32[4], value, w));
+        }
+    }
     if (ctx.stage == Stage::VertexB && ctx.runtime_info.convert_depth_mode &&
         !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);

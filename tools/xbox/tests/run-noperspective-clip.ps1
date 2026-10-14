@@ -7,9 +7,11 @@ param(
     [string[]] $ConstantBuffers = @(),
     [string] $PixelShader,
     [string] $DepthInput,
-    [string] $MaskMip0
+    [string] $MaskMip0,
+    [string] $GeometryShader
 )
 $ErrorActionPreference = 'Stop'
+if ($GeometryShader -and !$PixelShader) { throw 'Geometry control requires the full captured pixel replay' }
 if ($VertexShader) {
     $clipExpected = if ($PixelShader) { 5 } else { 2 }
     if ($ConstantBuffers.Count -ne $clipExpected) { throw "Expected $clipExpected captured constant buffers in binding order" }
@@ -40,6 +42,7 @@ if ($VertexShader) {
     }
     $clipArgs += @($VertexShader, $ConstantBuffers[0], $ConstantBuffers[1], $clipPixel)
     if ($PixelShader) { $clipArgs += @($ConstantBuffers[2], $ConstantBuffers[3], $ConstantBuffers[4], $DepthInput, $MaskMip0) }
+    if ($GeometryShader) { $clipArgs += $GeometryShader }
 }
 & "$($clipBuild.FullName)\noperspective-clip.exe" @clipArgs
 if ($LASTEXITCODE -ne 0) { throw 'Native replay failed' }
