@@ -107,15 +107,56 @@ def compare(varyings, samples, depth, mask, camera, x0, y0):
                 limitations='Affine camera relation for the documented interface; controlled mask samples, approximate BC4/filter model. No automatic root-cause verdict.')
 
 
+def compare_varying_control(path, camera, full_width, full_height, x0, y0):
+    """Identity GS control has no sample pass; compare only its four varyings."""
+    width, height, data = native(path, (2,), 16)
+    if x0 < 0 or y0 < 0 or x0+width > full_width or y0+height > full_height:
+        raise ValueError('control ROI outside reference')
+    cb = camera.read_bytes()
+    if len(cb) < 368:
+        raise ValueError('camera constant buffer incomplete')
+    a, b, ox, oy = struct.unpack_from('<4f', cb, 352)
+    maxima, mismatches = [0.0]*4, [0]*4
+    covered = nonfinite = 0
+    for y in range(height):
+        for x in range(width):
+            actual = struct.unpack_from('<4f', data, 16*(y*width+x))
+            if actual[0] == -99999:
+                continue
+            if not all(math.isfinite(v) for v in actual):
+                nonfinite += 1
+                continue
+            covered += 1
+            u, v = (x0+x+.5)/full_width, (y0+y+.5)/full_height
+            expected = (u, v, -(2*u-1)*a-ox, (1-2*v)*b-oy)
+            for c, (observed, reference) in enumerate(zip(actual, expected)):
+                error = abs(observed-reference)
+                maxima[c] = max(maxima[c], error)
+                mismatches[c] += error > 0.001
+    return dict(covered=covered, nonfinite=nonfinite, max_abs_error=maxima,
+                points_above_tolerance=mismatches, tolerance=0.001)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ('varyings', 'samples', 'depth', 'mask-mip0', 'camera-cbuf', 'output'):
         parser.add_argument('--'+key, required=True, type=Path)
     parser.add_argument('--roi-x', required=True, type=int)
     parser.add_argument('--roi-y', required=True, type=int)
+    parser.add_argument('--identity-varyings', type=Path)
+    parser.add_argument('--linear-varyings', type=Path)
+    parser.add_argument('--linear-samples', type=Path)
     args = parser.parse_args()
+    if bool(args.linear_varyings) != bool(args.linear_samples):
+        parser.error('linear control requires both varying and sample exports')
     result = compare(args.varyings, args.samples, args.depth, args.mask_mip0,
                      args.camera_cbuf, args.roi_x, args.roi_y)
+    if args.identity_varyings:
+        result['identity_control'] = compare_varying_control(args.identity_varyings,
+            args.camera_cbuf, *result['full_size'], args.roi_x, args.roi_y)
+    if args.linear_varyings:
+        result['linear_control'] = compare(args.linear_varyings, args.linear_samples,
+            args.depth, args.mask_mip0, args.camera_cbuf, args.roi_x, args.roi_y)
     args.output.write_text(json.dumps(result, indent=2), encoding='utf8')
     print(json.dumps(result, indent=2))
 

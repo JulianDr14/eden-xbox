@@ -20,6 +20,10 @@
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_d3d12/diagnostics/material_varyings_ps.h"
 #include "video_core/renderer_d3d12/diagnostics/material_samples_ps.h"
+#include "video_core/renderer_d3d12/diagnostics/material_identity_gs.h"
+#include "video_core/renderer_d3d12/diagnostics/material_linear_gs.h"
+#include "video_core/renderer_d3d12/diagnostics/material_linear_varyings_ps.h"
+#include "video_core/renderer_d3d12/diagnostics/material_linear_samples_ps.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
@@ -1274,9 +1278,31 @@ void RasterizerD3D12::ProbeMaterialIntermediates(const GraphicsPipeline& pipelin
 
     ComPtr<ID3D12Device> capture_device;
     ThrowIfFailed(image->Handle()->GetDevice(IID_PPV_ARGS(&capture_device)), "material GPU probe device");
-    const std::array<ComPtr<ID3D12PipelineState>, 2> probes{
-        pipeline.CreateMaterialProbePipeline(material_varyings_ps),
-        pipeline.CreateMaterialProbePipeline(material_samples_ps)};
+    const bool lowered = pipeline.LoweredNoPerspectiveMask() != 0;
+    if (lowered && pipeline.LoweredNoPerspectiveMask() != 3) {
+        throw std::runtime_error("material GPU probe: unsupported partial NoPerspective lowering");
+    }
+    std::vector<ComPtr<ID3D12PipelineState>> probes;
+    if (lowered) {
+        // The production VS already exports a*W. Recover a in the isolated PS;
+        // do not multiply it again in the .43 geometry controls.
+        probes = {pipeline.CreateMaterialProbePipeline(material_linear_varyings_ps),
+                  pipeline.CreateMaterialProbePipeline(material_linear_samples_ps)};
+    } else {
+        probes = {pipeline.CreateMaterialProbePipeline(material_varyings_ps),
+                  pipeline.CreateMaterialProbePipeline(material_samples_ps),
+                  pipeline.CreateMaterialProbePipeline(material_varyings_ps, material_identity_gs),
+                  pipeline.CreateMaterialProbePipeline(material_linear_varyings_ps, material_linear_gs),
+                  pipeline.CreateMaterialProbePipeline(material_linear_samples_ps, material_linear_gs)};
+    }
+    constexpr std::array names{"varyings", "samples", "identity_varyings", "linear_varyings",
+                               "linear_samples"};
+    constexpr std::array channels{
+        "Generic0.x/Generic0.y/Generic1.x/Generic1.y",
+        "depth.r/depth.g/mask(screenUV,LOD0)/mask(screenUV,LOD9)",
+        "identityGS:Generic0.x/Generic0.y/Generic1.x/Generic1.y",
+        "smooth(a*clipW)/SVPosition.w:Generic0.x/Generic0.y/Generic1.x/Generic1.y",
+        "smooth(a*clipW)/SVPosition.w:depth.r/depth.g/mask(screenUV,LOD0)/mask(screenUV,LOD9)"};
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     desc.Width = width; desc.Height = height;
@@ -1340,14 +1366,13 @@ void RasterizerD3D12::ProbeMaterialIntermediates(const GraphicsPipeline& pipelin
         cmd->ResourceBarrier(1, &barrier);
         const auto name = fmt::format("material_{}_{}_draw_{}_gpu_{}_x{}_y{}",
             material_capture_stamp, material_capture_id, trace_index,
-            pass ? "samples" : "varyings", roi.left, roi.top);
+            names[pass], roi.left, roi.top);
         const bool queued = QueueMaterialReadback(target.Get(), 0, desc.Format, name, &box);
         LOG_INFO(Render, "D3D12 material GPU probe: {} queued={} ROI={}x{} full={}x{} "
-                        "VS={:016x} PS={:016x} pipeline={:016x} channels={}",
+                        "VS={:016x} PS={:016x} pipeline={:016x} lowered_noperspective={:08x} channels={}",
             name, queued, roi.right - roi.left, roi.bottom - roi.top, width, height,
             pipeline.Key().unique_hashes[1], pipeline.Key().unique_hashes[5], pipeline.KeyHash(),
-            pass ? "depth.r/depth.g/mask(screenUV,LOD0)/mask(screenUV,LOD9)"
-                 : "Generic0.x/Generic0.y/Generic1.x/Generic1.y");
+            pipeline.LoweredNoPerspectiveMask(), channels[pass]);
     }
 }
 

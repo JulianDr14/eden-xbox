@@ -827,6 +827,28 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::array<std::vector<u32>, Maxwell::MaxShaderStage> spirv;
     boost::container::static_vector<size_t, Maxwell::MaxShaderStage> stage_indices;
 
+    // Series corrupts native NoPerspective coordinates when clipping volumes
+    // cross W=0. Preserve screen-linear semantics via smooth(a*clipW)/clipW.
+    // Only direct VS -> FS is covered here: intermediate stages/indexed loads
+    // need their own output/input handling, and must retain the original route.
+    u32 lower_noperspective_mask{};
+    if (key.unique_hashes[1] && key.unique_hashes[5] &&
+        !key.unique_hashes[2] && !key.unique_hashes[3] && !key.unique_hashes[4] &&
+        layer_source_program == nullptr && !programs[5].info.loads_indexed_attributes) {
+        const auto& vertex_info = programs[1].info;
+        const auto& fragment_info = programs[5].info;
+        for (u32 index = 0; index < Shader::IR::NUM_GENERICS; ++index) {
+            if (fragment_info.interpolation[index] == Shader::Interpolation::NoPerspective &&
+                fragment_info.loads.Generic(index) && vertex_info.stores.Generic(index)) {
+                lower_noperspective_mask |= 1U << index;
+            }
+        }
+    }
+    if (dumps_dxil && lower_noperspective_mask != 0) {
+        LOG_INFO(Render, "D3D12: NoPerspective lowering VS={:016x} PS={:016x} mask={:08x}",
+                 key.unique_hashes[1], key.unique_hashes[5], lower_noperspective_mask);
+    }
+
     const Shader::IR::Program* previous_stage{};
     Shader::Backend::Bindings binding;
     for (size_t index = uses_vertex_a && uses_vertex_b ? 1 : 0; index < Maxwell::MaxShaderProgram;
@@ -852,7 +874,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         const size_t stage_index{index - 1};
         infos[stage_index] = &program.info;
 
-        const auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage)};
+        auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage)};
+        runtime_info.lower_noperspective_mask = lower_noperspective_mask;
         ConvertLegacyToGeneric(program, runtime_info);
         spirv[stage_index] = EmitSPIRV(profile, runtime_info, program, binding);
         if (IsDumpedShader(key.unique_hashes[index])) [[unlikely]] {
@@ -922,7 +945,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     return std::make_unique<GraphicsPipeline>(device, texture_runtime, &shader_notify,
                                               thread_worker, key, std::move(compile_dxil), infos,
-                                              layout, build_pso, &graphics_psos);
+                                              layout, build_pso, &graphics_psos,
+                                              lower_noperspective_mask);
 
 } catch (const Shader::Exception& exception) {
     BUG_TRACK_KEY(ShaderCompile, key.unique_hashes[1] ^ std::rotl(key.unique_hashes[5], 1),
