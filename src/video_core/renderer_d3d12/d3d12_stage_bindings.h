@@ -23,6 +23,7 @@ struct StageBindings {
     std::vector<Shader::ImageDescriptor> image_descriptors;
     Shader::VaryingState loads;
     Shader::VaryingState stores; ///< Read by the draw trace only.
+    u64 interpolation{}; ///< Two bits per generic, Shader::Interpolation; diagnostic only.
     bool uses_render_area{};
 
     bool operator==(const StageBindings& other) const;

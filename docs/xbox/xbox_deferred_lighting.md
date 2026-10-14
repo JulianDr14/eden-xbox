@@ -1,0 +1,1226 @@
+# Sombras y particiones de tubos: Game F en Series
+
+Fecha: 13 octubre 2026. Estado: **causas raíz pendientes; diagnóstico implementado**.
+No se ha certificado una corrección visual de estos defectos en Xbox.
+
+## Reproducción y evidencia
+
+El usuario confirma que la ejecución Series ya llevaba la corrección BC de
+dimensiones lógicas717×717 frente a almacenamiento720×720. Las pruebas PC no
+cerraron la incidencia de Series. No revertir BC ni atribuir estos síntomas a
+padding sin evidencia nueva. Lejos la sombra se ve correcta; al acercarse se
+distorsiona; a igual distancia ciertos ángulos la corrigen y otros la deforman.
+Las particiones afectan a tubos transparentes **y verdes opacos**: no investigar
+solo blending. No se ha aislado aún posición del personaje frente a cámara.
+
+Se localizaron/inspeccionaron las capturas Screenshot_2026-10-13_08-02-31.png,
+08-03-03.png y08-03-31.png. Los logs disponibles equivalentes estaban sin los
+sufijos(7)/(8). Evidencia archivada en
+`build-uwp/test-results/game-f-lighting-2026-10-13/`; las imágenes originales ya no
+estaban después en Downloads, pero se conservaron las copias. Se observan regiones
+de terreno con iluminación irregular y bandas en tubos; una imagen fija no permite
+atribuirlas a cascadas ni distinguir todas las juntas/reflejos artísticos.
+
+La compilación registrada b702b3d925-xbox no demuestra que faltara BC: scm_rev.cpp
+generado conservaba ese identificador. La declaración del usuario y los binarios
+archivados son evidencia adicional. Identificar cada nuevo paquete por versión
+del manifest y SHA256 EXE/APPX; no usar solo el git hash incrustado.
+
+Series .35, archivada en `.../series35/`: cuatro capturas completas de560/480/228/
+466draws, sin omisiones de selección, parser errors ni nullSRV. DoceBMP con0texeles
+no finitos. RenderWarning/Error/Critical0 y sin assertsBufferQueue; máximo commit
+muestreado2375MiB/5120. Retorno10 significa volver a biblioteca, con shutdown
+completo. WarningNVDRV Pin count imbalance no vinculado a los artefactos.
+
+La toma3color es un pase previo a iluminación, sin personaje/cielo final; auxiliares
+parecen normales/materiales y excluyen transparencias posteriores. Toma4color sí
+contiene tubo. La ausencia de sombras/tubos en un intermedio no demuestra que la
+captura elimine el defecto. Tampoco ausencia de warnings prueba fidelidad.
+
+## Rastro técnico y candidatos, sin causa confirmada
+
+Flujo real: registrosMaxwell → recompiladorIR → backendSPIR-V → Mesa spirv_to_dxil
+→ DXIL firmado → PSO/bindings/rasterizadorD3D12 → cachés/scheduler/presentación.
+No es una ruta directa Maxwell→HLSL. Rutas inspeccionadas:
+`src/video_core/renderer_d3d12/`, `src/shader_recompiler/`, cachés genéricas de
+video_core y backendVulkan como referencia. También se revisaron antecedentes
+NXbox f27b464
+y668162e
+como pistas, sin copiar un parche ni demostrar su causalidad aquí.
+
+- ÚnicoPS registrado con muestreo depth: VSd4896447533c2378/PSd3e840710932bff7.
+  D16@523490000,1024×1024,un mip/capa,filtro0x95,comparación4LEQUAL,border1.
+  Keyb1e16c4ecfee4dbc estable en las cuatro tomas. IR muestra cuatro referencias
+  de profundidad alrededor de transformaciónCB13, compatible con tapsPCF; no se
+  identificó selectorCSM en ese shader. No generalizar a todos los pases.
+- MRT previo: albedoRGBA8@511b90000,RGB10A2@512410000,RG16F@512c90000,
+  R11G11B10F@513d90000 yD32S8@5362a0000. Interpretar normales codificadas como
+  color no demuestra un fallo de iluminación.
+- Candidatos transparentes: VSc648e71bf1731375/PS444f3d7a68e48b43,2424vértices,
+  atributosSNORM10 obtenidos medianteR32_UINT, BC4/cubemaps/escenaHDR;
+  RGBSRC_ALPHA/INV_SRC_ALPHA,alfaONE/ZERO,LEQUAL,depthwrite1. Otra pareja
+  VSf7aae59fdc8ac518/PS80ef979501d4d7a5 con geometría similar,depthwrite0.
+  No se ha demostrado por píxel que cada draw corresponda al tubo.
+- Depthbounds0,vertexfetchfallback0 y filtrosMIN/MAX0 en las draws registradas.
+  Inspección de una COPIA de cachéPC encontró14/14hashes seleccionados y tradujo
+  IR con librerías reales. Sin Shuffle/FSwizzleAdd/DPdx/DPdy explícitos en ese
+  conjunto; sí muestreoLOD implícito. No certifica DXIL ni resultados del driver.
+  Caché original intacta; harness/IR/bytecode solo en build-uwp, fuera de Git.
+
+## Método contrastado con documentación
+
+[Mesa: debugging misrenderings](https://docs.mesa3d.org/graphics-debugging/debugging-misrenderings-crashes.html)
+recomienda partir de la imagen final y localizar el comando que introduce el
+defecto, examinando sus entradas. Advierte que capturar puede ocultar fallos al
+introducir sincronización: es una hipótesis a comprobar, no prueba de una carrera.
+[PIX GPU captures](https://devblogs.microsoft.com/pix/gpu-captures/) y
+[RenderDoc Pixel History](https://github.com/baldurk/renderdoc/blob/v1.x/docs/how/how_inspect_pixel.rst)
+documentan inspección por evento/fragmento. Nuestra traza no equivale a esas
+herramientas ni garantiza replay entre GPU/driver distintos.
+
+[Visual Studio Graphics Diagnostics no admiteD3D12](https://learn.microsoft.com/en-us/visualstudio/debugger/graphics/visual-studio-graphics-diagnostics-directx-12?view=visualstudio).
+[Depuración remota de paquetesUWP instalados](https://learn.microsoft.com/en-us/visualstudio/debugger/debug-installed-app-package?view=visualstudio)
+sí admite Xbox paraC++, incluso sin proyectoVS. Es auxiliar para estados/recursos,
+no Pixel History. No se confirmó accesoPIX a GPU de una Series retailUWP DevMode;
+los ejemplosGDK/devkit no acreditan ese acceso. Ninja sigue siendo el generador.
+
+[Microsoft: readback por fence](https://learn.microsoft.com/en-us/windows/win32/direct3d12/readback-data-using-heaps)
+y[Map](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12resource-map)
+exigen completar la escrituraGPU antes de leer el punteroCPU. Map persistente
+no sustituye fences. Conservar footprints/pitch según
+[GetCopyableFootprints](https://learn.microsoft.com/en-us/windows/win32/direct3d12/upload-and-readback-of-texture-data).
+
+## Implementación de diagnóstico .36
+
+1. El mando View+Menu1s abre «Capturar gráficos y continuar», con
+   material_capture_menu=1. A oculta/re-presenta el menú, arma la captura y reanuda.
+   No necesita F7 ni teclado. Se conservan dos intervalos de presentación.
+2. Antes de entregar cada PresentFrame a PresentManager se copia su imagen en
+   COPY_SOURCE. `material_<stamp>_<id>_present_<frame>` identifica la fuente exacta
+   copiada a DXGI, después de composición/crop/escalado/overlays. No se elige por
+   heurística de tamaño. Present fallido y transformaciones OS/display quedan fuera.
+3. Targets, snapshots porPS y fuentes depth muestreadas se copian a staging
+   diferido. Se retienen recurso y tick de última copia. Poll exporta solo tras
+   fence y fuera de los intervalos, sin Finish/Wait entre draws. El drenaje habitual
+   del renderer al cerrar se conserva. Diagnósticos síncronos antiguos siguen
+   existiendo, pero este paquete no los activa.
+4. RAW conserva bytes nativos sin padding entre filas, incluidos HDR/alfa/depth.
+   JSON indica dimensiones,DXGI,row_bytes,pitchGPU y origen top-left. BMP es preview
+   clamped; no utilizarlo para medir precisión ni alfa.
+5. material_probe_x/y=-2 selecciona64×32 centrales de cada target nativo compatible
+   de4bytes/texel tras cada draw directo seleccionado. Hasta2048registros/16MiB.
+   CSV identifica draw,RT,formato,región,dirección,subresource,VS/PS yoffset.
+   No incluye depth/MSAA ni todos los clears/copies/compute/indirect: no es Pixel
+   History completo. Coordenadas entre diferentes targets no se comparan sin más.
+6. Se captura la primera base mip/capa de fuentes depth muestreadas, hasta16MiB,
+   después del primer draw registrado que las usa. No demuestra que todas sean
+   shadow maps ni incluye todos los mips/cascadas. En feedbackdepth activo, la
+   fuente post-draw puede diferir del snapshot que realmente leyó el shader.
+7. Primera draw de cada parejaVS/PS, hasta128parejas: uniformes y prefijos de
+   geometría de hasta256KiB por binding,8MiB total. StreamedCB copia bytes reales
+   del upload; buffers persistentes se copian enGPU/leen tras fence. Log incluye
+   binding/slot/kind,dirección,offset,stride,tamaño original/salvado/truncamiento
+   y parámetros de draw. No captura todos los objetos ni es replay completo.
+8. Copias completas pendientes:64MiB lógicos, con reserva16MiB para dos salidas
+   1080p medidas en Series; reserva descontada al registrar presentaciones. Staging
+   puede redondear capacidad. ROI16MiB,inputs8MiB y temporales son adicionales.
+   Omisiones/busy se registran. No garantizar dos capturas4K con ese presupuesto.
+   No hay estas reservas/readbacks en juego normal. Copias/transiciones perturban
+   GPU; exportar archivos puede pausar DESPUÉS de capturar. No certificar FPS aquí.
+
+Hashes candidatos solo en boot.cfg: iluminación d3e840710932bff7 y transparencia
+444f3d7a68e48b43. Son primeras draws coincidentes, no pases completos. Ningún hash
+se fija en el renderer ni altera iluminación/blending. Tubos opacos se incluyen
+con ROI y trazado de todas las parejas. BC, samplers, depthbias, colores y sombras
+no se modificaron para ocultar síntomas.
+
+Archivos: diagnostics/d3d12_draw_trace.cpp y rasterizer.{h,cpp} gestionan captura,
+inputs y fences; renderer_d3d12.cpp conecta presentación/solicitudes;
+uwp_boot.cpp/game_menu/locales exponen mando/configuración; stage_bindings conserva
+interpolación leída deIR para diagnóstico y su identidad internada. Manifest sube
+a0.2.87.36. analyze-material-trace.py/compare-material-distance.py comparan estados;
+analyze-material-probe.py valida binarios y cambios deROI. Tests cubren límites,
+interpolación, menú, parsers y copiasGPU. Sin refactor ajeno ni commit/push.
+
+## Validación local y límites
+
+- Build incrementalUWP/link correctos. Menú/localización y política de trazas pasan.
+- Parser de metadata/distancias pasa referencias, campos cambiados, capturas
+  parciales y omisiones. ParserROI separa subresources y rechaza truncamientos,
+  bytes sin indexar y regiones inválidas. Cambios deROI no prueban draw defectuosa:
+  puede haber clears/compute/copies entre muestras.
+- GPU8193texeles/5formatos,array/mip,bordes/estados restaurados; extensión verifica
+  fullcopy nativa/alfa y fence retenido: PASS/debug limpio.
+- Gates anteriores: BC22extents/132imágenes/834mips/213504componentesGPU;
+  drawtargets2304combinaciones/36draws; srv/interner32atributos: PASS. No se
+  repiten como evidencia visual de P1 ni como nuevos tests de esta .36.
+- AppContainer ex10 clear/blit retorna0 y exporta dos imágenes de presentación;
+  cero draws esperadas. ex04 cubo texturizado retorna0, dos draws/ROI sin omisiones,
+  geometría480B/CB128B y color/depthRAW; BMP presentado inspeccionado visualmente.
+  Segundo gate ex04 también ejercita snapshotPS, con omisiones de targets por el
+  presupuesto explícito de64MiB y salidaPC3072×1776. No son errores deD3D12.
+- Render/capa debug sin fallos de validación. Otros subsistemas registran teclado
+  no configurado, BufferQueue abandonada al cierre y warningNVMap: no llamar a
+  esto «log global sin errores». Evidencia en build-uwp/test-results/game-f-deferred-*.
+- No medición FPS/memoria/performance de P1 en Series con este diagnóstico.
+  No se ha confirmado raíz de sombras ni tubos, ni su corrección visual.
+
+Paquete firmado separado: build-uwp/package-game-f-diagnostic/eden-xbox.appx;
+símbolos EXE/PDB en symbols/0.2.87.36. .35 se conserva. Perfiles/debug/hotkeys
+desactivados, library/play/cap5120MiB conservados. Identidad final se comprueba
+comparando manifest/config/EXE del ZIP con símbolos y binario construido.
+
+Verificación final .36: APPX14873817bytes,
+SHA256 `47b5ce2859927a723e1f88c4e1101404e76c423bcfbe54d87719b2d04dd8e9f6`;
+EXE `2b01fa7546f2f89a0bf8504f07697c9468e830f051f953ef2af2999efe4a093c`.
+Manifest/config/EXE/símbolos coinciden; sin captura automática ni debug layer.
+Firmado con el mismo certificado de desarrollo de .35; Windows reporta raíz
+autofirmada no confiable en la verificación general, no afirmar confianzaPKI.
+Último ex04 con snapshot: dos presentaciones, snapshot porPS, color y2ROI;
+depth final omitido explícitamente por presupuestoPC. Cuatro exports RAW/JSON/BMP
+verificados por tamaño y RGB bit a bit entre RAW y preview. Regresión parserROI
+aplicada también a la captura real. No errores/warningsRender/capa debug.
+
+## Prueba decisiva pendiente en Series
+
+Siete tomas ordenadas con la región afectada cerca del centro:
+lejos/sombra bien; intermedia; cerca/sombra mal; misma distancia/ángulo bien;
+misma distancia/ángulo mal; tubo verde; tubo transparente. Mantener personaje y
+resto de escena constantes cuando sea posible. View+Menu1s → Capturar gráficos
+y continuar → A; cámara quieta y10s entre solicitudes. Anotar si el defecto sigue
+visible al reanudar; screenshot externo de las mismas posiciones si es posible.
+Volver a biblioteca; descargar trace completa y eden_log,eden_graphics_bugs.json/
+.log,eden_uwp_diag. Comparar final presentado antes de interpretar intermedios.
+
+Seguir final→primer pase incorrecto→entradas, separar cámara/distancia/ángulo de
+personaje y buscar umbral. Solo si los datos lo demuestran, correlacionar con
+cascadas,LOD/mips,precisión,recorte,shaders oRT. Si inputs coinciden PC/Series y
+outputs difieren, reducir shader/estado a regresión mínima. Si ya difieren inputs,
+retroceder al productor. Comparar normales/tangentes/atributos y profundidad
+además de blending para tubos opacos y transparentes. Ninguna causa compartida
+entre los dos fallos se da por supuesta.
+
+Trampas de trabajo: package-appx requiere OutDir relativo al repo, aunque se
+valide antes su destino absoluto. Al escribir documentación desde PythonWindows,
+usar UTF-8 explícito: un error de codificación puede truncar el archivo abierto;
+este informe nuevo del diagnóstico se reconstruyó tras ese error, sin afectar
+código, evidencia archivada, paquetes ni documentación previa del proyecto.
+
+
+## Revisión de Series .36 recibida (13 octubre 2026)
+
+Downloads contenía eden_log.txt(5605747B), eden_uwp_diag.txt(26832B),
+eden_graphics_bugs.json/.log y trace con4380archivos/912370628B. Archivados en
+build-uwp/test-results/game-f-lighting-2026-10-13/series36. Logs copiados; trace
+conservada mediante hardlinksNTFS, sin duplicar912MB. inventory.json conserva
+SHA256/tamaño por archivo para detectar modificaciones posteriores. No cambiar
+los archivos enlazados in-place. Diag acumula un arranque.35 previo y el arranque
+.36 actual; la sesión analizada corresponde a S:/Program Files/WindowsApps/...36.
+
+| Toma | Frame inicial | Draws seleccionadas | MuestrasROI | BytesROI |
+|---|---:|---:|---:|---:|
+|1|2595|286|622|5077376|
+|2|2977|280|610|4979072|
+|3|3120|490|1118|9122560|
+|4|3652|232|522|4258176|
+|5|4206|244|555|4528512|
+|6|9311|181|386|3144064|
+|7|11540|528|1162|9483008|
+
+Las siete metadata completas: cero parsererrors, nullSRV, droppedlines y draws
+omitidas; cero registrosROI omitidos; ningún fallo de exportación/busy. Catorce
+presentaciones y56exports nativosRAW/JSON/BMP presentes, tamaños nativos válidos,
+cero texelesNaN/Inf en los56. Hay4198archivos de inputs:4189 completos y9prefijos
+vertex truncados a256KiB, indicados en log. No afirmar replay completo. Tres DS
+finales omitidos por presupuesto64MiB, tomas1/2/7; sí existen en las SIETE tanto
+D16muestreado@523490000 comoD32muestreado@5362a0000. D16es1024x1024/dxgi56,
+D32es1920x1080/dxgi39. No equivalen a todos los mips/capas ni a DS de todos los pases.
+
+Inspección visual: contact sheets presents-contact.png,passes-1.png,passes-6.png,
+passes-7.png. Se ve el terreno investigado en final presentado; tubo verde en6 y
+transparente en7. Capturar ahora sí conserva esos objetos en la imagen de salida.
+No asumir que todo cambio de tonalidad/contorno observado sea error original:
+falta comparación controlada con referenciaPC/Switch de esos mismos estados.
+
+Acotación de sombras: en TODAS las tomas la primera draw de iluminación conserva
+VSd4896447533c2378/PSd3e840710932bff7/keyb1e16c4ecfee4dbc. Normalizando únicamente
+identidadCOM de PSO/recursos, estado y bindings de esa draw son idénticos en las
+siete (hashes de análisis1b40bd77ae1e48fe/4b3f999f160ee12e). Misma profundidadD16,
+SRV/sampler0x95/LEQUAL4, mismas resoluciones y vistas de unmip/capa. No hay evidencia
+de un cambio de PSO/sampler/selección de mip de VISTA al cambiar cámara. Esto no
+mide LOD implícito real ni descarta otros pases o un problema aritmético/comparación.
+
+Cambian el contenido nativo de depth y los CB de cámara/proyección. IR y tamaños
+identifican muestras VS_CB4(368B),PS_CB4(432B),PS_CB12(32B),PS_CB13(288B), en ese
+orden de uniforms (slots son ordinales host, no númerosCBguest). CB13capturado
+es finito y distinto en las siete; IR lo usa para transformación y cuatro taps
+shadow. Primeras5mantienen CB13[272]=8; tomas6/7=12, con CB13[276]~0.05. No llamar
+cascada a esos valores sin interpretar operaciones y productor. Dentro de1-5
+CB12es idéntico; matrices de4cambian orientación respecto3/5. Camera/objetivo pueden
+moverse conjuntamente: no afirmar que distancia/personaje quedaron constantes.
+lighting-constants.json conserva muestras y distance.json la comparación de estados.
+
+Las regiones de terreno investigadas son visibles ya en RT0 inmediatamente tras
+la draw de iluminación(199/193/171/163/170/125/193 según toma), antes del pase
+transparente/postprocesado. Localiza un límite de búsqueda: ese pase o sus entradas
+anteriores; no demuestra que esa draw sea la primera incorrecta ni descarta albedo,
+normales/reconstrucción de posición. Mantener separada la hipótesis de tubos.
+
+Tubos: verde aparece en imagen opaca/auxiliar y salida de iluminación; transparente
+se añade después. En7, snapshot444f3d7a68e48b43 es la primera draw coincidente204,
+192índices, y aún NO dibuja el tubo visible. Esa misma familia continúa204-215 con
+192/2424/2688índices; luego216-219 y221 usan80ef979501d4d7a5 sin depthwrite, y220
+1740c3985649fefd. Son candidatos por familia/pase, no identificación inequívoca por
+píxel. ROIcentral de7 queda por encima del tubo del primer plano y no determina
+la draw de ese tubo. No atribuir el fallo a blending ni suponer que el snapshot
+primero corresponde al objeto. El final sí conserva el tubo y sus bandas; la
+limitación está en atribuir la draw concreta. Próximo análisis debe elegir esa
+región/objeto, no repetir indiscriminadamente toda la batería.
+
+RenderWarning/Error/Critical0 y sin device removed/exportfail; máximo commit
+muestreado2416MiB/5120, no pico garantizado. Shutdown completo, retorno10=biblioteca,
+no crash. WarningsInput/servicios y NVMap no prueban causalidad con sombreado.
+No certificar rendimiento por estas cifras ni deducir fidelidad de ausencia de
+warnings. No causa raíz demostrada ni parche de rendering introducido en revisión.
+Siguiente operación a contrastar: reconstrucción de coordenadas/transformación y
+comparaciónshadow con inputs capturados frente a backend/PC correcto; para tubos,
+draw concreta, atributos/normales/interpolación antes de cambiar blend. No hardcode
+ni modificación de bias/color/sombras. Evidencia suficiente para seguir investigando;
+no solicitar repetición de las siete capturas sin una necesidad concreta.
+
+## Investigación causal offline y diagnóstico .37 (13 octubre)
+
+Se reutilizaron las siete tomas .36, los 56 exports nativos y los inputs ya
+conservados. Los resultados reproducibles están en
+`build-uwp/test-results/game-f-lighting-2026-10-13/causal/`. No se modificaron los
+hardlinks de evidencia ni la caché original del PC. El inspector siempre hace
+una copia antes de llamar a LoadPipelines, que puede borrar una caché inválida.
+Se tradujeron 14 shaders invitados con las bibliotecas de producción a IR tipado
+con IDs estables, flags, descriptores y prueba explícita de control lineal.
+Los shaders/cachés del juego permanecen exclusivamente en build-uwp ignorado.
+
+### Operación exacta del pase de iluminación
+
+En las siete: VS `d4896447533c2378`, PS `d3e840710932bff7`, pipeline
+`b1e16c4ecfee4dbc`. Draw inicial por toma: 199/193/171/163/170/125/193.
+
+| Entrada del PS | Descriptor guest CB2 | Recurso nativo observado |
+|---|---:|---|
+|Albedo|+0x20|RGBA8, @511b90000|
+|Iluminación/material HDR previo|+0x28|R11G11B10, @513d90000|
+|Normal codificada|+0x30|RGB10A2, @512410000|
+|Profundidad lineal y material|+0x38|RG16F, @512c90000|
+|Profundidad de sombras|+0x48|D16 1024², @523490000|
+
+La reconstrucción utiliza **RG16F.r**, no R11 ni la textura D32. CB4 contiene
+near=100 y far=100000; `viewZ = fma(linearDepth, 99900, 100)`.
+El VS genera un rayo a partir de NDC y CB4[352..364]. La posición de vista usada
+por sombras es `(-ray.x*z, -ray.y*z, -z) + (2*normal.rgb-1)*CB13[272]`.
+Se transforma por las cuatro filas de CB13, divide por W y consulta D16 cuatro
+veces con offsets de PCF de CB12[28] (~0.0006) y comparación LEQUAL. El código
+factored `shadow_coordinates` reproduce bit a bit las 2.940 coordenadas/taps
+comprobadas contra el IR completo. No se identificó selección de cascadas en
+este pase. W no es constante: es una proyección de sombras deformada/projectiva,
+dependiente de cámara. Eso explica qué transformación cambia con cámara, pero
+**no demuestra que esa transformación sea incorrecta**.
+
+En todas las tomas se cumple, dentro del redondeo de constantes FP32:
+
+```
+LightViewToShadow * MainWorldToView = BiasXYZ * ShadowWorldToClip
+BiasXYZ: x'=(x+w)/2, y'=(-y+w)/2, z'=(z+w)/2, w'=w
+```
+
+ShadowWorldToClip procede de VS_CB4[96..159] del productor D16. Error absoluto
+máximo de la composición: 0.000317..0.000737; coeficiente mayor por toma:
+10552..18929. WorldToView y ViewToWorld también componen identidad con error
+máximo 0.000215..0.000596, incluyendo traslación. No aparece una transposición
+general ni una inversión Y/Z entre esas matrices. No excluir errores locales
+en otras draws ni confundir consistencia interna con una referencia Switch.
+
+### Pruebas discriminantes ejecutadas
+
+|Hipótesis/comprobación|Resultado|Alcance de la conclusión|
+|---|---|---|
+|Replay escalar del PS, inputs ROI anteriores a la draw, FP32/FMA, PCF y almacenamiento R11 por truncamiento|11759/11760 píxeles bit a bit; tomas 1–5 y 7: 1680/1680 cada una; toma 6: 1679/1680|No hay discrepancia grande introducida por la ejecución de ese PS en esas regiones; un píxel de borde PCF queda distinto|
+|Forzar únicamente los cuatro resultados shadow a 1 en el replay|Las seis ROI de tomas 1–5/7 quedan idénticas; en toma 6 cambia 1255/1680 salidas|Las regiones centrales investigadas de 1–5/7 ya están iluminadas por D16. Sus diferencias de color no se explican por ese término shadow|
+|Invertir Y de consulta, invertir comparación, alterar rayo Y, filtro sin cuantizar y separar FMA|Controles conservados en lighting-replay.json; inversión Y/comparación rompe la región con sombra de 6; separar FMA no cambia salidas cuantizadas en la rejilla dispersa|Descarta esas alteraciones generales como corrección de los píxeles ensayados; no prueba cada operación de cada shader|
+|Reconstruir linealDepth desde D32 muestreado, near/far capturados|735/735 texeles coinciden con FP16 truncado; redondeo al más cercano discrepa como máximo una unidad FP16|La reconstrucción/depth fuente son coherentes en esas ROI; D32 procede de su primer uso muestreado, no de todo instante previo|
+|Atribuir truncamiento FP16/R11 a fallo exclusivo Series|Probe nativo PC AMD Radeon Pro 5300M también trunca: con 371 valores reales del replay, RG16 RTZ371/RNE129; R11 RTZ371/RNE76|No justifica cambiar globalmente el redondeo del renderer. El PC comparte ese comportamiento|
+|Primera malla D16 de toma 1: 470 vértices, skinning CB6, 906 triángulos, raster CPU|56 píxeles interiores del winding visible: bias100 da 51 exactos, 2 a -1 unidad D16 y 3 con profundidad observada menor, compatibles con oclusión; bias0 falla en 55, bias200 falla en todos|Consistencia interna de proyección/skinning/bias de esa malla, no todo el mapa ni todos sus productores|
+
+El replay utiliza fmaf nativo y falla ante opcodes/flujo no soportados; no es un
+emulador completo de Maxwell ni reproduce exactamente el reciprocal o las reglas
+subtexel/interpolador del hardware. No interpreta ramas linealizando sus bloques.
+La única discrepancia densa queda junto a un borde de PCF: puede depender de
+precisión de filtro/reciprocal y **no se ha demostrado que sea un bug Series**.
+Las MAE del informe comparan float32 sin cuantizar con RT cuantizado: no deben
+interpretarse como error visual cuando los bits almacenados coinciden.
+Coincidir con IR no descarta que Maxwell→IR ya introduzca una semántica incorrecta;
+sin referencia independiente no equivale a certificar el shader del invitado.
+
+Se amplió el forward-check D16 a las SIETE primeras mallas capturadas de esa
+pareja: 836 muestras interiores, 784 dentro de2 unidades D16 y52 con profundidad
+observada menor (compatibles con oclusión posterior), **cero profundidad predicha
+ausente**. Por toma: 53/56,61/64,106/108,121/124,97/100,1/7,345/377 dentro de2.
+Bias capturado100 en1–5 y0 en6–7; stride/offsets de pesos e índices se leen de cada
+draw, no se supone el layout de1 para las otras. Herramienta reproducible:
+`check-captured-shadow-mesh.py`, reporte `shadow-depth-raster-all.json`.
+No demuestra la corrección de las otras mallas ni del shader material.
+
+La comprobación de truncamiento usa un PS nativo DXBC de copia, que aísla la
+conversión RTV. No equivale a ejecutar el shader invitado DXIL en PC. Una segunda
+rejilla sintética reproducible de 371 valores da RG16 RTZ371/RNE189 y R11
+RTZ371/RNE96. Ambas corridas nativas quedan limpias con la capa debug D3D12.
+Las reglas de precisión y tolerancias se contrastaron con
+[Microsoft, floating-point rules](https://learn.microsoft.com/en-us/windows/win32/direct3d11/floating-point-rules).
+No extrapolar de ellas una regla de redondeo Maxwell no comprobada.
+
+### Primera información que falta aguas arriba
+
+El historial del píxel central muestra que los inputs ya cambian antes de la
+iluminación. Esto precisa la conclusión anterior: ver el síntoma tras lighting
+acotaba **pase o entradas**, no demostraba que naciera en lighting.
+En toma 3, albedo cambia por última vez en draw27
+VS `2d3131869b44982c` / PS `08b0982cc117e4a3`; normal/HDR/profundidad por última
+vez en draw41 VS `83e96b83bb284ca4` / PS `5f6f758f38e25d9c`, **7929 índices**.
+La primera draw guardada de esa pareja era draw37, **102 índices**, con otros
+materiales. No sirve como input replay de draw41.
+
+Draw41 vincula albedo BC1 sRGB256² @5bb956e00, otra BC1 sRGB256² @5bb98e800,
+BC5 SNORM256² @5bb962200, cubemap16², tabla1D64 y noise16². El shader también
+usa atributos SNORM10 empaquetados y tangentes SNORM8. No se conservaron sus
+CB/vertex/index exactos ni los texeles de esos mapas/mips. Los exports existentes
+contienen sus resultados ROI, **no esos operandos**. No hay una forma única de
+invertir los MRT y recuperar simultáneamente UV, derivadas, normales, texturas y
+constantes que no se copiaron. Este es el bloqueo concreto para atribuir la
+primera operación errónea aguas arriba. Los tamaños de estas texturas son256²:
+no aparece el caso717→720 en esos recursos; la corrección BC sigue intacta.
+
+El historial registra última **modificación de bytes**, no última cobertura:
+una draw puede escribir los mismos bits, y clears/copies intermedios no quedan
+atribuidos por ese historial. Una exploración de reproyección mundo entre tomas
+dio normales distintas para ciertos puntos, pero el muestreo de píxel vecino,
+normal maps, tiempo y tolerancia de8 unidades impiden atribuir error causal.
+Se conserva como exploración (`world-normal-reprojection.json`), no como prueba
+de un defecto de normales ni justificación para modificarlas.
+
+### Tubo transparente: exclusión geométrica adicional
+
+Se hizo backward slice del VS a Position XYZW, sin ejecutar muestreo material
+innecesario y exigiendo flujo lineal. Toma7, draw204 (PS444,192 índices): bounds
+pantalla [909.39,994.70]..[1099.37,1283.79]. Draw216 (PS80ef,2424 índices):
+[907.51,884.72]..[1090.73,1149.87]. Ambas quedan por debajo del tubo visible en
+primer plano (~x832..1088,y628..864). Exportados JSON/alambradoSVG; no hay vértices
+detrás de la cámara. Esto descarta que sus snapshots sean el tubo concreto.
+Los shaders conservan alpha blending SRC_ALPHA/INV_SRC_ALPHA, interpolación
+smooth y LEQUAL; PS444 escribe depth y PS80ef no. Esos estados distintos son
+hechos, no una causa demostrada. Para el tubo visible faltan las constantes y
+geometría de las draws posteriores de la familia. Tubo verde opaco sigue separado.
+
+### Instrumentación implementada, validada y empaquetada
+
+Selección genérica de snapshot por PS **y número de índices/vértices host**:
+`material_snapshot_vertices0/1=0` conserva selección previa; un valor no cero
+elige la primera coincidencia de ambos campos. Esa draw conserva sus CB y
+geometría aunque antes apareciera la misma pareja VS/PS. Antes de dibujar, copia
+sus entradas pequeñas con todos los mips y capas expuestos por las vistas.
+No es selección infalible por objeto: varias draws pueden compartir PS/count;
+los nombres identifican la draw real para comprobarla después.
+
+El exportador conserva bloques BC1–BC7, incluidas variantes SNORM/sRGB/typeless,
+sin decodificarlos ni fabricar un BMP. Usa NumRows/RowSizeInBytes reales, elimina
+únicamente padding de pitch y conserva dimensiones lógicas del mip en JSON.
+También soporta texturas1D de formatos ya decodificables. Rechaza explícitamente
+MSAA/3D/depth-feedback potencial/vistas sobre copia incompatible y registra omisiones; no finge capturarlas.
+Referencia: [Microsoft GetCopyableFootprints](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-getcopyablefootprints).
+
+Límites:4MiB por subrecurso,8MiB/256subrecursos por draw seleccionada, máximo dos
+selectores; permanecen el límite global64MiB de readback, reserva16MiB de present,
+8MiB de inputs CB/geometría y ROI16MiB. No hay waits por draw ni lecturas fuera
+de captura; fuentes retenidas hasta fence y disco después de los intervalos.
+La carga adicional de copia/export dentro de diagnóstico no se ha medido en
+Series; no hay medición de FPS, RAM pico ni compilación PSO de gameplay nueva.
+No se cambió ningún estado gráfico, shader traducido ni política de texturas BC.
+
+Archivos de implementación: d3d12_material_trace.h (selector/formatosBC),
+d3d12_draw_trace.cpp (inputs concretos/mips/export), d3d12_rasterizer.{h,cpp}
+(captura antes de draw), renderer_d3d12.{h,cpp} y uwp_boot.cpp (configuración).
+Herramientas nuevas: inspect-captured-shader.cpp/build-captured-shader-inspector.ps1,
+ir-scalar-evaluator.py, replay-lighting-ir.py, analyze-lighting-causality.py y
+project-captured-mesh.py. Fixtures: tests/lighting-ir.py, material-trace.cpp,
+float-store.cpp y run-material-causality.ps1. No commit/push.
+
+Gates: incremental UWP/link eden-uwp correcto; inspector14/14; replay denso y
+735depth/2940taps repetidos con verificación de flujo; fixtures FMA/noFMA,
+flujo rechazado, slicing, PCF, cuantización y selector pasan. Native GPU gate:
+32subrecursos BC1/4/5SNORM/7, cuatro mips incluyendo2×1 y dos capas, todas las
+filas idénticas tras GPU; debug limpio. Parsers distancia/ROI y git diff --check
+pasan. No prueba GPU del nuevo exportador dentro de AppContainer/Series aún.
+
+Comandos reproducibles desde raíz:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/xbox/tests/run-material-causality.ps1
+powershell -ExecutionPolicy Bypass -File tools/xbox/build-captured-shader-inspector.ps1
+# Ejecutar inspector con PATH de layout/VCLibs, CACHE OUTPUT HASH[,HASH...].
+# Get-AppxPackage para localizar VCLibs requiere Windows PowerShell; en este
+# host el módulo Appx no carga desde pwsh. Usar powershell.exe para ese paso.
+# Después, usando los IR exportados:
+python tools/xbox/analyze-lighting-causality.py CAPTURE_ROOT IR_DIRECTORY --output causal.json
+python tools/xbox/replay-lighting-ir.py CAPTURE_ROOT VS_IR_JSON PS_IR_JSON --step 1 --rounding rtz --experiments baseline,shadow_all_lit --output replay.json
+python tools/xbox/project-captured-mesh.py CAPTURE_ROOT VS_IR_JSON PS_HASH --capture 7 --output mesh.json
+python tools/xbox/check-captured-shadow-mesh.py CAPTURE_ROOT SHADOW_VS_IR_JSON --output shadow-mesh.json
+```
+
+Paquete diagnóstico **0.2.87.37** firmado en
+`build-uwp/package-game-f-causal/eden-xbox.appx`, separado de .35/.36, con
+símbolos en `build-uwp/symbols/0.2.87.37/`. Configuración: PS0=5f6f758f38e25d9c,
+vertices0=7929; PS1=444f3d7a68e48b43,vertices1=2424. Conserva play1,
+prewarm1/fastmem0/límite5120 y captura por mando, sin perfiles/hotkeys.
+
+APPX14831692bytes, SHA256
+`0e08a526d81e278c97ec6aeda67eb10ca3278822ad2948ddc564af47a6a30a56`.
+EXE de layout/APPX/símbolos coincide:
+`bed6dd089db921e945457e59d6840cd069e48031deb781367280f10e92061868`.
+PDB `fb35b597dd6a9da71d0129d16c399015d2ca428448b040713e35d8a0233c9f8d`.
+ZIP/manifest sinBOM/config/EXE verificados, verification.json conservado.
+SignTool sign finalizó correctamente con certificado local EdenXboxDev. La
+verificación `/pa` en este PC devuelve raíz no confiable: no se certifica cadena
+de confianza instalada en PC ni se importó un certificado por esa comprobación.
+Se entrega el .cer habitual para Device Portal si la consola no lo tiene confiado.
+
+Siguiente ejecución mínima: instalar .37, acercarse a la región equivalente a
+toma3/5 donde se ve la deformación, View+Menu1s → «Capturar gráficos y continuar»
+→ A. Una captura de esa región obtiene lo que falta para draw41; **no repetir las
+siete**. Si además se ensaya el tubo, una captura con él visible permite comprobar
+si la primera PS444/2424 lo dibuja; no se presupone que sí. Recuperar logs y trace.
+Antes de seguir, verificar `_before_draw_*_input_*_m*_l*`, inputs de draw7929 y
+snapshot post-draw; si no hubo coincidencia, los registros permiten determinarlo.
+Con esos datos: comparar UV/normal/tangente y material del productor con MRT,
+después ejecutar su PS con texturas/mips reales y derivadas/LOD controlados.
+La identificación causal y la validación visual estable por distancia/ángulo
+siguen pendientes; no se declara solucionada ninguna de las dos incidencias.
+
+## Mapa nuevo recibido con .37 y diagnóstico .38
+
+El usuario encontró otro mapa donde una sola vista muestra franjas diagonales
+en el terreno y bandas en un tubo **verde opaco**. No necesita regresar al mapa
+anterior: el nuevo contiene evidencia útil. Diag confirma ruta Series
+S:/Program Files/WindowsApps/...0.2.87.37..., límite OS5120MiB y salida normal
+retorno10/biblioteca. Máximo commit muestreado2444MiB; no pico garantizado.
+RenderWarning/Error/Critical0. No interpretar esto como ausencia de defectos.
+Bugtracker contiene stubs de servicios/erroresInput al arranque y BufferQueue
+abandoned/playtime/NVMap al salir, frame4319; no hay evidencia que los vincule a
+los píxeles capturados en4071. No se declara el log global libre de errores.
+
+Archivado en `build-uwp/test-results/game-f-lighting-2026-10-13/series37-map/`:
+548archivos de trace/115166005bytes, SHA256inventory, logs copiados y trace con
+hardlinks conservados sin escribirlos in-place. Una captura completa, frame4071,
+402draws/969ROI, cero omitted/dropped/parsererrors. Siete exportsRAW/JSON/BMP
+válidos, dos de presentación; profundidadD16/D32 presente.525buffers de inputs
+más el binROI. No inputs truncados ni omitidos registrados.
+
+La configuración de .37 estaba dirigida a **geometría del otro mapa**:
+PS5f/7929 y PS444/2424. Aquí no existen esas coincidencias. PS5f aparece con
+2994/354/156/396/2010/468/702/2220índices, y la familia transparente PS444 no
+aparece. Por ello no hay `_before_draw_*_input_*` ni snapshots seleccionados.
+La captura estándar/primeras parejas/ROI sí funcionó. No fue un fallo al tomarla.
+
+Inspección de imágenes: franjas oblicuas también visibles en RGB10A2 de normales,
+con la misma trayectoria general que las irregularidades de iluminación final.
+Acota la investigación a la generación/uso del G-buffer; no prueba que cada
+variación de normal sea incorrecta sin referencia o reproducción de su material.
+
+Lighting ahora es draw143, VSd4896447533c2378/PS**5f3a3ed7e21366f4**,18vértices,
+pipeline4763e2cf417bb089; no es el PSd3e del mapa anterior. Usa los mismos cinco
+tipos de entradas y **un tap Dref**, frente a cuatro en el anterior. Se exportó
+su IR real desde la copia de caché y se adaptó replay-lighting-ir.py para comparar
+el ROI exacto posterior cuando no hay snapshot completo de ese PS. BaselineRTZ
+**1680/1680bits exactos**, también1680/1680 forzando shadow_all_lit: el ROIcentral
+no está sombreado por D16. El centro contiene a P1; no extrapolar a toda la
+franja, que queda fuera de esos64×32. Coincidencia con IR no certifica Maxwell.
+
+Productor útil del terreno: draw9, VS37f370b16be0684f/PS087ab2f2815bc80a,
+**3624índices**,673vértices y1208triángulos. Proyección de sus inputs conservados:
+bounds [460.70,404.56]..[1758.98,832.66], cubre parte del suelo afectado. Los
+buffers de esta draw sí están completos. Material: BC1sRGB512²@5ebdf3400,
+BC4UNORM512²@5ebf99800, **BC5SNORM512²@5ebf43a00**, cubemaps y tabla1D64.
+Esos texeles/mips no están en los siete exports actuales.
+
+Prueba adicional de VS: slice Position y normal/bitangente/tangente/UV, decode
+SNORM10/SNORM8 según atributos capturados e interpolación perspectiva. Se añadió
+sqrt/rsqrt al evaluador con fixtures. En seis puntos del suelo (700,600),
+(800,650),(1050,570),(1100,570),(1100,600),(1400,550), profundidad prevista
+concuerda con D32 muestreado dentro de7.7e-7. Longitudes de bases interpoladas
+0.9966..1.0000; no degeneración grande en este cálculo CPU. En(1200,600) otra
+superficie oculta la malla (delta0.000406), por lo que no se atribuye su normal.
+Reportes grass-mesh.json/grass-tangent-basis.json y script local check-basis.py
+conservados. Esto **no valida la salida VS real en GPU** ni permite descartar un
+error de fetch/desempaquetado en Series; sí proporciona valores de referencia
+para contrastar el material. Falta muestreo BC5/LOD para cerrar la cadena.
+
+Tubo: se localizó una pieza compatible con su interior: draw57,
+VS2d3131869b44982c/PSb0170e3f4b9e6df3,360índices,97vértices/120triángulos,
+bounds[1583.84,365.59]..[1668.96,421.87], dentro de la abertura visible. Blending
+desactivado en cuatro MRT, depthLEQUAL/write1; no es transparencia. Muestrea
+BC1sRGB32×128, BC4UNORM32×128 y128², cubemaps y tabla1D. No atribuirle toda la
+pared exterior: la primera draw PS08 (102) proyecta otra pieza a la izquierda,
+bounds[1479.04,357.05]..[1544.12,384.80]. JSON/alambrados preservados.
+
+Paquete **0.2.87.38** preparado y firmado en
+`build-uwp/package-game-f-map/eden-xbox.appx`,14831682bytes,
+SHA256 `12a7e7786c62ccc0d97d32bb4bb5cbc0880b6138aca1203599c3297ea93d12a9`.
+Mismo EXE/PDB de .37 (hashes anteriores), símbolos copiados a0.2.87.38 y
+verification.json verifica manifest/config/EXE. Cambio exclusivamente de
+configuración: PS0=087ab2f2815bc80a/count3624; PS1=b0170e3f4b9e6df3/count360;
+ROI(1100,570), sobre suelo y fuera de P1 en esta vista. No recompilar ni
+alterar estados/BC/shaders del renderer para cambiar estos selectores.
+
+Siguiente dato imprescindible: contenido nativo/mips del mapa BC5 del material
+de draw9 y mapas del interior del tubo. .38 los copiará antes de esas draws,
+usando el exportador ya compilado. Una captura **en este mismo mapa**, con vista
+lo más parecida posible, basta para intentar obtenerlos; no repetir la batería
+de siete ni volver al anterior. Conservar también logs/trace para verificar
+coincidencias y omisiones antes de afirmar replay completo. Pruebas locales del
+evaluador, parsers y diff-check pasan. No parche visual ni causa raíz confirmada.
+
+## Series .38: entradas conservadas y prueba causal de fase UV
+
+La nueva sesión confirma .38 en S:/WindowsApps y retorno10 normal/biblioteca.
+Se recibieron inicialmente cinco archivos mientras terminaba la transferencia;
+la revisión se hizo con los967archivos finales,128517035bytes, preservados en
+`build-uwp/test-results/game-f-lighting-2026-10-13/series38-map` mediante hardlinks
+NTFS/inventorySHA256. No interpretar el listado inicial incompleto como fallo
+del exportador ni modificar esos hardlinks in-place.
+
+Captura4367:204draws/479ROI/3923968bytes, cero omisiones/parsererrors/dropped.
+Ahora sí coincidieron draw9PS087/3624 y draw60PSb017/360. Hay498bin (497inputs+
+ROI),174RAW+JSON y120BMP. Inputs seleccionados:86subrecursos/710608bytes del
+terreno y80/27960bytes del tubo, con todas las filas nativas verificadas contra
+metadata. No truncamientos de buffers ni fallos Render registrados. El DSfinal
+se omite por límite64MiB (pending61035896 +8294400), pero permanecen las fuentes
+D16 yD32 muestreadas; no hace falta repetir por ese DSfinal. Los stubs/Input de
+arranque y BufferQueue/playtime/NVMap al salir no demuestran causalidad gráfica.
+
+### Replay de la operación que produce las normales
+
+Se decodificaron los bloques BC5SNORM nativos del terreno @5bc413a00,512²,
+mips0/1, sin modificar el renderizador. La textura contiene ondulaciones suaves
+grandes (normal-map-decoded.bmp), no detalle fino de hierba. Rangos R[-0.441,0.567],
+G[-0.606,0.260]. Que esas ondas existan en GPU no demuestra que sean incorrectas
+ni que coincidan con la textura original guest: falta una referencia independiente.
+
+Se evaluó Position/TBN/UV del VS real con los buffers de draw9 y se interpoló
+perspectiva. Luego, únicamente la expresión aritmética del camino cubierto que
+escribe MRT1, incluyendo reconstrucción Z, normalización y codificación RGB10.
+CB9[20]=1 permite descartar los dos caminos de demote por alfa de este caso;
+no se linealizaron arbitrariamente los bloques del PS ni se afirma replay de
+todos sus MRT/ramas. El muestreo bilineal usa los bloques reales, wrap y fracciones
+subtexel8bits. El sampler normal es0x15/anis1, SRV82/84, mapping1b08,
+LOD0..0.09765625; se ensayaron mip0 y mezcla al MaxLOD.
+
+|Control de una sola entrada|Píxeles dentro de2unidades RGB10|Error medio por canal, unidades RGB10|Máximo|
+|---|---:|---:|---:|
+|BC5 real, LOD0|1680/1680|0.2690|2|
+|BC5 real, mezcla MaxLOD|1680/1680|0.2411|1|
+|Normal map plano, solo offline|2/1680|77.0145|266|
+|Invertir solo Y del normal map, offline|9/1680|69.2284|503|
+
+Por tanto, se reproduce el patrón nativo de normales desde sus entradas. No hay
+una discrepancia grande de ejecución GPU frente a esa expresión IR en el ROI
+ensayado. El piso real de confianza sigue siendo Maxwell→IR/guestinputs/referencia,
+no se certifica fidelidad por coincidir con nuestro propio IR.
+
+El lighting de esta misma captura (PS5f3a3ed7e21366f4) reproduce **1680/1680bits
+R11 exactos** y no cambia al forzar únicamente Dref=1. Aquí el ROIestá sobre
+terreno, fuera de P1: esas franjas concretas no proceden del término de
+shadow map probado. No extrapolar a las sombras proyectadas de otros objetos.
+
+Scripts/informes de caso conservados: decode-normal.py, replay-normal.py,
+normal-map-float.bin, normal-replay.json y lighting-replay.json. No contienen
+un parche del juego; consumen evidencia. Sigue pendiente comparar texeles nativos
+con guestoriginal y semántica independiente antes de atribuir un error de upload.
+
+### Entrada que explica el desplazamiento entre .37 y .38
+
+VB eIB de draw9 son idénticos por SHA256 entre las dos sesiones. La rotación de
+cámara es casi idéntica; cambia la traslación. Pero también cambian los offsets
+de la transformación UV del normal map: **VS_CB5[48]/[52]**.
+
+```
+.37: -0.7777892947, 1.4796011448
+.38: -2.6761226654, 3.7576012611
+delta para restaurar .37: +1.8983333707, -2.2780001163
+```
+
+El backward slice de Generic11.xy (76/77) prueba que los offsets participan en
+las UV del muestreo BC5, junto con CB5[32..44]. Los dos offsets son una entrada
+distinta de la matriz de cámara, no una cascada ni un depth bias.
+
+Prueba controlada: mismos triángulos y punto local, reproyección entre tomas,
+muestreo bilineal de D32 para rechazar oclusiones;39/46puntos cumplen deltaDepth
+<2e-6. Normales comparadas en mundo con ViewToWorld de cada toma. Con los inputs
+.38, diferencia frente a .37: media28.092°, máximo38.981°. Restaurando **solo los
+dos offsets UV**, sin cambiar cámara, geometría, sampler ni textura: media0.716°,
+máximo1.698°. La reproyección usa un buffer de normales final .37 y CB de su
+primera draw: no afirmar identidad de frame para todos los exports; cuantización,
+muestreo y posibles cambios entre intervalos limitan el residual.
+
+Esto identifica causalmente una entrada que desplaza el patrón entre esas dos
+tomas. **No demuestra que ese desplazamiento sea un bug**: puede ser animación
+del material, tiempo guest u otra actualización de constantes. No se había
+mantenido esa fase constante al comparar distancia. No afirmar todavía que el
+defecto lo cause solo la cámara ni que todo sea una animación legítima.
+Reportes cross-view-normal.json/uv-phase-counterfactual.json y scripts de caso
+conservados. El primer ensayo con depth vecino rechazó casi todos los puntos;
+se corrigió a muestreo bilineal antes de usar la comparación, evitando confundir
+pendiente de profundidad con oclusión o con error de normales.
+
+### Tubo y estado del trabajo
+
+Los inputs de la pieza interior del tubo se conservaron con sus80subrecursos.
+La BC1sRGB32×128 @564620000 decodifica un gradiente verde/negro; el gráfico
+pipe-albedo-564620000_m0_l0.bmp queda preservado. No se atribuyen las rayas de
+la pared exterior a esa pieza: no existe aún una prueba por píxel de su productor.
+Se mantiene investigación independiente del terreno.
+
+No se preparó .39 ni se necesita otra captura Xbox por ahora. No cambios de
+estados, shaders, bias, normal maps ni BC; las perturbaciones fueron offline.
+Siguiente contraste: validar la actualización de fase UV y las entradas de
+material contra una referencia PC/Switch o una ruta independiente, antes de
+calificarla como error. La captura .38 permite continuar sobre los mismos datos,
+incluido el material del tubo; no certificar corrección visual ni rendimiento.
+
+
+## Contraste nativo PC .38 y corrección del criterio de comparación
+
+El usuario precisa que las franjas de Series **se doblan formando ángulos de
+90 grados**, mientras que las de PC permanecen verticales. La mera presencia de
+ondas del material en ambos equipos NO demuestra que el defecto sea el mismo ni
+que sea legítimo. Separar las ondas suaves del normal map de las discontinuidades
+rectilíneas que atraviesan superficies en Series. No cerrar la incidencia por
+coincidencia de shaders, ausencia de warnings o replay de un único ROI.
+
+Referencia PC conservada en
+`build-uwp/test-results/game-f-lighting-2026-10-13/pc38-map/`:
+940 archivos/138714682 bytes, inventario SHA256, logs/diag y captura8744,
+201 draws/458 ROI completos. Se ejecutó D3D12 AMD Radeon Pro5300M con el mismo
+EXE diagnóstico y límite5120MiB. La presentación PC es3072×1776; su export nativo
+final es1920×1080, igual que Series. Se inspeccionó **también ese export nativo**:
+no atribuir la diferencia del tubo exclusivamente al escalado de presentación.
+El tubo opaco de Series muestra marcas verticales mucho más evidentes.
+
+Comparación de inputs seleccionados, por dirección guest/mip/layer:
+86 subrecursos del terreno y80 del interior del tubo, **166/166 byte idénticos**
+entre PC y Series. Reporte native-input-comparison.json. Esto descarta diferencias
+de contenido en esos subrecursos, no errores de coordenadas, derivadas, filtrado,
+ejecución del shader o materiales no seleccionados (incluida la pared exterior).
+
+Replay de normales PC,1680 píxeles interiores: LOD0,1680/1680 dentro de2 unidades
+RGB10, error medio0.215873 y máximo1; mezcla MaxLOD,1680/1680, media0.235913 y
+máximo2. Normal plano:0/1680; invertirY:6/1680. Replay lightingPS5f3,1680/1680
+R11 exactos con RTZ; forzar únicamente Dref=1 conserva1680/1680. Resultado
+comparable al ROI Series, **sin validar otras zonas donde se dobla la banda**.
+
+Se inspeccionaron los exports completos: las discontinuidades marcadas finales
+no tienen esa misma trayectoria en el color base ni en las normales. Las ondas
+suaves que sí aparecen en normales son un fenómeno distinto que se había mezclado
+con la descripción de las franjas finales. El siguiente análisis por píxel debe
+conservar esta distinción, y localizar primero el productor de la discontinuidad.
+
+Experimento adicional offline, shadow-screen.py y shadow-factor-reconstructed.bmp
+por plataforma: backward slice del único ImageSampleDrefImplicitLod del shader
+PS5f3 (instrucción140), matrices/normal RGB10 y D16 nativos. Se reconstruyó la
+profundidad lineal a partir de la fuente D32 y se cuantizó a half RTZ; se evaluaron
+129600 posiciones por plataforma (paso4). Los mapas resultantes contienen sombras
+localizadas y **no reproducen las bandas rectilíneas marcadas de Series**.
+No es una reproducción exacta del término en toda la pantalla: falta el RG16
+completo anterior al lighting y la D32 se capturó posteriormente. En el ROI, la
+profundidad half reconstruida coincide1674/1680 en Series y1661/1680 en PC,
+resto dentro de1 ULP. No usar este experimento aproximado para descartar todas
+las sombras ni extrapolar el residual del ROI al resto del escenario.
+
+Quedan dos datos concretos por resolver usando primero los recursos ya guardados:
+(1) contribución del MRT R11 de iluminación/reflejos y RG16 reales fuera del ROI,
+antes del lighting; (2) productor por píxel de la pared exterior del tubo. La
+pareja VS2d313/PS08b con528 índices (Series126/PC124), pipeline9d89b0cfc523d31f,
+stride28, color half3 y UV SNORM16x2, es un candidato distinto del interior y de
+la primera pieza PS08b capturada: todavía no se le atribuye la pared por evidencia
+espacial. No cambiar sus atributos ni precision sin esa atribución.
+
+No se modificó el renderer en este contraste; no hay parche visual ni .39.
+No se certifica una causa ni una corrección. Los scripts/reportes privados de
+caso permanecen junto a las capturas; no se incorporan texturas ni shaders guest
+al repositorio. La comparación debe seguir regiones coincidentes del modelo y
+controlar fase UV/cámara, además de inspeccionar las operaciones de iluminación.
+
+
+## Diagnóstico .39: completar exactamente el pase de iluminación
+
+La auditoría de cobertura (`replay-lighting-ir.py --validate-only`) confirma en
+Series38 y PC38 que **ninguna de las cuatro entradas del lighting tiene cobertura
+completa en el instante anterior a la draw**, y tampoco hay salida completa
+inmediatamente posterior. Los exports finales de normales, color y D32 no
+sustituyen esos instantes, particularmente al reutilizarse los RT. Informes
+input-coverage.json conservados en cada carpeta de evidencia. No hace falta
+repetir siete vistas: falta un pase completo en la vista del quiebre90°.
+
+Se amplió exclusivamente el exportador opt-in por shader/count: hasta8MiB por
+subrecurso y32MiB por draw seleccionada, antes4/8MiB. Cuatro superficies
+1920×1080×4 consumen33177600bytes. Más la salida exacta8294400 yD16 2097152
+suman43569152bytes, dentro de48MiB disponibles sin tocar la reserva16MiB de
+presentación ni el cap global64MiB. Fuentes DS/MSAA/3D/copias de vista siguen
+rechazadas explícitamente por esta ruta. El sampledD16 se conserva por la ruta
+existente. D32final/exports redundantes pueden omitirse; no se requieren para
+reconstruir profundidad cuando se obtiene el RG16 real previo al lighting.
+No se cambian estados gráficos, shaders, samplers ni la corrección BC.
+
+Archivos del cambio: `diagnostics/d3d12_material_trace.h` introduce política pura
+MaterialSampledInputBudget; `diagnostics/d3d12_draw_trace.cpp` la utiliza y solo
+consume presupuesto al encolar una copia válida. `tests/material-trace.cpp`
+prueba cuatro footprints1080p, límites, rechazo sin consumir, overflow y reset.
+`replay-lighting-ir.py` prioriza las cuatro entradas nativas con nombre exacto
+de draw/shader frente al ROI; comprueba formato, dimensiones y longitud, admite
+--region, --require-full-inputs y --validate-only. Control offline
+lighting_input_zero pone a cero únicamente RGB del inputR11 para aislar su
+contribución, sin asumir previamente que cause el defecto. Los fixtures de
+lighting-ir.py comprueban layouts inválidos/truncados y el formato del control.
+
+Validación: build incremental UWP17operaciones y segundo build sin trabajo,
+exit0. run-material-causality.ps1: políticas C++, fixturesIR,371conversiones
+nativas RG16/R11 RTZ,32copiasBC/mip/layer, debugD3D12 limpio en AMD5300M.
+Replay real del ROI Series:1680/1680 exactos baseline yDref1. Prueba del lector
+completo: cuatro arrays1080p sintéticos con los ROI reales insertados;1680/1680
+píxeles conservados exactos. **No se evaluaron ni atribuyeron los píxeles fuera
+del ROI de ese fixture**, llenados de cero. Reporte full-input-reader-regression.
+json; no confundirlo con una captura GPU de pantalla completa. diff-check pasa.
+
+Paquete0.2.87.39 preparado/firmado:
+`build-uwp/package-game-f-lighting-full/eden-xbox.appx`,14879628bytes.
+SHA256APPX:440fce01471f2deaae83847bcac94e0bd94f53f397ca53cacd360958f1966f81.
+EXE:5b9ef1f6bbbe63f6c018c9c50acef88e6d436ca41e869e0261c072e108c62045.
+PDB:260159c1da2e183174277f874cc288d49cf17cf0ff0ffdeff57d2ae4507a69d7.
+Símbolos en build-uwp/symbols/0.2.87.39; verification.json compruebaZIPmanifest,
+boot.cfg,EXEsha y presencia de firma. SignTool sign finaliza correctamente;
+no se añadió confianza al certificado de desarrollo en el PC.
+PS0=5f3a3ed7e21366f4/count18, PS1=0. Selector específico del pase de este mapa,
+no un parche de juego. Captura por mando activa, memory5120, library/play1,
+fastmem0/profilers0/prewarm1. .38 queda conservado para referencia.
+
+### Ejecución mínima pendiente y criterio discriminante
+
+Instalar .39 y abrir **este mismo mapa**; encuadrar las bandas con quiebre90°.
+View+Menu1s → «Capturar gráficos y continuar» → A. Una toma; conservar posición
+brevemente durante la captura. Recuperar eden_log.txt, eden_uwp_diag.txt y la
+carpeta trace completa en Descargas. No volver al mapa anterior ni repetir siete.
+
+Comprobar cuatro `_before_draw_*_ps_5f3a*_input_*_m0_l0.raw/json` de8294400bytes:
+color@511b90000, normal@512410000, RG16@512c90000 e iluminaciónR11@513d90000;
+las direcciones son las de esta sesión y pueden cambiar. La salida
+`_after_draw_*_ps_5f3a*_rt0.raw` debe tener8294400bytes, además del sampledD16.
+Usar identificadores/bindings de la nueva sesión, no asumir mismos ordinales.
+Validar con --require-full-inputs --validate-only antes de interpretar imágenes.
+
+Ejemplo de comando (sustituir ROOT por el archivo conservado de .39):
+```
+python tools/xbox/replay-lighting-ir.py ROOT build-uwp/test-results/game-f-lighting-2026-10-13/series37-map/ir/d4896447533c2378.ir.json build-uwp/test-results/game-f-lighting-2026-10-13/series37-map/ir/5f3a3ed7e21366f4.ir.json --output ROOT/coverage.json --require-full-inputs --validate-only
+```
+Después seleccionar --region sobre el quiebre real de esa toma, replaybaseline
+RTZ y controles Dref1/lighting_input_zero. Si la salida inmediatamente posterior
+ya tiene la banda y coincide con el replay, rastrear el input y la expresión
+responsables. Si diverge del replay, comparar valores intermedios, coordenadas,
+muestreo y ejecuciónGPU. Si no tiene banda pero el present sí, la primera
+operación errónea es posterior: revisar ese tramo, sin mantener una atribución
+incorrecta al lighting por los resultados del ROI anterior.
+
+Rendimiento: no medición de gameplay; límite global de memoria diagnóstico igual.
+El presupuesto de inputs pasa8→32MiB dentro de ese límite y solo durante captura
+explícita. Coste de copias/export de ese frame pendiente de medir en Series. Sin
+cambios en el camino de rendering normal ni validación visual de una corrección.
+No commit/push. La pared exterior del tubo conserva investigación independiente.
+
+
+## Series .39 recibida: causa inmediata de las bandas identificada en alfa
+
+Se revisó directamente Descargas y se conservó la nueva evidencia en
+`build-uwp/test-results/game-f-lighting-2026-10-13/series39-map`:527archivos,
+127905329bytes, hardlinks/inventarioSHA256 y copias de cuatro logs. Diag identifica
+0.2.87.39 enS:/WindowsApps. Frame2310,241draws (índices0..240),492ROI sin
+omitted. No RenderWarning/
+Error/Critical registrados. Diag termina en heartbeat, sin retorno final de
+RunHeadlessBoot: no certificar cierre/estabilidad. Omisiones de D32/finalcolor/
+aux/depth por cap conocidas, no errores de toma. Dos presents conservados.
+
+`--require-full-inputs --validate-only` PASA: cuatro inputs nativos1920×1080
+previos a **draw139 VSd489/PS5f3** y salida inmediataR11 completos,8294400bytes
+cada uno. El sampledD16 nativo también está. Se inspeccionaron present, salida y
+las cuatro entradas. La textura RGB base no mostraba las bandas al visualizarse
+sin su alfa: **el alfa contiene exactamente los quiebres rectilíneos**. La
+previsualización BMP del RGB había ocultado este dato; usar RAW+canales, nunca
+concluir ausencia de información solo por ese preview.
+
+### Evidencia discriminante y operación consumidora
+
+Replay de toda la pantalla conpaso16: **8160/8160R11 bit exactos**. No solo el
+ROIcentral. El shaderPS5f3 lee el alfa del color base (`CompositeExtract` tras
+sample0, luego `1-alpha`, instrucción175 del IR tipado), y atenúa con él tanto
+la contribución direccional como la entradaR11 de iluminación. En esta toma el
+factor de niebla vale0 en los puntos examinados. Un alfa112/255 deja143/255 de
+esa luz, es decir, aproximadamente56.08%. Así se hace visible la máscara como
+una franja oscura aunque RGB y normales no contengan ese quiebre.
+
+Región nativa(960,480),240×360,paso2,21600puntos sobre el quiebre:
+
+|Experimento offline de una variable|Píxeles iguales a salidaGPU|
+|---|---:|
+|Baseline RTZ|21597/21600|
+|Solo alfa de input0 a cero, RGB intactos|11418/21600|
+|Solo shadow-map Dref=1|21478/21600|
+
+Los previews de replay muestran que **la franja rectilínea desaparece al retirar
+únicamente ese alfa**, mientras que Dref1 la mantiene. Esto es un control causal,
+NO una propuesta de desactivar alfa/sombras: también retiraría efectos válidos.
+Las3discrepancias delbaseline quedan registradas en coordenadas1154,768;
+1160,772;1164,774, pendientes de cobertura/interpolación/muestreo; no afirmar
+que todas son mera cuantización ni ignorarlas. El muestreo global anterior sí
+es exacto en todos sus8160puntos. Reportes full-grid-replay/bend-alpha-replay,
+base-alpha.bmp y previews baseline/albedo_alpha_zero/shadow_all_lit-bend.bmp
+conservados. Previews del control usan gamma2.2 solo para inspección offline.
+
+### Primer productor localizado en el historial disponible
+
+ROI@511b90000: después dedraw9PS087 sus2048valores de alfa son0; permanecen
+iguales hasta **draw130**, donde aparecen87texeles112 y otros valores. En la
+entrada completa al lighting hay156192texeles con alfa112. La draw130 usa:
+
+- VSff85298630961280, PS844b5348ddab6cc6,36índices;
+- pipeline925c712d858fbd86, RGBA8@511b90000, máscara de escritura soloA;
+- blending alfaONE/ONE/MAX; depthHostformat0 porque no se vinculóDS a esa draw;
+  no se demuestra que ese estado sea erróneo ni se modifica;
+- RG16FLOAT@512c90000 (profundidad lineal/material) y **BC4UNORM512²,
+  10mips@5bde70000**, samplerlinear/wrap;
+- interpolación NoPerspective enGeneric0/1 (enum2 delIR), no Smooth.
+
+El mismo pipeline/shaders aparece enPC38draw137, y enSeries38draw139. En el ROI
+PC38 no produce texeles112; enSeries38 sí(81). Esto no prueba igualdad de inputs:
+matrices de cámara y offsetsUV también difieren. Se exportaron los4shaders
+reales de estas familias desde la COPIA de caché, inspector4/4 encontrados.
+
+Operación delPS844: reconstruye viewZ conCB4[332]/[340] ydepthRG16, posición de
+vista desdeGeneric1, transforma a coordenadas del volumen conCB13[64..108],
+consultaBC4 con UV derivadas de esas coordenadas yCB13[168/172/184/188]. Su
+alfa es `gate_volumen * (1-máscaraBC4) * CB13[160]`; MAX lo combina con alfa
+anterior. El lighting posterior usa `1-alfa_resultante`. Por ello esta cadena
+sí depende de profundidad/cámara y proyección del volumen. **Todavía falta
+identificar por qué la máscara proyectada resulta incorrecta en Series**;
+no declarar rootcause de traducción/recursos ni CSM ni depthbias.
+
+Se evaluó solo el slice aritmético del gate, sin falsear el CFG delPS (contiene
+Demote condicional). Generic0/1 se derivan de pantalla y cámara por la expresión
+NoPerspective delVS. En el ROI investigado el gate es1; no explica por sí solo
+las franjas internas. La estimación deLOD a partir de quads y RG16 previo al
+lighting daLOD0 en18003/22365puntos conalfa112 de la región ampliada; no hay
+prueba de que todo el defecto sea selección del último mip. No es medición de
+LOD ejecutado porGPU: hay límites de derivadas/helperlanes y del instante deRG16.
+Reportes/scripts volume-gate-replay yvolume-uv-lod conservados. No tocarLODglobal.
+
+### Tubo: evidencia separada
+
+Las marcas del tubo verde YA aparecen en la entradaR11 anterior al lighting,
+mientras su RGBbase y normales no muestran ese código de marcas. No atribuir
+ese defecto al alfa rectilíneo del terreno: sus productores son anteriores y
+necesitan identificación propia. Esta captura no contiene una demostración del
+tubo transparente ni de su drawcorrecta; no certificarlo.
+
+### Dato imprescindible restante y diagnóstico .40 preparado
+
+Inventario .39 confirma que **no existe ningún export nativo deBC4@5bde70000**.
+Es exactamente el recurso que consulta el productor delalfa; sustituirlo por el
+BC4del terreno .38 sería incorrecto. La siguiente toma se dirige aPS844/count36:
+RG16 y todos los mips delBC4 antes de esa draw, RT0antes y después de blending.
+No repetir siete vistas ni una captura GPUcompleta genérica.
+
+Se añadió únicamente al diagnóstico opt-in una copia diferida delRT0antes de
+una drawseleccionada con blending. Es necesaria para evaluarMAX contra el destino
+real, en vez de asumir alfa previo0 en toda la pantalla. UsaDumpTarget y los
+mismos64MiB/reserva16MiB; noesperaGPUpor draw ni cambia shaders/estados. Archivos:
+d3d12_rasterizer.h/.cpp ydiagnostics/d3d12_draw_trace.cpp. El evaluador Python añade
+comparaciones ordenadas>=/== ycontrol alfa0, con fixturesNaN/signedzero yRGBintacto.
+Buildincremental17ops ysegundo no-op/exit0; fixturesIR pasan, diff-check pasa.
+No prueba manual del nuevo preblend enSeries aún. No parche visual implementado.
+
+Paquete **0.2.87.40**, firmado,14878733bytes:
+`build-uwp/package-game-f-alpha-volume/eden-xbox.appx`.
+APPXsha:c63cfc9da152c56836bdca74ff754f2482b7297bfef2a3bc10b961ce41bc83f2.
+EXEsha:f127b11f891bad88a2be32d143d92b55a953446566d667406658abd7d755b4c5.
+PDBsha:d42d3e5aa7f83acb898b5cc61b2aeb1591a089b9ae0a4f590613ca25a7062e87.
+Manifest/config/EXE/firma-presente verificados enZIP; SignToolsign correcto;
+símbolos0.2.87.40 archivados. Mismos5120MiB/fastmem0/prewarm1/profilers0/library.
+
+Próxima ejecución: **una captura del mismo mapa/quiebre90°**, con .40;
+View+Menu1s → Capturar gráficos y continuar → A. Recuperar logs ytrace completos.
+Validar `_before_draw_*_ps_844b*_rt0`, `_after_draw_*_ps_844b*_rt0`,
+`_before_draw_*_ps_844b*_input_*` RG16 yBC4mips0..9. Con esos bytes: ejecutar
+la muestraBC4 con coordenadas/LOD controlados, ramaDemote yMAX conalfa previa;
+comparar dentro/fuera de bandas. Si reproduce la máscara, contrastar fuente/
+transformación/LOD conPC. Si no, aislar primera divergencia shader/sampler/GPU.
+La .40 no solicita nuevos datos del lighting completo ya validado.
+
+Compatibilidad: rendernormal yBCdimensiones intactos. No coste persistente extra
+fuera de captura; una copiaRT0adicional hasta8MiB en esta captura mezclada, dentro
+delcap existente. No se ha medido coste enSeries ni FPS. No commit/push.
+
+## 13 oct 2026: captura .40 y replay del productor en GPU de PC
+
+Se revisaron Descargas directamente y se conservaron los cuatro logs y `trace` en
+`build-uwp/test-results/game-f-lighting-2026-10-13/series40-map/`: 575 archivos,
+132199308 bytes e inventario SHA. El diag confirma instalación Series **0.2.87.40**.
+No hay errores Render/Critical en ese log. La captura terminó 484 draws seleccionadas,
+0 draws omitidas/0 líneas perdidas; el probe conserva 989 registros/8101888 bytes,
+0 omitidos. Dos copias auxiliares redundantes se omitieron al llegar al presupuesto;
+NO faltan las entradas específicas del productor. El log termina en heartbeat,
+no certifica cierre normal ni estabilidad prolongada.
+
+### Resultado discriminante
+
+En esta toma el productor es **draw132**, VS `ff85298630961280`, PS
+`844b5348ddab6cc6`, pipeline `925c712d858fbd86`, 36 índices. Se exportaron:
+
+- RT0 completo RGBA8 **antes y después** de la draw (1920×1080).
+- RG16_FLOAT @512c90000 antes de la draw, completo.
+- BC4_UNORM @5bde70000, **los diez mips**, 512² hasta 1².
+- Cinco CB completos y el IB de la draw.
+
+`before-alpha.bmp` no tiene las bandas rectilíneas; `after-alpha.bmp` sí reproduce
+el quiebre de 90°. La imagen de la máscara BC4 contiene siluetas suaves de nubes,
+no esas franjas. Esto localiza el primer productor de la máscara incorrecta, pero
+no demuestra por sí solo que la decodificación/muestreo GPU de BC4 sea correcto.
+
+Se ejecutó el slice alfa del PS real con estos bytes, NoPerspective analítico y
+cada mip fijo por separado. En 2681 puntos modificados de ROI x1000..1496,
+y500..796, paso4, mip0 coincide dentro de2 niveles UNORM en543 puntos; error
+medio44,281/255, máximo117/255. Ninguno de los diez mips fijos reproduce la salida.
+No equivale a descartar todas las derivadas/LOD dinámicas ni todas las entradas.
+Reportes `volume-replay-fixed-mips.json`, script privado `replay-volume.py`.
+
+### Replay nativo D3D12, usando los mismos datos de Series
+
+Se creó `tools/xbox/tests/noperspective-clip.cpp` y su runner
+`run-noperspective-clip.ps1`; los assets invitados permanecen privados. El probe
+permite: control geométrico HLSL, VS DXIL capturado + PS de inspección de varyings,
+o VS+PS DXIL capturados con cinco CB, RG16 y diez mips BC4. Binding fijo documentado:
+CBV0/1 VS, CBV2/3/4 PS, runtime CBV0 space31, SRV/sampler5/6. Usa RT float4
+1920×1080, sin depth/blending, para observar source alpha antes de aplicar MAX con
+el destino capturado. Samplers, SRV mapping, culling/viewport corresponden a draw132.
+No es un reproductor general de capturas ni se ejecutó este probe en Xbox.
+
+Se obtuvieron IR/SPIR-V/DXIL **de producción** mediante `dump_shader` en PC, con la
+misma .40 y traductor de la app. Se preservaron en `production-pc-shaders`. Los logs
+permiten comprobar que el último par exportado corresponde a PS844; VS puede
+vincularse también a otros PS, por lo que un nombre que contiene solo VS no es
+suficiente en general. La .41 elimina esa ambigüedad.
+
+La geometría del replay usa el cubo VB de draw130 retenido aparentemente por132
+(24 vértices stride32, mismo IB). **El VB exacto de132 no estaba exportado** porque
+el binder omite bindings sin cambios. Esto limita cualquier afirmación sobre una
+reproducción completa de la draw; .41 fuerza únicamente su rebind diagnóstico.
+
+Resultados en AMD Radeon Pro5300M, debug layer limpia:
+
+|Comprobación|Resultado|
+|---|---|
+|Control noperspective con clip positions de Series|2073600 píxeles cubiertos; errorUV máximo0,000594302|
+|Control alternativo attr×W, smooth y división por SV_Position.w|2073600 cubiertos; errorUV máximo0,0000137511|
+|VS DXIL real + PS de inspección|Mismo errorUV máximo0,000594302; no reproduce la deformación grande|
+|Replay PS CPU usando varyings calculados por VS GPU|543/2681 dentro de2 respecto a Series, igual que varyings analíticos|
+|VS+PS DXIL reales + texturas/CB Series, comparado con CPU|2673/2681 dentro de2; error medio0,02686/255; máximo9/255|
+|Mismo replay GPU comparado con salida Series|541/2681 dentro de2; error medio44,26557/255; máximo117/255|
+
+Los ocho puntos restantes GPU/CPU no se ocultan: el replay CPU usa mip0 fijo,
+redondeo bilinear aproximado y no reproduce todas las reglas de helper lanes/LOD.
+La diferencia pequeña entre CPU y GPU PC no explica la diferencia grande con Series.
+Reportes `production-vs-replay*`, `production-pipeline-*` y readbacks completos.
+
+La hipótesis de que el cálculo offline esté simplemente equivocado queda mucho
+más acotada: la GPU PC ejecuta el PS de producción casi igual a ese cálculo. NO
+se demuestra todavía que Series ejecute el mismo SPIR-V/DXIL, lea los mismos CB
+que se exportaron, interpole las mismas coordenadas o devuelva iguales muestras.
+Esa separación es el siguiente dato necesario, antes de alterar el renderer.
+
+Se simularon recortes homogéneos correctos y variantes clip-linear/smooth con
+varios guardbands. Algunas variantes incorrectas acercan el resultado (p.ej.
+528/894 dentro de2 en un subconjunto), pero ninguna prueba la causa. No aplicar
+un cambio global de interpolación/guardband a partir de esa correlación.
+
+Trampa corregida en el probe: `SV_Position.w` de D3D es W interpolado, mientras
+`gl_FragCoord.w` es el recíproco. En el control smooth corresponde **dividir** por
+SV_Position.w, no multiplicar. El ensayo anterior con multiplicación se descartó.
+Referencias: [semánticas HLSL](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-semantics),
+[discusión primaria glslang](https://github.com/KhronosGroup/glslang/issues/2244).
+Mesa local dxil_signature.c declara ambos Generic como NoPerspective correctamente;
+esto no certifica el resultado del rasterizador de Series.
+
+### Diagnóstico .41: datos exactos que faltan
+
+Cambios limitados al diagnóstico opt-in:
+
+1. `d3d12_pipeline_cache.cpp`: exportar DXIL también si el PS está seleccionado;
+   nombre con VS, PS, **hash real de pipeline**, stage; exportar también en hits
+   de la caché compartida. Antes un VS con varios PS podía sobrescribir el dump,
+   y un hit podía omitirlo. El identificador de FrameTrace es una dirección de
+   objeto: no confundirlo con el hash de pipeline.
+2. `d3d12_rasterizer.cpp`: en la draw seleccionada por PS/count durante captura,
+   marcar dirty los bindings VB para que el binder existente los vuelva a emitir
+   y exporte su contenido exacto. No conserva punteros Buffer entre draws, no
+   cambia geometría, estados ni shaders. Mantiene límites de readback existentes.
+3. Probe nativo, PS HLSL de varyings y runner reproducible. El PASS del probe solo
+   confirma readback/debug; los errores numéricos se comparan por separado.
+
+Compilación incremental de los dos componentes/link correcta. Fixtures de IR y
+parser de ROI correctos; probe de producción recompilado mediante runner y debug
+limpio. No corrección visual aplicada. No tests de regresión de una causa raíz aún
+no identificada. BC dimensiones permanece intacto.
+
+Siguiente comprobación mínima en Series: instalar .41, abrir el juego y dejar que
+termine la caché de shaders; recuperar `shader_ff852...`, `shader_844b...` y
+`dxil_ff852..._844b..._*` del directorio **eden/log**, además del log. Comparar
+firmas y arithmetic/SPIR-V/DXIL con PC. **Para esa comparación no hace falta otra
+captura del mapa.** Si ya se está en el mapa, una captura por mando además conserva
+el VB exacto y elimina la suposición geométrica; no repetir siete vistas.
+
+Si DXIL es idéntico, la siguiente inspección GPU debe devolver Generic0/1, depthRG
+muestreado, UV de BC4 y valor BC4 **de la draw132** a RT float en un pase diagnóstico
+separado. El probe PC y las entradas ya están preparados como control. Los snapshots
+actuales son salida/entradas, no valores intermedios del shader en Series: ese es el
+bloqueo concreto para nombrar la primera instrucción incorrecta. No usar F7 ni pedir
+una captura genérica que vuelva a omitir los datos necesarios.
+
+El tubo verde continúa separado: marcas en R11 pre-lighting, no demostrado que
+procedan de PS844. No se repitió ni se atribuyó al tubo transparente ausente.
+Rendimiento: no medido; dumps opt-in al compilar y rebind solo durante la captura
+seleccionada. No más presupuesto de readback ni cambios de memoria guest. No
+certificar estabilidad/FPS ni mejora visual de Series. Sin commit ni push.
+
+Paquete final .41 firmado/verificado: `build-uwp/package-game-f-shader-check/eden-xbox.appx`,
+14832667 bytes, SHA256 fcfef6cb3ab3d37695c6c384ebbe48af31cb1882b2eefa79c77cd3d943decd49.
+EXE f66bcd31e4fa8b0fab3d1d3ccea82afd0faf4ceb8b02a488c5d1dda098706403;
+PDB 5687b5252beec72f9ec9f685d7051619c88245d1c07fe1351b1d99e3f4eadb8e.
+Símbolos archivados en symbols/0.2.87.41; verification.json valida manifest/config,
+EXE del ZIP y presencia de firma. SignTool firmó correctamente.
+Arranque PC de candidato .41 confirmó dumps de ambos stages/pairs aun con cachehit:
+VS SHA6811ebf9a91a4ba81359e9d068aa118744c39b8e710c78bd12603e5b5053f403;
+PS SHA8183aca81df97afe2d1cf9bda6684311832538e2d399da13f5ab2f5bea40c788.
+Se corrigió después solo el nombre para usar hash real en lugar de dirección de
+FrameTrace, se recompiló/linkó y empaquetó. Ese ajuste final de nombre tiene gate de
+compilación; no repetir arranque/terminar gameplay del usuario para certificarlo.
+El proceso PC queda abierto, sin timeout ni entradas de gameplay programadas.
+No prueba FPS/estabilidad; diag confirma API de job cap5120 aunque AppMemoryUsageLimit
+reporta límite OS distinto. Registro loose misma versión conserva InstalledLocation
+anterior: no asumir que registra otro checkout solo por aceptar Add-AppxPackage.
+
+## 14 oct 2026: shaders Series .41 comparados con PC
+
+Descargas contiene la ejecución pedida, **sin una nueva captura del mapa**. Se
+archivaron logs, IR, SPIR-V y seis DXIL en
+`build-uwp/test-results/game-f-lighting-2026-10-14/series41-shaders/`, con inventario
+SHA256 y `comparison.json`. El diag identifica S:/WindowsApps/0.2.87.41 y el
+adaptador del log es SraKmd_arden. Los dumps tienen ahora hashes reales de PSO.
+
+Resultado de comparación binaria, no solo nombres o tamaño:
+
+|Dato de Series|Referencia PC|Resultado|
+|---|---|---|
+|VS ff852, DXIL, key925c712d858fbd86|VS del replay nativo PC .40|Idéntico byte por byte|
+|PS844, DXIL, key925c712d858fbd86|PS del replay nativo PC .40|Idéntico byte por byte|
+|VS y PS, keycda4b903e615a0e2|Mismas referencias|Ambos idénticos|
+|SPIR-V VS ff852 y PS844|SPIR-V producción PC|Ambos idénticos|
+|IR VS y PS, normalizando solo direcciones de instrucciones|IR producción PC|Ambos idénticos|
+
+SHA VS DXIL6811ebf9a91a4ba81359e9d068aa118744c39b8e710c78bd12603e5b5053f403;
+PS DXIL8183aca81df97afe2d1cf9bda6684311832538e2d399da13f5ab2f5bea40c788.
+El pipeline925c es el productor ya localizado en .40draw132. La otra pareja con
+PSf76 no debe atribuirse a él. Los logs muestran exportaciones a16,534s y18,194s,
+respectivamente, de las dos variantes PS844.
+
+**Hipótesis descartada:** que una traducción/compilación distinta según plataforma
+produzca instrucciones DXIL distintas en ese pase. No descarta un error semántico
+común, una diferencia del compilador del driver/hardware, clipping/interpolación,
+descriptores, datos realmente consumidos o muestreo. Tampoco demuestra que shaders
+idénticos produzcan iguales resultados bajo recursos/estados diferentes.
+
+El replay GPU PC anterior ya usaba exactamente estos bytes. Repetirlo solo porque
+los archivos vienen ahora de Series no añade una prueba independiente. Sigue siendo
+válido el contraste CPU~GPU PC frente a la salida de la captura .40Series, con sus
+límites de geometría retenida y precisión/mips documentados.
+
+Revisión de logs .41: Render Error0, Render Critical0, Critical global0. Los1084
+InputErrors son motores camera/joycon/virtual_amiibo/tas no registrados al arranque;
+los3ServiceErrors son Network isn't initialized. No enlazan los píxeles incorrectos
+con una operación GPU. graphics_bugs.json/log también revisados; no confundir esos
+mensajes con la causa de la iluminación. El log termina a95,771s; diag enheartbeat
+~90s, sin RunHeadlessBoot returned: no afirmar cierre correcto ni estabilidad.
+La última ventana de55,03FPS es300intervalos, no benchmark comparable ni mejora.
+
+No hay material complete ni datos intermedios nuevos en esta ejecución: es lo
+esperado al haber pedido únicamente shaders, no un fallo de captura. **No pedir que
+repita la .41:** la comprobación solicitada está satisfecha.
+
+Bloqueo causal preciso: faltan Generic0/1 y depthRG que la GPU Series consume en
+la draw seleccionada. Si difieren del replay PC, la primera divergencia está en
+VS/clipping/interpolación o lectura de profundidad; si coinciden, seguir UV BC4 y
+muestra/LOD del PS. La próxima instrumentación debe ser un pase separado a RT float,
+con el VS/DXIL, IA y bindings originales, sin escribir el framebuffer del juego;
+recuperar un ROI pequeño con margen para helper lanes, conservar viewport y reglas
+originales, comprobar restauración de PSO/RT/DS/scissor antes de continuar. Exportar
+valores intermedios reales, no otra imagen final ni un shader aproximado.
+
+En este paso no se modifican shaders ni estados de producción, no se aplica parche
+visual ni se aumenta memoria. Evidencia preservada y comparación ejecutada. Tubos
+siguen siendo una investigación separada. Sin commit/push; Xbox visual no corregido.
+
+## 14 oct 2026: investigación externa dirigida (prioridad solicitada)
+
+La búsqueda no encontró una incidencia pública que pruebe un bug específico de
+SraKmd_arden/Series en este juego. Sí aporta un mecanismo concreto prioritario:
+**recorte de atributos NoPerspective cuando aristas del volumen cruzan W=0**.
+
+- [Khronos EXT_gpu_shader4, cuestiones8/10](https://registry.khronos.org/OpenGL/extensions/EXT/EXT_gpu_shader4.txt): documenta la dificultad del recorte screen-linear al cruzar W=0 y resultados indefinidos en ese caso histórico. No es una especificación de Maxwell/NVN y no autoriza a emular resultados arbitrarios.
+- [Microsoft, especificación D3D11.3, §15.4/16.4](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm): el clipper debe tratar específicamente NoPerspective; W positivo sigue siendo obligatorio y el guardband XY puede variar entre implementaciones. No prueba una infracción del driver Xbox.
+- [Vulkan, Clipping Shader Outputs](https://docs.vulkan.org/spec/latest/chapters/vertexpostproc.html): ajustar el factor de interpolación de outputs NoPerspective para conservar linealidad en framebuffer. Contraste de semánticas, no causa demostrada.
+
+Vinculación con evidencia propia: el VS usa NoPerspective, la reconstrucción del
+cubo conCB .40 tiene W desde-6119,526 hasta11127,92, con un vértice W=32 y proyección
+muy grande. El VB exacto de draw132 seguía pendiente: esas cifras corresponden a
+la reconstrucción con el cubo retenido de130, NO a medición directa de outputsVS en
+Series. Cámara/distancia cambian qué aristas cruzan el plano y los límites XY;
+por eso esta hipótesis explica una dependencia de cámara que un defecto estático
+BC o simples factores de blending no explican por sí solos. Las90° no prueban el
+mecanismo: el guardband y otros clamps también son XY.
+
+Otra pista externa: [Unity UUM-108671, notas oficiales](https://legacy-activation.unity3d.com/releases/editor/whats-new/6000.6.0f1)
+registra corrupción AMD/D3D12 por metadata de compresión de placed resources sin
+inicializar tras cambiar resolución. [Microsoft CreatePlacedResource](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createplacedresource)
+requiere inicializar RT/DS después de activar aliasing. Se contrastó el código:
+`Image::InitializePlacedResource` ya hace aliasing barrier, transición RT/DS y
+DiscardResource completo. No evidencia de incumplimiento en esta ruta; no añadir
+clears globales ni atribuirlo al fallo de Unity sin inspeccionar el recurso real.
+
+Se revisaron también los dos commits NXbox enlazados por el usuario: el de
+10:10:10:2 firmado y el de depth bounds/factores alfa son pistas separadas. La draw
+productora utiliza posición float3 y depth bounds desactivado, por lo que esas
+correcciones no explican directamente sus bandas. Tubos requieren su draw exacta.
+
+Prueba discriminante prioritaria: contrastar Generic0/1 Series con su relación
+screen-linear y comparar profundidad/máscara muestreadas con bytes nativos. Si
+las coordenadas fallan y las muestras controladas coinciden al usar esas mismas
+coordenadas, dirigir el control reversible a interpolación/recorte; si no, continuar
+en la primera lectura incorrecta. No desactivar sombras ni cambiar el bias.
+
+Estado del código diagnóstico iniciado antes de esta búsqueda: pase float opt-in,
+dos ROIs256×128 con VS/bindings/viewport original, RT temporal≤32MiB, ~1MiB extra
+readback dentro delcap existente, query streams suspendidos para no contar draws
+internas y restauración de estado. Compila. Shader de muestras ejecutadoPC:32768
+píxelesdepth exactos, BC4 error máximo0,002561 (<1/255). Nuevo gateROI y validación
+integrada de restauración todavía pendientes; **.42 aún no empaquetada/validada**.
+La investigación web no transforma esa sonda en una corrección visual certificada.

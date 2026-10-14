@@ -247,6 +247,9 @@ public:
         return bound_color_targets;
     }
 
+    /// Opt-in isolated float output probe. Preserves linked VS, input layout and rasterization.
+    ComPtr<ID3D12PipelineState> CreateMaterialProbePipeline(std::span<const u8> pixel_shader) const;
+
     /// Port of Vulkan's ConfigureImpl: synchronizes and binds the guest's buffers and textures,
     /// writes the descriptor tables and transitions sampled and storage images. The render
     /// targets are updated last (UpdateRenderTargets) but not transitioned. Records no
@@ -255,6 +258,7 @@ public:
 
 private:
     void Build();
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC Describe(std::vector<D3D12_INPUT_ELEMENT_DESC>& elements) const;
 
     void Publish(State next);
 

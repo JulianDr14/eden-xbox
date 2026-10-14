@@ -12,10 +12,17 @@ def captures(lines):
     capture = None
     records = {}
     bindings = {}
+    capabilities = {}
     for line in lines:
+        capability = re.search(r'D3D12: (adapter |highest shader model |wave ops |'
+                               r'native 16-bit shader ops |typed UAV loads: |'
+                               r'texture cache runtime ready |pipeline cache ready )(.*)', line)
+        if capability:
+            capabilities[capability[1].strip()] = capability[2]
         begin = re.search(r'D3D12 material frame (\d+): begin', line)
         if begin:
-            capture = {'frame': int(begin[1]), 'complete': False, 'draws': [], 'errors': []}
+            capture = {'frame': int(begin[1]), 'complete': False, 'draws': [], 'errors': [],
+                       'capabilities': capabilities.copy()}
             result.append(capture)
             records, bindings = {}, {}
             continue

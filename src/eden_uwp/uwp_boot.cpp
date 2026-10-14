@@ -107,7 +107,11 @@ void SetTracedFrame(u32 frame, u32 count);
 void TraceNextFrames(u32 count);
 void TraceNextMaterialFrame(u64 pixel_shader = 0);
 void SetMaterialProbe(s32 x, s32 y);
+void SetMaterialCaptureFrame(u32 frame);
+void SetMaterialSnapshotShaders(u64 first, u64 second);
+void SetMaterialSnapshotVertexCounts(u32 first, u32 second);
 void SetDumpedShader(u64 unique_hash);
+void SetMaterialGpuProbeEnabled(bool enabled);
 void SetSkippedShader(u64 unique_hash);
 void SetGeometryDroppedShader(u64 unique_hash);
 void SetFrameDiagnostics(bool enabled);
@@ -272,6 +276,8 @@ struct BootConfig {
     /// Look for a removed device after every descriptor a draw writes ("descriptor_checks=1"), to
     /// name the view that removed it; costs a kernel call per descriptor.
     bool descriptor_checks{};
+    /// Controller-accessible bounded F7 equivalent, shown only in diagnostic packages.
+    bool material_capture_menu{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
     /// Per-core JIT elapsed time and slow callback counts ("cpu_profile=1"). Diagnostic only.
@@ -320,6 +326,10 @@ struct BootConfig {
     /// Presented frames the trace spans from traced_frame on (boot.cfg "trace_frames=").
     u32 traced_frames{1};
     s32 material_probe_x{-1}, material_probe_y{-1};
+    u32 material_capture_frame{}; // Opt-in deterministic homebrew diagnostic gate; zero in Series package.
+    bool material_gpu_probe{};
+    std::array<u64, 2> material_snapshot_ps{};
+    std::array<u32, 2> material_snapshot_vertices{};
     /// Keep D3D12 block-compressed 2D arrays compressed instead of decoding them on the CPU.
     bool bc_arrays_native{};
     /// How ASTC reaches D3D12 ("astc="): BC3 for single textures and RGBA8 for arrays. "gpu" (the
@@ -430,6 +440,10 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
               ", JIT cache " + std::to_string(config.jit_cache_mib) + " MiB per core");
     D3D12::SetTracedFrame(config.traced_frame, config.traced_frames);
     D3D12::SetMaterialProbe(config.material_probe_x, config.material_probe_y);
+    D3D12::SetMaterialCaptureFrame(config.material_capture_frame);
+    D3D12::SetMaterialGpuProbeEnabled(config.material_gpu_probe);
+    D3D12::SetMaterialSnapshotShaders(config.material_snapshot_ps[0], config.material_snapshot_ps[1]);
+    D3D12::SetMaterialSnapshotVertexCounts(config.material_snapshot_vertices[0], config.material_snapshot_vertices[1]);
     D3D12::SetFrameDiagnostics(!config.play);
     // The GPU spends the same 5 GiB as the emulated DRAM and the JIT: the texture and buffer
     // caches evict against what the whole app has left, not DXGI's budget.
@@ -960,7 +974,8 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                                                   g_fullscreen.load(), LoadSystemSettings().show_performance_stats,
                                                   pulse_identity.has_value(),
                                                   FromSettings(Settings::values.scaling_filter.GetValue(),
-                                                               Settings::values.fsr_sharpening_slider.GetValue())},
+                                                               Settings::values.fsr_sharpening_slider.GetValue()),
+                                                  config.material_capture_menu},
                                  program_id != 0);
                     if (game_title.empty()) {
                         std::string title;
@@ -1042,7 +1057,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     Cheats::ClampCheatsPage(cheats_page, cheats->Catalog(), Cheats::CheatsLayout::VisibleRows);
                     cheats_notice.clear();
                 }
-                if (result == GameMenuResult::Resume) {
+                if (result == GameMenuResult::Resume || result == GameMenuResult::CaptureGraphics) {
                     menu.reset();
                     cheats.reset();
                     if (game_keyboard.IsOpen() && menu_surface) {
@@ -1054,6 +1069,12 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                         system.GPU().RunOnGpuThread([&] { D3D12::HideGameMenu(system.Renderer()); });
                         input.SetMenuOpen(false);
                         keyboard_shown = false;
+                    }
+                    // Arm after hiding/re-presenting the menu, so only guest presents consume
+                    // the two capture intervals. Reuse the same bounded request as F7.
+                    if (result == GameMenuResult::CaptureGraphics) {
+                        D3D12::TraceNextMaterialFrame();
+                        WriteDiag("menu: bounded graphics capture requested for next guest frames");
                     }
                     void(system.Run());
                     WriteDiag("menu: closed, guest running");
@@ -2306,6 +2327,12 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                             WriteDiag(config.gpu_validation
                                           ? "boot.cfg: D3D12 debug layer with GPU-based validation"
                                           : "boot.cfg: D3D12 debug layer");
+                        } else if (line == "material_gpu_probe=1") {
+                            config.material_gpu_probe = true;
+                            WriteDiag("boot.cfg: isolated material GPU intermediate probe enabled");
+                        } else if (line == "material_capture_menu=1") {
+                            config.material_capture_menu = true;
+                            WriteDiag("boot.cfg: controller graphics capture menu enabled");
                         } else if (line == "bug_tracker=0") {
                             config.bug_tracker = false;
                             WriteDiag("boot.cfg: bug tracker off");
@@ -2335,6 +2362,17 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                                 WriteDiag("boot.cfg: building VS " + line.substr(8) +
                                           " without its geometry shader");
                             }
+                        } else if (line.starts_with("material_capture_frame=")) {
+                            config.material_capture_frame = static_cast<u32>(
+                                std::strtoul(line.c_str() + 23, nullptr, 10));
+                        } else if (line.starts_with("material_snapshot_vertices0=")) {
+                            config.material_snapshot_vertices[0] = static_cast<u32>(std::strtoul(line.c_str() + 28, nullptr, 10));
+                        } else if (line.starts_with("material_snapshot_vertices1=")) {
+                            config.material_snapshot_vertices[1] = static_cast<u32>(std::strtoul(line.c_str() + 28, nullptr, 10));
+                        } else if (line.starts_with("material_snapshot_ps0=")) {
+                            config.material_snapshot_ps[0] = std::strtoull(line.c_str() + 22, nullptr, 16);
+                        } else if (line.starts_with("material_snapshot_ps1=")) {
+                            config.material_snapshot_ps[1] = std::strtoull(line.c_str() + 22, nullptr, 16);
                         } else if (line.starts_with("material_probe_x=")) {
                             config.material_probe_x = static_cast<s32>(std::strtol(line.c_str() + 17, nullptr, 10));
                         } else if (line.starts_with("material_probe_y=")) {

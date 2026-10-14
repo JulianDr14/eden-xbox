@@ -140,6 +140,7 @@ enum class Text : std::uint16_t {
     // In-game menu
     MenuTitle,
     MenuResume,
+    MenuCaptureGraphics,
     MenuFullScreen,
     MenuBackToHome,
 

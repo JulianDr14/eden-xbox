@@ -3241,3 +3241,205 @@ cap5120/fastmem0/prewarm1. Verificados XML+boot.cfg enZIP, firma presente ySHA25
 EXE delAPPX vsbin. EXE/PDB actuales en symbols/0.2.87.34, anteriores preservados
 en before-bc-stride. No instalación ni ejecución adicional. Commits autorizados
 por temas: stride/regresiones/notas de código y Release/documentación. Sinpush.
+
+13 octubre 2026: nueva incidencia Game F en Series con BC corregido; usuario
+aclara que los fallos de iluminación según distancia y tubos no aparecen en PC.
+No generalizar el cierre visual previo a este caso. Evidencia3PNG+log/diag/tracker
+archivada en build-uwp/test-results/game-f-lighting-2026-10-13; nombres con sufijos
+no disponibles, equivalentes sin sufijo identifican título/.34/SraKmd_arden.
+Render Warning/Error/Critical0 y sin F7, no causa raíz demostrada. Metadata
+generada b702 stale: no permite excluir BC; usuario confirma corrida corregida,
+SHA256 previo EXE bin/layout/symbols/APPX coincide. No corregir bias/sombras/alfa
+sin identificar draw. SNORM10 ya usa R32_UINT+unpack SPIR-V, no copiar HLSL NXbox.
+F7 ahora registra todos atributos leídos/fetch, interpolación IR, pipeline key y
+depth bounds guest/host; interner compacto8bytes con igualdad/hash coherentes.
+Comparador por VS/PS conserva parciales y capacidades, ignora COM y no deduce
+objetos/píxeles/cascadas/LOD efectivo. UWP incremental21+4ops correcto;
+fixtures/parser/budget/interner32generics yGPU SRV/BC22extents132imágenes834mips
+213504componentes/RTV2304casos36draws pasanPC. Capacidades Series distintas
+(wave64, minmaxno, typedUAVformatqueriesno) no demuestran uso/causa del shader.
+Cerca/medio/lejos/mismoobjeto yPCSeries pendientes; no coste/FPS medido ni
+corrección visual certificada. Sincommit/push; docs/xbox/xbox_deferred_lighting.md.
+
+Series sin teclado (corrección de procedimiento): menú View+Menu1s ahora ofrece
+«Capturar gráficos y continuar» solo con material_capture_menu=1. Confirm oculta
+menú/re-presenta, arma solicitudF7 acotada yreanuda; no consume captura con el
+refresh pausado. Cfg de paquete separado package-game-f-lighting desactiva
+hotkeys/perfiles/debug/ROI, conserva play1/cap5120/.34. EXE yfirma/config interna
+verificados; Releaseoriginal sin sobrescribir, símbolos en .34/game-f-lighting.
+Frontendincremental23ops pasa; game-menu/localization-catalogs pasan.
+Trampa fixture: idioma se fija antesde comprobar etiquetaEN; abortWindowsnegativo
+no lo captura `if errorlevel 1`, runnernuevo compara distinto0. Corregido y
+repetidos ambos tests PASS. Gatevisual/capturaSeries ycausas raíz pendientes.
+
+13oct usuario pide versión.35 para este diagnóstico. Manifest0.2.87.34->.35
+sinBOM, mismoEXE sin recompilar, APPX separado package-game-f-lighting reempaquetado
+yfirmado. Versión interna/hashEXE/configmando/firma verificados; EXE/PDB en
+symbols/0.2.87.35. Releaseoriginal.34 intacto, sincommit/push.
+
+13oct Series.35 recibida: cuatro capturas completas560/480/228/466draws sin
+omisiones/parsererrors/nullSRV; doceBMPnonfinite0, Renderwarnings/errors0,
+cierrecompleto/retorno10=biblioteca, commitmaxmuestreado2375MiB. Toma3color es
+preiluminación; auxparecenormales/excluyetransparencias; toma4color sícontienetubo.
+No inferir desaparición deldefecto porbufferintermedio. ÚnicoPSdepthtrue
+d3e840710932bff7, D161024@523490000/LEQUAL4, keyestable; IR4Drefs, sinselector
+CSMidentificado. Depthbounds0/fetchfallback0/filtrosMINMAX0enregistrados.
+Copia cachéPC:14/14hashesdeSeries traducidosIRreal, sinwarp/derivadasexplícitas;
+no pruebaDXIL/driver. Búsqueda fuentesMesa/PIX/RenderDoc: seguirimagenfinalhacia
+primerdrawerróneo; capturapuedeocultarcarrerasporwaits, hipótesisnocausa.
+VisualStudioGraphicsDiagnosticsnoD3D12; accesoPIXretailUWPSeries no confirmado.
+Prioridad: backbufferexacto/metadataID, datosnativosHDR/alfa/depth, ROIylecturas
+diferidasconfence. SondadosPS postdrawcompila/policytests/GPUtile5formatospasan,
+pero síncrona/primerdraw/no finalpass; desactivadaAPPX.35/no reempaquetada.
+Evidencia series35 yfuentes/límites docs/xbox/xbox_deferred_lighting.md. Sinfixvisual,
+sincommit/push; no trasladar integridadF7 a fidelidadSeries.
+
+13oct diagnóstico .36: usuario precisa dependencia distancia Y ángulo, y particiones
+en tubos verdes opacos además de transparentes. Copias de fuente PresentFrame,
+targets/PS/depth muestreado con staging diferido y tick de última copia, exportación
+RAW+JSON+BMP tras fence fuera de intervalos. ROIcentral64x32/2048registros16MiB y
+inputs primera parejaVS/PS/128parejas/8MiB; copiasfull64MiB con reserva16 para
+present1080p, descontada al registrar presentación. Omisiones explícitas; sin
+Finish entre draws, sin replay/PixelHistory completo. Exportación puede pausar
+fuera de captura: no certificar FPS. IncrementalUWP y testsGPU8193texeles5formatos/
+fullcopy/alfa/fence, menú/catalogs y parsers pasan. AppContainer ex10 retorna0/
+presentRAW; ex04 retorna0/2draws/2ROI/CB128B/vertex480B/depth/color/present,
+BMP cubo inspeccionado. SnapshotPS también ejercitado; presupuesto omite targets
+con salidaPC3072x1776, preservando presentaciones. Sin errores de capaD3D12;
+Input no configurado/BufferQueue al cierre/NVMap ajenos anotados. Paquete .36
+separado y símbolos; .35 conservada. Siete tomas/mando y causas pendientes Series.
+Trampas: package-appx espera OutDir RELATIVO (concatena repo), validar destino
+absoluto antes. PythonWindows escribe cp1252 por defecto: usar encoding='utf-8';
+error de codificación truncó el informe nuevo de esta incidencia, reconstruido
+desde evidencia archivada. Código, paquetes y documentación previa intactos.
+Fuentes y límites en xbox_deferred_lighting.md. Sinfixvisual ni commit/push.
+
+
+13oct revisión Series.36:7capturas completas286/280/490/232/244/181/528draws,
+ROI622/610/1118/522/555/386/1162, sin omisiones/parsererrors/nullSRV.14presentados,
+56RAW/JSON/BMP válidos/nonfinite0,4198inputs(9prefijosvertex explícitos). DSfinal
+omitido1/2/7 por64MiB; depthD16 yD32 muestreados síen7. Misma parejaPSlighting/
+key/estado/bindings normalizados en7; cambian matricesCB4/13 ydepth nativo. Región
+terreno ya visible traslightingantestransparencia: acota pase/entradas, no causa.
+Verde yaenopaco; snapshotPS444 primero7draw204(192índices) todavía sin tubo;
+familia continúa2424/2688 yPS80ef posterior, ROIcentro7encima del tubo. No confundir
+snapshotprimero conobjetivo; siguienteatribuciónconregiónconcreta. RenderError0,
+commitmáxmuestreado2416/5120, retorno10biblioteca/shutdowncompleto. Diagcontiene
+arranque.35previo+.36real. Evidencia912MB/4380archivos preservadahardlinksNTFS+
+SHA256inventory en series36; logs copiados. Contact sheets/constantes/distancia
+analizadas. Sinrootcause/fix ni nuevoAPPX; detalles en xbox_deferred_lighting.md.
+
+13oct causaloffline .36→.37: typedIR14/14, replay lighting11759/11760bitsidénticos
+con RTZ;6ROI todaslit porD16, toma6síshadowedge. Reconstrucción RG16F.r desdeD32
+735/735RTZ; matrices productor/consumer coherentes7, sinselectorCSM demostrado.
+PCAMD5300M tambiéntruncaRG16/R11: descartaatribuirRTZsoloSeries. Forwardcheck7
+mallasD16:836samples,784within2,52nearer/oclusiones,0missing; no validaotrasmallas.
+InputsGbuffer cambiananteslighting: near3draw41PS5f/7929, snapshotprevio37/102
+eradematerialdistinto; faltanCB/geometry/mapas/mips realesde41. Tubofirst204/216
+proyectadosdebajodelvisible: no atribuirleseldefecto. InstrumentaciónPS+count,
+CBgeometry dela drawreal ycopiaspreDraw demips/capaspequeñosinclBC nativo con
+NumRows/RowSize, sinwaits; mismos64/16/8MiBglobales, cap8MiB/256subresourcesdraw.
+Incremental/linkUWP,fixturesIR/selector/parsers,GPU32BCmip/capas yRTVdebuglimpio
+pasan. No cambio deestados/shaders/BCvirtualdimensions, sinfixvisual niFPSmedido.
+APPX.37 separado package-game-f-causal, símbolos.37 yverification.json; firmado,
+signtoolverifyPC raízlocalno confiable(noimportada). Una captura cercana equivalente
+a3/5 falta paraoperandos41; no repetir7. Informe/reprocomandos xbox_deferred_lighting.md.
+Trampa inspector: Appx/Get-AppxPackage no carga aquí en pwsh; ejecutar búsqueda
+VCLibs con Windows PowerShell (powershell.exe). Herramienta reproducida14/14
+con runner nuevo yJSON idénticos. Replay coincide conIR, no referenciaMaxwell.
+
+13oct mapa nuevoSeries.37: captura4071completa402draws/969ROI/0omitidos,
+7exports válidos/525inputbuffers;548archivos115MB preservados series37-map con
+SHA256/hardlinks. Renderissues0/salida10normal, maxsample2444MiB. Franjas terreno
+tambiénGbuffernormales. Selectoresmapaanterior no coincidieron, nofallócaptura.
+LightingotroPS5f3a...1Dref: replayROI1680/1680 yalllitigual; centroP1, noextrapolar.
+Grounddraw9PS087/3624 síinputscompletos; VSposition/TBN6puntosdepthdelta<=7.7e-7,
+basesCPU0.9966..1, faltatexelesBC5SNORM512²/mips paraPS. GPUfetch no validado.
+Piezatubointerior draw57PSb017/360proyectada dentroabertura; opaco/depthwrite,
+noatribuirtodaparedexterna. .38configsolamente,mismoEXE/PDB37,package-game-f-map
+firmado/símbolos38; selectorPS087/3624+PSb017/360,ROI1100,570. Una captura enESTE
+mapa/vistasimilar, no volveranterior. Sinfixvisual/commit, informe yhashesdoclighting.
+
+Series.38recibida:967files128MB,204draws/479ROIcompletos. Selectores sí9/60;
+166subresources nativos pequeños válidos(86ground/80pipe),174RAW total,497inputs+
+ROI. DSfinalomitido64MiB, D16/D32fuentes presentes. BC5terrain decodificadoondas
+suaves; replaynormal1680pixelsmax1RGB10LODmax, flat/yinvertidos fallan; lighting
+1680bits yDref1igual enROIterrain. VB/IBidénticos37/38, cámara rotacióncasiigual,
+UVoffsetVS_CB5[48/52] cambia. Counterfactual39puntosdepthbilinearcoherentes:
+restaurarsoloUVfase bajadiferencianormalmundo28.09→0.716grados media. Causa de
+movimientodepatrón identificada, no defecto demostrado: animación/tiempo/entradas
+guest yreferenciaindependiente pendientes. No afirmarCámaraÚnica niNormalesBug.
+No39/otraXboxporahora; datosscriptscasepreservados series38-map, doclighting.
+
+13oct usuario confirma fallo soloSeries, PC D3D12 correcto; solicita lanzamientoPC.
+Lanzado P1 manual play1/D3D12, PID984, .38/EXEidéntico, selectores087/3624+b017/360,
+ROI1100,570, capcommit5120 confirmado en diag; AMD5300M, primeraDraw19.15s, proceso
+responde/sinRenderErrorobservado. PC CoreWindow3072x1776: revisar dimensiones guest
+y presupuestos al recibir captura. LogsPCprevios/trace preservados pc-before38.
+Sin timeout gameplay ni inputs programados; usuario toma mapa/captura por mando.
+Trampa launcher TimeoutSec0 solo evita monitor: GetContent puede adelantarse aldiag
+y devolver error aunque app sí arrancó. VerificarPID/diag, no relanzar automáticamente;
+launcher local preparado con2s de monitor para próximas invocaciones.
+
+
+### 13 octubre: referencia PC .38 frente a bandas Series
+
+Captura PC8744 archivada con940archivos/SHA256.166subrecursos seleccionados
+idénticosPC/Series; replay normal ylighting del ROI también concuerdan conIR.
+Esto no equipara las franjas: usuario precisa quiebres90° enSeries frente a
+verticalesPC. Inspeccionar nativo1920 dePC, no solo present3072. Separar ondas
+normalmap de discontinuidadesfinales; el ROIcentral no certifica todapantalla.
+Reconstrucción offline Dref de129600posiciones/equipo no reproduce las franjas,
+pero usaRG16 reconstruido deD32posterior: no descartar sombras globalmente.
+No parche/renderstate ni nueva versión. Evidencia y límites en
+xbox_deferred_lighting.md, sección Contraste nativo PC .38.
+
+
+### .39, 13 octubre: diagnóstico de bandas completo antes/después del lighting
+
+Cobertura PC38/Series38 confirma faltan cuatro inputs completos y salida exacta
+fueraROI. Export seleccionado amplía4/8→8/32MiB por recurso/draw, mantiene
+global64MiB/reserva16MiBpresent y defaultoptin. Build17ops+no-op/exit0 y gate
+C++/IR/GPU nativo pasan; lector completo con ROI insertado1680exactos, resto
+sintético no evaluado. .39firmado en package-game-f-lighting-full, PS5f3/count18,
+un solo selector. Símbolos0.2.87.39/verificationJSON archivados. Una toma del
+mismo mapa/quiebre90° por mando pendiente. No causa raíz ni arreglo visual
+certificados; procedimiento discriminante en xbox_deferred_lighting.md.
+
+
+### Series .39: las bandas se transmiten por alfa; .40 para productor
+
+Captura527archivos/127905329bytes, cuatro inputs youtput lighting completos.
+Replay8160/8160exactos. Alfa deRGBA8contienequiebres90° ocultos enpreviewRGB;
+lighting atenúa por1-alpha. ROIalfa0trasdraw9, cambiaen130 VSff852/PS844b,count36,
+MAXsoloA, consultaRG16+BC4@5bde70000. Controlofflinealfa0retira franja,Dref1no;
+causa inmediata localizada, raíz de máscaraSeries pendiente. BC4no estáenexports.
+.40firmada package-game-f-alpha-volume selecciona productor,inputs,mips yRT0
+pre/postblend(diagnóstico añadido,64MiBglobal intacto). Build17ops/fixtures pasan.
+Una toma mismo mapa pendiente. Marcas tubo yaenR11prelighting, investigación
+separada. Reportes/limitaciones en xbox_deferred_lighting.md. No arreglo certificado.
+
+13 oct 2026, .40 revisada en Descargas: 575 archivos/132199308 bytes preservados.
+Bandas90° introducidas en alfa de RT0 por draw132 VSff852/PS844; BC4 nube nativa,
+diez mips y RG16 completos recuperados. Replay VS+PS de producción en GPU PC con
+inputsSeries: 2673/2681 puntos dentro2UNORM respectoCPU, solo541 respectoSeries.
+Causa última pendiente: comparar DXIL Series y valores intermedios de esa draw.
+Diagnóstico .41 añade identidadVS/PS/hash en dumps, export en cachehit y VB retenido
+en draw seleccionada; no modifica rendernormal. Probe native/runner y fixtures
+pasan, incremental correcto. Detalle y límites en xbox_deferred_lighting.md.
+
+14oct2026 .41Series revisada: DXILVSff852/PS844 de ambosPSO925c/cda4 ySPIR-V
+son byteidénticos aPC; IR idéntico normalizando direcciones. Se descarta generación
+DXIL diferente por plataforma, no errores comunes/driver/recursos. RenderError0/
+Critical0; Input1084 yNetwork3 sin relaciónGPU demostrada; finalheartbeat sinQ.
+Shaders/logs archivados en test-results/game-f-lighting-2026-10-14/series41-shaders.
+No pedir repetir.41; faltan intermediosGPU Generic0/1/depthRG/UVBC4 del productor,
+requerir pase diagnóstico separado float. Detalle en xbox_deferred_lighting.md.
+
+14oct investigaciónweb: KhronosEXT_gpu_shader4 cuestiones8/10 documentaNoPerspective
+conW cruzando0; D3D§16.4 exigeclippercoherente yguardbandpuedevariar. Encaja como
+hipótesisprioritaria convolumenreconstruidoWnegativo, no causacertificada ni prueba
+bugSeries. PistaAMDmetadata placed(UUM108671) contrastada:InitializePlacedResource
+yaaliasing/transición/Discard, noincumplimientoprobado. Sondafloatoptincompila,PS
+muestrasPCdepth32768exactos/BC4<1UNORM; gateROI/restauraciónintegrada ypaquete.42
+pendientes. Usuario priorizó investigacióninternet; detalle/fuentesen docGame F.

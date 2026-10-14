@@ -36,6 +36,9 @@ int main() try {
     };
     constexpr UINT SLOT = 32 * 256, CASES = 5;
     auto readback = buffer(CASES * SLOT, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+    constexpr UINT FULL_SLOT = 65536;
+    auto full = buffer(CASES * FULL_SLOT, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+    std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT, CASES> full_footprints{};
     std::vector<ComPtr<ID3D12Resource>> keep_alive;
     struct Expected { UINT width, height, x, y; };
     std::array<Expected, CASES> expected{};
@@ -65,6 +68,11 @@ int main() try {
         D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition = {texture.Get(), 3, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE};
         commands->ResourceBarrier(1, &barrier);
+        full_footprints[test] = footprint;
+        auto full_placed = footprint; full_placed.Offset = test * FULL_SLOT;
+        D3D12_TEXTURE_COPY_LOCATION whole{full.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
+        whole.PlacedFootprint = full_placed;
+        commands->CopyTextureRegion(&whole, 0, 0, 0, &dst, nullptr);
         const UINT x = test == 4 ? 74 : test * 3, y = test == 4 ? 70 : test * 2;
         const UINT width = std::min(64U, 75 - x), height = std::min(32U, 71 - y);
         expected[test] = {width, height, x, y};
@@ -77,9 +85,16 @@ int main() try {
         commands->ResourceBarrier(1, &barrier);
         keep_alive.push_back(texture); keep_alive.push_back(upload);
     }
+    // Hold the queue behind a GPU-side wait. A deferred consumer must leave the mapped
+    // readback untouched until its completion fence advances; no CPU wait between copies.
+    ComPtr<ID3D12Fence> gate;
+    Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)));
+    Check(queue->Wait(gate.Get(), 1));
     Check(commands->Close()); ID3D12CommandList* lists[]{commands.Get()}; queue->ExecuteCommandLists(1, lists);
     ComPtr<ID3D12Fence> fence; Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
     Check(queue->Signal(fence.Get(), 1));
+    if (fence->GetCompletedValue() != 0) throw std::runtime_error("readback retired before last copy");
+    Check(gate->Signal(1));
     HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!event) throw std::runtime_error("event");
     Check(fence->SetEventOnCompletion(1, event)); const auto wait = WaitForSingleObject(event, 30000); CloseHandle(event);
@@ -94,6 +109,19 @@ int main() try {
             ++texels;
         }
     }
+    void* full_mapped{}; Check(full->Map(0, nullptr, &full_mapped));
+    for (UINT test = 0; test < CASES; ++test) {
+        const auto& fp = full_footprints[test];
+        std::vector<unsigned char> packed(75 * 71 * 4);
+        for (UINT y = 0; y < 71; ++y)
+            std::memcpy(packed.data() + y * 75 * 4,
+                static_cast<char*>(full_mapped) + test * FULL_SLOT + y * fp.Footprint.RowPitch, 75 * 4);
+        for (UINT y = 0; y < 71; ++y) for (UINT x = 0; x < 75; ++x) {
+            UINT actual{}; std::memcpy(&actual, packed.data() + (y * 75 + x) * 4, 4);
+            if (actual != ((test << 24) | (y << 12) | x)) throw std::runtime_error("native full copy/alpha mismatch");
+        }
+    }
+    full->Unmap(0, nullptr); readback->Unmap(0, nullptr);
     for (UINT64 i = 0; i < messages->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
         SIZE_T size{}; messages->GetMessage(i, nullptr, &size); std::vector<char> bytes(size);
         auto* message = reinterpret_cast<D3D12_MESSAGE*>(bytes.data()); Check(messages->GetMessage(i, message, &size));
@@ -102,6 +130,6 @@ int main() try {
         }
     }
     Check(device->GetDeviceRemovedReason());
-    std::cout << "PASS GPU tiles: " << texels << " exact texels, 5 formats, array mip, clipped edge, restored state; debug clean\n";
+    std::cout << "PASS GPU tiles: " << texels << " exact texels, 5 formats, array mip, clipped edge, restored state; native full-frame/alpha and deferred fence gate; debug clean\n";
     return 0;
 } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

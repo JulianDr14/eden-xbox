@@ -44,6 +44,7 @@ size_t Hash(const StageBindings& bindings) {
     HashDescriptors(seed, bindings.image_descriptors);
     Combine(seed, std::hash<std::bitset<512>>{}(bindings.loads.mask));
     Combine(seed, std::hash<std::bitset<512>>{}(bindings.stores.mask));
+    Combine(seed, std::hash<u64>{}(bindings.interpolation));
     Combine(seed, bindings.uses_render_area);
     return seed;
 }
@@ -68,7 +69,8 @@ bool StageBindings::operator==(const StageBindings& other) const {
            image_buffer_descriptors == other.image_buffer_descriptors &&
            texture_descriptors == other.texture_descriptors &&
            image_descriptors == other.image_descriptors && loads.mask == other.loads.mask &&
-           stores.mask == other.stores.mask && uses_render_area == other.uses_render_area;
+           stores.mask == other.stores.mask && interpolation == other.interpolation &&
+           uses_render_area == other.uses_render_area;
 }
 
 std::shared_ptr<const StageBindings> InternStage(const Shader::Info& info) {
@@ -81,6 +83,12 @@ std::shared_ptr<const StageBindings> InternStage(const Shader::Info& info) {
     CopyDescriptors(bindings->image_descriptors, info.image_descriptors);
     bindings->loads = info.loads;
     bindings->stores = info.stores;
+    static_assert(std::tuple_size_v<decltype(info.interpolation)> == 32);
+    for (size_t index = 0; index < info.interpolation.size(); ++index) {
+        if (info.loads.Generic(index)) {
+            bindings->interpolation |= u64{static_cast<u32>(info.interpolation[index])} << (2 * index);
+        }
+    }
     bindings->uses_render_area = info.uses_render_area;
     const size_t hash = Hash(*bindings);
 

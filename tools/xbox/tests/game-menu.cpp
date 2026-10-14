@@ -162,5 +162,20 @@ int main() {
     check(scaling_menu.Settings().upscaling == Upscaling::FsrSoft && scaling_row().value == L"FSR 1 · suave");
     GameMenu scaling_reopened{scaling_menu.Settings()};
     check(scaling_reopened.Settings().upscaling == Upscaling::FsrSoft);
-    std::puts("game menu: combo hold/stagger/tap/held passthrough, navigation, settings, upscaling and cheats PASS");
+    I18n::SetUiLanguage(*I18n::FindUiLanguage(L"en"));
+    GameMenuSettings diagnostic_settings{};
+    diagnostic_settings.material_capture = true;
+    GameMenu diagnostic{diagnostic_settings};
+    const auto normal_rows = GameMenu{GameMenuSettings{}}.Rows();
+    check(diagnostic.Rows().size() == normal_rows.size() + 1);
+    while (diagnostic.SelectedItem() != GameMenu::CaptureGraphics) diagnostic.Apply(MenuAction::Down);
+    check(diagnostic.Rows()[diagnostic.Selected()].label == L"Capture graphics and resume");
+    check(diagnostic.Apply(MenuAction::Left) == GameMenuResult::None);
+    check(diagnostic.Apply(MenuAction::Right) == GameMenuResult::None);
+    check(diagnostic.Apply(MenuAction::Confirm) == GameMenuResult::CaptureGraphics);
+    check(diagnostic.Apply(MenuAction::Back) == GameMenuResult::Resume);
+    I18n::SetUiLanguage(*I18n::FindUiLanguage(L"es"));
+    check(diagnostic.Rows()[diagnostic.Selected()].label == L"Capturar gráficos y continuar");
+    for (const auto& row : normal_rows) check(row.label != L"Capture graphics and resume");
+    std::puts("game menu: controller combo, navigation, settings, upscaling, cheats and opt-in capture PASS");
 }

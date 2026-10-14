@@ -32,6 +32,8 @@ struct FramebufferConfig;
 
 namespace D3D12 {
 
+void SetMaterialGpuProbeEnabled(bool enabled);
+
 class AccelerateDMA final : public Tegra::Engines::AccelerateDMAInterface {
 public:
     AccelerateDMA(BufferCache& buffer_cache, TextureCache& texture_cache);
@@ -134,8 +136,13 @@ public:
     void SetDrawTrace(bool enabled, bool dump_targets = false);
     /// Explicit bounded capture with target snapshots and an optional native pixel probe.
     /// Refuses an intensive trace; the caller ends it after the selected present intervals.
-    bool BeginMaterialTrace(u64 pixel_shader = 0, s32 probe_x = -1, s32 probe_y = -1);
+    bool BeginMaterialTrace(u64 pixel_shader = 0, s32 probe_x = -1, s32 probe_y = -1,
+                            std::array<u64, 2> snapshot_shaders = {},
+                            std::array<u32, 2> snapshot_vertices = {});
     void EndMaterialTrace(bool intervals_complete = true);
+    /// Copies the exact composited image handed to presentation, with capture/frame identity.
+    void CaptureMaterialPresent(ID3D12Resource* resource, u64 frame);
+    void PollMaterialReadbacks();
 
 private:
     struct DrawParams {
@@ -201,6 +208,14 @@ private:
     /// and writes trace\<name>.bmp.
     std::optional<u64> DumpTarget(const Image& image, const std::string* bmp_name,
                                   u32 subresource = 0);
+    bool QueueMaterialReadback(ID3D12Resource* resource, u32 subresource,
+                               DXGI_FORMAT format, const std::string& name, const D3D12_BOX* region = nullptr);
+    void ProbeMaterialIntermediates(const GraphicsPipeline& pipeline, const PipelineBindings& bindings,
+        const Framebuffer& framebuffer, const DrawParams& params, Maxwell::PrimitiveTopology topology);
+    bool material_gpu_probe_done{};
+    u64 ExportTargetReadback(StagingBufferRef& readback,
+                             const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint,
+                             DXGI_FORMAT format, const std::string* bmp_name, bool native);
     /// Logs the NaN/Inf texels of every level and layer of a sampled image (once per trace).
     void DumpTextureNonFinite(const Image& image);
     /// For every traced draw: reads each bound cbuf, vertex and index buffer back from the GPU and
@@ -289,16 +304,61 @@ private:
     u32 material_capture_id{};
     u64 material_capture_stamp{};
     void DumpMaterialTargets();
+    void DumpMaterialShaderTarget(const GraphicsPipeline& pipeline, const Framebuffer& framebuffer,
+                                  u32 vertices);
+    void CaptureMaterialSampledInputs(const GraphicsPipeline& pipeline,
+                                     std::span<const VideoCommon::ImageViewId> views, u32 vertices,
+                                     const Framebuffer& framebuffer);
+    MaterialSnapshotSelection material_snapshots;
+    struct MaterialReadback {
+        StagingBufferRef buffer;
+        ComPtr<ID3D12Resource> source;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+        DXGI_FORMAT format;
+        u64 tick;
+        u64 bytes;
+        std::string name;
+        u32 rows{};
+        u64 row_bytes{};
+        u32 subresource{};
+    };
+    std::vector<MaterialReadback> material_readbacks;
+    u64 material_readback_bytes{};
+    static constexpr u64 MATERIAL_READBACK_LIMIT = 64ULL << 20;
     void ProbeMaterialDraw(const GraphicsPipeline& pipeline, const Framebuffer& framebuffer);
     void DumpMaterialProbe(bool complete);
     struct MaterialProbeRecord {
-        u32 draw, target, format, x, y, width, height;
+        u32 draw, target, format, x, y, width, height, subresource;
         u64 address, vertex_shader, pixel_shader;
     };
     static constexpr u32 MATERIAL_PROBE_LIMIT = 2048;
     static constexpr u32 MATERIAL_PROBE_SLOT_BYTES = 32 * 256;
     std::vector<MaterialProbeRecord> material_probe_records;
     StagingBufferRef material_probe_buffer{};
+    struct PendingMaterialProbe {
+        StagingBufferRef buffer;
+        std::vector<MaterialProbeRecord> records;
+        u64 tick;
+        std::string name;
+        u32 omitted;
+    };
+    std::optional<PendingMaterialProbe> pending_material_probe;
+    void ExportMaterialProbe(PendingMaterialProbe& probe);
+    struct MaterialBufferReadback {
+        StagingBufferRef buffer;
+        ComPtr<ID3D12Resource> source;
+        std::vector<u8> streamed;
+        u64 tick;
+        u32 size;
+        std::string name;
+    };
+    std::vector<MaterialBufferReadback> material_buffer_readbacks;
+    std::unordered_set<std::string> material_input_pairs;
+    u64 material_input_bytes{};
+    std::unordered_set<std::string> material_sampled_depth;
+    u64 material_sampled_depth_bytes{};
+    void CaptureMaterialInputs(const GraphicsPipeline& pipeline,
+                               std::span<const TracedBuffer> buffers, const DrawParams& params);
     s32 material_probe_x{-1}, material_probe_y{-1};
     u32 material_probe_omitted{};
     void LogDrawTrace(std::string_view line);
