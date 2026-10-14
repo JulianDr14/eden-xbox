@@ -3443,3 +3443,46 @@ bugSeries. PistaAMDmetadata placed(UUM108671) contrastada:InitializePlacedResour
 yaaliasing/transición/Discard, noincumplimientoprobado. Sondafloatoptincompila,PS
 muestrasPCdepth32768exactos/BC4<1UNORM; gateROI/restauraciónintegrada ypaquete.42
 pendientes. Usuario priorizó investigacióninternet; detalle/fuentesen docSM3DW.
+
+14oct gatecoordenadasPC: dosPSdiagnósticos+VSreal coninputsSeries. ROI32768píxeles
+sinNaN/Inf; UVmax8,103e-6, viewmax5,135e-6, depthRGexacto, BC4<1/255. CopiaGPU
+ROI byteidéntica full ydebugaisladolimpio. Fixtureparserpasa; harnesscorrigemacro
+Win32small. AppPCautomática600capturapantallainicial24draws, sinPSseleccionado:
+no gateintegrado de sondarestauración/query; warnings210VBcorto previos/aotrosdraws.
+Paquete.42firmado/verificado enpackage-coordinate-probe, símbolosarchivados.
+SiguienteSeriesunacapturamismomapa/zona conMenu; buscargpu_varyings/gpu_samples.
+No correcciónvisualcertificada ni nuevocommit/push; detalleendocSM3DW.
+
+## 14 oct 2026: coordenadas Series .42 y control de interpolación .43
+
+Evidencia y límites en `xbox_sm3dw_lighting.md`, sección .42/.43. El usuario
+confirma cierre forzado voluntario; la captura completó 201 draws y ambos ROIs
+antes del cierre. VB/IB/CB exactos conservados. Generic0.y en Series se aparta
+0,197057 del valor afín esperado; PC con esos mismos datos solo 8,474e-6.
+El replay del alfa original con coordenadas Series reproduce 8048/8192 puntos
+a 2/255 (98,2%), frente a 6046 con coordenadas esperadas. Entre los 2137 puntos
+realmente modificados, explica 1993 (93,26%) frente a 49. Primera divergencia
+medida antes de la iluminación del PS. BC4 controlado coincide; todavía falta
+separar aritmética VS del driver, recorte e interpolación.
+
+El control opt-in .43 añade GS identidad y smooth(a*clipW)/SVPosition.w: tres
+ROIs adicionales, sin escribir el framebuffer invitado. Mismo RT ≤32 MiB y
+cap de readbacks 64 MiB; readbacks de la sonda 2,5 MiB en total. Native PC con
+VS original y datos .42: identidad exacta, error lineal ROI ≤8,778e-6, RG16
+exacto/BC4 ≤1/255, debug limpio. Oracle de 8192 casos, parser, IR y build
+incremental pasan. Paquete firmado en
+`build-uwp/package-interpolation-control/eden-xbox.appx`, versión 0.2.87.43,
+símbolos archivados. Una captura Series debe comparar original, identidad y
+lineal antes de convertir el mecanismo en una corrección de producción.
+Firma CMS y BlockMap correctos; SignTool /pa rechaza confianza en raíz dev
+local, sin modificar el almacén de certificados. Sin nuevo commit/push ni
+corrección visual certificada.
+
+Investigación externa posterior .42: AMD PAL documenta dxLinearAttrClipEna como
+ajuste del factor de clipping para conservar gradientes lineales; Mesa activa
+DX_LINEAR_ATTR_CLIP_ENA. No prueba que Xbox lo configure mal ni permite tocarlo
+desde nuestra API D3D12. Microsoft DXIL permite repacking de firmas por el driver:
+bytecode idéntico no descarta linking/interpolador distinto. Modelos CPU .42 con
+guardbands asimétricos tampoco reproducen toda la salida (mejor 677/2048 a0,001).
+Fuentes, exclusiones y resultados en xbox_sm3dw_lighting.md. No se cambió renderer
+ni paquete .43; sigue pendiente contrastar GS identidad y control lineal en Series.
