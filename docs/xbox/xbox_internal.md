@@ -3486,3 +3486,27 @@ bytecode idéntico no descarta linking/interpolador distinto. Modelos CPU .42 co
 guardbands asimétricos tampoco reproducen toda la salida (mejor 677/2048 a0,001).
 Fuentes, exclusiones y resultados en xbox_sm3dw_lighting.md. No se cambió renderer
 ni paquete .43; sigue pendiente contrastar GS identidad y control lineal en Series.
+
+## 14 oct 2026: Series .43 aísla NoPerspective; candidato correctivo .44
+
+Original e identidad son byteidénticos en Series; el control lineal baja el error
+Generic0.y de0,197782 a6,208e-6, RG16 exacto, BC4 dentro1/255. Se aísla la ruta de
+recorte/interpolación NoPerspective al cruzar W=0; no se conoce la microoperación
+interna del driver ni se acusa un registro concreto. Retorno10 fue a biblioteca,
+no crash. Evidencia en xbox_sm3dw_lighting.md y series43-map (572 archivos).
+
+Corrección genérica D3D12 para VS→FS directos: epílogo exporta a*W, FS smooth lee
+a multiplicando por FragCoord.w recíproco SPIR-V. Excluye GS/tess/indexedFS y no
+usa hashes de juegos. Vulkan/GL/compute y smooth/flat conservados. Sonda adaptada
+para no ponderar dos veces; sin GS/draws/recursos nuevos en producción.
+Build incremental, cuatro fixtures de emisor/linker, ocho gates GPU y regresiónGS
+45 módulos/36 PSOs pasan. DXIL real modificado con inputs exactos .43 reproduce
+8192/8192 alfas del oráculo afín sin diferenciaUNORM8, debug limpio. Pareja DXIL
++160 bytes medidos; FPS/tiempoPSO/Series sin benchmark comparable.
+Paquete de prueba0.2.87.44 en build-uwp/package-noperspective-fix/eden-xbox.appx,
+símbolos archivados. Comprobar imagen y estabilidad cerca/lejos/ángulos en Series;
+tubos siguen separados. Sin commit/push ni corrección visual certificada.
+
+Confirmación posterior: el usuario probó el paquete .44 de package-noperspective-fix
+y respondió «perfecto era eso». Resultado visual positivo en Series; sin nueva
+captura/log ni desglose de tubos, distancias u otros escenarios. No certificar FPS.

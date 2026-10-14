@@ -950,3 +950,17 @@ realesGPU PC coninputsSeries coincideCPU2673/2681, Series541/2681; no causaúlti
 certificada. .41diagnóstico exportaDXIL VS/PS/hash inclusohit yVB retenidos de draw
 seleccionada; rendernormal/BCintactos. Fixtures/nativeprobe/buildincremental pasan;
 DXILSeries/intermediosGPU pendientes. Sinparchevisual/commit/push; detalle docSM3DW.
+
+14 oct 2026: Series .43 aísla la ruta de recorte/interpolación NoPerspective:
+original e identidad byteidénticos; control lineal baja error Y0,1978→6,208e-6,
+profundidad exacta. Candidato .44 pondera atributos al final del VS y los recupera
+en FS smooth, sin GS adicional ni hashes específicos. Solo VS→FS directos;
+GS/tess/indexedFS conservados. Build, fixtures de emisor, ocho gates GPU y regresión
+GS pasan; DXIL real con inputs .43 coincide alfa afín8192/8192. Paquete listo en
+build-uwp/package-noperspective-fix/eden-xbox.appx. Imagen cerca/lejos/ángulos en
+Series y tubos pendientes; no declarar corrección visual ni rendimiento validado.
+Sin commit/push. Evidencia y límites en docs/xbox/xbox_sm3dw_lighting.md.
+
+Confirmación posterior .44: usuario indica resultado visual positivo en Series
+(«perfecto era eso»). Sin nuevos logs ni desglose de tubos/distancias/otros
+escenarios o benchmark; conservar esas limitaciones al informar del cierre.

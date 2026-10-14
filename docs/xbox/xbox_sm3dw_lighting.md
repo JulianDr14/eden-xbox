@@ -1494,3 +1494,159 @@ NoPerspective y, después, el linking/interpolador del driver. .43 ya contiene l
 controles adecuados para distinguirlos sin modificar la iluminación del invitado.
 No se modifica ni recompila el renderer en este paso; solo documentación y el
 experimento CPU. El APPX .43 y sus hashes siguen siendo los ya verificados.
+
+## 14 oct 2026: resultado causal .43 y corrección .44
+
+Se revisaron Descargas, los cuatro diagnósticos y los cinco ROIs de .43. Evidencia
+con inventario SHA256 en `test-results/sm3dw-lighting-2026-10-14/series43-map/`:
+572 archivos, 131962923 bytes. Present2401 inspeccionado directamente: persisten
+las bandas con quiebros y las marcas del tubo verde, como corresponde a una sonda
+que no modifica la imagen invitada. Draw137/PS844/VSff852/pipeline925c, mismos
+recursos e interfaz que .42. Captura completa: 201 draws, omitted_draws0,
+dropped_lines0, intervals_complete1; cinco ROIs queued=true. Las dos copias finales
+aux/depth se omiten por el cap, pero las fuentes necesarias están completas.
+
+El diag identifica 0.2.87.43 y `RunHeadlessBoot returned 10`: este código significa
+RETURN_TO_LIBRARY en uwp_boot.cpp, seguido de «back to the library». No es un crash.
+El log registra fallos de playtime al cerrar y avisos de BufferQueue/NVMap, sin
+RenderError/Critical asociado a esta prueba. No convertirlos en causa de los píxeles.
+
+### Resultado de una perturbación controlada en Series
+
+|Ruta, mismo VS y entradas|Error máximo Generic0.y|Puntos sobre tolerancia0,001 en ese canal|
+|---|---:|---:|
+|Original NoPerspective|0,1977818275|24731/32768|
+|GS identidad + NoPerspective|0,1977818275|24731/32768|
+|GS pondera a*W + PS smooth reconstruye a|0,00000620815|0/32768|
+
+Original e identidad son **idénticos byte por byte** en el ROI float4 completo,
+no solo sus máximos. El control lineal conserva cobertura32768, NaN/Inf0 y errores
+máximos por canal [1,156e-6,6,208e-6,1,807e-6,3,893e-6]. Las muestras point de
+profundidadRG coinciden exactamente con sus fuentes; BC4 LOD0/9 queda dentro1/255.
+Reportes `intermediate-comparison.json` y bytes nativos preservados.
+
+Esto aísla causalmente **la ruta de recorte/interpolación NoPerspective del volumen
+que cruza W=0**. Mantener el VS original y añadir GS identidad no cambia el error;
+cambiar la representación del atributo elimina la divergencia de coordenadas.
+La explicación de la dependencia de cámara es la variación de W, proyecciones e
+intersecciones al recortar. No son dimensiones BC ni un sampler/cascada que cambia
+entre capturas. Sigue sin demostrarse qué microoperación interna o registro del
+driver causa el error: no afirmar que DX_LINEAR_ATTR_CLIP_ENA esté mal programado.
+
+Replay del PS original con datos .43: las coordenadas Series reproducen8069/8192
+puntos a2/255, mientras las afines reproducen6353/8192; error medio0,521 frente
+23,788 unidadesUNORM8. Confirma que la divergencia de coordenadas llega al alfa
+que consume la iluminación. La causa del tubo continúa separada.
+
+### Implementación en el recompilador, sin GS adicional
+
+`RuntimeInfo::lower_noperspective_mask` selecciona atributos por la interpolación
+real del FS. D3D12 lo configura solo para pipelines directos VS→FS con atributos
+leídos por el FS y escritos por el VS; excluye tessellation, GS, emulación de layer
+y lecturas indexadas del FS. Es independiente de hashes y títulos. Las demás
+rutas, Vulkan/GL y compute conservan máscara0 y comportamiento anterior.
+
+El epílogo SPIR-V del VS multiplica **los valores finales** del atributo por clipW,
+después de todos los stores invitados. Esto evita depender del orden en que el
+guest escriba PositionW. El FS usa interpolación smooth para esos atributos y
+reconstruye el valor al leerlo multiplicando por FragCoord.w de SPIR-V, que es
+**recíproco** de W. Mesa ya convierte esa semántica al SV_Position.w de D3D.
+Por eso el código SPIR-V multiplica, mientras la sonda HLSL .43 dividía por W.
+No tocar posición/Z, matrices, bias, profundidad, blending, texturas o colores.
+Smooth y flat se preservan; no se añade GS, draw, textura ni descriptor en producción.
+
+La clave compartida de shaders contiene el SPIR-V transformado, así que no puede
+reutilizar DXIL anterior incompatible. La caché persistente almacena entornos
+Maxwell y vuelve a compilar: no hace falta borrar perfiles/cachés del usuario.
+GraphicsPipeline conserva la máscara para diagnóstico; la sonda .44 usa PS smooth
+sin GS y exporta los atributos reconstruidos. No aplica la ponderación dos veces.
+
+|Archivo de producción modificado|Propósito de la corrección|
+|---|---|
+|`shader_recompiler/runtime_info.h`|Máscara explícita por interfaz, valor0 para rutas ajenas|
+|`backend/spirv/spirv_emit_context.cpp`|Declarar FragCoord cuando hace falta y seleccionar smooth|
+|`backend/spirv/emit_spirv_special.cpp`|Ponderar atributos finales del VS por W|
+|`backend/spirv/emit_spirv_context_get_set.cpp`|Reconstruir el atributo al leerlo en FS|
+|`renderer_d3d12/d3d12_pipeline_cache.cpp`|Seleccionar pipelines/atributos elegibles y conservar la máscara|
+|`renderer_d3d12/d3d12_graphics_pipeline.h/.cpp`|Metadato de representación usado por las sondas|
+|`renderer_d3d12/diagnostics/d3d12_draw_trace.cpp`|Sonda compatible con el VS ya ponderado|
+|`dist/uwp/AppxManifest.xml`|Versión0.2.87.44 del paquete correctivo de prueba|
+
+### Validación técnica realizada
+
+- Build incremental UWP correcto, 52 operaciones tras cambiar RuntimeInfo compartido.
+- Cuatro fixtures del **emisor de producción** y linker SPIR-V→DXIL: máscara0 y
+  máscara0x80000001, PositionW temprano/tardío, atributos smooth/flat mezclados y
+  ubicación31. SPIRV-Tools valida los módulos y Mesa genera DXIL firmado válido.
+- Ocho ejecuciones GPU nativas con W positivo/cruzando W=0. El lowering conserva
+  los canales smooth/flat exactamente y las coordenadas afines con error máximo
+  1,278e-5; sin NaN/Inf ni avisos de debug. El control nativo del caso sintético
+  extremo cruzando W=0 produce Inf/errores incluso en PC: se registra como control,
+  no se oculta ni se exige que un camino conocido delicado pase el oráculo.
+  Esto no contradice que la escena real solo falle en Series; el caso sintético
+  tiene una geometría distinta y cruza una singularidad exacta de su plano de clip.
+- Arranque PC .44 con debug: shaders afectados **de producción** volcados para
+  pipeline925c. La app tramita576 solicitudes de PSO y permanece en pantalla inicial;
+  snapshot de log sin RenderError/Critical/RenderWarning. No es gate de gameplay
+  ni de rendimiento, ni ejecutó necesariamente la sonda seleccionada dentro del juego.
+- Se ejecutaron esos DXIL nuevos en GPU PC con VB/IB/CB y texturas exactos de .43,
+  sin reimplementar el VS/PS en HLSL. Error máximo de coordenadasROI6,944e-6,
+  profundidadRG exacta, BC4 dentro1/255 y debug limpio. **Alfa del PS real modificado,
+  convertido aUNORM8 y combinado con MAX/preblend: 8192/8192 puntos idénticos al
+  oráculo afín**, error0. Cambia1839 puntos respecto a la salida errónea Series .43.
+  Evidencia `production-fixed-pc-{intermediates,alpha}.json` y DXIL en
+  `production-fixed-pc-shaders/`.
+- Regresión de geometry passthrough: 45 módulos SPIR-V validados, 36 GS DXIL
+  firmados con VS/GS/PS enlazados y PSOs D3D12 válidos; comparación de 24 módulos
+  explícitos, máscaras sparse, profundidad y orden de vértices correcta. Cubre
+  que la máscara0 de las rutas ajenas al cambio conserva sus semánticas.
+- Fixtures IR, parser de intermedios y oracle matemático de8192casos pasan.
+
+Pruebas añadidas: `noperspective-lowering.cpp/.py` y runner; el harness nativo
+acepta fixtures sin recursos privados. Los grandes readbacks sintéticos viven en
+un directorio temporal verificado bajo build-uwp y se eliminan tras la comparación;
+se conserva `noperspective-lowering-gate/gpu-comparison.json`. No incorporar assets
+invitados al repo. Nota de herramientas: Get-AppxPackage falla desde PowerShell7
+en este host; el runner consulta el runtime UWP mediante WindowsPowerShell5.1.
+
+### Compatibilidad, coste y validación pendiente
+
+El coste de producción es aritmética adicional solo en los atributos NoPerspective
+seleccionados, más un campo pequeño por pipeline. La pareja real DXIL pasa de
+2819→2839 bytesVS y3284→3424 bytesPS: **+160 bytes medidos**. No hay nuevas
+asignaciones GPU ni pasadas de producción. No hay benchmark comparable de FPS,
+tiempo de PSO o consumo en Series; no afirmar sobrecoste cero. La representación
+usa FP32 y su rango/precisión requieren regresiones con otros shaders; no introducir
+clamps para ocultar overflow o entradas no finitas. GS/tessellation/indexedFS
+siguen pendientes si se localiza el mismo mecanismo en esas rutas.
+
+Paquete correctivo de prueba **0.2.87.44**:
+`build-uwp/package-noperspective-fix/eden-xbox.appx`,14837056bytes,
+SHA25628f20fbc703eb5536d97b7bad8b3ede8406a80db2b32fd1b7e1d2608ed48c1f4.
+EXEbc17e0ba02c1ef8ab79d7384f9de5bd8d6da348be5b6c60bc964e651503dd1f5;
+PDBd023711580943f0c8104a70d3e9cc1c4a876b41e60fa98a3fa7a0611589d98e5.
+Símbolos archivados, manifest/config/EXE comprobados contraZIP, firma CMS y719
+bloques SHA256 del BlockMap correctos. El último link de5operaciones solo incorpora
+ajustes de formato C++; el paquete final y sus símbolos corresponden a ese link.
+Se empaquetó en un staging nuevo para conservar la appPC en ejecución, y se
+actualizó el APPX entregable sin tocar su checkout activo. ConfigSeries
+conserva library/play, límite5120 y sonda por mando; añade dumps acotados de los
+dos shaders afectados para verificar el código realmente desplegado. El layout
+PC se restauró a configuraciónSeries después de cargarla; APPX siempre fueSeries.
+
+Instalar .44 y observar la misma zona al acercarse, alejarse y girar la cámara.
+Tomar una captura por mando con la banda visible y dejar terminar las exportaciones:
+debe registrar `lowered_noperspective=00000003` y coordenadas reconstruidas correctas.
+Comparar las bandas legítimas de la referencia PC, las sombras del personaje y la
+estabilidad según distancia; no exigir que desaparezca toda variación artística.
+Revisar el tubo verde y los transparentes, sin atribuirles automáticamente esta
+causa. **El defecto visual aún no está certificado como corregido en hardware.**
+Sin nuevo commit ni push.
+
+### Confirmación del usuario en Series, .44
+
+Después de indicar el APPX final de `package-noperspective-fix`, el usuario
+confirma «perfecto era eso». Se registra como confirmación visual positiva de
+la corrección probada en consola. No acompañó este mensaje con otra captura o
+log, ni desglosó distancias, tubos o escenarios adicionales: esas comprobaciones
+no se dan automáticamente por certificadas. No hay medición nueva de FPS.
