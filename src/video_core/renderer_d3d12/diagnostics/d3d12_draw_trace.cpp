@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -17,6 +18,8 @@
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "video_core/memory_manager.h"
+#include "video_core/renderer_d3d12/diagnostics/material_varyings_ps.h"
+#include "video_core/renderer_d3d12/diagnostics/material_samples_ps.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
@@ -27,6 +30,11 @@
 // readback checks against guest memory. Diagnostics only; draws do not depend on it.
 
 namespace D3D12 {
+
+namespace { std::atomic_bool material_gpu_probe_enabled{false}; }
+void SetMaterialGpuProbeEnabled(bool enabled) {
+    material_gpu_probe_enabled.store(enabled, std::memory_order_relaxed);
+}
 
 namespace {
 
@@ -103,6 +111,9 @@ bool ReadTexel(DXGI_FORMAT format, const u8* src, std::array<float, 4>& rgba) {
         rgba = {value, value, value, 1.0f};
         return true;
     }
+    case DXGI_FORMAT_R32G32B32A32_FLOAT:
+        std::memcpy(rgba.data(), src, sizeof(float) * 4);
+        return true;
     case DXGI_FORMAT_R32_TYPELESS:
     case DXGI_FORMAT_R32_FLOAT: {
         const float value = std::bit_cast<float>(word);
@@ -130,6 +141,7 @@ bool ReadTexel(DXGI_FORMAT format, const u8* src, std::array<float, 4>& rgba) {
 
 u32 DumpTexelBytes(DXGI_FORMAT format) {
     switch (format) {
+    case DXGI_FORMAT_R32G32B32A32_FLOAT: return 16;
     case DXGI_FORMAT_R16G16B16A16_TYPELESS:
     case DXGI_FORMAT_R16G16B16A16_FLOAT:
         return 8;
@@ -180,8 +192,11 @@ void RasterizerD3D12::SetDrawTrace(bool enabled, bool dump_targets) {
     trace_non_finite_grew = false;
 }
 
-bool RasterizerD3D12::BeginMaterialTrace(u64 pixel_shader, s32 probe_x, s32 probe_y) {
-    if (trace_draws) return false;
+bool RasterizerD3D12::BeginMaterialTrace(u64 pixel_shader, s32 probe_x, s32 probe_y,
+                                        std::array<u64, 2> snapshot_shaders,
+                                        std::array<u32, 2> snapshot_vertices) {
+    if (trace_draws || !material_readbacks.empty() || pending_material_probe ||
+        !material_buffer_readbacks.empty()) return false;
     EndMaterialTrace(false);
     material_trace.Begin(pixel_shader);
     material_trace_records.clear();
@@ -195,7 +210,48 @@ bool RasterizerD3D12::BeginMaterialTrace(u64 pixel_shader, s32 probe_x, s32 prob
     material_probe_y = probe_y;
     material_probe_omitted = 0;
     material_probe_records.clear();
+    material_snapshots.Begin(snapshot_shaders, snapshot_vertices);
+    material_gpu_probe_done = false;
+    material_input_pairs.clear();
+    material_input_bytes = 0;
+    material_sampled_depth.clear();
+    material_sampled_depth_bytes = 0;
     return true;
+}
+
+void RasterizerD3D12::DumpMaterialShaderTarget(const GraphicsPipeline& pipeline,
+                                             const Framebuffer& framebuffer, u32 vertices) {
+    const u64 shader = pipeline.Key().unique_hashes[5];
+    if (!material_snapshots.Consume(shader, vertices)) return;
+    // One exact post-draw snapshot per requested PS, never a readback on every matching draw.
+    // The first matching draw is explicit in the file name; it is NOT a completed pass/replay.
+    if (!(pipeline.BoundColorTargets() & 1) || framebuffer.ColorOnCopy(0)) return;
+    const Image* image = framebuffer.ColorImage(0);
+    if (!image || !image->Handle() || image->Handle()->GetDesc().SampleDesc.Count != 1) return;
+    try {
+        const auto base = framebuffer.ColorBase(0);
+        const u32 subresource = image->Subresource(base.level, base.layer);
+        const auto desc = image->Handle()->GetDesc();
+        ComPtr<ID3D12Device> capture_device;
+        ThrowIfFailed(image->Handle()->GetDevice(IID_PPV_ARGS(&capture_device)), "PS snapshot device");
+        UINT64 bytes{};
+        capture_device->GetCopyableFootprints(&desc, subresource, 1, 0, nullptr, nullptr, nullptr, &bytes);
+        if (!material_snapshots.AllowBytes(bytes)) {
+            LOG_WARNING(Render, "D3D12 material PS snapshot skipped: {} bytes exceeds remaining budget", bytes);
+            return;
+        }
+        const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "trace";
+        std::filesystem::create_directories(directory);
+        const std::string name = fmt::format("material_{}_{}_after_draw_{}_ps_{:016x}_rt0",
+            material_capture_stamp, material_capture_id, trace_index - 1, shader);
+        const auto dumped = DumpTarget(*image, &name, subresource);
+        LOG_INFO(Render, "D3D12 material post-draw snapshot: draw={} PS={:016x} @{:x} mip={} layer={} "
+                         "bytes={} result={} (first matching draw, not complete pass)",
+                 trace_index - 1, shader, image->gpu_addr, base.level, base.layer, bytes,
+                 dumped ? name : "unsupported format");
+    } catch (const std::exception& e) {
+        LOG_WARNING(Render, "D3D12 material PS snapshot failed: {}", e.what());
+    }
 }
 
 void RasterizerD3D12::EndMaterialTrace(bool intervals_complete) {
@@ -226,7 +282,8 @@ void RasterizerD3D12::EndMaterialTrace(bool intervals_complete) {
 
 void RasterizerD3D12::ProbeMaterialDraw(const GraphicsPipeline& pipeline,
                                       const Framebuffer& framebuffer) {
-    if (material_probe_x < 0 || material_probe_y < 0) return;
+    const bool center = material_probe_x == -2 && material_probe_y == -2;
+    if (!center && (material_probe_x < 0 || material_probe_y < 0)) return;
     // Include preliminary MRT passes: RT0 may exist but be inactive while slot 3 is written.
     for (u32 rt = 0; rt < VideoCommon::NUM_RT; ++rt) {
         if (!(pipeline.BoundColorTargets() & (1U << rt)) || framebuffer.ColorOnCopy(rt)) continue;
@@ -239,9 +296,10 @@ void RasterizerD3D12::ProbeMaterialDraw(const GraphicsPipeline& pipeline,
         const auto base = framebuffer.ColorBase(rt);
         const u32 mip_width = static_cast<u32>(std::max<u64>(1, desc.Width >> base.level));
         const u32 mip_height = std::max(1U, desc.Height >> base.level);
+        const u32 probe_x = center ? mip_width / 2 : static_cast<u32>(material_probe_x);
+        const u32 probe_y = center ? mip_height / 2 : static_cast<u32>(material_probe_y);
         // Coordinates refer to the native target, not the window or a scaled screenshot.
-        if (static_cast<u32>(material_probe_x) >= mip_width ||
-            static_cast<u32>(material_probe_y) >= mip_height) continue;
+        if (probe_x >= mip_width || probe_y >= mip_height) continue;
         if (material_probe_records.size() == MATERIAL_PROBE_LIMIT) {
             ++material_probe_omitted;
             return;
@@ -253,11 +311,11 @@ void RasterizerD3D12::ProbeMaterialDraw(const GraphicsPipeline& pipeline,
         capture_device->GetCopyableFootprints(&desc, subresource, 1, 0, &footprint,
                                              nullptr, nullptr, nullptr);
         std::array<float, 4> rgba{};
-        const std::array<u8, 8> zero{};
+        const std::array<u8, 16> zero{};
         if (DumpTexelBytes(footprint.Footprint.Format) != 4 ||
             !ReadTexel(footprint.Footprint.Format, zero.data(), rgba)) continue;
-        const u32 x = material_probe_x > 32 ? material_probe_x - 32 : 0;
-        const u32 y = material_probe_y > 16 ? material_probe_y - 16 : 0;
+        const u32 x = probe_x > 32 ? probe_x - 32 : 0;
+        const u32 y = probe_y > 16 ? probe_y - 16 : 0;
         const u32 width = std::min(64U, mip_width - x);
         const u32 height = std::min(32U, mip_height - y);
         if (!material_probe_buffer.buffer) {
@@ -297,34 +355,36 @@ void RasterizerD3D12::ProbeMaterialDraw(const GraphicsPipeline& pipeline,
         scheduler.CommandList()->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
         image->Transition(previous);
         material_probe_records.push_back({trace_index, rt, static_cast<u32>(footprint.Footprint.Format),
-            x, y, width, height, image->gpu_addr,
+            x, y, width, height, subresource, image->gpu_addr,
             pipeline.Key().unique_hashes[1], pipeline.Key().unique_hashes[5]});
     }
 }
 
 void RasterizerD3D12::DumpMaterialProbe(bool complete) {
     if (!material_probe_buffer.buffer) return;
-    // The deferred allocation spans two present intervals. Even an aborted capture must
-    // retire the last copy before the pool can reuse the buffer (its initial tick is older).
-    scheduler.Finish();
-    StagingBufferRef readback = material_probe_buffer;
+    // Pin until the LAST copy tick completes, not the allocation's first tick.
+    pending_material_probe.emplace(PendingMaterialProbe{
+        material_probe_buffer, std::move(material_probe_records), scheduler.CurrentTick(),
+        complete ? fmt::format("material_{}_{}_probe", material_capture_stamp, material_capture_id)
+                 : std::string{}, material_probe_omitted});
     material_probe_buffer = {};
-    SCOPE_EXIT { staging.FreeDeferred(readback); };
-    if (!complete) {
-        LOG_INFO(Render, "D3D12 material probe aborted: {} records", material_probe_records.size());
-        return;
-    }
+}
+
+void RasterizerD3D12::ExportMaterialProbe(PendingMaterialProbe& probe) {
+    auto& readback = probe.buffer;
+    const auto& records = probe.records;
+    if (probe.name.empty()) return;
     const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "trace";
     std::filesystem::create_directories(directory);
-    const auto name = fmt::format("material_{}_{}_probe", material_capture_stamp, material_capture_id);
+    const auto& name = probe.name;
     std::ofstream data{directory / (name + ".bin"), std::ios::binary};
     std::ofstream index{directory / (name + ".csv")};
-    index << "draw,target,dxgi,x,y,width,height,address,vs,ps,offset\n";
+    index << "draw,target,dxgi,x,y,width,height,address,vs,ps,offset,subresource\n";
     u64 offset = 0;
-    for (size_t i = 0; i < material_probe_records.size(); ++i) {
-        const auto& r = material_probe_records[i];
-        index << fmt::format("{},{},{},{},{},{},{},{:x},{:016x},{:016x},{}\n", r.draw, r.target, r.format,
-            r.x, r.y, r.width, r.height, r.address, r.vertex_shader, r.pixel_shader, offset);
+    for (size_t i = 0; i < records.size(); ++i) {
+        const auto& r = records[i];
+        index << fmt::format("{},{},{},{},{},{},{},{:x},{:016x},{:016x},{},{}\n", r.draw, r.target, r.format,
+            r.x, r.y, r.width, r.height, r.address, r.vertex_shader, r.pixel_shader, offset, r.subresource);
         for (u32 row = 0; row < r.height; ++row) {
             const auto* bytes = readback.mapped_span.data() + i * MATERIAL_PROBE_SLOT_BYTES + row * 256;
             data.write(reinterpret_cast<const char*>(bytes), r.width * 4);
@@ -338,7 +398,7 @@ void RasterizerD3D12::DumpMaterialProbe(bool complete) {
         return;
     }
     LOG_INFO(Render, "D3D12 material probe: {} records, {} omitted, {} bytes, {}",
-             material_probe_records.size(), material_probe_omitted, offset, name);
+             records.size(), probe.omitted, offset, name);
 }
 
 void RasterizerD3D12::DumpMaterialTargets() {
@@ -968,6 +1028,15 @@ std::optional<u64> RasterizerD3D12::DumpTarget(const Image& target, const std::s
         return std::nullopt;
     }
 
+    if (bmp_name && bmp_name->starts_with("material_")) {
+        Image& image = const_cast<Image&>(target);
+        const auto previous = image.State();
+        image.Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+        SCOPE_EXIT { image.Transition(previous); };
+        const bool queued = QueueMaterialReadback(resource, subresource, format, *bmp_name);
+        return queued ? std::optional<u64>{0} : std::nullopt;
+    }
+
     // Diagnostics only: the copy needs the image in COPY_SOURCE; its next use transitions it
     // back. Waiting here keeps one frame of dumps from holding a readback each.
     Image& image = const_cast<Image&>(target);
@@ -1004,6 +1073,13 @@ std::optional<u64> RasterizerD3D12::DumpTarget(const Image& target, const std::s
     image.Transition(previous);
     scheduler.Finish();
 
+    SCOPE_EXIT { staging.FreeDeferred(readback); };
+    return ExportTargetReadback(readback, footprint, format, bmp_name, false);
+}
+
+u64 RasterizerD3D12::ExportTargetReadback(StagingBufferRef& readback,
+    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint, DXGI_FORMAT format,
+    const std::string* bmp_name, bool native) {
     const u32 width = static_cast<u32>(footprint.Footprint.Width);
     const u32 height = footprint.Footprint.Height;
     const u32 texel_bytes = DumpTexelBytes(format);
@@ -1062,7 +1138,24 @@ std::optional<u64> RasterizerD3D12::DumpTarget(const Image& target, const std::s
             }
         }
     }
-    staging.FreeDeferred(readback);
+    if (native && bmp_name) {
+        const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "trace";
+        std::filesystem::create_directories(directory);
+        std::ofstream raw(directory / (*bmp_name + ".raw"), std::ios::binary);
+        for (u32 y = 0; y < height; ++y) {
+            raw.write(reinterpret_cast<const char*>(readback.mapped_span.data() +
+                size_t{y} * footprint.Footprint.RowPitch), size_t{width} * texel_bytes);
+        }
+        std::ofstream info(directory / (*bmp_name + ".json"));
+        info << fmt::format("{{\"width\":{},\"height\":{},\"dxgi_format\":{},"
+                            "\"row_bytes\":{},\"gpu_row_pitch\":{},\"origin\":\"top-left\","
+                            "\"native_bytes\":true,\"preview_clamped\":true}}\n",
+            width, height, static_cast<u32>(format), width * texel_bytes,
+            footprint.Footprint.RowPitch);
+        raw.flush();
+        info.flush();
+        if (!raw || !info) throw std::runtime_error("material native export failed");
+    }
     if (bmp_name) {
         const double count = static_cast<double>(width) * height;
         LOG_INFO(Render,
@@ -1081,6 +1174,384 @@ std::optional<u64> RasterizerD3D12::DumpTarget(const Image& target, const std::s
         }
     }
     return non_finite;
+}
+
+bool RasterizerD3D12::QueueMaterialReadback(ID3D12Resource* resource, u32 subresource,
+                                          DXGI_FORMAT format, const std::string& name, const D3D12_BOX* region) {
+    auto desc = resource->GetDesc();
+    if ((desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+         desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE1D) || desc.SampleDesc.Count != 1)
+        return false;
+    ComPtr<ID3D12Device> capture_device;
+    ThrowIfFailed(resource->GetDevice(IID_PPV_ARGS(&capture_device)), "capture device");
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 bytes{};
+    UINT rows{};
+    UINT64 row_bytes{};
+    if (region) {
+        // Only the isolated float probe uses ROI copies; ordinary capture paths are unchanged.
+        if (subresource || format != DXGI_FORMAT_R32G32B32A32_FLOAT ||
+            desc.DepthOrArraySize != 1 || desc.MipLevels != 1 ||
+            region->left >= region->right || region->top >= region->bottom ||
+            region->right > desc.Width || region->bottom > desc.Height ||
+            region->front != 0 || region->back != 1) return false;
+        desc.Width = region->right - region->left;
+        desc.Height = region->bottom - region->top;
+    }
+    capture_device->GetCopyableFootprints(&desc, subresource, 1, 0, &footprint,
+                                         &rows, &row_bytes, &bytes);
+    const u32 texel_bytes = DumpTexelBytes(format);
+    std::array<float, 4> decoded{};
+    const std::array<u8, 16> zero{};
+    if (!ReadTexel(format, zero.data(), decoded) && !MaterialBlockBytes(static_cast<u32>(format)))
+        return false;
+    // Reserve 16 MiB for the two 1080p presentation copies on Series. Intermediate
+    // diagnostics may be omitted; they must not crowd out the visible reference image.
+    u64 present_bytes = 0;
+    for (const auto& pending : material_readbacks)
+        if (pending.name.find("_present_") != std::string::npos) present_bytes += pending.bytes;
+    const u64 reserve = (16ULL << 20) - std::min<u64>(16ULL << 20, present_bytes);
+    const u64 limit = name.find("_present_") != std::string::npos
+        ? MATERIAL_READBACK_LIMIT : MATERIAL_READBACK_LIMIT - reserve;
+    if (!bytes || !texel_bytes || material_readback_bytes > limit ||
+        bytes > limit - material_readback_bytes ||
+        footprint.Footprint.Depth != 1 || !rows || row_bytes > footprint.Footprint.RowPitch ||
+        u64{rows - 1} * footprint.Footprint.RowPitch + row_bytes > bytes) {
+        LOG_INFO(Render, "D3D12 material deferred copy omitted: {} bytes={} pending={}",
+                    name, bytes, material_readback_bytes);
+        return false;
+    }
+    // Reserve metadata before recording a GPU copy; no throwing container growth afterwards.
+    material_readbacks.reserve(material_readbacks.size() + 1);
+    MaterialReadback pending{{}, resource, footprint, format, scheduler.CurrentTick(), bytes, name};
+    pending.rows = rows;
+    pending.row_bytes = row_bytes;
+    pending.subresource = subresource;
+    pending.buffer = staging.Request(bytes, MemoryUsage::Download, true);
+    SCOPE_EXIT { if (pending.buffer.buffer) staging.FreeDeferred(pending.buffer); };
+    if (pending.buffer.mapped_span.size() < bytes) {
+        return false;
+    }
+    auto placed = footprint;
+    placed.Offset = pending.buffer.offset;
+    const D3D12_TEXTURE_COPY_LOCATION src{resource,
+        D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {.SubresourceIndex = subresource}};
+    const D3D12_TEXTURE_COPY_LOCATION dst{pending.buffer.buffer,
+        D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {.PlacedFootprint = placed}};
+    scheduler.CommandList()->CopyTextureRegion(&dst, 0, 0, 0, &src, region);
+    material_readback_bytes += bytes;
+    material_readbacks.push_back(std::move(pending));
+    pending.buffer = {};
+    LOG_INFO(Render, "D3D12 material deferred copy: {} subresource={} dxgi={} bytes={} tick={}",
+             name, subresource, static_cast<u32>(format), bytes, scheduler.CurrentTick());
+    return true;
+}
+
+void RasterizerD3D12::ProbeMaterialIntermediates(const GraphicsPipeline& pipeline,
+    const PipelineBindings& bindings, const Framebuffer& framebuffer, const DrawParams& params,
+    Maxwell::PrimitiveTopology topology) {
+    if (!material_gpu_probe_enabled.load(std::memory_order_relaxed) || material_gpu_probe_done ||
+        !material_snapshots.Targeted(pipeline.Key().unique_hashes[5], params.num_vertices)) return;
+    material_gpu_probe_done = true; // A rejected interface must not retry/allocate per draw.
+    const Image* image = framebuffer.ColorImage(0);
+    if (!image || !image->Handle() || framebuffer.ColorBase(0).level != 0 ||
+        material_probe_x < 0 || material_probe_y < 0) return;
+    const auto source_desc = image->Handle()->GetDesc();
+    const u64 pixels = source_desc.Width * source_desc.Height;
+    if (!pixels || pixels > (32ULL << 20) / 16 || source_desc.SampleDesc.Count != 1 ||
+        source_desc.Width > INT_MAX || source_desc.Height > INT_MAX) return;
+    const LONG width = static_cast<LONG>(source_desc.Width), height = static_cast<LONG>(source_desc.Height);
+    if (material_probe_x >= width || material_probe_y >= height) return;
+    D3D12_RECT roi{std::max(0, material_probe_x - 128), std::max(0, material_probe_y - 64), 0, 0};
+    roi.right = std::min(width, roi.left + 256);
+    roi.bottom = std::min(height, roi.top + 128);
+    const auto original_scissor = ScissorRect(0);
+    roi.left = std::max(roi.left, original_scissor.left);
+    roi.top = std::max(roi.top, original_scissor.top);
+    roi.right = std::min(roi.right, original_scissor.right);
+    roi.bottom = std::min(roi.bottom, original_scissor.bottom);
+    if (roi.left >= roi.right || roi.top >= roi.bottom) return;
+
+    ComPtr<ID3D12Device> capture_device;
+    ThrowIfFailed(image->Handle()->GetDevice(IID_PPV_ARGS(&capture_device)), "material GPU probe device");
+    const std::array<ComPtr<ID3D12PipelineState>, 2> probes{
+        pipeline.CreateMaterialProbePipeline(material_varyings_ps),
+        pipeline.CreateMaterialProbePipeline(material_samples_ps)};
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = width; desc.Height = height;
+    desc.DepthOrArraySize = desc.MipLevels = 1; desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_CLEAR_VALUE clear{}; clear.Format = desc.Format;
+    for (auto& channel : clear.Color) channel = -99999.0f;
+    ComPtr<ID3D12Resource> target;
+    ThrowIfFailed(capture_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_RENDER_TARGET, &clear, IID_PPV_ARGS(&target)), "material GPU probe RT");
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1};
+    ComPtr<ID3D12DescriptorHeap> rtvs;
+    ThrowIfFailed(capture_device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&rtvs)),
+                  "material GPU probe RTV heap");
+    const auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
+    capture_device->CreateRenderTargetView(target.Get(), nullptr, rtv);
+    // Lifetime covers the async recorder and GPU. No flush/wait and no live guest target writes.
+    scheduler.DeferRelease(target); scheduler.DeferRelease(rtvs);
+    for (const auto& probe : probes) scheduler.DeferRelease(probe);
+    auto* cmd = scheduler.CommandList();
+    SCOPE_EXIT {
+        command_state.valid = false;
+        try {
+            // Internal draws must not contribute samples/primitives to guest query reports.
+            query_cache.EnableCounters();
+            BindDrawState(pipeline, bindings, framebuffer, params, topology);
+        } catch (const std::exception& e) {
+            // Leave the cache invalid so the next normal draw rebinds all state.
+            LOG_WARNING(Render, "D3D12 material GPU probe state restore deferred: {}", e.what());
+        }
+    };
+    query_cache.DisableStreams();
+    const D3D12_BOX box{static_cast<UINT>(roi.left), static_cast<UINT>(roi.top), 0,
+        static_cast<UINT>(roi.right), static_cast<UINT>(roi.bottom), 1};
+    for (size_t pass = 0; pass < probes.size(); ++pass) {
+        if (pass) {
+            D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition = {target.Get(), 0, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                  D3D12_RESOURCE_STATE_RENDER_TARGET};
+            cmd->ResourceBarrier(1, &barrier);
+        }
+        cmd->ClearRenderTargetView(rtv, clear.Color, 1, &roi);
+        cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        cmd->RSSetScissorRects(1, &roi);
+        scheduler.SetPipelineState(probes[pass].Get());
+        {
+            const ConditionalRendering::Scope predicate{conditional_rendering, cmd};
+            if (params.is_indexed) {
+                cmd->DrawIndexedInstanced(params.num_vertices, params.num_instances, params.first_index,
+                                          static_cast<INT>(params.base_vertex), params.base_instance);
+            } else {
+                cmd->DrawInstanced(params.num_vertices, params.num_instances, params.base_vertex,
+                                   params.base_instance);
+            }
+        }
+        D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition = {target.Get(), 0, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                              D3D12_RESOURCE_STATE_COPY_SOURCE};
+        cmd->ResourceBarrier(1, &barrier);
+        const auto name = fmt::format("material_{}_{}_draw_{}_gpu_{}_x{}_y{}",
+            material_capture_stamp, material_capture_id, trace_index,
+            pass ? "samples" : "varyings", roi.left, roi.top);
+        const bool queued = QueueMaterialReadback(target.Get(), 0, desc.Format, name, &box);
+        LOG_INFO(Render, "D3D12 material GPU probe: {} queued={} ROI={}x{} full={}x{} "
+                        "VS={:016x} PS={:016x} pipeline={:016x} channels={}",
+            name, queued, roi.right - roi.left, roi.bottom - roi.top, width, height,
+            pipeline.Key().unique_hashes[1], pipeline.Key().unique_hashes[5], pipeline.KeyHash(),
+            pass ? "depth.r/depth.g/mask(screenUV,LOD0)/mask(screenUV,LOD9)"
+                 : "Generic0.x/Generic0.y/Generic1.x/Generic1.y");
+    }
+}
+
+void RasterizerD3D12::CaptureMaterialSampledInputs(const GraphicsPipeline& pipeline,
+    std::span<const VideoCommon::ImageViewId> views, u32 vertices, const Framebuffer& framebuffer) {
+    const auto shader = pipeline.Key().unique_hashes[5];
+    // Count zero preserves the existing first-draw capture without extra texture copies.
+    if (!material_snapshots.Targeted(shader, vertices)) return;
+    // A blended output cannot be replayed from shader inputs alone: preserve the
+    // destination before this selected draw, with the same bounded deferred path.
+    if (pipeline.Key().state.attachments[0].enable &&
+        (pipeline.BoundColorTargets() & 1) && !framebuffer.ColorOnCopy(0)) {
+        if (const Image* image = framebuffer.ColorImage(0); image && image->Handle() &&
+            image->Handle()->GetDesc().SampleDesc.Count == 1) {
+            const auto base = framebuffer.ColorBase(0);
+            const auto name = fmt::format("material_{}_{}_before_draw_{}_ps_{:016x}_rt0",
+                material_capture_stamp, material_capture_id, trace_index, shader);
+            const auto saved = DumpTarget(*image, &name, image->Subresource(base.level, base.layer));
+            LOG_INFO(Render, "D3D12 material pre-blend snapshot: draw={} PS={:016x} result={}",
+                     trace_index, shader, saved ? name : "omitted/unsupported");
+        }
+    }
+    MaterialSampledInputBudget selected_budget;
+    std::unordered_set<std::string> copied;
+    for (const auto id : views) {
+        const auto& view = texture_cache.GetImageView(id);
+        Image* image = view.SourceImage();
+        if (!image || !image->Handle()) continue;
+        const auto desc = image->Handle()->GetDesc();
+        if (view.ImageHandle() != image->Handle() ||
+            (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+             desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE1D) || desc.SampleDesc.Count != 1 ||
+            (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
+            // Depth sampling may bind a feedback copy rather than this source. The
+            // separate sampled-depth diagnostic records those candidates explicitly.
+            LOG_INFO(Render, "D3D12 material selected input unsupported: draw={} @{:x} dimension={} view_copy={} depth={}",
+                     trace_index, image->gpu_addr, static_cast<u32>(desc.Dimension),
+                     view.ImageHandle() != image->Handle(),
+                     (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0);
+            continue;
+        }
+        ComPtr<ID3D12Device> capture_device;
+        ThrowIfFailed(image->Handle()->GetDevice(IID_PPV_ARGS(&capture_device)), "selected input device");
+        for (s32 layer = view.range.base.layer;
+             layer < view.range.base.layer + view.range.extent.layers; ++layer) {
+            for (s32 mip = view.range.base.level;
+                 mip < view.range.base.level + view.range.extent.levels; ++mip) {
+                const auto key = fmt::format("{:x}_m{}_l{}", image->gpu_addr, mip, layer);
+                if (copied.size() == 256 && !copied.contains(key)) {
+                    LOG_INFO(Render, "D3D12 material selected inputs capped: draw={} subresources=256", trace_index);
+                    return;
+                }
+                if (!copied.insert(key).second) continue;
+                const auto subresource = image->Subresource(mip, layer);
+                UINT64 bytes{};
+                capture_device->GetCopyableFootprints(&desc, subresource, 1, 0,
+                    nullptr, nullptr, nullptr, &bytes);
+                // Full 1080p inputs are required to follow discontinuities outside the ROI.
+                // QueueMaterialReadback still enforces 64 MiB and the presentation reserve.
+                if (!selected_budget.Fits(bytes)) {
+                    LOG_INFO(Render, "D3D12 material selected input omitted: draw={} {} bytes={} limit=32MiB/resource8MiB",
+                             trace_index, key, bytes);
+                    continue;
+                }
+                const auto previous = image->State();
+                image->Transition(D3D12_RESOURCE_STATE_COPY_SOURCE);
+                SCOPE_EXIT { image->Transition(previous); };
+                const auto name = fmt::format("material_{}_{}_before_draw_{}_ps_{:016x}_input_{}",
+                    material_capture_stamp, material_capture_id, trace_index, shader, key);
+                if (QueueMaterialReadback(image->Handle(), subresource, desc.Format, name))
+                    selected_budget.Commit(bytes);
+                else
+                    LOG_INFO(Render, "D3D12 material selected input not saved: draw={} {} dxgi={}",
+                             trace_index, key, static_cast<u32>(desc.Format));
+            }
+        }
+    }
+}
+
+void RasterizerD3D12::CaptureMaterialPresent(ID3D12Resource* resource, u64 frame) {
+    if (!material_trace.Active() || !resource) return;
+    try {
+        std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
+        const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "trace";
+        std::filesystem::create_directories(directory);
+        QueueMaterialReadback(resource, 0, resource->GetDesc().Format,
+            fmt::format("material_{}_{}_present_{}", material_capture_stamp,
+                        material_capture_id, frame));
+    } catch (const std::exception& e) {
+        LOG_WARNING(Render, "D3D12 material presentation capture failed: {}", e.what());
+    }
+}
+
+void RasterizerD3D12::CaptureMaterialInputs(const GraphicsPipeline& pipeline,
+    std::span<const TracedBuffer> buffers, const DrawParams& params) {
+    const std::string pair = fmt::format("vs_{:016x}_ps_{:016x}",
+        pipeline.Key().unique_hashes[1], pipeline.Key().unique_hashes[5]);
+    // All shader pairs, including opaque materials. Explicitly bounded; this is a first-draw
+    // sample, not a complete replay of every object using the same shader.
+    const bool targeted = material_snapshots.Targeted(pipeline.Key().unique_hashes[5], params.num_vertices);
+    if (!targeted && (material_input_pairs.contains(pair) || material_input_pairs.size() == 128)) return;
+    if (material_input_pairs.size() < 128) material_input_pairs.insert(pair);
+    LOG_INFO(Render, "D3D12 material inputs: draw={} {} vertices={} instances={} first_index={} "
+                    "base_vertex={} base_instance={} indexed={} targeted={} (first pair or explicit selector)",
+        trace_index, pair, params.num_vertices, params.num_instances, params.first_index,
+        params.base_vertex, params.base_instance, params.is_indexed, targeted);
+    u32 binding = 0;
+    for (const auto& source : buffers) {
+        const u32 ordinal = binding++;
+        if (!source.size || (!source.buffer && !source.mapped)) continue;
+        // Uniforms contain camera/object matrices. Geometry can be large; keep a named prefix
+        // and report full size, rather than silently claiming the buffer is complete.
+        const u32 bytes = std::min(source.size, 256U << 10);
+        if (bytes > (8ULL << 20) - material_input_bytes) {
+            LOG_INFO(Render, "D3D12 material input omitted: draw={} binding={} bytes={} budget=8MiB",
+                     trace_index, ordinal, bytes);
+            continue;
+        }
+        const auto name = fmt::format("material_{}_{}_draw_{}_{}_binding_{}_kind_{}_slot_{}",
+            material_capture_stamp, material_capture_id, trace_index, pair, ordinal,
+            static_cast<u32>(source.kind), source.slot);
+        material_buffer_readbacks.reserve(material_buffer_readbacks.size() + 1);
+        MaterialBufferReadback pending{{}, {}, {}, scheduler.CurrentTick(), bytes, name};
+        SCOPE_EXIT { if (pending.buffer.buffer) staging.FreeDeferred(pending.buffer); };
+        if (source.kind == TracedBuffer::Kind::StreamedUniform && source.mapped) {
+            pending.streamed.assign(source.mapped, source.mapped + bytes);
+        } else if (source.buffer && source.buffer->Handle()) {
+            pending.source = source.buffer->Handle();
+            pending.buffer = staging.Request(bytes, MemoryUsage::Download, true);
+            source.buffer->Transition(D3D12_RESOURCE_STATE_GENERIC_READ);
+            scheduler.CommandList()->CopyBufferRegion(pending.buffer.buffer, pending.buffer.offset,
+                source.buffer->Handle(), source.offset, bytes);
+        } else continue;
+        material_input_bytes += bytes;
+        material_buffer_readbacks.push_back(std::move(pending));
+        pending.buffer = {};
+        LOG_INFO(Render, "D3D12 material input {}: address={:x} offset={} stride={} full_size={} "
+                        "saved={} truncated={}", name, source.device_addr, source.offset,
+                        source.stride, source.size, bytes, bytes != source.size);
+    }
+}
+
+void RasterizerD3D12::PollMaterialReadbacks() {
+    // Called on the GPU thread under both cache mutexes. Never flush/wait to export.
+    if (material_trace.Active()) return; // Disk work only after the captured intervals.
+    for (auto it = material_buffer_readbacks.begin(); it != material_buffer_readbacks.end();) {
+        if (!scheduler.IsFree(it->tick)) { ++it; continue; }
+        try {
+            const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "trace";
+            std::filesystem::create_directories(directory);
+            std::ofstream out(directory / (it->name + ".bin"), std::ios::binary);
+            const u8* data = it->streamed.empty() ? it->buffer.mapped_span.data() : it->streamed.data();
+            out.write(reinterpret_cast<const char*>(data), it->size);
+            if (!out) throw std::runtime_error("input buffer export failed");
+        } catch (const std::exception& e) {
+            LOG_WARNING(Render, "D3D12 material input export failed: {}", e.what());
+        }
+        if (it->buffer.buffer) staging.FreeDeferred(it->buffer);
+        it = material_buffer_readbacks.erase(it);
+    }
+    if (pending_material_probe && scheduler.IsFree(pending_material_probe->tick)) {
+        try {
+            ExportMaterialProbe(*pending_material_probe);
+        } catch (const std::exception& e) {
+            LOG_WARNING(Render, "D3D12 material probe export failed: {}", e.what());
+        }
+        staging.FreeDeferred(pending_material_probe->buffer);
+        pending_material_probe.reset();
+    }
+    for (auto it = material_readbacks.begin(); it != material_readbacks.end();) {
+        if (!scheduler.IsFree(it->tick)) { ++it; continue; }
+        try {
+            if (MaterialBlockBytes(static_cast<u32>(it->format))) {
+                const auto desc = it->source->GetDesc();
+                const auto mip = it->subresource % desc.MipLevels;
+                const u64 logical_width = std::max<u64>(1, desc.Width >> mip);
+                const u32 logical_height = std::max(1U, desc.Height >> mip);
+                const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "trace";
+                std::filesystem::create_directories(directory);
+                std::ofstream raw(directory / (it->name + ".raw"), std::ios::binary);
+                for (u32 row = 0; row < it->rows; ++row)
+                    raw.write(reinterpret_cast<const char*>(it->buffer.mapped_span.data() +
+                        size_t{row} * it->footprint.Footprint.RowPitch),
+                        static_cast<std::streamsize>(it->row_bytes));
+                std::ofstream info(directory / (it->name + ".json"));
+                info << fmt::format("{{\"width\":{},\"height\":{},\"dxgi_format\":{},"
+                    "\"row_bytes\":{},\"block_rows\":{},\"gpu_row_pitch\":{},"
+                    "\"native_bytes\":true,\"block_compressed\":true,\"origin\":\"top-left\"}}\n",
+                    logical_width, logical_height,
+                    static_cast<u32>(it->format), it->row_bytes, it->rows,
+                    it->footprint.Footprint.RowPitch);
+                raw.flush();
+                info.flush();
+                if (!raw || !info) throw std::runtime_error("material block export failed");
+            } else {
+                ExportTargetReadback(it->buffer, it->footprint, it->format, &it->name, true);
+            }
+        } catch (const std::exception& e) {
+            LOG_WARNING(Render, "D3D12 material deferred export failed: {}: {}", it->name, e.what());
+        }
+        material_readback_bytes -= it->bytes;
+        staging.FreeDeferred(it->buffer);
+        it = material_readbacks.erase(it);
+    }
 }
 
 void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* pipeline,
@@ -1149,9 +1620,10 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
         line += fmt::format(" | VS {:016x} PS {:016x} blend0 {:08x}", key.unique_hashes[1],
                             key.unique_hashes[5], key.state.attachments[0].raw);
         const auto& dynamic = key.state.dynamic_state;
-        line += fmt::format(" PSO={} targets={:x} topology={} bias enable={} "
+        line += fmt::format(" PSO={} key={:016x} targets={:x} topology={} bias enable={} "
                             "guest={:.6g} host={} clamp={:.6g} slope={:.6g}",
-                            static_cast<void*>(pipeline->Handle()), pipeline->BoundColorTargets(),
+                            static_cast<void*>(pipeline->Handle()), pipeline->KeyHash(),
+                            pipeline->BoundColorTargets(),
                             static_cast<u32>(key.state.topology.Value()),
                             dynamic.depth_bias_enable.Value(), std::bit_cast<float>(key.depth_bias),
                             static_cast<INT>(std::bit_cast<float>(key.depth_bias) / 2.0f),
@@ -1204,15 +1676,49 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
                             dynamic.stencil_enable.Value(), dynamic.cull_enable.Value());
         line += fmt::format(" face {} front {}", static_cast<u32>(dynamic.CullFace()),
                             static_cast<u32>(dynamic.FrontFace()));
-        // Vertex attributes the vertex stage reads: buffer, offset, size and type.
-        for (u32 i = 0; i < 4; ++i) {
+        // Trace the same enabled/read attributes and fetch policy as the PSO, including
+        // normals/tangents beyond slot 3. No vertex readback or per-frame logging.
+        const StageBindings& vs_info = pipeline->StageInfo(0);
+        for (u32 i = 0; i < key.state.attributes.size(); ++i) {
+            const auto& baked = key.state.attributes[i];
+            if (!baked.enabled || !vs_info.loads.Generic(i)) continue;
             const auto& attrib = maxwell3d->regs.vertex_attrib_format[i];
             line += fmt::format(" attr{} {:08x}(b{} +{} s{:x} t{}{})", i, attrib.hex,
                                 attrib.buffer.Value(), attrib.offset.Value(),
                                 static_cast<u32>(attrib.size.Value()),
                                 static_cast<u32>(attrib.type.Value()),
                                 attrib.constant ? " const" : "");
+            const u32 stride = key.state.vertex_strides[baked.buffer];
+            const auto fetch = MaxwellToD3D12::SplitAttributeFetch(
+                baked.Type(), baked.Size(), baked.offset, stride);
+            const auto requested_format = fetch.parts > 1 ? fetch.part_format
+                : MaxwellToD3D12::VertexFormat(baked.Type(), baked.Size());
+            const auto format = requested_format == DXGI_FORMAT_UNKNOWN
+                ? DXGI_FORMAT_R32G32B32A32_FLOAT : requested_format;
+            line += fmt::format(" fetch{}[dxgi={} fallback={} offset={} stride={} divisor={} parts={} bytes={}]",
+                                i, static_cast<u32>(format), requested_format == DXGI_FORMAT_UNKNOWN,
+                                baked.offset, stride,
+                                key.state.binding_divisors[baked.buffer], fetch.parts, fetch.part_bytes);
         }
+        const auto& ps_info = pipeline->StageInfo(4);
+        line += " interp[";
+        for (u32 i = 0; i < 32; ++i) {
+            if (ps_info.loads.Generic(i)) {
+                line += fmt::format("{}:{};", i, (ps_info.interpolation >> (2 * i)) & 3);
+            }
+        }
+        line += "]"; // 0=smooth/perspective, 1=flat, 2=no-perspective (guest IR).
+        const bool has_depth = framebuffer && framebuffer->DepthFormat() != DXGI_FORMAT_UNKNOWN;
+        line += fmt::format(" depthHost[format={} test={} write={} func={}] bounds[guest={} min={:.9g} "
+                            "max={:.9g} host=0]",
+                            framebuffer ? static_cast<u32>(framebuffer->DepthFormat()) : 0,
+                            has_depth && dynamic.depth_test_enable.Value(),
+                            has_depth && dynamic.depth_write_enable.Value(),
+                            static_cast<u32>(dynamic.depth_test_enable.Value()
+                                ? MaxwellToD3D12::ComparisonFunc(dynamic.DepthTestFunc())
+                                : D3D12_COMPARISON_FUNC_ALWAYS),
+                            dynamic.depth_bounds_enable.Value(), maxwell3d->regs.depth_bounds[0],
+                            maxwell3d->regs.depth_bounds[1]);
         line += fmt::format(" a2c {} alpha test {} ref {:.4g} early z {} msaa {}",
                             key.state.alpha_to_coverage_enabled.Value(),
                             key.state.alpha_test_func.Value(),
@@ -1221,7 +1727,6 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
                             static_cast<u32>(key.state.msaa_mode.Value()));
         // Clip distances the vertex stage writes, and which the guest enables.
         u32 clip_written = 0;
-        const StageBindings& vs_info = pipeline->StageInfo(0);
         for (u32 i = 0; i < 8; ++i) {
             const auto attribute = static_cast<Shader::IR::Attribute>(
                 static_cast<u32>(Shader::IR::Attribute::ClipDistance0) + i);
@@ -1290,6 +1795,34 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
     }
     for (const VideoCommon::ImageViewId id : views) {
         const ImageView& view = texture_cache.GetImageView(id);
+        if (material_trace.Active() && view.SourceImage() && view.SourceImage()->Handle() &&
+            (view.SourceImage()->Handle()->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
+            // Snapshot a sampled depth surface at its first use, before later clears/reuse.
+            // These are candidates for shadow maps, not an assertion that all are shadows.
+            const Image& image = *view.SourceImage();
+            const auto base = view.range.base;
+            const std::string key = fmt::format("{:x}_m{}_l{}", image.gpu_addr, base.level, base.layer);
+            if (material_sampled_depth.insert(key).second) {
+                try {
+                    const auto desc = image.Handle()->GetDesc();
+                    ComPtr<ID3D12Device> capture_device;
+                    ThrowIfFailed(image.Handle()->GetDevice(IID_PPV_ARGS(&capture_device)), "depth sample capture");
+                    UINT64 bytes{};
+                    capture_device->GetCopyableFootprints(&desc, image.Subresource(base.level, base.layer),
+                        1, 0, nullptr, nullptr, nullptr, &bytes);
+                    if (bytes && bytes <= (16ULL << 20) - material_sampled_depth_bytes) {
+                        const auto name = fmt::format("material_{}_{}_draw_{}_sampled_depth_{}",
+                            material_capture_stamp, material_capture_id, trace_index - 1, key);
+                        if (DumpTarget(image, &name, image.Subresource(base.level, base.layer)))
+                            material_sampled_depth_bytes += bytes;
+                    } else {
+                        LOG_INFO(Render, "D3D12 material sampled depth omitted: {} bytes={}", key, bytes);
+                    }
+                } catch (const std::exception& e) {
+                    LOG_WARNING(Render, "D3D12 material sampled depth capture failed: {}", e.what());
+                }
+            }
+        }
         if (const Image* const image = view.SourceImage();
             image && trace_dumps && traced_textures.insert(image->gpu_addr).second) {
             DumpTextureNonFinite(*image);
@@ -1302,6 +1835,9 @@ void RasterizerD3D12::TraceDraw(std::string_view what, const GraphicsPipeline* p
                             describe(view.SourceImage()));
     }
     LogDrawTrace(line);
+    if (material_trace.Active() && pipeline && framebuffer && vertices && instances) {
+        DumpMaterialShaderTarget(*pipeline, *framebuffer, vertices);
+    }
 }
 
 } // namespace D3D12

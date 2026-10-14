@@ -44,7 +44,7 @@ def load_tiles(index_path):
     raw = index_path.with_suffix('.bin').read_bytes()
     tiles = []
     expected_offset = 0
-    with index_path.open(newline='') as source:
+    with index_path.open(newline='', encoding='utf-8') as source:
         for row in csv.DictReader(source):
             for key in ('draw', 'dxgi', 'x', 'y', 'width', 'height', 'offset'):
                 row[key] = int(row[key])
@@ -52,6 +52,7 @@ def load_tiles(index_path):
                 row['target'] = int(row['target'])
                 if not 0 <= row['target'] < 8:
                     raise ValueError('Invalid color target')
+            row['subresource'] = int(row.get('subresource', 0))
             width, height, offset = row['width'], row['height'], row['offset']
             if not 1 <= width <= 64 or not 1 <= height <= 64 or offset != expected_offset:
                 raise ValueError('Invalid tile bounds or noncontiguous offset')
@@ -80,19 +81,22 @@ def write_bmp(path, tile):
     path.write_bytes(header + pixels)
 
 
-def summarize(tiles, pixel=None, export_dir=None):
+def summarize(tiles, pixel=None, export_dir=None, include_unchanged=False):
     previous = {}
     result = []
     for tile in tiles:
-        key = tuple(tile[k] for k in ('address', 'dxgi', 'x', 'y', 'width', 'height'))
+        key = (tile.get('target', 0), tile.get('subresource', 0)) + tuple(
+            tile[k] for k in ('address', 'dxgi', 'x', 'y', 'width', 'height'))
         old = previous.get(key)
         current = tile['data']
-        changed = None if old is None else sum(current[i:i+4] != old[i:i+4] for i in range(0, len(current), 4))
-        previous[key] = current
-        if changed == 0:
+        changed = None if old is None else sum(current[i:i+4] != old[1][i:i+4] for i in range(0, len(current), 4))
+        previous[key] = (tile['draw'], current)
+        if changed == 0 and not include_unchanged:
             continue
         record = {k: v for k, v in tile.items() if k != 'data'}
         record['changed_pixels'] = changed
+        record['changed_texels'] = changed
+        record['previous_draw'] = None if old is None else old[0]
         if pixel:
             x, y = pixel[0] - tile['x'], pixel[1] - tile['y']
             if 0 <= x < tile['width'] and 0 <= y < tile['height']:
@@ -104,12 +108,29 @@ def summarize(tiles, pixel=None, export_dir=None):
     return result
 
 
+NOTE = ('Exact native ROI changes between sampled direct draws. Clears, copies, compute '
+        'and indirect draws between samples can also cause changes; a changed region '
+        'does not identify an incorrect draw.')
+
+
+def analyze(index):
+    return {'file': str(index), 'records': summarize(load_tiles(index), include_unchanged=True),
+            'note': NOTE}
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('index', type=Path)
     parser.add_argument('--pixel', nargs=2, type=int)
     parser.add_argument('--export-dir', type=Path)
+    parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     if args.export_dir:
         args.export_dir.mkdir(parents=True, exist_ok=True)
-    print(json.dumps(summarize(load_tiles(args.index), args.pixel, args.export_dir), indent=2))
+    records = summarize(load_tiles(args.index), args.pixel, args.export_dir,
+                        include_unchanged=bool(args.output))
+    if args.output:
+        args.output.write_text(json.dumps({'file': str(args.index), 'records': records,
+                                          'note': NOTE}, indent=2) + '\n', encoding='utf-8')
+    else:
+        print(json.dumps(records, indent=2))

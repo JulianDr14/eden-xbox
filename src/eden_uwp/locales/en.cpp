@@ -121,6 +121,7 @@ const Catalog EnglishCatalog = MakeCatalog({
     // In-game menu
     {Text::MenuTitle, L"Menu"},
     {Text::MenuResume, L"Resume"},
+    {Text::MenuCaptureGraphics, L"Capture graphics and resume"},
     {Text::MenuFullScreen, L"Full screen"},
     {Text::MenuBackToHome, L"Back to home"},
     {Text::Options, L"Options"},

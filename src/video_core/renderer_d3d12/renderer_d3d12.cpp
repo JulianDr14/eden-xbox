@@ -36,6 +36,7 @@ std::atomic<u32> traced_frame_count{1};
 std::atomic<bool> frame_diagnostics{true};
 std::atomic<u32> trace_requested{};
 std::atomic<bool> material_trace_requested{};
+std::atomic<u32> material_capture_frame{};
 std::atomic<u64> material_trace_shader{};
 std::atomic<s32> material_probe_x{-1}, material_probe_y{-1};
 
@@ -71,6 +72,25 @@ void TraceNextMaterialFrame(u64 pixel_shader) {
 void SetMaterialProbe(s32 x, s32 y) {
     material_probe_x.store(x, std::memory_order_relaxed);
     material_probe_y.store(y, std::memory_order_relaxed);
+}
+
+void SetMaterialCaptureFrame(u32 frame) {
+    material_capture_frame.store(frame, std::memory_order_relaxed);
+}
+
+namespace {
+std::atomic<u64> material_snapshot_first{}, material_snapshot_second{};
+std::atomic<u32> material_snapshot_vertices_first{}, material_snapshot_vertices_second{};
+}
+
+void SetMaterialSnapshotShaders(u64 first, u64 second) {
+    material_snapshot_first.store(first, std::memory_order_relaxed);
+    material_snapshot_second.store(second, std::memory_order_relaxed);
+}
+
+void SetMaterialSnapshotVertexCounts(u32 first, u32 second) {
+    material_snapshot_vertices_first.store(first, std::memory_order_relaxed);
+    material_snapshot_vertices_second.store(second, std::memory_order_relaxed);
 }
 
 RendererD3D12::RendererD3D12(Core::Frontend::EmuWindow& emu_window,
@@ -175,6 +195,12 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                 constexpr u32 DUMP_INTERVAL = 600;
                 constexpr u32 MAX_DUMPS = 12;
                 ++accelerated_frames;
+                if (material_trace_presents_remaining != 0) {
+                    // This is the exact composited image copied by PresentManager to DXGI,
+                    // including crop/scale/overlays. Copy before handing its lease over.
+                    frame->Transition(scheduler.CommandList(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    rasterizer.CaptureMaterialPresent(frame->image.Get(), accelerated_frames);
+                }
                 if (material_trace_presents_remaining != 0 &&
                     --material_trace_presents_remaining == 0) {
                     rasterizer.EndMaterialTrace();
@@ -218,11 +244,17 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                     requested_trace = false;
                     LOG_INFO(Render, "D3D12: draw trace of frame {} complete", traced_frame);
                 }
-                if (material_trace_requested.exchange(false, std::memory_order_acquire)) {
+                const u32 automatic_capture = material_capture_frame.load(std::memory_order_relaxed);
+                const bool capture_requested = material_trace_requested.exchange(false, std::memory_order_acquire);
+                if (capture_requested || (automatic_capture != 0 && accelerated_frames == automatic_capture)) {
                     const bool started = rasterizer.BeginMaterialTrace(
                         material_trace_shader.load(std::memory_order_relaxed),
                         material_probe_x.load(std::memory_order_relaxed),
-                        material_probe_y.load(std::memory_order_relaxed));
+                        material_probe_y.load(std::memory_order_relaxed),
+                        {material_snapshot_first.load(std::memory_order_relaxed),
+                         material_snapshot_second.load(std::memory_order_relaxed)},
+                        {material_snapshot_vertices_first.load(std::memory_order_relaxed),
+                         material_snapshot_vertices_second.load(std::memory_order_relaxed)});
                     // MK8 may present while recording a guest frame's preliminary passes.
                     // Include the next interval too; draw/text budgets span both intervals.
                     material_trace_presents_remaining = started ? 2 : 0;

@@ -524,7 +524,8 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     }
 }
 
-void GraphicsPipeline::Build() try {
+D3D12_GRAPHICS_PIPELINE_STATE_DESC GraphicsPipeline::Describe(
+    std::vector<D3D12_INPUT_ELEMENT_DESC>& elements) const {
     using VideoCore::Surface::PixelFormatFromDepthFormat;
     using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
 
@@ -542,7 +543,6 @@ void GraphicsPipeline::Build() try {
 
     // Vertex input: nir_to_dxil names generic attribute N "TEXCOORD" N. Strides are dynamic (they
     // go in the vertex buffer views), so the layout only needs slots and offsets.
-    std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
     for (size_t index = 0; index < state.attributes.size(); ++index) {
         const auto& attribute = state.attributes[index];
         if (attribute.enabled == 0 || !stage_infos[0] || !stage_infos[0]->loads.Generic(index)) {
@@ -661,6 +661,62 @@ void GraphicsPipeline::Build() try {
     desc.SampleMask = UINT_MAX;
     desc.SampleDesc = {.Count = MaxwellToD3D12::SampleCount(state.msaa_mode), .Quality = 0};
 
+    return desc;
+}
+
+ComPtr<ID3D12PipelineState> GraphicsPipeline::CreateMaterialProbePipeline(
+    std::span<const u8> pixel_shader) const {
+    // The authored diagnostic PS supports exactly two noperspective generic vectors.
+    // Reject side-effecting stages and depth/MSAA paths instead of silently approximating them.
+    if (!dxil || has_stage[1] || has_stage[2] || has_stage[3] ||
+        StageInfo(4).interpolation != 0xa || !StageInfo(0).stores.Generic(0) ||
+        !StageInfo(0).stores.Generic(1) || layout.NumResourceDescriptors() != 7 ||
+        layout.NumSamplerDescriptors() != 2) {
+        throw std::runtime_error("material GPU probe: unsupported shader interface");
+    }
+    for (const auto& info : stage_infos) {
+        if (info && (!info->storage_buffers_descriptors.empty() || !info->image_descriptors.empty() ||
+                     !info->image_buffer_descriptors.empty())) {
+            throw std::runtime_error("material GPU probe: side-effecting stage rejected");
+        }
+    }
+    const auto& textures = StageInfo(4).texture_descriptors;
+    if (textures.size() != 2 || FirstTextureBinding(StageInfo(4), NumStageBindings(StageInfo(0))) != 5) {
+        throw std::runtime_error("material GPU probe: unsupported texture bindings");
+    }
+    for (const auto& texture : textures) {
+        if (texture.type != Shader::TextureType::Color2D || texture.is_depth ||
+            texture.is_integer || texture.is_multisample || texture.count != 1) {
+            throw std::runtime_error("material GPU probe: unsupported texture type");
+        }
+    }
+    std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
+    auto desc = Describe(elements);
+    if (desc.DSVFormat != DXGI_FORMAT_UNKNOWN || desc.SampleDesc.Count != 1 ||
+        desc.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE) {
+        throw std::runtime_error("material GPU probe: depth/MSAA/topology unsupported");
+    }
+    desc.PS = {pixel_shader.data(), pixel_shader.size()};
+    desc.NumRenderTargets = 1;
+    std::fill(std::begin(desc.RTVFormats), std::end(desc.RTVFormats), DXGI_FORMAT_UNKNOWN);
+    desc.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.BlendState = {};
+    desc.BlendState.RenderTarget[0] = {
+        .SrcBlend = D3D12_BLEND_ONE, .DestBlend = D3D12_BLEND_ZERO,
+        .BlendOp = D3D12_BLEND_OP_ADD, .SrcBlendAlpha = D3D12_BLEND_ONE,
+        .DestBlendAlpha = D3D12_BLEND_ZERO, .BlendOpAlpha = D3D12_BLEND_OP_ADD,
+        .LogicOp = D3D12_LOGIC_OP_NOOP, .RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL};
+    ComPtr<ID3D12PipelineState> result;
+    ThrowIfFailed(device.Get()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&result)),
+                  "material GPU probe pipeline");
+    return result;
+}
+
+void GraphicsPipeline::Build() try {
+    const auto& stages = *dxil;
+    std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
+    auto desc = Describe(elements);
+    const size_t num_attachments = desc.NumRenderTargets;
     auto host_key = MakeGraphicsPsoKey(desc, dxil);
     const u64 index_bytes = sizeof(GraphicsPsoCache::Entry) + 128 +
                             host_key.state.capacity() * sizeof(u32);

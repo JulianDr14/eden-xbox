@@ -28,6 +28,7 @@ La rama de trabajo es `xbox`; las reglas del proyecto están en [AGENTS.md](../.
 - [Copias de bloques BC](xbox_bc_block_copy.md): preservación exacta de arrays decodificados y reinterpretación BC3/UINT128.
 - [Dimensiones de SRV](xbox_srv_dimensions.md): compatibilidad de cubemaps, fallback nulo y propiedad de descriptores.
 - [Líneas en el terreno](xbox_terrain_seams.md): dimensiones virtuales BC corregidas; desaparición de líneas confirmada por el usuario en MK8 PC y Series; diagnóstico F7.
+- [Iluminación y tubos de 3D World](xbox_sm3dw_lighting.md): replay causal de siete capturas, G-buffer/proyección de sombras y diagnóstico .37 por mando; causas visuales pendientes.
 - [Revisión de logs del 30 de septiembre de 2026](xbox_log_review_2026-09-30.md).
 
 Los resultados históricos conservan sus límites y pendientes. Un build correcto o

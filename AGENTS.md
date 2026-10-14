@@ -854,3 +854,99 @@ pasa. Sincommit; APPX.34 previo no reempaquetado; detalle xbox_terrain_seams.md.
 Preferencia explícita del usuario (13oct): no incrementar automáticamente la
 versión al compilar/empaquetar si no es necesario. Si el binario ya está al día,
 reutilizarlo; no forzar recompilaciones. Release actual conserva0.2.87.34.
+
+13oct 3DWorld iluminación/tubos: usuario aclara corridaSeries conBCcorregido;
+defectos no aparecenPC ypersistenSeries. No trasladar cierrePC aeste gateSeries.
+TresPNG ylog/diag/tracker deDownloads archivados; sufijos(7)/(8)ausentes, archivos
+sin sufijo identifican título/.34/SraKmd_arden. Renderwarnings/errors0,F7ausente:
+sin causa raíz demostrada. Metadata b702 stale no identifica contenidoEXE;
+hashAPPX/layout/símbolosprevios coincide, usuario confirma corrección instalada.
+F7amplía atributosleídos/fetch/interpolación/depthbounds/key; comparadorcapturas
+porVS/PS conservaparciales/capacidadesPCSeries, no deducepixel/LOD/cascada.
+Incremental21+4ops,parser/fixtures/interner32generics/SRV/BC213504componentes/
+RTV2304casos36drawsGPU pasanPC. SinfixvisualniFPSSeries certificados,
+sincommit/push. Detalle docs/xbox/xbox_sm3dw_lighting.md.
+
+Series sinteclado: diagnóstico opt-in material_capture_menu=1 añade «Capturar
+gráficos y continuar» al menú View+Menu1s; Aoculta menú y solicita capturaacotada
+antesdereanudar. Hotkeys0 en APPXdiagnóstico separado package-sm3dw-lighting,
+versión.34 conservada, Releaseoriginalintacto/símbolosensubcarpeta separada.
+Buildfrontend23ops ytests game-menu/localizationpasan; gatevisual/capturaSeries
+pendiente. No cambio deimagen ni fix certificado, sincommit/push.
+
+Usuario corrige versión del diagnóstico a0.2.87.35: manifiesto sinBOM actualizado,
+APPX package-sm3dw-lighting reempaquetado/firmado con mismoEXE, sinrecompilar.
+Versión/hash/configmando verificados, símbolos en0.2.87.35; Releaseoriginal.34
+intacto. Sincommit/push.
+
+RevisiónSeries.35:4capturas560/480/228/466drawscompletas, null/fallback/bounds0,
+RenderError0/cierrecompleto/retorno10=biblioteca. Toma3colorpreiluminación,
+auxnormales no incluyen sombras/tubos; toma4color sí muestra tubo. Causaspendientes.
+FuentesMesa/PIX/RenderDoc orientan finalbackbuffer->primerdraw->inputsPCSeries;
+waitsdecaptura puedenocultarfallo, no carrera demostrada. SondadosPSpostdraw
+compila/tests presupuesto/GPUtiles pasan, pero síncrona/primerdraw ydesactivada
+enAPPX.35 entregado, no reempaquetado. Siguiente captura debe confirmar defecto
+enframefinalexacto yexportarHDR/depth/alfa nativos confencediferido. AccesoPIX
+retailUWPSeries sinconfirmar, VisualStudioGraphicsDiagnosticsnoD3D12.
+Detalle/fuentes docs/xbox/xbox_sm3dw_lighting.md, sincommit/push.
+
+13oct diagnóstico sombras/tubos .36: distancia y ángulo afectan sombra; tubos
+verdes opacos también muestran particiones. Captura fuente de presentación,
+RAW+JSON/preview, ROIcentral por draw y muestras CB/geometría; copias diferidas
+tras fence sin waits por draw y presupuestos acotados. IncrementalUWP/testsGPU/
+menú/parser pasan, AppContainer ex04/ex10 retorna0, sin fallos de capaD3D12;
+no valida visualMario. Paquete separado package-sm3dw-diagnostic y símbolos.36;
+.35 conservada. Siete tomas con mando/trace completa pendientes Series. Sin fix
+visual ni commit; detalles y fuentes en docs/xbox/xbox_sm3dw_lighting.md.
+
+Series.36 revisada13oct:7metadata/ROI completas,14presentados y56exportsRAW válidos;
+4380archivos/912MB archivados con SHA256, sin erroresRender/export. DSfinal omitido
+1/2/7 por64MiB, D16/D32muestreados síen7. Estado/bindingsPSlighting idénticos en7,
+matrices ydepth cambian; regiónterreno ya visible traslighting antestransparencia.
+No causa exacta demostrada. Verde enopaco; transparente finalvisible pero snapshot
+primeroPS444 no corresponde todavía al tubo, ROIcentral7 queda porencima. No
+atribución automática a blending. Shutdown/retorno10normal, commitmáxmuestreado
+2416/5120. Informe/contact sheets en xbox_sm3dw_lighting.md y series36; sinfixvisual
+ni nuevoAPPX/commit. Continuar con inputs reales, no repetir7tomas sin necesidad.
+
+Causal13oct: replaylighting11759/11760bits,6ROIshadowlit;RG16depth735/735RTZ,
+matrices7coherentes,7mallasD16sinmissing(836samples). PCAMD tambiénRTZ: sinparche
+deredondeo. Near3productorGbufferdraw41PS5f/7929; snapshot37/102otro material,
+operandos41faltan. Firsttube204/216proyectadosdebajodelvisible. Diagnóstico.37
+PS+count yinputs pequeñosmips/capasBC preDraw, sinwaits/cambiodeestados. Build/link,
+fixturesIR/selector/parsers yGPU32BCsubresourcesdebugclean pasan. Paquete firmado
+package-sm3dw-causal/símbolos.37; verificacióndeconfianzaPC raízcerno confiable.
+Faltaunacapturacercana equivalente3/5, no7; causasvisuales/Seriespendientes,
+sincommit/push. Resultados,hashes yprocedimiento en xbox_sm3dw_lighting.md.
+
+Mapa nuevoSeries.37 revisado:402draws/969ROIcompletos,7nativeexports/525inputs,
+Renderissues0. Franjas tambiénnormalesprelighting; nuevoPS5f3 replayROI1680exactos.
+No coincidieronselectoresdelotro mapa. Grounddraw9PS087/3624 tieneCB/geometry;
+faltantexturasBC5/mips, TBNCPU/nodegeneracióngrande no certificaGPUfetch.
+PiezainteriortuboPSb017/360 localizada. .38configsolo,package-sm3dw-map ysymbols38,
+mismoEXE37, selectores087/3624+b017/360,ROI1100,570. Usuario puede seguirenESTE
+mapa, unacapturavistasimilar; no necesita anterior. Sinfixvisual/commit,doclighting.
+
+
+Gate diagnóstico SM3DW .39 (13oct): cobertura nativa PC/Series38 demuestra
+inputs lighting y salida completos ausentes fueraROI. Export opt-in seleccionado
+amplía8→32MiB/draw, mantiene64MiBglobal/reserva16MiBpresent. Buildincremental
+ytests C++/IR/GPU nativo pasan. Paquete firmado package-sm3dw-lighting-full,
+PS5f3/count18; símbolos0.2.87.39. Una captura mismo mapa con quiebre90° pendiente;
+no parche especulativo ni causa/corrección visual certificadas. Detalles y comando
+replay --require-full-inputs en docs/xbox/xbox_sm3dw_lighting.md.
+
+
+Gate SM3DW Series39: inputs completos/replay8160exactos. Quiebre90° localizado
+enalfaRGBA8, productorROI draw130VSff852/PS844b,count36, máscaraBC4 noexportada.
+Controloffline alfa0retirafranja, Dref1no. .40firmada captura máscara+mips yRT0
+pre/postblend; buildincremental yfixtures pasan. Una captura pendiente, no raíz
+final/correcciónvisual certificadas. Tubo tiene marcas enR11previo, caso separado.
+Detalle en docs/xbox/xbox_sm3dw_lighting.md; no commit/push.
+
+Diagnóstico iluminación13oct: .40Series revisada, bandas90° nacen enalfa RT0 de
+draw132VSff852/PS844. Inputs BC4diezmips/RG16/preblend recuperados. Replay shaders
+realesGPU PC coninputsSeries coincideCPU2673/2681, Series541/2681; no causaúltima
+certificada. .41diagnóstico exportaDXIL VS/PS/hash inclusohit yVB retenidos de draw
+seleccionada; rendernormal/BCintactos. Fixtures/nativeprobe/buildincremental pasan;
+DXILSeries/intermediosGPU pendientes. Sinparchevisual/commit/push; detalle docSM3DW.

@@ -85,19 +85,22 @@ void DumpShader(u64 unique_hash, size_t stage, const Shader::IR::Program& progra
     LOG_INFO(Render, "D3D12: shader {:016x} stage {} dumped ({})", unique_hash, stage, base);
 }
 
-/// Writes a linked pipeline's DXIL stages next to the log, named after its vertex shader.
-void DumpDxil(u64 vertex_shader, std::span<const std::vector<u8>> stages) {
+/// Include both stages and the pipeline key: one VS can link to several fragment shaders.
+void DumpDxil(u64 vertex_shader, u64 fragment_shader, u64 pipeline,
+              std::span<const std::vector<u8>> stages) {
     const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir);
     for (size_t stage = 0; stage < stages.size(); ++stage) {
         if (stages[stage].empty()) {
             continue;
         }
-        const std::string name = fmt::format("dxil_{:016x}_{}.dxil", vertex_shader, stage);
+        const std::string name = fmt::format("dxil_{:016x}_{:016x}_{:016x}_{}.dxil",
+                                             vertex_shader, fragment_shader, pipeline, stage);
         std::ofstream{directory / name, std::ios::binary | std::ios::trunc}.write(
             reinterpret_cast<const char*>(stages[stage].data()),
             static_cast<std::streamsize>(stages[stage].size()));
     }
-    LOG_INFO(Render, "D3D12: pipeline DXIL of VS {:016x} dumped", vertex_shader);
+    LOG_INFO(Render, "D3D12: pipeline DXIL VS {:016x} PS {:016x} key {:016x} dumped",
+             vertex_shader, fragment_shader, pipeline);
 }
 
 using Shader::Backend::SPIRV::EmitSPIRV;
@@ -169,7 +172,7 @@ Shader::AttributeType CastAttributeType(const FixedPipelineState::VertexAttribut
     }
     if (attr.Type() == Maxwell::VertexAttribute::Type::SNorm &&
         attr.Size() == Maxwell::VertexAttribute::Size::Size_A2_B10_G10_R10) {
-        // DXGI has no signed 10:10:10:2: fetched as R10G10B10A2_UINT (VertexFormat) and normalized
+        // DXGI has no signed 10:10:10:2: fetched as a packed R32_UINT (VertexFormat) and normalized
         // in the shader. Mario Wonder packs normals like this; read as floats they were NaN.
         return Shader::AttributeType::SignedNormA2B10G10R10;
     }
@@ -781,7 +784,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     const bool uses_vertex_a{key.unique_hashes[0] != 0};
     const bool uses_vertex_b{key.unique_hashes[1] != 0};
     const bool drops_geometry{HasShaderHash(gs_dropped_shaders, key.unique_hashes[1])};
-    const bool dumps_dxil{IsDumpedShader(key.unique_hashes[1])};
+    const bool dumps_dxil{IsDumpedShader(key.unique_hashes[1]) ||
+                          IsDumpedShader(key.unique_hashes[5])};
 
     // Layer passthrough generation for devices that cannot write the layer outside a GS
     Shader::IR::Program* layer_source_program{};
@@ -863,7 +867,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     // 150-490 ms per 300 frames when entering new areas (0.2.59 profile). Translating the guest
     // shaders stays here, since it reads guest memory through the environments.
     auto compile_dxil = [this, spirv = std::move(spirv), stage_indices, dumps_dxil,
-                         vertex_shader = key.unique_hashes[1]](u64 trace_pipeline) {
+                         vertex_shader = key.unique_hashes[1],
+                         fragment_shader = key.unique_hashes[5],
+                         pipeline_key = key.Hash()](u64 trace_pipeline) {
         boost::container::static_vector<ShaderCompiler::PipelineStage, Maxwell::MaxShaderStage>
             stages;
         for (const size_t stage_index : stage_indices) {
@@ -895,9 +901,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 dxil.stages[stage_indices[i]] = std::move(compiled[i].dxil);
             }
             dxil.charge = Common::MemoryCharge(Common::MemoryAccount::ShaderBytecode, bytes);
-            if (dumps_dxil) [[unlikely]] {
-                DumpDxil(vertex_shader, dxil.stages);
-            }
             return dxil;
         }, [](const ChargedDxilStages& dxil) {
             size_t bytes = sizeof(dxil);
@@ -906,6 +909,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
             return bytes;
         });
+        // Export the actual linked bytes even when another pipeline populated this cache entry.
+        if (dumps_dxil) [[unlikely]] {
+            DumpDxil(vertex_shader, fragment_shader, pipeline_key, cached.value->stages);
+        }
         VideoCore::FrameTrace::Mark(VideoCore::FrameTrace::Event::PipelineCacheResult,
                                    static_cast<u64>(cached.outcome), trace_pipeline);
         // The pipeline keeps the whole entry, charge included, alive through its stages.

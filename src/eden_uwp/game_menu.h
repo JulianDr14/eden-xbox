@@ -103,6 +103,8 @@ struct GameMenuSettings {
     bool pulse_sessions{};
     /// Shown live: the paused frame is presented again with each change.
     Upscaling upscaling{Upscaling::Bilinear};
+    /// Opt-in diagnostic package: capture from a controller without a keyboard.
+    bool material_capture{};
 };
 
 /// Library: back to home, keeping a Pulse session when they are on. LibraryWithoutSession: the
@@ -110,6 +112,7 @@ struct GameMenuSettings {
 enum class GameMenuResult : std::uint8_t {
     None, Resume, Library, SettingsChanged, FullScreen, Cheats, PerformanceStatsChanged, UpscalingChanged,
     LibraryWithoutSession,
+    CaptureGraphics,
 };
 
 /// One row as drawn: a label, and the value of a setting (changed with left/right) or of a page.
@@ -125,6 +128,7 @@ class GameMenu {
 public:
     enum Item : std::size_t {
         Continue, Cheats, Mods, Style, FaceButtons, Deadzone, FullScreen, ImageUpscaling, PerformanceStats, Library,
+        CaptureGraphics,
     };
 
     /// `cheats`: the game can have cheats (it has a title id), so the menu offers them.
@@ -135,6 +139,7 @@ public:
         if (settings.can_fullscreen) items.push_back(FullScreen);
         items.push_back(ImageUpscaling);
         items.push_back(PerformanceStats);
+        if (settings.material_capture) items.push_back(CaptureGraphics);
         items.push_back(Library);
     }
 
@@ -195,6 +200,8 @@ private:
         switch (item) {
         case Continue:
             return {Tr(Text::MenuResume)};
+        case CaptureGraphics:
+            return {Tr(Text::MenuCaptureGraphics)};
         case Cheats:
             return {Tr(Text::CheatsTitle), I18n::Plural(Text::CheatsOnOne, Text::CheatsOnOther, cheats_on),
                     GameMenuRow::Kind::Page};
@@ -228,6 +235,8 @@ private:
         switch (SelectedItem()) {
         case Continue:
             return action == MenuAction::Confirm ? GameMenuResult::Resume : GameMenuResult::None;
+        case CaptureGraphics:
+            return action == MenuAction::Confirm ? GameMenuResult::CaptureGraphics : GameMenuResult::None;
         case Cheats:
             return action == MenuAction::Confirm ? GameMenuResult::Cheats : GameMenuResult::None;
         case Mods:

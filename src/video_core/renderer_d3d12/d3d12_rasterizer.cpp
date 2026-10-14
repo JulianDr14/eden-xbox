@@ -14,6 +14,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "video_core/control/channel_state.h"
+#include "video_core/dirty_flags.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/framebuffer_config.h"
 #include "video_core/gpu.h"
@@ -97,6 +98,17 @@ RasterizerD3D12::RasterizerD3D12(Tegra::GPU& gpu_,
 }
 
 RasterizerD3D12::~RasterizerD3D12() {
+    // Renderer drains the scheduler before destroying caches/staging. Export completed work
+    // on a normal shutdown too; a removed device must never make destruction throw.
+    try {
+        std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
+        PollMaterialReadbacks();
+        for (auto& pending : material_readbacks) staging.FreeDeferred(pending.buffer);
+        for (auto& pending : material_buffer_readbacks)
+            if (pending.buffer.buffer) staging.FreeDeferred(pending.buffer);
+        if (pending_material_probe) staging.FreeDeferred(pending_material_probe->buffer);
+    } catch (...) {
+    }
     buffer_runtime.SetDescriptorQueue(nullptr);
 }
 
@@ -139,8 +151,19 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         bindings.trace_views = &traced_views;
         bindings.trace_filters = &traced_filters;
         bindings.trace_types = &traced_types;
-        if (trace_dumps) {
+        if (trace_dumps || material_trace.Active()) {
             buffer_runtime.SetTraceBuffers(&traced_buffers);
+        }
+    }
+    if (material_trace.Active()) {
+        const auto& draw = maxwell3d->draw_manager.draw_state;
+        const u32 count = is_indexed ? draw.index_buffer.count : draw.vertex_buffer.count;
+        if (material_snapshots.Targeted(pipeline->Key().unique_hashes[5], count)) {
+            // The normal binder skips unchanged VBs. Rebind only the explicit diagnostic draw
+            // so its geometry snapshot includes retained bindings, without retaining Buffer*.
+            for (u32 index = 0; index < Tegra::Engines::Maxwell3D::Regs::NumVertexArrays; ++index) {
+                maxwell3d->dirty.flags[VideoCommon::Dirty::VertexBuffer0 + index] = true;
+            }
         }
     }
     pipeline->Configure(is_indexed,
@@ -195,7 +218,28 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         }
         return;
     }
+    if (material_trace.Active() && trace_this_draw) {
+        try {
+            CaptureMaterialSampledInputs(*pipeline, traced_views, params.num_vertices, *framebuffer);
+        } catch (const std::exception& e) {
+            LOG_WARNING(Render, "D3D12 material sampled inputs skipped: {}", e.what());
+        }
+    }
     RecordDraw(*pipeline, bindings, *framebuffer, params, draw_state.topology);
+    if (material_trace.Active() && trace_this_draw) {
+        try {
+            ProbeMaterialIntermediates(*pipeline, bindings, *framebuffer, params, draw_state.topology);
+        } catch (const std::exception& e) {
+            LOG_WARNING(Render, "D3D12 material GPU probe skipped: {}", e.what());
+        }
+    }
+    if (material_trace.Active() && trace_this_draw) {
+        try {
+            CaptureMaterialInputs(*pipeline, traced_buffers, params);
+        } catch (const std::exception& e) {
+            LOG_WARNING(Render, "D3D12 material inputs skipped: {}", e.what());
+        }
+    }
     if (trace_this_draw) {
         if (material_trace.Active()) ProbeMaterialDraw(*pipeline, *framebuffer);
         if (!traced_filters.empty()) {
@@ -613,6 +657,7 @@ void RasterizerD3D12::TickFrame() {
         // The fence worker shares staging with both caches. Retire resources only while neither
         // cache can add a reference or release a pinned readback concurrently.
         std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
+        PollMaterialReadbacks();
         auto snapshot = texture_runtime.BeginMemoryGuardFrame();
         if (staging.GuardMemory(snapshot)) {
             // A retired ring can return 256 MiB at once. Refresh only on that rare transition,

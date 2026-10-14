@@ -6,6 +6,7 @@
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 #include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_srv_compatibility.h"
+#include "video_core/renderer_d3d12/d3d12_stage_bindings.h"
 #include "video_core/texture_cache/image_view_info.h"
 #include <d3d12sdklayers.h>
 #include <d3dcompiler.h>
@@ -18,6 +19,26 @@ using namespace VideoCommon;
 using VideoCore::Surface::PixelFormat;
 
 int main() try {
+    // Diagnostic metadata must not merge shader interfaces with different interpolation.
+    // Exercise the top generic as well: shifts past 31 bits must remain 64-bit.
+    for (u32 generic = 0; generic < 32; ++generic) {
+        Shader::Info info{};
+        info.loads.Set(Shader::IR::Attribute::Generic0X + generic * 4);
+        info.interpolation[generic] = Shader::Interpolation::Smooth;
+        const auto smooth = InternStage(info);
+        assert(InternStage(info) == smooth);
+        for (auto mode : {Shader::Interpolation::Flat, Shader::Interpolation::NoPerspective}) {
+            info.interpolation[generic] = mode;
+            const auto changed = InternStage(info);
+            assert(changed != smooth);
+            assert(((changed->interpolation >> (2 * generic)) & 3) == static_cast<u32>(mode));
+            assert(InternStage(info) == changed);
+        }
+        // Unread interpolation does not inflate the interner.
+        info.interpolation[generic] = Shader::Interpolation::Smooth;
+        info.interpolation[(generic + 1) % 32] = Shader::Interpolation::Flat;
+        assert(InternStage(info) == smooth);
+    }
     D3D12_RESOURCE_DESC compatibility{};
     compatibility.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     compatibility.Width = compatibility.Height = 8;

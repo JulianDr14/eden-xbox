@@ -43,6 +43,8 @@ void TraceNextFrames(u32 count);
 /// Bounded metadata across two present intervals, optional PS filter. Safe from the UI thread.
 void TraceNextMaterialFrame(u64 pixel_shader = 0);
 void SetMaterialProbe(s32 x, s32 y);
+void SetMaterialSnapshotShaders(u64 first, u64 second);
+void SetMaterialSnapshotVertexCounts(u32 first, u32 second);
 
 /// Whether presents write frame*.bmp and trace a frame's draws (the default). Off for a session
 /// played by hand (boot.cfg "play=1"). Set before boot.
