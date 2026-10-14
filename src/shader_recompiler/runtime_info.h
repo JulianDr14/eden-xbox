@@ -101,6 +101,11 @@ struct RuntimeInfo {
     bool convert_depth_mode{};
     bool force_early_z{};
 
+    /// Host workaround for direct VS -> FS pipelines: export a*clipW with smooth
+    /// interpolation, then reconstruct a using reciprocal fragment W. Zero keeps
+    /// native NoPerspective, including all other backends and intermediate stages.
+    u32 lower_noperspective_mask{};
+
     TessPrimitive tess_primitive{};
     TessSpacing tess_spacing{};
     bool tess_clockwise{};

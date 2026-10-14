@@ -26,10 +26,11 @@ static void Check(HRESULT hr) {
     if (FAILED(hr)) throw std::runtime_error("D3D12 clip probe failure " + std::to_string(hr));
 }
 int main(int argc, char** argv) try {
-    if (argc != 3 && argc != 7 && argc != 12) throw std::runtime_error(
-        "usage: noperspective-clip FLOAT8_TRIANGLES OUTPUT_DIR [VS_DXIL CB0 CB1 PS_DXIL [CB2 CB3 CB4 RG16_RAW BC4_M0_RAW]]");
+    if (argc != 3 && argc != 5 && argc != 7 && argc != 12 && argc != 13) throw std::runtime_error(
+        "usage: noperspective-clip FLOAT8_TRIANGLES OUTPUT_DIR [FIXTURE_VS FIXTURE_PS | VS_DXIL CB0 CB1 PS_DXIL [CB2 CB3 CB4 RG16_RAW BC4_M0_RAW [GS_DXIL]]]");
+    const bool fixture = argc == 5;
     const bool captured_vs = argc >= 7;
-    const bool captured_ps = argc == 12;
+    const bool captured_ps = argc >= 12;
     const unsigned constant_count = captured_ps ? 6 : 3;
     const auto size = std::filesystem::file_size(argv[1]);
     if (!size || size % 96 || size > 65536) throw std::runtime_error("invalid triangle input");
@@ -183,7 +184,7 @@ float4 PC(C i):SV_Target { return float4(i.a.xy,i.b.xy); }
     cmd->IASetVertexBuffers(0, 1, &view); cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VIEWPORT vp{0,0,float(W),float(H),0,1}; cmd->RSSetViewports(1,&vp);
     const D3D12_RECT sc{0,0,W,H}; cmd->RSSetScissorRects(1,&sc);
-    const unsigned target_count = captured_vs ? 1 : 2;
+    const unsigned target_count = captured_vs || fixture ? 1 : 2;
     for (unsigned i=0; i<target_count; ++i) {
         ComPtr<ID3DBlob> vs, ps;
         const auto compile = [&](const char* entry, const char* profile, ID3DBlob** out) {
@@ -193,17 +194,18 @@ float4 PC(C i):SV_Target { return float4(i.a.xy,i.b.xy); }
             Check(hr);
         };
         compile(i ? "VS" : "VN", "vs_5_0", &vs); compile(captured_vs ? "PC" : i ? "PS" : "PN", "ps_5_0", &ps);
-        std::vector<char> captured_bytecode, captured_pixel_bytecode;
-        if (captured_vs) {
+        std::vector<char> captured_bytecode, captured_pixel_bytecode, geometry_bytecode;
+        if (captured_vs || fixture) {
             const auto bytes = std::filesystem::file_size(argv[3]);
             if (bytes < 32 || bytes > 16 * 1024 * 1024) throw std::runtime_error("invalid VS DXIL size");
             captured_bytecode.resize(bytes);
             std::ifstream shader(argv[3], std::ios::binary); shader.read(captured_bytecode.data(), bytes);
             if (!shader) throw std::runtime_error("incomplete VS DXIL");
-            const auto pixel_bytes = std::filesystem::file_size(argv[6]);
+            const char* pixel_path = argv[fixture ? 4 : 6];
+            const auto pixel_bytes = std::filesystem::file_size(pixel_path);
             if (pixel_bytes < 32 || pixel_bytes > 16 * 1024 * 1024) throw std::runtime_error("invalid PS DXIL size");
             captured_pixel_bytecode.resize(pixel_bytes);
-            std::ifstream pixel(argv[6], std::ios::binary); pixel.read(captured_pixel_bytecode.data(), pixel_bytes);
+            std::ifstream pixel(pixel_path, std::ios::binary); pixel.read(captured_pixel_bytecode.data(), pixel_bytes);
             if (!pixel) throw std::runtime_error("incomplete PS DXIL");
         }
         D3D12_RESOURCE_DESC td{}; td.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -222,14 +224,28 @@ float4 PC(C i):SV_Target { return float4(i.a.xy,i.b.xy); }
         const float clear[]{-99999,-99999,-99999,-99999}; cmd->ClearRenderTargetView(handle,clear,0,nullptr);
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{}; pd.pRootSignature=root.Get();
         pd.VS={vs->GetBufferPointer(),vs->GetBufferSize()}; pd.PS={ps->GetBufferPointer(),ps->GetBufferSize()};
-        if (captured_vs) {
+        if (argc == 13) {
+            const auto bytes = std::filesystem::file_size(argv[12]);
+            if (bytes < 32 || bytes > 16 * 1024 * 1024) throw std::runtime_error("invalid GS DXIL size");
+            geometry_bytecode.resize(bytes);
+            std::ifstream geometry(argv[12], std::ios::binary);
+            geometry.read(geometry_bytecode.data(), bytes);
+            if (!geometry) throw std::runtime_error("incomplete GS DXIL");
+            pd.GS = {geometry_bytecode.data(), geometry_bytecode.size()};
+        }
+        if (captured_vs || fixture) {
             pd.VS = {captured_bytecode.data(), captured_bytecode.size()};
             pd.PS = {captured_pixel_bytecode.data(), captured_pixel_bytecode.size()};
         }
         D3D12_INPUT_ELEMENT_DESC captured_layout = layout[1]; captured_layout.AlignedByteOffset = 0;
         pd.InputLayout={layout,2};
+        const D3D12_INPUT_ELEMENT_DESC fixture_layout[] = {
+            {"TEXCOORD",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+            {"TEXCOORD",1,DXGI_FORMAT_R32G32B32A32_FLOAT,0,16,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0}};
+        if (fixture) pd.InputLayout = {fixture_layout, 2};
         if (captured_vs) pd.InputLayout = {&captured_layout, 1}; pd.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;
         pd.RasterizerState.CullMode=D3D12_CULL_MODE_FRONT; pd.RasterizerState.FrontCounterClockwise=TRUE;
+        if (fixture) pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
         pd.RasterizerState.DepthClipEnable=TRUE; pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_ALWAYS;
         pd.DepthStencilState.FrontFace={D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_COMPARISON_FUNC_ALWAYS};
         pd.DepthStencilState.BackFace=pd.DepthStencilState.FrontFace;
@@ -278,24 +294,25 @@ float4 PC(C i):SV_Target { return float4(i.a.xy,i.b.xy); }
         for (UINT y=0;y<H;++y) {
             const auto* row=reinterpret_cast<const float*>(static_cast<char*>(mapped)+y*footprints[i].Footprint.RowPitch);
             out.write(reinterpret_cast<const char*>(row),W*16);
-            for (UINT x=0;x<W;++x) if (row[x*4+(captured_ps ? 3 : 0)]>-90000) {
+            for (UINT x=0;x<W;++x) if (fixture ? row[x*4] != -99999
+                                             : row[x*4+(captured_ps ? 3 : 0)]>-90000) {
                 ++covered; const double err=std::max(std::abs(row[x*4]-(x+.5)/W),std::abs(row[x*4+1]-(y+.5)/H));
-                if (!captured_ps) { valid+=err<.0001; max_error=std::max(max_error,err); }
+                if (!captured_ps && !fixture) { valid+=err<.0001; max_error=std::max(max_error,err); }
             }
         }
         void* roi_mapped{};Check(roi_downloads[i]->Map(0,nullptr,&roi_mapped));
         std::ofstream roi_out(std::filesystem::path(argv[2])/(i?"emulated-roi.raw":"native-roi.raw"),std::ios::binary);
         for (unsigned row=0;row<128;++row) {
-            const auto* small=static_cast<char*>(roi_mapped)+row*roi_footprints[i].Footprint.RowPitch;
+            const auto* roi_row=static_cast<char*>(roi_mapped)+row*roi_footprints[i].Footprint.RowPitch;
             const auto* full=static_cast<char*>(mapped)+(row+506)*footprints[i].Footprint.RowPitch+972*16;
-            if (std::memcmp(small,full,256*16)) throw std::runtime_error("ROI GPU copy differs from full readback");
-            roi_out.write(small,256*16);
+            if (std::memcmp(roi_row,full,256*16)) throw std::runtime_error("ROI GPU copy differs from full readback");
+            roi_out.write(roi_row,256*16);
         }
         roi_downloads[i]->Unmap(0,&empty);
         if (!roi_out) throw std::runtime_error("ROI output write failed");
         downloads[i]->Unmap(0,&empty);
         std::cout<<(i?"emulated":"native")<<" covered="<<covered;
-        if (!captured_ps) std::cout<<" affine="<<valid<<" max_error="<<max_error;
+        if (!captured_ps && !fixture) std::cout<<" affine="<<valid<<" max_error="<<max_error;
         std::cout<<'\n';
         if (!out) throw std::runtime_error("clip output write failed");
     }

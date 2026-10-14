@@ -334,6 +334,14 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, Id vertex) {
         const Id pointer{
             AttrPointer(ctx, generic.pointer_type, vertex, source, ctx.Const(load_element))};
         const Id value{ctx.OpLoad(generic.component_type, pointer)};
+        if (ctx.stage == Stage::Fragment &&
+            (ctx.runtime_info.lower_noperspective_mask & (1U << index)) != 0) {
+            // SPIR-V FragCoord.w is reciprocal clip W. Mesa translates this to
+            // reciprocal D3D SV_Position.w, unlike the authored HLSL probe.
+            const Id w_pointer{
+                ctx.OpAccessChain(ctx.input_f32, ctx.input_position, ctx.Const(3U))};
+            return ctx.OpFMul(ctx.F32[1], value, ctx.OpLoad(ctx.F32[1], w_pointer));
+        }
         return [&ctx, generic, value, element]() {
             switch (generic.load_op) {
             case InputGenericLoadOp::SNormA2B10G10R10:
