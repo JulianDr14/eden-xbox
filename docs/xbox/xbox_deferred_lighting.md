@@ -1224,3 +1224,273 @@ internas y restauración de estado. Compila. Shader de muestras ejecutadoPC:3276
 píxelesdepth exactos, BC4 error máximo0,002561 (<1/255). Nuevo gateROI y validación
 integrada de restauración todavía pendientes; **.42 aún no empaquetada/validada**.
 La investigación web no transforma esa sonda en una corrección visual certificada.
+
+## 14 oct 2026: gate de coordenadas y paquete .42
+
+Se ejecutaron ambos PS diagnósticos con el VS DXIL real y los CB/texturas de .40
+sobre GPU AMD Radeon Pro5300M. El harness ahora hace una copia GPU del ROI256×128
+(x972,y506) además del readback completo; compara cada fila byte por byte. Ambos
+pases pasan ese gate y la capa de debug aislada queda limpia. Se corrigió el nombre
+local `small` del test porque el SDK Windows lo define como macro `char`; el fallo
+era de compilación del harness, no del renderer. No se modificó bytecode invitado.
+
+Analizador `analyze-material-intermediates.py` ejecutado sobre las dos copias ROI:
+32768píxeles cubiertos, NaN/Inf0. Errores absolutos máximos:
+
+- Generic0.x 0,00000201861; Generic0.y 0,00000810314.
+- Generic1.x 0,00000226920; Generic1.y 0,00000513519.
+- Depth.r/g: **0 exacto**, usando las coordenadas reales deGPU para seleccionar texel.
+- BC4 a screenUV/LOD0:0,002560799; LOD9:5,844e-9, ambos dentro1/255.
+
+El controlBC4 sigue siendo bilinear/decodificación aproximados y LOD explícito;
+NO reproduce la UV proyectada del PS invitado. No atribuir su error pequeño al
+fallo de Series. Resultados en test-results/game-f-lighting-2026-10-14/pc42-{varyings,samples}.
+Nuevo fixture tests/material-intermediates.py pasa control exacto, discrepanciaUV,
+NaN, sentinel de no cobertura y rechazo deROI truncado. FixturesIR también pasan.
+Build incremental UWP correcto tras regenerar los PS diagnósticos.
+
+La app .42 fue abierta en PC condebug y una captura automática al present600,
+sin gameplay/input automatizado ni timeout/cierre. La captura terminó24draws sin
+pérdidas, pero ocurrió en pantalla inicial y **no contenía PS844/count36**. Por eso
+no produjo gpu_varyings/gpu_samples: no se certifica todavía la integración del
+pase seleccionado/restauración/query streams con esa prueba. El log integrado
+muestra warnings210 deVB corto enDrawInstanced de la pantalla inicial; no afirmar
+que la corrida integrada sea debuglimpia ni atribuirlos a una sonda que no se
+activó. La prueba GPU aislada sí está limpia. App continúa bajo control del usuario.
+Se restauró boot.cfg de layout después de la lectura inicial; APPX siempre conservó
+configuraciónSeries, sin debug ni capturaautomática600.
+
+Paquete diagnóstico **0.2.87.42**, firmado conSignTool yZIPverificado:
+`build-uwp/package-coordinate-probe/eden-xbox.appx`,14836010bytes.
+SHAAPPX c13c033ea85361cde81137aaa2fd7b92f36e5f7b4874bd9ac5ede407f941c9ea;
+SHAEXE22b14ad680c1151ec02a85dc05dbcf303b4b2f58645f7b6fc48b0a3dc83dd62e;
+SHAPDB12b6f3ff0b7f7c162b3b868749d49d356ccd4899d9b481dac3504c7d6b28de49.
+Símbolos0.2.87.42archivados; verification.json comprueba versión/config/EXE/firma.
+Config material_gpu_probe1, PS844/count36, probe1100/570, memoria5120, library1,
+play1, fastmem0, profiles0; no shaderoverride, bias ni desactivación de efectos.
+
+Siguiente ejecución necesaria enSeries: una toma de la misma zona y encuadre de
+.40 conView+Menu1s → Capturar gráficos y continuar → A; dejar unos segundos y copiar
+logs+trace aDescargas. Deben aparecer `*_gpu_varyings_x*_y*.raw/json` y
+`*_gpu_samples_x*_y*.raw/json`, con queued=true. Comparar con CB y fuentes nativas
+**de esa misma toma**, usando coordenadasdelROI delnombre/log. Conservarantes/después,
+VBexacto y máscaraBC4. No hacen falta siete distancias ni volver al mapa anterior.
+No declarar visualcorregido ni cerrarcausa hasta analizarintermediosSeries.
+
+El commitc4854c10e4 conserva la implementación previa. Corrección delharness,
+versión42, fixture y esta evidencia posteriores quedan sincommit, conforme a la
+regla de commit solo a solicitud. No push.
+
+## 14 oct 2026: .42 Series, primera divergencia medida y control .43
+
+Descargas revisada: logs, diag y trace de **0.2.87.42**. Evidencia conservada en
+`build-uwp/test-results/game-f-lighting-2026-10-14/series42-map/`, inventario563
+archivos/129991090bytes. Se inspeccionó directamente present2597: persisten las
+bandas dobladas del terreno y las marcas del tubo verde. El usuario confirma
+**cierre forzado voluntario**: el final abrupto del log no prueba crash. Antes del
+cierre se exportaron ambos ROIs y terminó la captura201draws, omitted_draws0,
+dropped_lines0, intervals_complete1. Sin RenderError/Critical en la revisión.
+Las copias auxiliares/final depth omitidas por el presupuesto no afectan a esta
+prueba; sí se conservaron profundidadRG16 muestreada, BC4 y sus diez mips.
+
+Productor exacto: draw137, VSff85298630961280, PS844b5348ddab6cc6,
+pipeline925c712d858fbd86,36índicesuint16. Ahora están capturados **VB e IB de esta
+misma draw**, no se reutiliza el cubo supuesto de .40draw130. Sus24vértices tienen
+stride32/posiciónfloat3, CBslots0..4 completos. ROIx972/y506/256×128,32768puntos,
+ambos queued=true y NaN/Inf0.
+
+|Error absoluto máximo|Series .42|Replay PC con exactamente los mismos VB/IB/CB/texturas|
+|---|---:|---:|
+|Generic0.x|0,02520315|0,00000129143|
+|Generic0.y|0,19705704|0,00000847446|
+|Generic1.x|0,02825426|0,00000141685|
+|Generic1.y|0,12426364|0,00000539571|
+|BC4 screenUV/LOD0|0,000119688|0,002560799|
+|BC4 screenUV/LOD9|5,844e-9|5,844e-9|
+
+Todos los controlesBC4 quedan dentro1/255. La profundidad point, calculando el
+texel desde las coordenadas medidas, coincide en casi todos los puntos Series:
+77canalR/94canalG difieren; máximos0,014572/0,784210. No atribuir esos máximos
+aislados a corrupción global: las dos sondas son PS distintos y límites point
+pueden amplificar diferencias pequeñas de interpolación. EnPC ambos canales
+coinciden exactamente. Reportes `intermediate-comparison.json` y
+`exact-pc-comparison.json`; copiasROI GPU contra readback completo byteidénticas,
+replaysPC aislados con capa de debug limpia.
+
+**Prueba causal del alfa realmente escrito por el PS original:** se ejecutó la
+misma dependenciaIR auditada, CB y recursos de esta toma, cambiando únicamente
+sus entradas interpoladas.8192puntos delROI, tolerancia2/255 después de MAX con
+el alfa anterior capturado:
+
+|Entradas del replay|Coincidencias|Error absoluto medio en unidadesUNORM8|
+|---|---:|---:|
+|Coordenadas afines esperadas + profundidad nativa|6046/8192|27,0695|
+|Coordenadas medidas Series + profundidad nativa|8047/8192|0,3960|
+|Coordenadas medidas Series + profundidad medida Series|8048/8192|0,3947|
+
+Separando los2137puntos donde la draw cambió realmente el alfa (para no inflar
+el porcentaje con píxeles intactos), las coordenadas afines explican49/2137,
+frente1993/2137 (93,26%) con las coordenadas y profundidad medidasSeries.
+El error medio baja de101,364 a1,513 unidadesUNORM8. Resultado adicional en
+`alpha-causal-replay-changed-summary.json`.
+
+Esto vincula las coordenadas incorrectas con la banda producida, y reduce la
+prioridad de sampling/LOD de BC4 y de la lecturaRG16 como explicación principal.
+No es igualdad completa: queda incertidumbre de LOD/derivadas/precisión y bordes
+en144puntos. Resultados `alpha-causal-replay{,-summary}.json`. El PS consumidor
+posterior no puede reparar información incorrecta en este alfa.
+
+La primera divergencia **medida** está antes de las operaciones de iluminación
+del PS, en Generic0/1 que entrega VS/recorte/interpolación. Todavía no se separa
+aritméticaVS del driver de clipping/interpolación. El mismo DXIL ya se probó
+idéntico entre plataformas; el replayPC nuevo elimina la incertidumbre delVB.
+No afirmar todavía que el driver incumple una especificación o que CSM participa.
+
+El evaluadorCPU delVS conVBexacto obtiene W entre-6070,034 y11177,413; seis
+vértices tienen W negativo y seis están alrededor53,69. Por tanto hay recorte
+de aristas que cruzan el plano de cámara. Cámara/distancia cambian W y los puntos
+de intersección: mecanismo concreto compatible con la dependencia observada.
+ModelosCPU de clipping screen-linear, clip-linear y mixto con distintosguardbands
+comparados directamente con las coordenadasSeries: el mejor clip-linear/guard32
+solo explica677/2048puntos a0,001; error máximo0,01296. Mejora sobre elmodelo
+afín, pero **no reproduce toda la salida**. No convertir ese guardband en parche.
+Resultados `exact-volume-vertices.json`/`exact-clip-models.json`.
+
+### Control discriminante preparado, sin cambiar el framebuffer invitado
+
+La sonda opt-in `material_gpu_probe=1` conserva los dos pases .42 y añade:
+
+1. `gpu_identity_varyings`: VS original → GS que copia exactamente sus outputs →
+   PS NoPerspective original de diagnóstico. Controla el efecto de insertarGS.
+2. `gpu_linear_varyings`: mismoVS → GS multiplica atributos por clipW → PS smooth
+   divide por SV_Position.w de D3D. Conserva el atributo lineal en framebuffer
+   mediante otra representación, sin el camino NoPerspective del clipper.
+3. `gpu_linear_samples`: misma representación y muestras controladasRG16/BC4.
+
+En una arista, la representación da
+`lerp(a0*w0,a1*w1,t)/lerp(w0,w1,t)`, equivalente al factor de interpolación
+screen-linear `t*w1/lerp(w0,w1,t)`. Tras rasterización se divide por W interpolado
+deD3D; no confundir con GLFragCoord.w recíproco. Oracle matemático8192casos pasa,
+incluidoWpreclip negativo. Es una **prueba diagnóstica**, no un cambio por defecto
+del recompilador ni una solución visual certificada.
+
+Los tres controles se ejecutaronPC conVS DXIL real y todos los datos .42 exactos.
+GSidentidad reproduce byte por byte las coordenadas originales. Controllineal:
+error máximoROI8,778e-6, profundidadRG exacta, BC4 dentro1/255, NaN0; debug limpio
+y copiasROI byteidénticas. Muestreo del frame completo cada4píxeles129600puntos:
+máximo original0,000468 frente0,0000119 lineal, ninguno sobre0,001. No extrapolar
+estos números al hardwareSeries. Replays en `pc-{identity-varyings,linear-varyings,linear-samples}`.
+
+Lectura prevista de la próxima captura:
+- Identidad conserva el error y lineal lo elimina: evidencia fuerte contra el
+  camino de interpolación/recorteNoPerspective, con aritméticaVS original intacta.
+- Identidad también cambia el error: investigar linking/GS/recorte antes de
+  atribuir la mejora a la representación ponderada.
+- Ambas conservan el error: no aplicar lowering; medir outputsVS antes de recorte.
+
+Código: `diagnostics/material_interpolation.hlsl` y headersgenerados SM6.4,
+`CreateMaterialProbePipeline` aceptaGS solo en la sonda; cinco pases comparten
+elRTtemporal≤32MiB y añaden1,5MiB de readbacks frente .42 (total2,5MiB), mismo
+cap64MiB y reserva de presentación. Solo una vez por captura explícita, fuera
+de queries invitadas, sin escribir susRT, sin waits GPU/CPU. Hay tresPSO/draws
+diagnósticas adicionales; tiempo y memoriaPSO no medidos enSeries. Ningún coste
+de dibujo adicional con la sonda desactivada; estado de producción/BC intacto.
+Harness aceptaGS capturado; analizador admite `--identity-varyings`,
+`--linear-varyings` y `--linear-samples`. Fixturesparser/IR y oracle pasan;
+buildincremental UWP20operaciones correcto. Integración .43 aún pendienteSeries.
+
+Paquete **0.2.87.43** listo en
+`build-uwp/package-interpolation-control/eden-xbox.appx`,14838905bytes,
+SHA25667cea35f237ee3986b12823db762b463b4f9abd7e50c99db76af9f0dccbdbcbb.
+EXE3e3944206e5b0b0c1b6aa11041cbbf6bbc506b48e3a4fda2e0cf4ff5dd9b80d3;
+PDB6ccde49bcae31a1049e2e8e47961185aaa9a859fa46e8992c8600437e06d8908.
+Símbolosarchivados. Manifest/config/EXE verificados contraZIP, firmaCMS criptográfica
+correcta y719bloquesSHA256 delBlockMap correctos. SignTool /pa no confía en la
+raíz delcertificado de desarrollo deestePC; no se alteró el almacén deconfianza.
+El empaquetado/firma sí terminó correctamente; certificado de desarrollo habitual.
+
+Prueba mínima necesaria: instalar .43, **una toma en la misma zona** con el mismo
+menú del mando y esperar a terminar lasexportaciones. Los tresintermedios nuevos
+no existen en .42, por eso no pueden inferirse de las capturas conservadas. No
+hacen falta siete distancias, repetir .41 ni volver almapa anterior. La imagen
+seguirá mostrando el fallo durante estecontrol porque no toca el pase invitado.
+Tubos conservan investigación separada; no se identificó aquí su causa. Sinpush,
+sin nuevocommit ni afirmación de corrección visual.
+
+## 14 oct 2026: búsqueda externa tras medir la divergencia de coordenadas
+
+Investigación solicitada por el usuario, centrada en AMD/D3D12, atributos
+NoPerspective, W negativo, guardband y linking DXIL. No se encontró una incidencia
+pública que confirme específicamente este fallo en SraKmd_arden/Series UWP.
+Se encontraron mecanismos documentados que permiten concretar la investigación:
+
+**1. AMD tiene un ajuste específico del recorte de atributos lineales.**
+El código oficial de [AMD PAL, PaClClipCntlMetadata](https://github.com/GPUOpen-Drivers/pal/blob/dev/inc/core/g_palPipelineAbiMetadata.h)
+documenta `dxLinearAttrClipEna`: ajusta el factor usado para calcular coordenadas
+baricéntricas y conservar un gradiente lineal a través del abanico de triángulos
+recortados. Sin ese ajuste se usan coordenadas baricéntricas con perspectiva.
+[AbiToPipelineRegisters](https://github.com/GPUOpen-Drivers/pal/blob/dev/src/core/hw/gfxip/gfx9/gfx9AbiToPipelineRegisters.h)
+lo lleva al bit `DX_LINEAR_ATTR_CLIP_ENA` de PA_CL_CLIP_CNTL. El manual público
+[AMD SI 3D Registers, PA_CL_CLIP_CNTL](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/programmer-references/SI_3D_registers.pdf)
+también identifica el campo; es una arquitectura histórica, no un manual de Series.
+
+Contraste local con Mesa 26.2.3: `src/gallium/drivers/radeonsi/si_state.c:912` y
+las rutas RADV de `radv_cmd_buffer.c` activan ese bit. Esto prueba que hay una
+decisión concreta del driver para el clipping lineal, **no que el driver Xbox
+la configure mal**. Nuestro backend D3D12 no programa registros AMD. No introducir
+un acceso a registros ni asumir que PAL/Mesa son el driver de consola. Si el
+control lineal .43 mejora y GS identidad no, este mecanismo gana prioridad.
+
+**2. W cercano a cero o negativo es un caso particularmente delicado.**
+[Khronos EXT_gpu_shader4, cuestión 8](https://registry.khronos.org/OpenGL/extensions/EXT/EXT_gpu_shader4.txt)
+explica el crecimiento de coordenadas proyectadas al acercarse W a cero y el
+problema de recortar interpolantes screen-linear al cruzar ese plano. Esa extensión
+histórica deja el cruce indefinido; no demuestra que Maxwell/NVN o Direct3D deban
+admitir resultados arbitrarios. La especificación actual de
+[Vulkan, Clipping Shader Outputs](https://docs.vulkan.org/spec/latest/chapters/vertexpostproc.html#vertexpostproc-clipping-shader-outputs)
+exige ajustar el factor para NoPerspective y mantener linealidad en framebuffer.
+Nuestra geometría exacta .42 cruza el plano W=0: el mecanismo se ejercita realmente.
+La inferencia sobre la cámara es concreta: cambiar posición/orientación altera W,
+las intersecciones y los triángulos producidos por el clipper.
+
+**3. Un DXIL idéntico todavía puede ejecutarse de forma diferente.**
+[Microsoft DXIL, Signature packing](https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst#signature-packing)
+permite que el compilador del driver reordene los elementos de la firma conservando
+la compatibilidad entre etapas. Los drivers tienen ambas etapas disponibles al
+crear el PSO. Por ello la igualdad de bytes .41 descarta una traducción distinta
+en Eden, pero no errores de linking, de asignación de interpoladores o de código
+nativo generado por el driver. Es una razón técnica para conservar GS identidad
+en .43: insertar GS puede cambiar ese camino incluso sin cambiar sus valores.
+Mesa local `src/microsoft/compiler/dxil_signature.c:get_interpolation` traduce
+NoPerspective a LINEAR_NOPERSPECTIVE; no se encontró una inversión trivial del enum.
+
+**4. El guardband es rectangular y depende de la implementación.**
+[Microsoft, D3D11.3 §15.4/§16.3](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm)
+permite márgenes de clipping XY más amplios, pero requiere respetar el modo de
+interpolación también al recortar. El guardband por sí solo no justifica grandes
+errores dentro de la imagen. Mesa local `src/amd/common/ac_guardband.c` calcula
+márgenes X/Y independientes, dependientes del viewport y de la cuantización.
+Un error en el ajuste de atributos al recortar contra esos límites sí es
+compatible con fronteras alineadas con los ejes; las bandas a 90° son una pista,
+no prueba suficiente.
+
+Comprobación nueva ejecutada a partir de esa pista: el modelo CPU .42 ahora prueba
+guardbands asimétricos, incluidos 32768/960 por 32768/540, 8192/960 por 8192/540 y
+2048/960 por 2048/540. Ninguno reproduce las coordenadas Series completas. Mejor
+ajuste: 677/2048 puntos a 0,001 y error máximo 0,01296, igual que el mejor modelo
+simétrico anterior. `series42-map/asymmetric-clip-models.json` conserva los resultados.
+Se descarta que simplemente sustituir el tamaño simétrico por esos tamaños AMD
+explique el resultado; siguen pendientes reglas/orden/precisión del clipper real.
+
+Pistas de menor relevancia revisadas: Mesa documenta `radeonsi_no_infinite_interp`,
+pero su implementación local se activa para interpolantes con perspectiva; nuestros
+ROIs no contienen NaN/Inf y no es una corrección aplicable a UWP. La excepción de
+[D3D12 Conservative Rasterization](https://learn.microsoft.com/en-us/windows/win32/direct3d12/conservative-rasterization)
+con depth clip desactivado tampoco coincide: esta draw tiene conservative OFF y
+DepthClipEnable TRUE. No cambiar estos estados.
+
+Conclusión de investigación: priorizar el ajuste de atributos durante el recorte
+NoPerspective y, después, el linking/interpolador del driver. .43 ya contiene los
+controles adecuados para distinguirlos sin modificar la iluminación del invitado.
+No se modifica ni recompila el renderer en este paso; solo documentación y el
+experimento CPU. El APPX .43 y sus hashes siguen siendo los ya verificados.
