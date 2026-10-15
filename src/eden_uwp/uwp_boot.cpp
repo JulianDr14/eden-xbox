@@ -88,6 +88,8 @@
 #include "eden_uwp/pulse_sessions.h"
 #include "eden_uwp/pulse_store_gate.h"
 #include "eden_uwp/uwp_input.h"
+#include "eden_uwp/text_entry_input.h"
+#include "eden_uwp/game_menu.h"
 #include "eden_uwp/uwp_controllers.h"
 #include "eden_uwp/keyboard_bindings.h"
 #include "eden_uwp/uwp_library.h"
@@ -848,42 +850,6 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
             if (reply && keyboard_applet) keyboard_applet->Reply(*reply);
             sync_keyboard();
         };
-        // The pad on the game's keyboard; the bumpers stand in for + and -, which the menu holds.
-        const auto keyboard_command = [](MenuAction action) -> std::optional<TextEntry::Command> {
-            using Command = TextEntry::Command;
-            switch (action) {
-            case MenuAction::Up: return Command::Up;
-            case MenuAction::Down: return Command::Down;
-            case MenuAction::Left: return Command::Left;
-            case MenuAction::Right: return Command::Right;
-            case MenuAction::Confirm: return Command::Press;
-            case MenuAction::Back: return Command::Cancel;
-            case MenuAction::Alternate: return Command::Delete;
-            case MenuAction::Refresh: return Command::Space;
-            case MenuAction::PreviousTab: return Command::Shift;
-            case MenuAction::NextTab: return Command::Done;
-            case MenuAction::Toggle: break;
-            }
-            return std::nullopt;
-        };
-        // The cheats page's presses, while it is open.
-        const auto cheats_input = [&](MenuAction action) -> std::optional<Cheats::CheatsInput> {
-            using Cheats::CheatsInput;
-            switch (action) {
-            case MenuAction::Up: return CheatsInput::Up;
-            case MenuAction::Down: return CheatsInput::Down;
-            case MenuAction::Left:
-            case MenuAction::PreviousTab: return CheatsInput::PreviousCategory;
-            case MenuAction::Right:
-            case MenuAction::NextTab: return CheatsInput::NextCategory;
-            case MenuAction::Confirm: return CheatsInput::Toggle;
-            case MenuAction::Alternate: return CheatsInput::ToggleAll;
-            case MenuAction::Refresh: return CheatsInput::Refresh;
-            case MenuAction::Back: return CheatsInput::Back;
-            case MenuAction::Toggle: break;
-            }
-            return std::nullopt;
-        };
         constexpr auto TICK = std::chrono::milliseconds(20);
         constexpr u32 TICKS_PER_MINUTE = 3000;
         constexpr u32 TICKS_PER_SECOND = TICKS_PER_MINUTE / 60;
@@ -958,7 +924,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
             }
             for (const MenuAction action : input.TakeMenuActions()) {
                 if (!menu && action != MenuAction::Toggle && game_keyboard.IsOpen()) {
-                    if (const auto command = keyboard_command(action))
+                    if (const auto command = TextEntryCommand(action))
                         keyboard_press(game_keyboard.Handle(*command));
                     continue;
                 }
@@ -999,7 +965,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 }
                 if (cheats && action != MenuAction::Toggle) {
                     using Cheats::CheatsEffect;
-                    const auto pressed = cheats_input(action);
+                    const auto pressed = Cheats::CheatsInputForAction(action);
                     if (!pressed) continue;
                     cheats_notice.clear();
                     const CheatsEffect effect = Cheats::HandleCheatsInput(cheats_page, *cheats, *pressed,

@@ -10,6 +10,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <optional>
+#include "eden_uwp/ui_actions.h"
 
 #include "eden_uwp/cheats/cheat_catalog.h"
 
@@ -33,6 +35,24 @@ struct CheatsPage {
 enum class CheatsInput : std::uint8_t {
     Up, Down, PreviousCategory, NextCategory, Toggle, ToggleAll, Refresh, Back,
 };
+
+// Library and in-game overlays use the same semantic actions, including tab aliases.
+inline std::optional<CheatsInput> CheatsInputForAction(MenuAction action) {
+    switch (action) {
+    case MenuAction::Up: return CheatsInput::Up;
+    case MenuAction::Down: return CheatsInput::Down;
+    case MenuAction::Left:
+    case MenuAction::PreviousTab: return CheatsInput::PreviousCategory;
+    case MenuAction::Right:
+    case MenuAction::NextTab: return CheatsInput::NextCategory;
+    case MenuAction::Confirm: return CheatsInput::Toggle;
+    case MenuAction::Alternate: return CheatsInput::ToggleAll;
+    case MenuAction::Refresh: return CheatsInput::Refresh;
+    case MenuAction::Back: return CheatsInput::Back;
+    case MenuAction::Toggle: return std::nullopt;
+    }
+    return std::nullopt;
+}
 
 enum class CheatsEffect : std::uint8_t {
     None,
