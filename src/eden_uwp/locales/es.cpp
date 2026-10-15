@@ -450,7 +450,7 @@ const Catalog SpanishCatalog = MakeCatalog({
     {Text::ModsUpdated, L"Mod actualizado."},
     {Text::ModsAdult, L"Mods para adultos"},
     {Text::PerformanceStats, L"Estadísticas de rendimiento"},
-    {Text::PerformanceStatsHint, L"Mostrar FPS y estadísticas de CPU/GPU"},
+    {Text::PerformanceStatsHint, L"Mostrar FPS y estadísticas de CPU/GPU/RAM"},
     {Text::ModsAdultHint, L"Muestra en la tienda los mods marcados para adultos, con la etiqueta 18+"},
     {Text::ModsAdultShown, L"Se muestran"},
     {Text::ModsAdultHidden, L"Ocultos"},

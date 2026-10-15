@@ -22,6 +22,7 @@
 #include "video_core/perf_counters.h"
 #include "video_core/performance_overlay.h"
 #include "video_core/renderer_d3d12/d3d12_resource_utils.h"
+#include "video_core/renderer_d3d12/d3d12_overlay_memory.h"
 #include "video_core/renderer_d3d12/renderer_d3d12.h"
 #include "video_core/shader_notify.h"
 
@@ -138,7 +139,14 @@ void RendererD3D12::DrawPerformanceOverlay(CommandStream* cmd,
         const u64 cpu_ticks = ticks(kernel) + ticks(user);
         const u64 gpu_us = VideoCore::Perf::counters[
             static_cast<size_t>(VideoCore::Perf::Counter::GpuBusyUs)].load(std::memory_order_relaxed);
-        std::array<std::string, 4> lines{"FPS --", "FRAME -- MS MAX --", "CPU --", "GPUQ --"};
+        // Reuse the HUD refresh and cached text. At most one lightweight OS query per second,
+        // including failures; hiding the HUD resets this state and performs no queries.
+        if (first || now - hud.memory_sample_time >= std::chrono::seconds{1}) {
+            hud.memory_line = FormatOverlayResidentMemory(QueryOverlayResidentMemory());
+            hud.memory_sample_time = now;
+        }
+        std::array<std::string, 5> lines{
+            "FPS --", "FRAME -- MS MAX --", "CPU --", "GPUQ --", hud.memory_line};
         if (!first && hud.frames != 0) {
             const double frames = static_cast<double>(hud.frames);
             lines[0] = fmt::format("FPS {:.1f}", frames * 1000.0 / elapsed_ms);
@@ -165,7 +173,8 @@ void RendererD3D12::DrawPerformanceOverlay(CommandStream* cmd,
             chars = std::max(chars, line.size());
         }
         const LONG left = right - TextWidth(chars, cell) - 2 * pad;
-        hud.panel = {left, top, right, top + 2 * pad + 4 * 7 * cell - 2 * cell};
+        hud.panel = {left, top, right,
+                     top + 2 * pad + static_cast<LONG>(lines.size()) * 7 * cell - 2 * cell};
         hud.text.clear();
         hud.text.reserve(1536);
         for (size_t row = 0; row < lines.size(); ++row) {

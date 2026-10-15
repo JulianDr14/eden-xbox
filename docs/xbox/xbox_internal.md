@@ -3678,3 +3678,37 @@ conservada. Visual/mando/hotplug/gameplay/Series pendientes; sin FPS medidos.
 Guardado frontend solicitado14oct: commits separados por catálogo, acciones,
 captura modal, listas, asignaciones y pruebas; documentación aparte. Autor
 JulianDr14, sin coautoría automática ni push. Hashes en xbox_frontend_refactor.md.
+# HUD RAM (14 oct 2026)
+
+El HUD D3D12 existente incorpora una quinta línea `RAM WS`, con MiB (antes de
+1 GiB) o GiB (dos decimales). Windows desktop/UWP/Xbox usan el mismo contador
+`K32GetProcessMemoryInfo(GetCurrentProcess()).WorkingSetSize`: páginas residentes
+privadas y compartidas del proceso. Las compartidas pueden contarse también en
+otros procesos; no es memoria física exclusiva, commit privado, reserva virtual,
+VRAM ni RAM total del dispositivo. No usar el contador de presupuesto
+`AppMemoryUsage`/commit del GC como sustituto silencioso de RAM residente.
+
+Fuentes oficiales:
+- [GetProcessMemoryInfo, compatible con desktop y UWP](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo).
+- [WorkingSetSize y diferencia con PrivateUsage/commit](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters_ex).
+- [Working set: memoria residente](https://learn.microsoft.com/en-us/windows/win32/memory/working-set).
+
+La consulta ocurre únicamente dentro del refresh existente de 500 ms del HUD,
+como máximo una vez por segundo (primera muestra inmediata). Conserva el texto
+hasta la siguiente muestra; ocultar el panel descarta estado y suspende consultas.
+Una llamada nativa con estructura en stack, sin enumeración, nuevos hilos,
+locks, WinRT ni sincronización GPU. Se ejecuta en el hilo actual del HUD como
+los contadores CPU: consulta ligera, nunca por frame. Fallo muestra `RAM WS --`
+y reintenta en el siguiente segundo, sin log repetitivo ni fallback a otra métrica.
+El panel y el indicador T se ajustan a cinco filas. Alcance: HUD D3D12 existente;
+no se crean paneles en Vulkan/OpenGL ni monitores para otras plataformas.
+
+Prueba focal `tools/xbox/tests/overlay-memory.cpp`: unidades, cero válido,
+umbral MiB/GiB, ausencia, handle inválido y contador del proceso real. Compilar
+con MSVC desktop `/std:c++20 /EHsc /O2 /utf-8 /DFMT_HEADER_ONLY /DNOMINMAX
+/Isrc /I.cache/cpm/fmt/12.1.0/include`; salidas en `test-results/overlay-memory`.
+Pasa; 10.000 consultas promedian 0,59687 us en este PC (microbenchmark agregado,
+no p99, ni coste del dibujado, ni prueba de gameplay/Series). Objeto HUD UWP
+compila correctamente. Build completo eden-uwp sin trabajo pendiente; versión
+0.2.89.0 empaquetada y lanzada en PC, biblioteca esperando selección de juego.
+Validación visual del HUD durante gameplay y gate Series pendientes.
