@@ -28,6 +28,9 @@ public:
     GameMenuSurface(const GameMenuSurface&) = delete;
     GameMenuSurface& operator=(const GameMenuSurface&) = delete;
 
+    /// Physical face labels and colors, from the same selected pad as input.
+    void SetPromptMapping(u8 mapping);
+
     /// The menu's list, for a screen of `screen` pixels.
     D3D12::MenuImage DrawMenu(const GameMenu& menu, std::wstring_view game, std::pair<u32, u32> screen);
     /// The cheats page.

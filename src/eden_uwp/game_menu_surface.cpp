@@ -101,6 +101,19 @@ struct GameMenuSurface::Impl : UiPainter {
         return image;
     }
 
+    u8 prompt_mapping{};
+
+    float Prompt(std::wstring_view letters, unsigned color, std::wstring_view label, float x, float y) {
+        if (prompt_mapping & 1) {
+            if (letters == L"A") { letters = L"B"; color = ButtonColor::B; }
+            else if (letters == L"B") { letters = L"A"; color = ButtonColor::A; }
+            else if (letters == L"X") { letters = L"Y"; color = ButtonColor::Y; }
+            else if (letters == L"Y") { letters = L"X"; color = ButtonColor::X; }
+        }
+        if (prompt_mapping & 2) color = ButtonColor::Neutral;
+        return UiPainter::Prompt(letters, color, label, x, y);
+    }
+
     void DrawMenu(const GameMenu& menu, std::wstring_view game) {
         using L = MenuLayout;
         PageHeader(L::Margin, 22, UiIcon::Game, I18n::Tr(Text::MenuTitle), game);
@@ -171,6 +184,8 @@ struct GameMenuSurface::Impl : UiPainter {
 
 GameMenuSurface::GameMenuSurface() : impl{std::make_unique<Impl>()} {}
 GameMenuSurface::~GameMenuSurface() = default;
+
+void GameMenuSurface::SetPromptMapping(u8 mapping) { impl->prompt_mapping = mapping; }
 
 D3D12::MenuImage GameMenuSurface::DrawMenu(const GameMenu& menu, std::wstring_view game,
                                           std::pair<u32, u32> screen) {

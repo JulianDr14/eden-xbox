@@ -890,3 +890,29 @@ no número de elementos de última página. Biblioteca ya muestra posición/tota
 Sistema, teclado por pestañas y menú in-game caben completos: sin barra superflua.
 Build incremental UWP correcto; gate visual y navegación en Series pendientes.
 APPX 0.2.87.3 solicitado, símbolos por versión. Sin commit.
+
+
+## 14 octubre 2026: indicadores de botones del menú in-game
+
+La entrada ya aplicaba `SwapControllerFaceButtons`, pero GameMenuSurface dibujaba
+A/B/X/Y fijos. Ahora el hilo de entrada publica una instantánea atómica del mapeo
+del mando seleccionado; cada dibujo del menú, trucos y teclado del juego usa esa
+misma selección para intercambiar A/B y X/Y, incluidos sus colores. Los mandos
+Pro usan glifos neutros como la biblioteca. No se enumeran mandos desde el dibujo
+ni se cambia la entrada del guest. Gate visual PC/Series pendiente: comprobar
+confirmar/volver y trucos/teclado con intercambio activado y desactivado. Sin commit.
+
+Entrega 0.2.88.1: build incremental UWP y link correctos; APPX actualizado en
+`build-uwp/package/eden-xbox.appx`, símbolos en `build-uwp/symbols/0.2.88.1`.
+Lanzada biblioteca PC (PID 4484); diag confirma espera de selección del usuario.
+Comprobación visual del menú y autorización de commit pendientes.
+
+Corrección adicional 0.2.88.1 (misma versión por indicación del usuario en PC):
+Continuar dejaba pasar al guest el botón todavía pulsado al cerrar el menú.
+GamepadInput conserva los botones consumidos y los bloquea hasta soltarlos; los
+sticks usados se bloquean hasta neutral. Navegación y filtrado usan una misma
+instantánea de menu_open para evitar que el cierre entre ambas lecturas filtre
+la confirmación al juego. Aplica tras el mapeo, también a teclado, y permite
+nuevas pulsaciones durante gameplay. Build incremental y link correctos;
+gate manual mantener B/A al continuar y soltar/volver a pulsar pendiente.
+Sin commit; versión nueva solo al preparar prueba en Series.

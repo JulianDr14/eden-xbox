@@ -569,6 +569,9 @@ void GamepadInput::Run(std::stop_token stop) {
     u32 style_polls = 0;
     MenuComboFilter combo;
     u32 menu_held = 0; // Navigation bits held last poll, for press edges.
+    u32 menu_consumed_buttons = 0;
+    bool menu_consumed_left_stick = false;
+    bool menu_consumed_right_stick = false;
     std::vector<bool> announced(script.size());
     u32 polls = 0;
     while (!stop.stop_requested()) {
@@ -606,6 +609,9 @@ void GamepadInput::Run(std::stop_token stop) {
                 pad.reset();
             }
         }
+        menu_prompt_mapping.store(pad ?
+            static_cast<u8>((SwapControllerFaceButtons(*pad, current_options.swap_face_buttons) ? 1 : 0) |
+                           (pad->pro ? 2 : 0)) : 0);
         ApplyKeyboard(state);
         const auto elapsed = static_cast<u32>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                   std::chrono::steady_clock::now() - start)
@@ -655,10 +661,13 @@ void GamepadInput::Run(std::stop_token stop) {
                          (nav(VirtualButton::TriggerR, false) ? 512U : 0U);
         const u32 pressed = held & ~menu_held;
         menu_held = held;
-        if (toggle || (menu_open.load(std::memory_order_relaxed) && pressed)) {
+        // One snapshot for both navigation and guest filtering: closing the menu on the
+        // frontend thread must not expose this poll's confirmation to the guest.
+        const bool in_menu = menu_open.load(std::memory_order_relaxed);
+        if (toggle || (in_menu && pressed)) {
             std::scoped_lock lock{menu_mutex};
             if (toggle) menu_actions.push_back(MenuAction::Toggle);
-            if (menu_open.load(std::memory_order_relaxed)) {
+            if (in_menu) {
                 constexpr std::array NAV{MenuAction::Up,          MenuAction::Down,
                                          MenuAction::Left,        MenuAction::Right,
                                          MenuAction::Confirm,     MenuAction::Back,
@@ -668,8 +677,22 @@ void GamepadInput::Run(std::stop_token stop) {
                     if (pressed & (1U << i)) menu_actions.push_back(NAV[i]);
             }
         }
-        if (menu_open.load(std::memory_order_relaxed)) {
+        const bool left_stick_active = state.left_x != 0.0f || state.left_y != 0.0f;
+        const bool right_stick_active = state.right_x != 0.0f || state.right_y != 0.0f;
+        if (in_menu) {
+            menu_consumed_buttons = state.buttons;
+            menu_consumed_left_stick = left_stick_active;
+            menu_consumed_right_stick = right_stick_active;
             state = {}; // The paused game sees every button released.
+        } else {
+            // A menu press belongs to the menu until released, including mapped A/B,
+            // keyboard buttons and sticks. New presses remain available to gameplay.
+            menu_consumed_buttons &= state.buttons;
+            state.buttons &= ~menu_consumed_buttons;
+            menu_consumed_left_stick &= left_stick_active;
+            menu_consumed_right_stick &= right_stick_active;
+            if (menu_consumed_left_stick) state.left_x = state.left_y = 0.0f;
+            if (menu_consumed_right_stick) state.right_x = state.right_y = 0.0f;
         }
         const StylePad styled = MapPadToStyle(
             {state.buttons, state.left_x, state.left_y, state.right_x, state.right_y}, style);
