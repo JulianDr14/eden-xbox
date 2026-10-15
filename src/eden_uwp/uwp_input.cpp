@@ -26,6 +26,7 @@
 #include "eden_uwp/localization.h"
 #include "eden_uwp/uwp_controllers.h"
 #include "eden_uwp/controller_catalog.h"
+#include "eden_uwp/menu_input_capture.h"
 #include "eden_uwp/game_menu.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
@@ -571,11 +572,9 @@ void GamepadInput::Run(std::stop_token stop) {
     u32 style_polls = 0;
     MenuComboFilter combo;
     u32 menu_held = 0; // Navigation bits held last poll, for press edges.
-    u32 menu_consumed_buttons = 0;
-    bool menu_consumed_left_stick = false;
-    bool menu_consumed_right_stick = false;
-    std::vector<bool> announced(script.size());
+    MenuInputCapture menu_capture;
     ControllerCatalog<ControllerDevice> controllers;
+    std::vector<bool> announced(script.size());
     while (!stop.stop_requested()) {
         // The gamepad list is cheap to query but changes rarely: look again twice a second.
         const ControllerOptions current_options = Options();
@@ -684,23 +683,7 @@ void GamepadInput::Run(std::stop_token stop) {
                     if (pressed & (1U << i)) menu_actions.push_back(NAV[i]);
             }
         }
-        const bool left_stick_active = state.left_x != 0.0f || state.left_y != 0.0f;
-        const bool right_stick_active = state.right_x != 0.0f || state.right_y != 0.0f;
-        if (in_menu) {
-            menu_consumed_buttons = state.buttons;
-            menu_consumed_left_stick = left_stick_active;
-            menu_consumed_right_stick = right_stick_active;
-            state = {}; // The paused game sees every button released.
-        } else {
-            // A menu press belongs to the menu until released, including mapped A/B,
-            // keyboard buttons and sticks. New presses remain available to gameplay.
-            menu_consumed_buttons &= state.buttons;
-            state.buttons &= ~menu_consumed_buttons;
-            menu_consumed_left_stick &= left_stick_active;
-            menu_consumed_right_stick &= right_stick_active;
-            if (menu_consumed_left_stick) state.left_x = state.left_y = 0.0f;
-            if (menu_consumed_right_stick) state.right_x = state.right_y = 0.0f;
-        }
+        menu_capture.Filter(state, in_menu);
         const StylePad styled = MapPadToStyle(
             {state.buttons, state.left_x, state.left_y, state.right_x, state.right_y}, style);
         state = {styled.buttons, styled.left_x, styled.left_y, styled.right_x, styled.right_y};
