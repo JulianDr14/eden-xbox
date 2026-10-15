@@ -617,7 +617,7 @@ private:
             ControlPrompt(Navigation::Play, Tr(T::ToggleCheat), x + L::Margin, footer, 120);
             ControlPrompt(Navigation::AddFolder, Tr(T::AllCheats), x + L::Margin + 170, footer, 110);
             float next = x + L::Margin + 330;
-            if (Cheats::CheatTabs(view.cheats->Catalog()).size() > 1) {
+            if (Cheats::CheatTabCount(view.cheats->Catalog()) > 1) {
                 ControlPrompt(Navigation::Tabs, Tr(T::Category), next, footer, 140);
                 next += 250;
             }

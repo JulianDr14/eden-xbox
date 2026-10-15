@@ -9,12 +9,13 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <array>
+#include <span>
 #include <optional>
-#include "eden_uwp/ui_actions.h"
 
 #include "eden_uwp/cheats/cheat_catalog.h"
 #include "eden_uwp/list_navigation.h"
+#include "eden_uwp/ui_actions.h"
 
 namespace EdenXbox::Cheats {
 
@@ -65,17 +66,26 @@ enum class CheatsEffect : std::uint8_t {
 };
 
 /// The categories that have cheats, in tab order.
-inline std::vector<CheatCategory> CheatTabs(const CheatCatalog& catalog) {
-    std::vector<CheatCategory> tabs;
+inline std::span<const CheatCategory> CheatTabs(
+    const CheatCatalog& catalog, std::array<CheatCategory, CategoryCount>& storage) {
+    std::size_t count = 0;
     for (const auto category : {CheatCategory::Gameplay, CheatCategory::Graphics, CheatCategory::Mine})
-        if (!catalog.Cheats(category).empty()) tabs.push_back(category);
-    return tabs;
+        if (!catalog.Cheats(category).empty()) storage[count++] = category;
+    return {storage.data(), count};
+}
+
+inline std::size_t CheatTabCount(const CheatCatalog& catalog) {
+    std::size_t count = 0;
+    for (const auto category : {CheatCategory::Gameplay, CheatCategory::Graphics, CheatCategory::Mine})
+        count += !catalog.Cheats(category).empty();
+    return count;
 }
 
 /// Keeps the page on a category with cheats and the cursor inside its list, after the catalog
 /// changed (cheats arrived from the database) or the page opened.
 inline void ClampCheatsPage(CheatsPage& page, const CheatCatalog& catalog, std::size_t visible_rows) {
-    const auto tabs = CheatTabs(catalog);
+    std::array<CheatCategory, CategoryCount> storage;
+    const auto tabs = CheatTabs(catalog, storage);
     if (!tabs.empty() && std::find(tabs.begin(), tabs.end(), page.category) == tabs.end()) {
         page.category = tabs.front();
         page.selected = page.first = 0;
@@ -105,7 +115,8 @@ CheatsEffect HandleCheatsInput(CheatsPage& page, Model& model, CheatsInput input
         return CheatsEffect::Moved;
     case CheatsInput::PreviousCategory:
     case CheatsInput::NextCategory: {
-        const auto tabs = CheatTabs(catalog);
+        std::array<CheatCategory, CategoryCount> storage;
+        const auto tabs = CheatTabs(catalog, storage);
         if (tabs.size() < 2) return CheatsEffect::None;
         const auto at = static_cast<std::size_t>(std::find(tabs.begin(), tabs.end(), page.category) - tabs.begin());
         const std::size_t next = input == CheatsInput::PreviousCategory ? (at + tabs.size() - 1) % tabs.size()

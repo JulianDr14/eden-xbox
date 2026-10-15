@@ -37,6 +37,14 @@ CheatSet Set(std::string mod, int count, int words = 1) {
 } // namespace
 
 int main() {
+    if (CheatsInputForAction(MenuAction::Toggle) ||
+        CheatsInputForAction(MenuAction::Left) != CheatsInput::PreviousCategory ||
+        CheatsInputForAction(MenuAction::PreviousTab) != CheatsInput::PreviousCategory ||
+        CheatsInputForAction(MenuAction::Right) != CheatsInput::NextCategory ||
+        CheatsInputForAction(MenuAction::Confirm) != CheatsInput::Toggle ||
+        CheatsInputForAction(MenuAction::Alternate) != CheatsInput::ToggleAll)
+        std::abort();
+
     auto check = [](bool ok) { if (!ok) std::abort(); };
     constexpr std::size_t rows = 3;
 
@@ -45,7 +53,11 @@ int main() {
     CheatsPage page{CheatCategory::Mine, 9, 9};
     ClampCheatsPage(page, model.catalog, rows);
     check(page.category == CheatCategory::Gameplay && page.selected == 0 && page.first == 0);
-    check(CheatTabs(model.catalog) == std::vector{CheatCategory::Gameplay, CheatCategory::Graphics});
+    std::array<CheatCategory, CategoryCount> tab_storage;
+    const auto tabs = CheatTabs(model.catalog, tab_storage);
+    check(tabs.size() == 2 && tabs[0] == CheatCategory::Gameplay && tabs[1] == CheatCategory::Graphics);
+    check(tabs.data() == tab_storage.data() && CheatTabCount(model.catalog) == tabs.size());
+    check(CheatTabs(CheatCatalog{}, tab_storage).empty());
 
     // Down scrolls the window with the cursor and wraps to the top.
     for (int i = 0; i < 4; ++i) check(HandleCheatsInput(page, model, CheatsInput::Down, rows) == CheatsEffect::Moved);

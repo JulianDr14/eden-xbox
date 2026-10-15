@@ -35,7 +35,8 @@ std::wstring_view SourceText(CheatSource source) {
 
 /// Tabs with how many of their cheats are on; LB and RB beside them when there is a choice.
 void DrawTabs(UiPainter& paint, const CheatCatalog& catalog, CheatCategory current, float x, float y) {
-    const auto tabs = CheatTabs(catalog);
+    std::array<CheatCategory, CategoryCount> storage;
+    const auto tabs = CheatTabs(catalog, storage);
     float left = x + L::Margin;
     if (tabs.size() > 1) {
         paint.ButtonGlyph(L"LB", left, y + 3, ButtonColor::Neutral);
