@@ -3510,3 +3510,127 @@ tubos siguen separados. Sin commit/push ni corrección visual certificada.
 Confirmación posterior: el usuario probó el paquete .44 de package-noperspective-fix
 y respondió «perfecto era eso». Resultado visual positivo en Series; sin nueva
 captura/log ni desglose de tubos, distancias u otros escenarios. No certificar FPS.
+
+14 oct, tubos: usuario confirma persistencia en .44. Proyección del VS real .43
+localiza interior draw58, excluye primeras parejas draw103 (pieza contigua) y126
+(personaje). Pared candidata draw124/count528 carece de VB/IB exactos; ROI previo
+estaba en suelo. Paquete diagnóstico .45 en build-uwp/package-tube-probe conserva
+EXE .44 byteidéntico, centra ROI en cuerpo del tubo y captura PS08b/528 + PSb017/360
+con recursos. ZIP/config/719 bloques/firma CMS pasan, símbolos archivados. Nueva
+opción --draw del proyector con regresión sintética pasa. Captura por mando pendiente;
+no parche especulativo ni causa raíz declarada. Detalle en xbox_deferred_lighting.md.
+
+14oct Series .45: captura completa236draws/472tiles,180nativos válidos. Pared real
+localizada draw44 VS55e0/PSba9295/2712índices; candidato08b/528 descartado: personaje.
+Oráculo normal VS+interpolación+PS normal:1618píxeles cuerpo coinciden máximo1/1023.
+No causa raíz aún. Faltan MRT3 postdraw44 y LUT5a9594000; ROI estaba fuera del tubo.
+Diagnóstico ahora exporta MRT activos del draw seleccionado bajo mismo cap32MiB,
+no altera producción. Build incremental17ops y gates selección/budget4MRT/probe
+pasan. Paquete .46 listo en build-uwp/package-tube-material-46, firmaCMS/719bloques
+correctos, símbolos archivados; captura Xbox pendiente. Sin commit/push.
+
+14 oct, limpieza solicitada: entrega única build-uwp/package/eden-xbox.appx,
+versión0.2.87.46 y SHA25627e2f5754c492934cdc5e8d8ce0036f105900d9131dd8d26542c0b944ad3d884
+sin cambios. Se retiraron16paquetes antiguos (incluido series) y temporales de raíz
+(scripts de edición/lanzamiento, logs build, objetos y ejecutables sueltos), unos941MiB.
+La revisión automática bloqueó borrado permanente; limpieza efectuada mediante
+Papelera recuperable, sin vaciarla. Metadatos JSON de paquetes conservados en
+build-uwp/test-results/package-history, junto a informe de rutas. No había app activa
+ni userdata semilla en los paquetes. Build incremental/dependencias, símbolos,
+capturas, trazas, herramientas forenses y gates conservados. Preferencia de carpeta
+única registrada en AGENTS.md/README; rutas históricas package-* no son entregables
+vigentes. Sin recompilar, commit ni push.
+
+14oct .46 recibido: cuatroMRT postdraw44 y LUT faltante válidos; separar current
+por prefijo material1792007635931153 (Downloads también tenía exports45 viejos).
+ReplayD3D12PC del DXIL real+inputsSeries:1618/1618palabras iguales base/normales/
+profundidad; RT3 1289iguales/329distintas, maxRGB0,1015625. PC no reproduce barras.
+Seis replays debuglimpio; forzar samplerCubeLOD0..4 no reproduce patrón completo.
+Investigación Microsoft/AMD apunta a discriminar dirección/gradientes/LOD/fetch,
+sin erratum público confirmado; PS no usaWave/Quad, CB9[20]=1 desactiva dithering.
+SondaSM6.4 FLOAT4 dirección+LOD/sampleimplícito/mip0/ambiente+LUT compilada yGPU PC
+validada; integración scratchSeries pendiente, no nuevoAPPX. Todos los archivos
+forenses privados en test-results/.../series46-map. Detalle/fuentes/métricas ylímites
+en xbox_deferred_lighting.md. Producción y paquete .46 enpackage intactos; sincommit.
+
+14oct .47 listo enbuild-uwp/package/eden-xbox.appx: integraciónscratch de6sondas
+reflejos dirección/LOD/implícito/mip0/ambienteLUT/gradientes. Sidecarsprivadosopt-in,
+interfazVS55/PSba estricta,1RTfloat32sinDSVguest, cap/restore/queryexistentes. Build
+incremental20ops y6PSOsGPU PCdebuglimpio, parser/regresionespasan;725bloques/firmaCMS
+verificados,símbolosarchivados. ReferenciaPC9238finitos/0NaN; medirSeriespendiente.
+APPXSHA56cb86a210058916ff8e8f14d403be4269a53b406f1074d5104e5248d2386c9f.
+No cambioespeculativoproducción, noFPSmedidos, sincommit/push. Detalleenlighting.
+
+14oct lectura.47: seis sondas GPU coincidenbyteporbyte Series/PC coninputs exactos
+.47 (LUT cambióaddr, replay ahora mapabindingsactual),9238píxeles/0NaN. PSoriginal
+sigueRT3 329/1618discrepancias; restoMRTexacto. Noextrapolar kernelaislado alCFG.
+Preparado.48enpackage: copiarDXIL original yredirigirsolocuatroStoreOutputRT0 aSSA
+RT3, mismoCFG/math/muestras verificadas; ejecutar mismoDXIL enFLOAT32 yR11.
+PC R11redirect1618/1618exacto, dosPSOsGPUválidos con4warnings esperados deoutputs
+no vinculados. Incremental20ops/tests/727bloques/firmaCMS pasan,símbolosarchivados.
+Scratch+7,91MiB yROI+0,625MiB soloalpedircaptura, capreadback64MiB intacto.
+APPXSHA19dc17d61f4912fe06e48a5de7a6234aad64ce517e7faf2063bb46b4f4504fff.
+SiguienteSeries distingue CFG/math vs conversión/exportación/slotMRT, no causa raíz
+ni corrección declarada. Verlighting para límites. Sincommit/push.
+
+14oct lectura.48: FLOAT32 original redirigido ya difiere Series/PC en330/1618
+interiores, máximoRGB0,10131669; la diferencia precede empaquetadoR11. La ROI R11
+faltó por whitelist soloFLOAT4 en QueueMaterialReadback, corregida para2/26 con
+regresión. No pedir repetir.48 por ese dato. .49 prepara seis sondas deSSA dentro
+ delCFG original (dirección/cubo/LUT/log/exp/material/ambiente/escalado), ochoPhi y
+cuatrostores cambiados, demásLLVMidéntico; controles finales preservados.
+Incremental17ops/tests yreplayGPU PC pasan (4warnings esperados poroutputs sinRT);
+9238finitos/sonda, cube idénticoaislado ypow4error≤1,08e-9 en1618interiores.
+.49enpackage verificado728blocks/CMS/8sidecars, símbolosarchivados; SHAappx
+ac7858a47173ac19a0cfe717c1ca10d402e49bdd19448ebeb6c7b3d265a17197.
+Una tomaSeries por mando aportaSSA faltantes delCFG original. No causa raíz ni
+corrección visual de tubos aún; BC/.44 intactos. Detalleenlighting, sincommit/push.
+
+14oct lectura .49: ocho sondas/88exports válidos; coordenadas cubemap/ambiente/LUT/
+albedo exactosPC-Series, primera diferencia enSamplecubemap yBC4(332/1618).
+ControlPCSampleLevel0..4 ajusta TODOSlos332cubemapSeries aLOD1,55..4(residual<3,71e-7),
+frente0..0,453enPC; máscaraSampleLevel7 reproduce332/332(valores7/255, noLODdirecto).
+Log/exp correctos para suentrada. Fine/coarseSampleGrad enPC no reproduceanomalía.
+Hipótesis siguiente: OpKill delprofiledemotefalse→Mesa demote+return. CBumbral1
+haceambascondicionesfalse; no afirmar descartevisible. .50 diagnóstica6controles
+bypass/predicación debranches, cálculosoriginalesintactos yPCROIenteraexactaen6.
+Incremental4ops/regresiones/729BlockMapSHA/CMS pasan; enpackage,SHA88718d9f4d2dc5543336f2f341dad330cc9f95d558b355670eeba6f9e64d0089.
+Símbolosarchivados, una capturaSeries pendientespara confirmar/descartarCFG;
+ningún parchefidelidad niDLLMesa cambiados,BC/.44 intactos. Verlighting, sincommit/push.
+
+14oct lectura.50: los6controles ramas/discard sonBYTEIDÉNTICOSPC-Series enROI
+entera524288B,1618/1618interiores; controloriginalsigue330errores,max0,10131669.
+Demuestra dependenciaCFG, no ramaúnica/ISA exacta. HarnessIRcondicional+derivadas
+validaSPIRV/linkDXIL; Killfallback yDemotenativo generanDXILidéntico. También
+shaderreal conOpKill→Demote producePSbyteidéntico(SHA1e20373c25d630077557941a2e172e03407d8c39e2e324ea691899f8f1d7c3f1).
+Noactivarprofiletruecomofix: ensayo revertido,sin modificaciónproducción.
+IRguestya tieneEpilogues/retornosdespuésdedemote; reorderD3D12 ya true pero
+DemoteCombinationPass omitemúltiplesepilogues. Siguiente canonicalizaciónsegura
+conregresiones; ningunaotra capturapara repetircausalidad. APPXvigente.50,
+ningúnfixvisualdeclarado,BC/.44intactos,sincommit/push. Detalleenlighting.
+
+14oct.51 implementada: DemoteReturnPassD3D12 reconecta brazosdiscardterminales al
+merge, eliminaoutputs/Epilogue inobservables yreturn; nativodemotepermitehelpers.
+GuardaFragment/derivadas, rechazaloops/Phi/subgrupos/memoria/efectoslaterales;
+ningúncambioglobaldeLODnihashdetítulo. O(N)compilación,sinrecursosGPU/trabajoporframe.
+64regresionesrecursivas0..12niveles/1..4retornos, SPIRV+DXILfirmado pasan. GPUAMDPro5300M:
+7200visibles/7104descartados/96vecinosenquad, error≤2,60e-7, debuglimpio.
+PaseC++real aplica2retornos alIRcapturado; replayinputs.50produce cuatroMRTcompletos
+byteidénticoscontrol/original/fixed, noROIaproximada. PS5885→5693B noequivaleFPS.
+IncrementalUWP/regresiones/diffcheck/719blocksCMS pasan. APPX.51enpackage,
+SHA9c8e6dd416687e71800c1c56910f120664e208babdef64e1ab75e26099a4ec4b,
+símbolosarchivados. material_gpu_probe0,sinsidecarsviejos; mando/dumpsshaderreal
+habilitados. GateSeriesvisualambostubos/cámara ycapturanuevoDXIL pendiente; no
+certificarFPS ni costeGPUcero(helpersdescartadospuedencalcularmás). Fuentesprimarias,
+restricciones/comandos/trampas enlighting. BC/.44 intactos,sincommit/push.
+
+Cierre14oct2026 confirmado usuario: todos los tubos opacos/transparentes correctos
+ enSeries.51. Logs nuevos muestran2retornos corregidos; replayexacto captura
+material_1792016944492521_1 produce1618/1618palabras idénticasPC-Series en cada
+uno de los4MRT, incluidoRT3 antesincorrecto. RenderError/Critical0 observado;
+diag noQ/retorno gameplay, no inventarlo. Incidenciailuminación(.44)+tubos(.51)
+cerrada. Resumen causal ycronología en xbox_deferred_lighting.md.
+Release0.2.88.0 entregaenpackage, símbolosporversión; biblioteca,5120MiB,fastmem0,
+prewarm1; sinsondas/dumps/selectores/capturemenu/debug. Código diagnósticoopt-in
+conservado. BuildRelease/artefacto verificaciónenpackage/verification.json.
+Commits temáticos solicitados, identidadusuario,sinpush. NoFPSnuevos medidos.

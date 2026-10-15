@@ -5,6 +5,10 @@ La rama de trabajo es `xbox`; las reglas del proyecto están en [AGENTS.md](../.
 
 ## Arranque y despliegue
 
+El instalador vigente se entrega siempre en `build-uwp/package/eden-xbox.appx`.
+No crear una carpeta de paquetes por compilación. Las rutas `package-*` citadas
+en documentación histórica ya no son carpetas de entrega vigentes.
+
 - [Cuaderno del proyecto](xbox_internal.md): estado, decisiones, trampas y resultados de pruebas.
 - [Compilación UWP](uwp_build.md): toolchain y configuración inicial; conserva el contexto histórico de la fase 2.
 - [Despliegue en Series](xbox_deploy.md): empaquetado, instalación y diagnóstico de activación.
@@ -28,7 +32,7 @@ La rama de trabajo es `xbox`; las reglas del proyecto están en [AGENTS.md](../.
 - [Copias de bloques BC](xbox_bc_block_copy.md): preservación exacta de arrays decodificados y reinterpretación BC3/UINT128.
 - [Dimensiones de SRV](xbox_srv_dimensions.md): compatibilidad de cubemaps, fallback nulo y propiedad de descriptores.
 - [Líneas en el terreno](xbox_terrain_seams.md): dimensiones virtuales BC corregidas; desaparición de líneas confirmada por el usuario en Game A PC y Series; diagnóstico F7.
-- [Iluminación y tubos de Game F](xbox_deferred_lighting.md): replay causal de siete capturas, G-buffer/proyección de sombras y diagnóstico .37 por mando; causas visuales pendientes.
+- [Iluminación y tubos de Game F](xbox_deferred_lighting.md): cerrado en Series; iluminación confirmada en .44 y ambos tipos de tubo en .51, con comparación exacta PC/Series. Release 0.2.88.0.
 - [Revisión de logs del 30 de septiembre de 2026](xbox_log_review_2026-09-30.md).
 
 Los resultados históricos conservan sus límites y pendientes. Un build correcto o
