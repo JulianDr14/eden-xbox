@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include "eden_uwp/controller_style.h"
+#include "eden_uwp/ui_actions.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/ui_text.h"
 #include "eden_uwp/upscaling.h"
@@ -15,12 +16,6 @@ namespace EdenXbox {
 // In-game menu: View + Menu held for a second (Escape on a keyboard) pauses the game and opens it.
 // The guide button belongs to the system, so the shortcut has to come from game buttons: Switch -
 // and +, which almost no game holds together.
-
-/// Presses the open menu receives: the d-pad or left stick, A, B, X (Alternate), Y (Refresh) and
-/// the bumpers.
-enum class MenuAction : std::uint8_t {
-    Toggle, Up, Down, Left, Right, Confirm, Back, Alternate, Refresh, PreviousTab, NextTab,
-};
 
 /// Holds back a lone + or - for a moment, so pressing View and Menu together never reaches the
 /// game as a pause press; both held for HoldMs fire Toggle. A lone press is delivered after

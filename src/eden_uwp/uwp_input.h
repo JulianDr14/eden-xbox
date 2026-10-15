@@ -21,7 +21,7 @@
 
 #include "common/common_types.h"
 #include "eden_uwp/controller_style.h"
-#include "eden_uwp/game_menu.h"
+#include "eden_uwp/ui_actions.h"
 #include "eden_uwp/text_entry.h"
 
 namespace Core::HID {

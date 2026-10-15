@@ -26,6 +26,7 @@
 #include "eden_uwp/localization.h"
 #include "eden_uwp/uwp_controllers.h"
 #include "eden_uwp/controller_catalog.h"
+#include "eden_uwp/game_menu.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
 #include "input_common/drivers/virtual_gamepad.h"

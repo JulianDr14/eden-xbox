@@ -3,6 +3,7 @@
 #include "eden_uwp/uwp_library.h"
 #include "eden_uwp/stick_navigation.h"
 #include "eden_uwp/controller_catalog.h"
+#include "eden_uwp/text_entry_input.h"
 #include "eden_uwp/uwp_library_canvas.h"
 #include "eden_uwp/uwp_rom_storage.h"
 #include "eden_uwp/storage_path.h"
@@ -553,23 +554,22 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                     // Like the console's keyboard: A types, X deletes, Y adds a space, Menu (or RB)
                     // is done, View (or LB) is Shift and B leaves without saving. The bumpers are
                     // what a game's keyboard uses, where + and - belong to the game menu.
-                    using Command = TextEntry::Command;
                     auto& editor = *system_page.name_editor;
-                    const std::pair<bool, Command> presses[] = {
-                        {(directions & Up) != 0, Command::Up},
-                        {(directions & Down) != 0, Command::Down},
-                        {(directions & Left) != 0, Command::Left},
-                        {(directions & Right) != 0, Command::Right},
-                        {hit(GamepadButtons::A), Command::Press},
-                        {hit(GamepadButtons::X), Command::Delete},
-                        {hit(GamepadButtons::Y), Command::Space},
-                        {hit(GamepadButtons::View) || hit(GamepadButtons::LeftShoulder), Command::Shift},
-                        {hit(GamepadButtons::Menu) || hit(GamepadButtons::RightShoulder), Command::Done},
-                        {hit(GamepadButtons::B), Command::Cancel},
+                    const std::pair<bool, MenuAction> presses[] = {
+                        {(directions & Up) != 0, MenuAction::Up},
+                        {(directions & Down) != 0, MenuAction::Down},
+                        {(directions & Left) != 0, MenuAction::Left},
+                        {(directions & Right) != 0, MenuAction::Right},
+                        {hit(GamepadButtons::A), MenuAction::Confirm},
+                        {hit(GamepadButtons::X), MenuAction::Alternate},
+                        {hit(GamepadButtons::Y), MenuAction::Refresh},
+                        {hit(GamepadButtons::View) || hit(GamepadButtons::LeftShoulder), MenuAction::PreviousTab},
+                        {hit(GamepadButtons::Menu) || hit(GamepadButtons::RightShoulder), MenuAction::NextTab},
+                        {hit(GamepadButtons::B), MenuAction::Back},
                     };
-                    for (const auto& [pressed, command] : presses) {
+                    for (const auto& [pressed, action] : presses) {
                         if (!pressed || finish_name_editor) continue;
-                        const auto result = editor.Apply(command);
+                        const auto result = editor.Apply(*TextEntryCommand(action));
                         if (result != TextEntry::Result::None) finish_name_editor = result == TextEntry::Result::Done;
                     }
                     if (directions || edges != GamepadButtons::None) {
@@ -870,11 +870,12 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                 }
                 dirty |= actions != 0;
             } else if (cheat_session && actions) {
-                using Cheats::CheatsInput;
                 using Cheats::CheatsEffect;
-                const auto send = [&](unsigned bits, CheatsInput input) {
+                const auto send = [&](unsigned bits, MenuAction action) {
                     if (!(actions & bits)) return;
-                    switch (Cheats::HandleCheatsInput(cheats_page, *cheat_session, input,
+                    const auto input = Cheats::CheatsInputForAction(action);
+                    if (!input) return;
+                    switch (Cheats::HandleCheatsInput(cheats_page, *cheat_session, *input,
                                                       Cheats::CheatsLayout::VisibleRows)) {
                     case CheatsEffect::Changed:
                         if (!cheat_session->Saved()) notify(T::CheatsSaveFailed);
@@ -891,14 +892,14 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                         break;
                     }
                 };
-                send(Up, CheatsInput::Up);
-                send(Down, CheatsInput::Down);
-                send(Left | PreviousTab, CheatsInput::PreviousCategory);
-                send(Right | NextTab, CheatsInput::NextCategory);
-                send(Play, CheatsInput::Toggle);
-                send(Swap | AddFolder, CheatsInput::ToggleAll);
-                send(Refresh, CheatsInput::Refresh);
-                if (cheat_session) send(Quit, CheatsInput::Back);
+                send(Up, MenuAction::Up);
+                send(Down, MenuAction::Down);
+                send(Left | PreviousTab, MenuAction::PreviousTab);
+                send(Right | NextTab, MenuAction::NextTab);
+                send(Play, MenuAction::Confirm);
+                send(Swap | AddFolder, MenuAction::Alternate);
+                send(Refresh, MenuAction::Refresh);
+                if (cheat_session) send(Quit, MenuAction::Back);
                 dirty = true;
             } else if (actions) {
                 const auto send = [&](unsigned bit, GameOptionsInput input) {
