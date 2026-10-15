@@ -14,6 +14,7 @@
 #include "eden_uwp/ui_actions.h"
 
 #include "eden_uwp/cheats/cheat_catalog.h"
+#include "eden_uwp/list_navigation.h"
 
 namespace EdenXbox::Cheats {
 
@@ -80,10 +81,7 @@ inline void ClampCheatsPage(CheatsPage& page, const CheatCatalog& catalog, std::
         page.selected = page.first = 0;
     }
     const std::size_t count = catalog.Cheats(page.category).size();
-    page.selected = count ? std::min(page.selected, count - 1) : 0;
-    if (page.selected < page.first) page.first = page.selected;
-    if (visible_rows && page.selected >= page.first + visible_rows) page.first = page.selected + 1 - visible_rows;
-    page.first = std::min(page.first, count > visible_rows ? count - visible_rows : 0);
+    ClampListWindow(page.selected, page.first, count, visible_rows);
 }
 
 /// Applies one press. `Model` gives Catalog(), Toggle(CheatRef) and SetCategory(category, on).
