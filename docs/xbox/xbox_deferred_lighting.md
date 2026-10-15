@@ -2117,3 +2117,202 @@ una salida puede cambiar optimización/registroshardware aunque elLLVMconserve
 las operaciones. No afirmar automáticamente causa raíz conun único resultado.
 Causa todavía pendiente, sin parche especulativo/commit/push niFPSmedidos.
 
+### Lectura Series .48: diferencia anterior a conversión R11; sondas .49
+
+Descargas del14oct16:09–16:11 corresponden aAPPX0.2.87.48/SraKmd_arden.
+Conservado series48-map/current (prefijo material_1792012010193042_1):
+87exports nativos válidos,236draws/472ROI; se exportaron seis sondas aisladas y
+original_final. Replay PC usa los inputs actuales (LUT5a9594000/ruido5b63ae000),
+no los de.47. En los1618píxeles interiores del cuerpo, original_finalFLOAT32
+coincide exactamente en1288;330 superan1e-5 y el máximoRGB es0,1013166904.
+Por tanto **la diferencia sobrevive sin conversión a R11** en este shader derivado.
+No certifica todavía qué instrucción falla, ni idéntico código máquina del driver.
+El ROI completo incluye juntas/solapes:9238cubiertos y máximo0,9044 no son el
+oráculo interior. No usar esos bordes para atribuir la causa.
+
+Defecto de nuestra instrumentación .48: reflection_original_r11 queued=false.
+QueueMaterialReadback rechazaba todas las regiones salvoFLOAT4, aunque el nuevo
+PSO R11 y su decoder eran válidos. Se corrigió exclusivamente la whitelist ROI:
+MaterialProbeRegionBytes admiteDXGI2(16B) y26(4B), conserva comprobaciones de
+bounds/mip/layer/subresource. Regresión recorre120formatos y rechaza los demás,
+incluidoBC. No es una corrección visual del tubo. No pedir repetir.48 solo porR11:
+FLOAT32 conservado ya discrimina ejecución del shader frente a conversión.
+
+Control de cuantización sobre los mismos1618píxeles: floatSeries→R11 conRNE
+reproduce176palabras delRT3 original; conRTZ reproduce1603. No atribuir esos saltos
+normales de conversión a un fallo de iluminación ni cambiar globalmente redondeo.
+Quedan15palabras distintas entre el shader redirigido yel original: la redirección
+puede cambiar optimización, además de cuantización. La evidencia principal es la
+comparaciónFLOAT32 Series/PC con mismoDXIL einputs, no este control aproximado.
+Datos en original-float-comparison.json/float-to-original-r11-proof.json privados.
+
+**Siguiente comprobación mínima preparada:** seis sondas del CFG original,
+sustituyendo las seis aisladas (no sumar seisdraws más). Cada una expone enRT0:
+
+| Sonda | Valores originales DXIL | Discriminación |
+|---|---|---|
+| cfg_cube | SSA160..163: muestraRGBA cubemap | Muestreo original frente a kernel aislado |
+| cfg_lut_power | 167,191,192,195: LUT.r,abs(alpha),log2,exp2(log2*4) | LUT frente a aritmética de potencia |
+| cfg_direction | 153,154,152,138: direcciónXYZ/LUTcoord | Primera transformación frente a muestreo |
+| cfg_material | 174,181,182,183: máscara.r/albedoRGB | Otras entradas del material |
+| cfg_ambient | 11,12,13,242: ambienteRGB/peso material | Varyings y combinación material |
+| cfg_scaled | 237,241,252,25: reflejo escaladoRGB/escalarCB | Potencia y constantes frente a suma final |
+
+No se reescribe aritmética HLSL: redirect-dxil-probe.py añade cuatrophi al merge282
+y cuatro al297, respetando los predecesores62/63 y30/282, y cambia solo cuatro
+StoreOutputRT0. Comprobación automática confirma que todas las demás líneas LLVM
+son idénticas; validatorDXIL firma los seis módulos. El driver aún puede optimizar
+salidas no consumidas: se preservan todos los outputs originales y los controles
+original_final/original_r11 para detectar cambios. No prometer ejecución idéntica
+a nivel de ISA. El programa público no contiene shaders ni datosguest; los LLVM,
+DXIL, assembler yreferencias permanecen ignoradosen test-results/series49-cfg.
+
+Interfaz opt-in explícita: package-appx -MaterialProbeOriginalCfg requiere ocho
+sidecars; flag local cambia nombres/canales del diagnóstico, nunca el shaderguest.
+Analizador distingue authored/original_cfg y no interpreta ningún canalCFG comoLOD.
+Siguen ocho pases, ROI256×128, scratch≈39,55MiB, lectura3,625MiB, cap64MiB;
+sin lecturas/pases nuevos durante gameplay sin captura. No hay benchmark nuevo.
+BC ycorrección deinterpolación.44 intactos. Se investiga paredverde opaca; todavía
+no atribuir estos resultados al shader del tubo transparente.
+
+Validación realizada: incrementalUWP17operaciones; tests material-trace,
+dxil-probe, material-reflections, material-probe, material-intermediates y
+project-captured-mesh pasan; diffcheck sin errores. OchoPSOs diagnósticos ejecutan
+enGPU PC con cuatro avisos esperados porMRT/depth declarados pero no vinculados,
+sin otrosavisos/errores observados. Los sieteFLOAT32 tienen9238píxelesfinitos y
+0NaN; sobre1618interiores, cfg_cube coincide exactamente con sondaaislada;
+exp2(log2(alpha)*4) vsalpha**4 error≤1,08e-9. Controlfinalbyteidénticoal anterior.
+No sustituye hardwareSeries ni validación de transparencia/otrosjuegos.
+
+**APPX0.2.87.49 listo en build-uwp/package/eden-xbox.appx**,14883114B,
+SHA256ac7858a47173ac19a0cfe717c1ca10d402e49bdd19448ebeb6c7b3d265a17197.
+EXE05430a806fb3de6458711dbb1e7e6b5b418f6799efe288ecd89619683cf0c0c6;
+PDB77a59536c08dd365947d145680080319174c38c0d4d2a8f97a6ffb465e1e29b7.
+ZIPmanifest/config/EXE, ochoDXIL iguales a los probados, flagCFG,728BlockMapSHA y
+firmaCMS verificados. Símbolosarchivados. MismoPS/count/ROI/5120/prewarm/play.
+Instalar.49 y hacer una sola captura del mismo tubo porView+Menu(1s)→Capturar
+ gráficos ycontinuar→A; esperar10s y exportarlog/trace/diag aDescargas. Es necesaria
+porque.48 solo conservaba resultado final y el kernelaislado; faltan estosSSA del
+CFG original enSeries. Si dirección difiere, investigar transformación; dirección
+igual/muestra distinta discrimina sampling bajoCFG; muestra igual/potencia distinta
+localiza log/exp; entradas iguales/escalado distinto localiza CB/multiplicaciones;
+si todo igual yfinaldistinto, aislar sumas/compilación restante. Ninguna causa raíz
+ni corrección del tubo declarada. Sincommit/push.
+
+### Lectura Series .49: muestreo con LOD incorrecto; control de ramas .50
+
+Se revisaron los archivos nuevos de Descargas del 14oct16:27–16:28. Diag confirma
+APPX0.2.87.49 y adapter SraKmd_arden. Captura material_1792013150750238_1,
+conservada en test-results/game-f-lighting-2026-10-14/series49-map/current.
+Las ocho sondas se encolan/exportan, incluida R11 tras corregir la whitelist.
+88 exports nativos:63.984.240 bytes, formatos/tamaños comprobados considerando
+filas de bloques BC. 474 draws y949 tiles completos, sin drops. Tres dumps finales
+omitidos por el cap existente; todos los inputs/MRT/sondas seleccionados están.
+No hay Error/Critical de Render; errores Input keyboard son ajenos a estos píxeles.
+Diag termina en menú; no se afirma cierre Q ni retorno de ejecución no registrado.
+
+Se rehizo el replay con los buffers/texturas EXACTOS actuales; bindings de draw44
+confirman las seis direcciones del mapa .48, no se sustituyen datos de otra sesión.
+Ocho PSOs diagnósticos GPU PC válidos (cuatro warnings esperados de outputs sinRT),
+PSO original sin warnings. Referencia sobre1618píxeles interiores ya establecidos:
+
+| Salida | Resultado Series frente a PC |
+|---|---|
+| DirecciónXYZ cubemap/LUTcoord | Buffer entero byteidéntico,1618/1618interiores |
+| AmbienteRGB/peso material | Buffer entero byteidéntico,1618/1618interiores |
+| LUT.r | Exacto en1618/1618 |
+| AlbedoRGB | Exacto en1618/1618 |
+| CubemapRGBA original |332interiores discrepantes; máximoRGB0,287138 |
+| Máscara BC4.r original |332interiores discrepantes, todos devuelven7/255 |
+| Reflejo escalado |326interiores con diferencia>1e-5 |
+| FinalFLOAT32 original |330interiores con diferencia>1e-5; máximo0,10131669 |
+| MRT0/1/2 originales |1618/1618palabras exactas cada uno |
+| MRT3 original |1288/1618palabras exactas |
+
+Se comprobaron log2 y potencia usando **la entrada de su propia sonda**, evitando
+mezclar valores de módulos que pueden recibir distinta optimización del driver.
+Error máximo log2 vssoftware2,25e-7; exp2(log2(alpha)*4) vsalpha**4 ≤1,07e-9.
+No explica la anomalía. La muestra alpha del módulo cfg_cube y la usada en el módulo
+cfg_lut_power difieren en217interiores Series: cambiar salidas puede alterar código
+máquina/selección de derivadas. Nunca recomponer un shader con sondas de distintos
+módulos como si fueran una ejecución única. R11 redirigido yRT3 original coinciden
+en1601/1618palabras, otra razón para conservar ambos controles y no prometer ISAigual.
+
+**Prueba discriminante adicional, solo PC:** reemplazar únicamente la lectura del
+cubemap por SampleLevel0..4 dentro del DXIL de cfg_cube, conservar instrucciones y
+bindings restantes, validar/firmar y ejecutar cada variante con inputs .49. Ajustar
+la mezcla lineal entre dos mips vecinos sobre los cuatro canales de cada píxel.
+Los332píxeles afectados Series se reproducen TODOS con residualmáximo3,71e-7:
+LOD efectivo ajustado1,55469..4. En los MISMOS332píxeles, el muestreo implícito PC
+se ajusta aLOD efectivo0..0,453141, residualmáximo3,58e-7.253de332muestrasSeries
+son exactamente el mip4. El resto encaja con mezclas de mips más gruesos.
+Son LOD inferidos por ajuste de muestras; no un registro directo del hardware.
+La máscara con SampleLevel7 reproduce exactamente332/332valores incorrectos;
+el valor constante7/255 por sí solo no identifica de forma única el mip elegido.
+Datos: cube-lod-fit.json, last-mip-controls.json, sampling-math-controls.json.
+
+Esto localiza la primera diferencia observada en **muestreo implícito/elección LOD**,
+con coordenadas cubemap correctas. Descarta transformación de esas coordenadas,
+albedo/ambiente, log/exp y conversiónR11 como explicación de estas diferencias
+concretas. No demuestra aún qué instrucción/estado provoca el LOD incorrecto.
+No culpar automáticamente al descriptor/sampler: el kernel aislado .47 coincide,
+el módulo original falla y cambiar sus salidas modifica ciertas muestras.
+No se atribuye este shader del tubo verde opaco a la transparencia por extensión.
+
+Otra perturbación local: SampleGrad con derivadas finas y gruesas del DXIL original,
+primero solo cubemap y después cubemap+BC4. Cuatro módulos validados y ejecutadosPC;
+ninguno reproduce el patrón Series: permanecen330–332discrepancias, máximo0,101317.
+VariaciónPCvsPC máxima0,000918(fine)/0,000443(coarse), mucho menor. Reduce la
+hipótesis de elección legal fine/coarse como explicación completa; no descarta
+que Series produzca gradientes erróneos dentro del CFG.
+
+Ruta concreta a comprobar: profileD3D12.support_demote_to_helper_invocation=false
+(d3d12_pipeline_cache.cpp) hace que EmitDemoteToHelperInvocation emita OpKill;
+Mesa26.2.3 dxil_nir_lower_discard_and_terminate convierte terminate a demote+return.
+El DXIL afectado tiene dos branches de descarte y merge/retorno que preceden a las
+coordenadas calculadas ySample. CB9 byte20=1 enesta captura: 0>=1 y1<1 sonfalse,
+por lo que NO se está demostrando descarte real de píxeles visibles. Las ramas aún
+pueden influir en generación de código/helpers. Esta es una hipótesis causal,
+no autorización para eliminar ramas del shaderguest o activar capacidades a ciegas.
+
+Referencia de semántica: [Microsoft Wave Intrinsics](https://github.com/microsoft/DirectXShaderCompiler/wiki/Wave-Intrinsics)
+explica helper lanes y quads; [D3D11.3 §16.8](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm)
+distingue derivadas/flujo variable. No extrapolar waveops6.7 a XboxSM6.4 ni afirmar
+que discard aislado invalida toda derivada posterior. Aquí no hay wave intrinsics.
+La ruta Mesa anterior se comprobó en su fuente local, no se modificó la DLL.
+
+**.50 preparada para discriminar ramas, no como parche visual:** seis sidecars
+scratch modifican solo una variable por control: bypass primer branch, segundo,
+ambos; o discard predicado continuando cálculo en primero, segundo, ambos.
+Se conservan todas las instrucciones aritméticas, sample,phi yStoreOutput; solo
+cambia control de flujo y, en controles predicados, se añade discard condicional.
+Bypass válido únicamente como diagnóstico con condicionesfalse comprobadas enCB
+actual; nunca aplicarlo en producción. Los antiguos bloqueskill quedan inalcanzables
+con sus edges dephi válidos. ValidatorDXIL acepta los seis módulos. EnGPU PC las
+seis variantes producen el bufferFLOAT32 completo byteidéntico al original .49,
+no solo píxeles seleccionados. Controles finales originales6/7 intactos.
+
+controlled-dxil-branches.py y su regresión verifican patrón exacto de branch/kill,
+predicación y rechazo deCFG desconocido. package-appx añade opt-inBranchControls
+que requiereOriginalCfg y8sidecars; flag separa nombres/tipo enlog. Analizador y
+regresión distinguen authored/CFG/branches sin tratar canales RGB comoLOD.
+IncrementalUWP4operaciones, tests dxil-branches/dxil-probe/material-reflections y
+diffcheck pasan; sin cambios de semántica producción/BC/.44 ni DLLMesa. Sin aumento
+de draws, buffers o presupuesto respecto.49; benchmark/FPS nuevos no medidos.
+
+**APPX0.2.87.50 lista en build-uwp/package/eden-xbox.appx**,14.883.904bytes,
+SHA25688718d9f4d2dc5543336f2f341dad330cc9f95d558b355670eeba6f9e64d0089.
+EXE6db2a518d5c3477d293a2da20e05831c749d2352c450aa4a2335f7ec79a4db49;
+PDB38cbb8485a2d6c20a51352e5a5b357799bdeac569349658ab9f1550868d29589.
+Símbolos archivados; ZIPmanifest/config/EXE/ochoDXIL/ambosflags,729BlockMapSHA256
+ yfirmaCMS comprobados. Canonicalpackage; sin nuevas carpetas de entrega.
+
+Una sola capturaSeries del mismo tubo porView+Menu(1s)→Capturar gráficos y continuar
+→A, esperar10s, exportarlog/trace/diag aDescargas. Hace falta porque ninguna captura
+existente ejecuta estos controles de ramas. Si un bypass corrige y predicación
+correspondiente también, discrimina influencia del retorno/CFG frente a sampler;
+si solo quitar discard cambia resultado, comprobar helpers/discard; si nada cambia,
+no aplicar la hipótesis y pasar a gradientes de las muestras originales. Mantener
+controloriginal6/7 y umbralCB exacto. No declarar tubos corregidos ni hardware
+validado con datosPC. Sincommit/push.
+
