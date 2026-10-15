@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Project captured first-pair geometry using its actual vertex IR position slice.
+"""Project captured geometry using its actual vertex IR position slice.
 
 Supports one complete float3 position vertex stream and uint16 triangle indices.
 Exports a wireframe SVG and bounds to locate an object; does not establish pixel
@@ -24,13 +24,19 @@ def main():
     parser.add_argument('vertex_ir', type=Path)
     parser.add_argument('pixel_shader')
     parser.add_argument('--capture', type=int, required=True, help='One-based capture ordinal')
+    parser.add_argument('--draw', type=int, help='Exact draw index; otherwise the first shader pair')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     original = json.loads(args.vertex_ir.read_text(encoding='utf-8'))
     vertex = lighting.ir.attribute_slice(original, {28, 29, 30, 31})
     log = (args.capture_root / 'eden_log.txt').read_text(encoding='utf-8', errors='replace')
     captures = lighting.material.captures(log.splitlines())
-    draw = next(d for d in captures[args.capture - 1]['draws'] if d['vs'] == vertex['hash'] and d['ps'] == args.pixel_shader)
+    matches = [d for d in captures[args.capture - 1]['draws']
+               if d['vs'] == vertex['hash'] and d['ps'] == args.pixel_shader and
+               (args.draw is None or d['index'] == args.draw)]
+    if not matches:
+        raise ValueError('Requested draw/shader pair is absent from the capture')
+    draw = matches[0]
     prefix = sorted((args.capture_root / 'trace').glob('*_probe.csv'))[args.capture - 1].stem[:-6]
     stem = f"{prefix}_draw_{draw['index']}_vs_{vertex['hash']}_ps_{args.pixel_shader}"
     files = list((args.capture_root / 'trace').glob(stem + '*kind_2_slot_*.bin'))
