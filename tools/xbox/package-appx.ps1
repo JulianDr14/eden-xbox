@@ -43,10 +43,23 @@ param(
     # Mesa's SPIR-V -> DXIL translator for the D3D12 renderer, built by build-spirv-to-dxil.ps1.
     # Without it the renderer still presents, through its CPU fallback.
     [string] $SpirvToDxil = "..\mesa-build\build-uwp\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll",
+    # Optional local diagnostic DXIL sidecars; never bundled by default.
+    [string] $MaterialProbeShaders,
+    [ValidateRange(6, 8)]
+    [int] $MaterialProbeShaderCount = 6,
+    # Sidecars expose original CFG intermediates instead of the authored kernels.
+    [switch] $MaterialProbeOriginalCfg,
+    [switch] $MaterialProbeBranchControls,
     [string] $OutDir = "build-uwp\package"
 )
 
 $ErrorActionPreference = "Stop"
+if ($MaterialProbeOriginalCfg -and (!$MaterialProbeShaders -or $MaterialProbeShaderCount -ne 8)) {
+    throw 'Original CFG diagnosis requires eight explicit sidecars'
+}
+if ($MaterialProbeBranchControls -and !$MaterialProbeOriginalCfg) {
+    throw 'Branch controls require the explicit original CFG diagnostic mode'
+}
 if ($Library) { $BootCfg += 'library=1'; $BootCfg += 'play=1' }
 if ($Profile -eq "on") { $BootCfg += 'profile=1' }
 if ($Profile -eq "full") { $BootCfg += 'profile=full' }
@@ -107,6 +120,22 @@ if (Test-Path $s2d) {
     }
 } else {
     Write-Warning "spirv_to_dxil.dll not found ($s2d): the D3D12 renderer will present through the CPU."
+}
+
+if ($MaterialProbeShaders) {
+    for ($probeIndex = 0; $probeIndex -lt $MaterialProbeShaderCount; ++$probeIndex) {
+        $probeFile = Get-Item -LiteralPath (Join-Path $MaterialProbeShaders "material_reflection_$probeIndex.dxil")
+        if ($probeFile.Length -lt 32 -or $probeFile.Length -gt 1MB) {
+            throw "Invalid diagnostic sidecar size: $($probeFile.Name)"
+        }
+        Copy-Item -LiteralPath $probeFile.FullName -Destination $layout
+    }
+    if ($MaterialProbeOriginalCfg) {
+        [IO.File]::WriteAllText((Join-Path $layout 'material_reflection_original_cfg.flag'), 'original-cfg-v1')
+    }
+    if ($MaterialProbeBranchControls) {
+        [IO.File]::WriteAllText((Join-Path $layout 'material_reflection_branch_controls.flag'), 'branch-controls-v1')
+    }
 }
 
 # User data (keys, firmware, game): see the parameters above.
