@@ -26,6 +26,7 @@
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/ir/program.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
+#include "shader_recompiler/ir_opt/demote_return_pass.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -418,7 +419,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .support_viewport_index_layer_non_geometry = caps.vp_and_rt_index_from_any_stage,
         .support_viewport_mask = false,
         .support_typeless_image_loads = caps.typed_uav_load_additional_formats,
-        .support_demote_to_helper_invocation = false,
+        // Terminal discard arms may continue as helpers after DemoteReturnPass.
+        // OpKill would terminate those lanes before their derivative calculations.
+        .support_demote_to_helper_invocation = true,
         .support_int64_atomics = false,
         .support_shared_int64_atomics = false,
         .support_derivative_control = true,
@@ -877,6 +880,11 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage)};
         runtime_info.lower_noperspective_mask = lower_noperspective_mask;
         ConvertLegacyToGeneric(program, runtime_info);
+        const auto merged_demote_returns = Shader::Optimization::DemoteReturnPass(program);
+        if (merged_demote_returns && IsDumpedShader(key.unique_hashes[index])) {
+            LOG_INFO(Render, "D3D12 helper-preserving discard: PS={:016x} terminal_returns={} (compile-time)",
+                     key.unique_hashes[index], merged_demote_returns);
+        }
         spirv[stage_index] = EmitSPIRV(profile, runtime_info, program, binding);
         if (IsDumpedShader(key.unique_hashes[index])) [[unlikely]] {
             DumpShader(key.unique_hashes[index], stage_index, program, spirv[stage_index]);

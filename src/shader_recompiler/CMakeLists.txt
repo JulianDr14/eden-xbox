@@ -6,6 +6,8 @@
 
 add_library(shader_recompiler STATIC
     backend/bindings.h
+    ir_opt/demote_return_pass.cpp
+    ir_opt/demote_return_pass.h
     backend/spirv/emit_spirv.cpp
     backend/spirv/emit_spirv.h
     backend/spirv/emit_spirv_atomic.cpp
