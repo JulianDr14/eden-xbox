@@ -3660,3 +3660,21 @@ la confirmación al juego. Aplica tras el mapeo, también a teclado, y permite
 nuevas pulsaciones durante gameplay. Build incremental y link correctos;
 gate manual mantener B/A al continuar y soltar/volver a pulsar pendiente.
 Sin commit; versión nueva solo al preparar prueba en Series.
+
+
+## 14 octubre 2026: contratos compartidos del frontend
+
+Biblioteca y gameplay migrados a ControllerCatalog con cadencia500ms y backoff
+tras fallo; acciones semánticas separadas del modelo de menú. Captura modal
+extraída y cubierta por tests; teclado y cheats comparten traductores reales.
+Mods/cheats comparten clamp de listas. Pestañas cheats usan array local/span en
+vez de vector, incluidos prompts; sin benchmark FPS. Gates y límites detallados
+en [xbox_frontend_refactor.md](xbox_frontend_refactor.md). Sin commit/push.
+
+Gate final: diez harness PASS, Release UWP incremental/link y diff-check PASS.
+PC bibliotecaPID9348 activa/Responding, diag esperando selección; versión0.2.88.1
+conservada. Visual/mando/hotplug/gameplay/Series pendientes; sin FPS medidos.
+
+Guardado frontend solicitado14oct: commits separados por catálogo, acciones,
+captura modal, listas, asignaciones y pruebas; documentación aparte. Autor
+JulianDr14, sin coautoría automática ni push. Hashes en xbox_frontend_refactor.md.

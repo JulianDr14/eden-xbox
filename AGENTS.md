@@ -1010,3 +1010,15 @@ Iluminación.44+tubos.51 cerrados. Release0.2.88.0 enpackage (única entrega),
 biblioteca sinpreselección, sondas/dumps/capturemenu/debug desactivados; memoria5120,
 fastmem0,prewarm1 conservados. Símbolos0.2.88.0, verificaciónartefacto fuerarepo.
 Commits pequeños solicitados,sinpush niatribuciónIA. Historiacausal enlighting.
+
+
+14oct frontend: catálogo de mandos compartido con backoff/cadencia500ms, acciones
+UI separadas del modelo, traductores teclado/cheats únicos, captura modal testeable
+y clamp listas mods/cheats. Pestañas cheats sin vector dinámico, sin mejora FPS
+medida. Diez harness/MSVC desktop y ReleaseUWP incremental/link/diffcheck pasan.
+BibliotecaPC PID9348 activa; gate visual/mando/hotplug/gameplay/Series pendiente.
+Versión0.2.88.1 conservada, sin commit/push; docs/xbox/xbox_frontend_refactor.md.
+
+Guardado frontend solicitado14oct: commits separados por catálogo, acciones,
+captura modal, listas, asignaciones y pruebas; documentación aparte. Autor
+JulianDr14, sin coautoría automática ni push. Hashes en xbox_frontend_refactor.md.
