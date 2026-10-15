@@ -806,6 +806,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
             const auto screen = D3D12::GameMenuScreenSize(system.Renderer());
             D3D12::MenuImage image;
             try {
+                menu_surface->SetPromptMapping(input.MenuPromptMapping());
                 image = cheats ? menu_surface->DrawCheats({*cheats, cheats_page, game_title, cheats_notice, true},
                                                           screen)
                         : menu ? menu_surface->DrawMenu(*menu, game_title, screen)

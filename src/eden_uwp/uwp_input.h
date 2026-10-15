@@ -100,6 +100,8 @@ public:
     /// While open, the pad drives the menu and the game sees every button released.
     void SetMenuOpen(bool open);
     [[nodiscard]] ControllerOptions Options();
+    /// Snapshot of the selected pad: bit 0 swaps face labels, bit 1 uses Nintendo colors.
+    [[nodiscard]] u8 MenuPromptMapping() const { return menu_prompt_mapping.load(); }
     /// Applies (and saves) options changed in the menu; a new style reconnects player 1 now.
     void SetOptions(const ControllerOptions& options);
 
@@ -114,6 +116,7 @@ private:
     ControllerOptions options;
     std::atomic<bool> style_changed{};
     std::atomic<bool> menu_open{};
+    std::atomic<u8> menu_prompt_mapping{};
     std::mutex menu_mutex;
     std::vector<MenuAction> menu_actions;
     Core::HID::HIDCore* hid{};
