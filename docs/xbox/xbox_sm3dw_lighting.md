@@ -1,7 +1,41 @@
 # Sombras y particiones de tubos: Super Mario 3D World en Series
 
-Fecha: 13 octubre 2026. Estado: **causas raíz pendientes; diagnóstico implementado**.
-No se ha certificado una corrección visual de estos defectos en Xbox.
+Investigación: 13–14 octubre 2026. Estado: **CERRADO en Series**.
+La iluminación quedó confirmada en .44 y ambos tipos de tubo en .51. El usuario
+confirmó el 14 de octubre: «funcionó perfecto, ya se ven bien todos los tubos».
+
+## Cómo se encontró y corrigió el error
+
+1. Las capturas por pase situaron las bandas de iluminación antes de las
+   transparencias. Comparar coordenadas PC/Series mostró que la interpolación
+   NoPerspective no conservaba el resultado esperado en Series. La .44 reconstruye
+   la interpolación con atributos ponderados por clipW y fragmentW; el usuario
+   confirmó la corrección de iluminación. La corrección BC anterior se conservó.
+2. Para los tubos se localizó la draw correcta por geometría, evitando atribuir
+   el material al primer objeto que compartía shader. Las normales y MRT0/1/2
+   coincidían con PC; la diferencia aparecía en el reflejo de MRT3.
+3. Reproducir el mismo DXIL con buffers, texturas y samplers exactos descartó
+   una mera diferencia de escena. Las sondas de coordenadas, ambiente y color
+   coincidían. El muestreo del shader completo elegía mips demasiado gruesos;
+   el ajuste de muestras por mip reprodujo los 332 píxeles afectados.
+4. El error persistía en float32: no era la conversión R11. Los seis controles
+   de ramas de .50 produjeron buffers idénticos PC/Series mientras el original
+   mantenía 330 píxeles incorrectos. Activar demote nativo sin cambiar los
+   retornos generaba el mismo DXIL y no constituía una solución.
+5. DemoteReturnPass transforma únicamente brazos terminales ya descartados:
+   elimina salidas inobservables y permite que los helpers reconverjan antes
+   de calcular derivadas. Rechaza bucles, phis, subgrupos, memoria y efectos
+   laterales que impidan demostrar equivalencia. No fuerza LOD ni cambia materiales.
+6. La .51 pasó 64 regresiones, pruebas GPU de vecinos descartados y replay de
+   cuatro MRT completos idénticos en PC. La ejecución real de Series registra
+   dos retornos transformados y ahora coincide exactamente con PC en los
+   1.618 píxeles interiores de **cada uno de los cuatro MRT**, incluido MRT3.
+   La confirmación visual del usuario cierra tubos opacos y transparentes.
+
+Los detalles siguientes conservan la cronología y las hipótesis pendientes en
+cada momento. Esas notas históricas no sustituyen este estado final. No se ha
+medido una mejora FPS ni se afirma una certificación de todos los shaders/juegos.
+
 
 ## Reproducción y evidencia
 
@@ -1650,3 +1684,175 @@ confirma «perfecto era eso». Se registra como confirmación visual positiva de
 la corrección probada en consola. No acompañó este mensaje con otra captura o
 log, ni desglosó distancias, tubos o escenarios adicionales: esas comprobaciones
 no se dan automáticamente por certificadas. No hay medición nueva de FPS.
+
+### Tubos persistentes en .44: delimitación geométrica y diagnóstico .45
+
+El usuario confirma explícitamente que los tubos siguen fallando en .44. La
+confirmación positiva anterior corresponde a iluminación; no solicitar otra
+confirmación de persistencia ni tratar los tubos como corregidos.
+
+Se reproyectó la posición del VS real `2d3131869b44982c` con los VB/IB/CB de
+la captura .43 conservada, evaluando solo su slice de Position:
+
+|Draw .43 / PS|Geometría proyectada en 1920×1080|Conclusión|
+|---|---|---|
+|58 / b0170e3f4b9e6df3|97 vértices,120 triángulos; x1645,17–1731,17 y363,63–419,71|Interior/apertura del tubo localizado|
+|103 / 08b0982cc117e4a3|144 vértices,120 triángulos; x1534,76–1599,51 y356,21–383,86|Pieza contigua; no es la pared exterior|
+|126 / eebbbff18c664da2|304 vértices,516 triángulos; x967,47–993,82 y503,35–538,04|Parte del personaje; descartar para este tubo|
+
+La draw124, VS2d313/PS08b,528 índices, pipeline9d89b0cfc523d31f sigue siendo
+**candidata**, no autora demostrada de la pared. Su VB/IB exacto no se conservó:
+los primeros inputs de esa pareja son de draw103 y NO son intercambiables.
+Todas las proyecciones anteriores tienen W positivo. Bounds geométricos no
+prueban cobertura final, éxito del depth test ni causalidad de un píxel.
+
+Comparación interior Series38draw60/PC38draw59: VB2328B e IB720B idénticos.
+Los97 normales SNORM10 decodificados en CPU tienen longitud0,999082–1,001271,
+ninguno cero. Esto descarta diferencias en esos bytes, **no** demuestra que el
+fetch GPU sea correcto ni informa sobre la pared exterior. Evidencia privada:
+`build-uwp/test-results/tube-investigation-2026-10-14/`, tres mesh JSON/SVG e
+`inner-geometry-comparison.json`.
+
+Las draws opacas candidatas usan cuatro MRT, blending desactivado, LEQUAL con
+escritura de profundidad, cull back CCW, sin MSAA ni alpha-to-coverage. El verde
+ya está en el MRT R11 preiluminación de .39: el PS844 de iluminación posterior
+no es su primera fuente. No extender esta conclusión al tubo transparente.
+El VS exporta normal transformada/normalizada Generic0, color de vértice saturado
+Generic3, ambiente de cubemap Generic4 y posición de vista Generic5. Generic6XY
+es coordenada de pantalla NoPerspective; .44 ya aplica su lowering cuando la
+ruta es elegible. No repetir ese parche por la mera presencia del mismo modificador.
+El PS08b tiene CFG con nueve bloques: no ejecutar todo como IR lineal.
+
+Recursos de la pared candidata que faltan en las exportaciones de interior .38:
+BC1sRGB256²@561990000, BC4UNORM256²@56199b400, cubemapRGBA8 128²@5b709a000,
+R32F1D64@5a95a6000, RGBA8 16²@5b63ae000. VS cubemapRGBA8 8²@5b708a400
+es compartido con el interior. El `dim=3` de la traza describe recurso físico
+Texture2D, no SRV: no inferir que se perdió la vista cube por ese valor.
+
+**Dato adicional mínimo necesario:** geometría exacta de draw528 y sus recursos,
+más cambios por draw del R11 en píxeles del tubo. Las sondas .43 están en suelo
+(ROI x1068,y554,64×32), no permiten localizar el primer escritor del tubo.
+No repetir las siete tomas: una toma con el mismo encuadre de .43 basta para esta
+prueba, manteniendo el tubo verde arriba a la derecha.
+
+Paquete diagnóstico **0.2.87.45**, `build-uwp/package-tube-probe/eden-xbox.appx`:
+
+- Mismo EXE que .44, SHA256bc17e0ba02c1ef8ab79d7384f9de5bd8d6da348be5b6c60bc964e651503dd1f5;
+  preserva la corrección, sin cambio especulativo en renderer ni necesidad de recompilar.
+- ROI64×32 x1653,y432, centro1685,448, en cuerpo frontal del tubo del encuadre .43.
+  CSV/raw por draw conserva los cambios de cada MRT para localizar el primer escritor.
+- SnapshotPS08b/count528 y PSb017/count360 conserva geometría/CB/inputs nativos;
+  dumps limitados a esos dos PS y VS2d313. Sonda GPU especial de iluminación desactivada:
+  su PS de intermedios no sirve para esta interfaz. Captura sigue siendo opt-in por mando.
+- Símbolos .45 archivados; versión/config/EXE dentro del ZIP comprobados,719 bloques
+  SHA256 y firma CMS criptográfica correctos. No se cambió almacén de certificados.
+  APPX14837072B, SHA2560b16ec1a3de43a22a732d3667287691ea623ae55deb5018beda656991323791d.
+
+Herramienta pública `project-captured-mesh.py --draw N` selecciona draw exacta,
+conserva comportamiento anterior por defecto y rechaza draw ausente. Regresión
+sintética con dos objetos del mismo VS/PS comprueba que no confunde sus bounds;
+pasa sin assets privados. Esto evita atribuir otra vez el primer snapshot a otra
+malla. Próxima lectura: identificar escritor en ROI, proyectar su VB exacto,
+comparar normales/ambiente/reflejo y recursos antes de diseñar una perturbación.
+Causa raíz del tubo pendiente; no hay medición nueva de FPS/memoria ni validación
+visual .45. Sin commit ni push.
+
+### Lectura de Series .45: pared real localizada y normales contrastadas
+
+Descargas recibido 14oct: log/trace y diag .45. Se archivó el conjunto completo
+bajo `build-uwp/test-results/sm3dw-lighting-2026-10-14/series45-map` (exportación
+original en log-export, trace normalizado al nivel esperado por herramientas).
+Una captura completa,236draws,472registrosROI,0omitidos/0líneasperdidas,
+180exportaciones nativas con tamaños exactos fila/bloque verificados, dos presents.
+Índice SHA256 del archivo privado conserva1266archivos. RenderError/Critical0;
+errores playtime al salir independientes de la imagen. Retorno10 sigue al menú
+«back to library», shutdown completo y worker unido: no es crash del renderer.
+
+**La hipótesis de pared PS08b/count528 se descarta geométricamente.** En .45 es
+draw111:108vértices/176triángulos,x801,20–809,79 y484,66–504,32, parte del
+personaje. Draw90/PS08b primera pareja es pieza contigua x1415–1474 y356–381.
+No atribuir estos shaders al tubo por compartir escenario o tamaño de draw.
+Draw45/PSb017 interior97vértices/120triángulos,x1503–1577 y363–412.
+
+Se exportaron ocho shaders IR adicionales desde la copia privada de caché y se
+proyectaron las primeras parejas disponibles usando sus posiciones reales. Así
+se localiza la **pared exterior draw44**:
+
+- VS55e0d63ec3a46b1f / PSba9295f0d82e7ae1, pipeline003571e9b310fb88,
+  2712índices,526vértices,904triángulos, x1480,94–1594,80 y354,99–485,08.
+- VB24bytes: posiciónFLOAT3+0, normalesSNORM10+12, colorUNORM8+16,
+  UVUNORM8x2+20. Matrices/normal/atributos difieren del candidato08b.
+- CuatroMRT, sin blending ni bias, depthLEQUAL/write, backcullCCW, sinMSAA/a2c.
+- Textura baseBC1sRGB32×128@564620000, máscaraBC4 128²@563a26800,
+  VS cubeRGBA8 8²@5b708a400, PS cubeRGBA8 16²@5b708d400,
+  LUTR32F64×1@5a9594000 y ruidoRGBA8 16²@5b63ae000.
+  El LUT es distinto del interior@5a958e000 y falta en inputs nativos .45.
+
+Prueba discriminante realizada con los inputs exactos de draw44: evaluar slice
+lineal del VS55 para Position y Generic0XYZ, decodificarSNORM10, rasterizarCPU con
+perspectiva y normalizar/codificar como las dependencias RGB del PSba. Comparar
+con el bufferRGB10 nativo completo aux7. En cuerpo frontal x1515–1565,y425–458,
+**1618píxeles interiores coinciden con error máximo1unidadUNORM10 (1/1023)**.
+Los normales de entrada tienen longitud0,998716–1,001271, ninguno cero.
+Esto descarta una corrupción grande del fetch/transformación/interpolación de
+normales en esa región; no certificar toda malla, todos los atributos ni otros tubos.
+
+Límite del método: el PSba tiene ramas; NO se lo convirtió en IR lineal. Solo se
+contrastó su expresión RGB de normales del camino superviviente, que depende de
+Generic0, normalización y codificación0,5N+0,5, sin texturas. El buffer nativo no
+cero y la coincidencia sustentan ese camino en los píxeles comparados. Recíprocos
+GPU y subpíxel no se modelan exactamente. Trampa del oráculo: primero resolver la
+superficie más cercana y luego excluir píxeles junto a aristas. Descartar triángulos
+por margen antes del z-test seleccionaba caras traseras, creando83discrepancias
+artificiales; se corrigió la comprobación local, no el emulador. Evidencia:
+compare-normals.py,wall-normal-oracle.json,mesh-draw-44.json/SVG y recortes
+base-after45.png/normal-full.png. Los recortes muestran color base suave y normales
+suaves, mientras la presentación conserva marcas verdes; eso orienta al MRT3 de
+ambiente/reflejos, pero no demuestra aún la primera operación incorrecta.
+
+La ROI .45 x1653,y432 quedó fuera del tubo de esta toma (cámara distinta). Se
+conservó el objetivo capturado por shader/count y permitió excluirlo; los472tiles
+no pueden demostrar causalidad en los píxeles del tubo. Falta **R11 exacto justo
+tras draw44** y LUT nativo@5a9594000. Son los datos mínimos siguientes; no pedir
+siete tomas ni depender de alinear una ROI otra vez.
+
+### Diagnóstico .46 preparado: MRT completos de la pared identificada
+
+DumpMaterialShaderTarget exporta ahora todos los MRT activos del único draw
+seleccionado, con filtros previos (BoundColorTargets,ColorOnCopy,recurso válido,
+SampleCount1), subrecurso correcto y excepción contenida por target. Usa el mismo
+presupuesto32MiB compartido de snapshots; no ampliarlo. Cuatro footprints1080p
+(33177600B) caben en33554432B; un quinto se omite con aviso. Cada copia finaliza
+antes de la siguiente por la infraestructura DumpTarget existente: no conservar
+cuatro staging buffers adicionales simultáneamente. Solo se ejecuta al consumir
+una selección de diagnóstico; no cambia shaders ni estados de producción.
+Los ficheros mantienen sufijo_rtN y se registra el índiceMRT. Si un target falla,
+los demás siguen disponibles, sin tumbar la app.
+
+Paquete **0.2.87.46**: `build-uwp/package-tube-material-46/eden-xbox.appx`.
+Solo PSba9295f0d82e7ae1/count2712 seleccionado, segundo snapshot desactivado para
+reservar32MiB a sus cuatro salidas. Sus inputs nativos incluyen LUT/cubemaps,
+VB/IB/CB; dumps VS55/PSba. ROI secundaria1538,442 sigue siendo auxiliar: la
+prueba principal dispone de MRT completos y no depende de ese encuadre exacto.
+Conserva BC y lowering .44,library/play,5120MiB y captura por mando.
+
+Build incremental UWP17operaciones correcto; gateMSVC material-trace con nuevo
+caso cuatroMRT y rechazo del quinto pasa, también material-probe y selección exacta
+project-captured-mesh. ZIPmanifest/config/EXE,719BlockMap SHA256 y firmaCMS pasan;
+símbolos .46 archivados. APPX14836045B,
+SHA25627e2f5754c492934cdc5e8d8ce0036f105900d9131dd8d26542c0b944ad3d884;
+EXEd124ae4cf5429f0c6fd8dd65858362cc69283437530c8108122eaeaa8341f3a1.
+Gate GPU del nuevo volcado en Xbox pendiente. No se midióFPS/tiempoPSO; overhead
+adicional solo al capturar, con readback síncrono y exportación. Causa raíz de
+bandas aún pendiente: siguiente comparar MRT3 con evaluación/replay y separar
+ambienteVS, reflejoPS, máscara/LUT/ruido. Tubo transparente requiere su propia draw;
+no extrapolar el resultado opaco. Sin commit ni push.
+
+### Ruta vigente de entrega tras limpieza (14oct2026)
+
+El paquete .46 verificado se trasladó sin alterar sus bytes a
+`build-uwp/package/eden-xbox.appx`. Esta es la única carpeta de entrega en adelante;
+`package-tube-material-46` y las demás carpetas package-* antiguas se retiraron.
+Símbolos y evidencia causal permanecen en sus archivos originales. No repetir
+rutas históricas al indicar el instalador al usuario.
+
