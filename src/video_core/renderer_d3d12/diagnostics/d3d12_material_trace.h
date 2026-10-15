@@ -9,6 +9,11 @@
 
 namespace D3D12 {
 
+// Only single-texel probe formats support bounded ROI readback (DXGI values).
+constexpr std::uint32_t MaterialProbeRegionBytes(std::uint32_t format) {
+    return format == 2 ? 16 : format == 26 ? 4 : 0;
+}
+
 // Explicit shader/count selections may need all four 1080p G-buffer inputs.
 // This remains subordinate to the capture-wide readback cap and present reserve.
 class MaterialSampledInputBudget {
@@ -27,7 +32,8 @@ private:
     std::uint64_t bytes{};
 };
 
-// At most two exact post-draw snapshots per requested capture. Configuration is
+// At most two selected draws per capture; their MRT snapshots share a fixed budget.
+// Configuration is
 // generic (shader hashes supplied by the diagnostic package), never a game workaround.
 class MaterialSnapshotSelection {
 public:

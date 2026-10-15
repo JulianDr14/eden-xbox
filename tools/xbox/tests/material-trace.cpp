@@ -7,6 +7,10 @@
 #include "video_core/renderer_d3d12/diagnostics/d3d12_material_trace.h"
 
 int main() {
+    for (std::uint32_t format = 0; format < 120; ++format) {
+        assert(D3D12::MaterialProbeRegionBytes(format) ==
+               (format == 2 ? 16 : format == 26 ? 4 : 0));
+    }
     D3D12::MaterialSampledInputBudget inputs;
     assert(!inputs.Fits(0));
     assert(!inputs.Fits(std::numeric_limits<std::uint64_t>::max()));
@@ -34,6 +38,11 @@ int main() {
     snapshots.Begin({7, 7});
     assert(snapshots.Consume(7) && !snapshots.Consume(7));
     assert(snapshots.AllowBytes(snapshots.MAX_BYTES));
+    // A selected draw's four 1080p MRTs fit; a fifth cannot exceed the shared cap.
+    snapshots.Begin({7, 0}, {2712, 0});
+    assert(snapshots.Consume(7, 2712));
+    for (int i = 0; i < 4; ++i) assert(snapshots.AllowBytes(screen_bytes));
+    assert(!snapshots.AllowBytes(screen_bytes));
     snapshots.Begin({0, 0});
     assert(!snapshots.Consume(0) && !snapshots.Consume(7));
     snapshots.Begin({7, 7}, {192, 7929});

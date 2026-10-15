@@ -227,34 +227,38 @@ void RasterizerD3D12::DumpMaterialShaderTarget(const GraphicsPipeline& pipeline,
                                              const Framebuffer& framebuffer, u32 vertices) {
     const u64 shader = pipeline.Key().unique_hashes[5];
     if (!material_snapshots.Consume(shader, vertices)) return;
-    // One exact post-draw snapshot per requested PS, never a readback on every matching draw.
-    // The first matching draw is explicit in the file name; it is NOT a completed pass/replay.
-    if (!(pipeline.BoundColorTargets() & 1) || framebuffer.ColorOnCopy(0)) return;
-    const Image* image = framebuffer.ColorImage(0);
-    if (!image || !image->Handle() || image->Handle()->GetDesc().SampleDesc.Count != 1) return;
-    try {
-        const auto base = framebuffer.ColorBase(0);
-        const u32 subresource = image->Subresource(base.level, base.layer);
-        const auto desc = image->Handle()->GetDesc();
-        ComPtr<ID3D12Device> capture_device;
-        ThrowIfFailed(image->Handle()->GetDevice(IID_PPV_ARGS(&capture_device)), "PS snapshot device");
-        UINT64 bytes{};
-        capture_device->GetCopyableFootprints(&desc, subresource, 1, 0, nullptr, nullptr, nullptr, &bytes);
-        if (!material_snapshots.AllowBytes(bytes)) {
-            LOG_WARNING(Render, "D3D12 material PS snapshot skipped: {} bytes exceeds remaining budget", bytes);
-            return;
+    // Capture the active MRTs of one exact selected draw, within the existing budget.
+    // Keeping all outputs avoids attributing a shading defect from RT0 alone.
+    for (u32 target = 0; target < 8; ++target) {
+        if (!(pipeline.BoundColorTargets() & (1U << target)) || framebuffer.ColorOnCopy(target))
+            continue;
+        const Image* image = framebuffer.ColorImage(target);
+        if (!image || !image->Handle() || image->Handle()->GetDesc().SampleDesc.Count != 1)
+            continue;
+        try {
+            const auto base = framebuffer.ColorBase(target);
+            const u32 subresource = image->Subresource(base.level, base.layer);
+            const auto desc = image->Handle()->GetDesc();
+            ComPtr<ID3D12Device> capture_device;
+            ThrowIfFailed(image->Handle()->GetDevice(IID_PPV_ARGS(&capture_device)), "PS snapshot device");
+            UINT64 bytes{};
+            capture_device->GetCopyableFootprints(&desc, subresource, 1, 0, nullptr, nullptr, nullptr, &bytes);
+            if (!material_snapshots.AllowBytes(bytes)) {
+                LOG_WARNING(Render, "D3D12 material PS snapshot RT{} skipped: {} bytes exceeds remaining budget", target, bytes);
+                continue;
+            }
+            const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "trace";
+            std::filesystem::create_directories(directory);
+            const std::string name = fmt::format("material_{}_{}_after_draw_{}_ps_{:016x}_rt{}",
+                material_capture_stamp, material_capture_id, trace_index - 1, shader, target);
+            const auto dumped = DumpTarget(*image, &name, subresource);
+            LOG_INFO(Render, "D3D12 material post-draw snapshot: draw={} PS={:016x} RT{} @{:x} mip={} layer={} "
+                             "bytes={} result={} (first matching draw, not complete pass)",
+                     trace_index - 1, shader, target, image->gpu_addr, base.level, base.layer, bytes,
+                     dumped ? name : "unsupported format");
+        } catch (const std::exception& e) {
+            LOG_WARNING(Render, "D3D12 material PS snapshot RT{} failed: {}", target, e.what());
         }
-        const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "trace";
-        std::filesystem::create_directories(directory);
-        const std::string name = fmt::format("material_{}_{}_after_draw_{}_ps_{:016x}_rt0",
-            material_capture_stamp, material_capture_id, trace_index - 1, shader);
-        const auto dumped = DumpTarget(*image, &name, subresource);
-        LOG_INFO(Render, "D3D12 material post-draw snapshot: draw={} PS={:016x} @{:x} mip={} layer={} "
-                         "bytes={} result={} (first matching draw, not complete pass)",
-                 trace_index - 1, shader, image->gpu_addr, base.level, base.layer, bytes,
-                 dumped ? name : "unsupported format");
-    } catch (const std::exception& e) {
-        LOG_WARNING(Render, "D3D12 material PS snapshot failed: {}", e.what());
     }
 }
 
@@ -1193,8 +1197,8 @@ bool RasterizerD3D12::QueueMaterialReadback(ID3D12Resource* resource, u32 subres
     UINT rows{};
     UINT64 row_bytes{};
     if (region) {
-        // Only the isolated float probe uses ROI copies; ordinary capture paths are unchanged.
-        if (subresource || format != DXGI_FORMAT_R32G32B32A32_FLOAT ||
+        // Probe ROIs allow float4 and packed float RGB, never compressed blocks.
+        if (subresource || !MaterialProbeRegionBytes(static_cast<u32>(format)) ||
             desc.DepthOrArraySize != 1 || desc.MipLevels != 1 ||
             region->left >= region->right || region->top >= region->bottom ||
             region->right > desc.Width || region->bottom > desc.Height ||
@@ -1278,31 +1282,74 @@ void RasterizerD3D12::ProbeMaterialIntermediates(const GraphicsPipeline& pipelin
 
     ComPtr<ID3D12Device> capture_device;
     ThrowIfFailed(image->Handle()->GetDevice(IID_PPV_ARGS(&capture_device)), "material GPU probe device");
+    const bool reflection = pipeline.Key().unique_hashes[1] == 0x55e0d63ec3a46b1fULL &&
+                            pipeline.Key().unique_hashes[5] == 0xba9295f0d82e7ae1ULL;
     const bool lowered = pipeline.LoweredNoPerspectiveMask() != 0;
-    if (lowered && pipeline.LoweredNoPerspectiveMask() != 3) {
+    if (!reflection && lowered && pipeline.LoweredNoPerspectiveMask() != 3) {
         throw std::runtime_error("material GPU probe: unsupported partial NoPerspective lowering");
     }
     std::vector<ComPtr<ID3D12PipelineState>> probes;
-    if (lowered) {
-        // The production VS already exports a*W. Recover a in the isolated PS;
-        // do not multiply it again in the .43 geometry controls.
-        probes = {pipeline.CreateMaterialProbePipeline(material_linear_varyings_ps),
-                  pipeline.CreateMaterialProbePipeline(material_linear_samples_ps)};
+    std::vector<std::string_view> names;
+    std::vector<std::string_view> channels;
+    if (reflection) {
+        names = {"reflection_direction_lod", "reflection_implicit", "reflection_level_zero",
+                 "reflection_ambient_lut", "reflection_gradient_x", "reflection_gradient_y"};
+        channels = {"reflection.xyz/LOD_unclamped", "cube.Sample.rgba", "cube.SampleLevel0.rgba",
+                    "Generic4.rgb/LUT.r", "ddx_fine(reflection).xyz/ddx_fine(LUTcoord)",
+                    "ddy_fine(reflection).xyz/ddy_fine(LUTcoord)"};
+        if (std::filesystem::exists(Common::FS::GetExeDirectory() / "material_reflection_original_cfg.flag")) {
+            names = {"reflection_cfg_cube", "reflection_cfg_lut_power", "reflection_cfg_direction",
+                     "reflection_cfg_material", "reflection_cfg_ambient", "reflection_cfg_scaled"};
+            channels = {"original CFG:cube.Sample.rgba", "original CFG:LUT.r/abs(cube.a)/log2/exp2(log2*4)",
+                        "original CFG:cube.direction.xyz/LUTcoord", "original CFG:mask.r/albedo.rgb",
+                        "original CFG:Generic4.rgb/material weight", "original CFG:scaled reflection.rgb/CB scalar"};
+        }
+        if (std::filesystem::exists(Common::FS::GetExeDirectory() / "material_reflection_branch_controls.flag")) {
+            names = {"reflection_branch_bypass_first", "reflection_branch_bypass_second", "reflection_branch_bypass_both",
+                     "reflection_branch_predicate_first", "reflection_branch_predicate_second", "reflection_branch_predicate_both"};
+            channels.assign(6, "diagnostic branch control:original final RT3.rgba to float4 RT0");
+        }
+        if (std::filesystem::exists(Common::FS::GetExeDirectory() / "material_reflection_6.dxil")) {
+            names.insert(names.end(), {"reflection_original_final", "reflection_original_r11"});
+            channels.insert(channels.end(), {"original CFG/math:RT3.rgba redirected to float4 RT0",
+                "same redirected DXIL:RT3.rgb to R11G11B10 RT0"});
+        }
+        for (size_t pass = 0; pass < names.size(); ++pass) {
+            // Private diagnostic sidecars are packaged locally, never embedded in production.
+            // Bounded, opt-in loading happens once per capture.
+            const auto path = Common::FS::GetExeDirectory() /
+                              fmt::format("material_reflection_{}.dxil", pass);
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file) throw std::runtime_error("material reflection probe: missing sidecar");
+            const auto bytes = file.tellg();
+            if (bytes < 32 || bytes > (1 << 20))
+                throw std::runtime_error("material reflection probe: invalid sidecar size");
+            std::vector<u8> code(static_cast<size_t>(bytes));
+            file.seekg(0);
+            file.read(reinterpret_cast<char*>(code.data()), static_cast<std::streamsize>(code.size()));
+            if (!file || std::memcmp(code.data(), "DXBC", 4) != 0)
+                throw std::runtime_error("material reflection probe: invalid DXIL container");
+            probes.push_back(pipeline.CreateMaterialProbePipeline(code, {}, true,
+                pass == 7 ? DXGI_FORMAT_R11G11B10_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT));
+        }
     } else {
-        probes = {pipeline.CreateMaterialProbePipeline(material_varyings_ps),
-                  pipeline.CreateMaterialProbePipeline(material_samples_ps),
-                  pipeline.CreateMaterialProbePipeline(material_varyings_ps, material_identity_gs),
-                  pipeline.CreateMaterialProbePipeline(material_linear_varyings_ps, material_linear_gs),
-                  pipeline.CreateMaterialProbePipeline(material_linear_samples_ps, material_linear_gs)};
+        names = {"varyings", "samples", "identity_varyings", "linear_varyings", "linear_samples"};
+        channels = {"Generic0.x/Generic0.y/Generic1.x/Generic1.y",
+            "depth.r/depth.g/mask(screenUV,LOD0)/mask(screenUV,LOD9)",
+            "identityGS:Generic0.x/Generic0.y/Generic1.x/Generic1.y",
+            "smooth(a*clipW)/SVPosition.w:Generic0.x/Generic0.y/Generic1.x/Generic1.y",
+            "smooth(a*clipW)/SVPosition.w:depth.r/depth.g/mask(screenUV,LOD0)/mask(screenUV,LOD9)"};
+        if (lowered) {
+            probes = {pipeline.CreateMaterialProbePipeline(material_linear_varyings_ps),
+                      pipeline.CreateMaterialProbePipeline(material_linear_samples_ps)};
+        } else {
+            probes = {pipeline.CreateMaterialProbePipeline(material_varyings_ps),
+                      pipeline.CreateMaterialProbePipeline(material_samples_ps),
+                      pipeline.CreateMaterialProbePipeline(material_varyings_ps, material_identity_gs),
+                      pipeline.CreateMaterialProbePipeline(material_linear_varyings_ps, material_linear_gs),
+                      pipeline.CreateMaterialProbePipeline(material_linear_samples_ps, material_linear_gs)};
+        }
     }
-    constexpr std::array names{"varyings", "samples", "identity_varyings", "linear_varyings",
-                               "linear_samples"};
-    constexpr std::array channels{
-        "Generic0.x/Generic0.y/Generic1.x/Generic1.y",
-        "depth.r/depth.g/mask(screenUV,LOD0)/mask(screenUV,LOD9)",
-        "identityGS:Generic0.x/Generic0.y/Generic1.x/Generic1.y",
-        "smooth(a*clipW)/SVPosition.w:Generic0.x/Generic0.y/Generic1.x/Generic1.y",
-        "smooth(a*clipW)/SVPosition.w:depth.r/depth.g/mask(screenUV,LOD0)/mask(screenUV,LOD9)"};
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     desc.Width = width; desc.Height = height;
@@ -1315,12 +1362,29 @@ void RasterizerD3D12::ProbeMaterialIntermediates(const GraphicsPipeline& pipelin
     ComPtr<ID3D12Resource> target;
     ThrowIfFailed(capture_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
         D3D12_RESOURCE_STATE_RENDER_TARGET, &clear, IID_PPV_ARGS(&target)), "material GPU probe RT");
-    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1};
+    ComPtr<ID3D12Resource> packed_target;
+    const bool compare_packed = reflection && probes.size() == 8;
+    if (compare_packed) {
+        auto packed_desc = desc;
+        packed_desc.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+        D3D12_CLEAR_VALUE packed_clear{}; packed_clear.Format = packed_desc.Format;
+        ThrowIfFailed(capture_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
+            &packed_desc, D3D12_RESOURCE_STATE_RENDER_TARGET, &packed_clear,
+            IID_PPV_ARGS(&packed_target)), "material packed probe RT");
+        scheduler.DeferRelease(packed_target);
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, compare_packed ? 2U : 1U};
     ComPtr<ID3D12DescriptorHeap> rtvs;
     ThrowIfFailed(capture_device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&rtvs)),
                   "material GPU probe RTV heap");
     const auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
     capture_device->CreateRenderTargetView(target.Get(), nullptr, rtv);
+    auto packed_rtv = rtv;
+    if (compare_packed) {
+        packed_rtv.ptr += capture_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        capture_device->CreateRenderTargetView(packed_target.Get(), nullptr, packed_rtv);
+    }
+
     // Lifetime covers the async recorder and GPU. No flush/wait and no live guest target writes.
     scheduler.DeferRelease(target); scheduler.DeferRelease(rtvs);
     for (const auto& probe : probes) scheduler.DeferRelease(probe);
@@ -1340,14 +1404,19 @@ void RasterizerD3D12::ProbeMaterialIntermediates(const GraphicsPipeline& pipelin
     const D3D12_BOX box{static_cast<UINT>(roi.left), static_cast<UINT>(roi.top), 0,
         static_cast<UINT>(roi.right), static_cast<UINT>(roi.bottom), 1};
     for (size_t pass = 0; pass < probes.size(); ++pass) {
-        if (pass) {
+        const bool packed = reflection && pass == 7;
+        auto* active_target = packed ? packed_target.Get() : target.Get();
+        const auto active_rtv = packed ? packed_rtv : rtv;
+        const auto active_format = packed ? DXGI_FORMAT_R11G11B10_FLOAT : desc.Format;
+        const std::array<float, 4> packed_clear{};
+        if (pass && !packed) {
             D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            barrier.Transition = {target.Get(), 0, D3D12_RESOURCE_STATE_COPY_SOURCE,
+            barrier.Transition = {active_target, 0, D3D12_RESOURCE_STATE_COPY_SOURCE,
                                   D3D12_RESOURCE_STATE_RENDER_TARGET};
             cmd->ResourceBarrier(1, &barrier);
         }
-        cmd->ClearRenderTargetView(rtv, clear.Color, 1, &roi);
-        cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        cmd->ClearRenderTargetView(active_rtv, packed ? packed_clear.data() : clear.Color, 1, &roi);
+        cmd->OMSetRenderTargets(1, &active_rtv, FALSE, nullptr);
         cmd->RSSetScissorRects(1, &roi);
         scheduler.SetPipelineState(probes[pass].Get());
         {
@@ -1361,13 +1430,13 @@ void RasterizerD3D12::ProbeMaterialIntermediates(const GraphicsPipeline& pipelin
             }
         }
         D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition = {target.Get(), 0, D3D12_RESOURCE_STATE_RENDER_TARGET,
+        barrier.Transition = {active_target, 0, D3D12_RESOURCE_STATE_RENDER_TARGET,
                               D3D12_RESOURCE_STATE_COPY_SOURCE};
         cmd->ResourceBarrier(1, &barrier);
         const auto name = fmt::format("material_{}_{}_draw_{}_gpu_{}_x{}_y{}",
             material_capture_stamp, material_capture_id, trace_index,
             names[pass], roi.left, roi.top);
-        const bool queued = QueueMaterialReadback(target.Get(), 0, desc.Format, name, &box);
+        const bool queued = QueueMaterialReadback(active_target, 0, active_format, name, &box);
         LOG_INFO(Render, "D3D12 material GPU probe: {} queued={} ROI={}x{} full={}x{} "
                         "VS={:016x} PS={:016x} pipeline={:016x} lowered_noperspective={:08x} channels={}",
             name, queued, roi.right - roi.left, roi.bottom - roi.top, width, height,

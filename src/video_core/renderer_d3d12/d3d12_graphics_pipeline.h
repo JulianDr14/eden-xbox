@@ -253,7 +253,9 @@ public:
 
     /// Opt-in isolated float output probe. Preserves linked VS, input layout and rasterization.
     ComPtr<ID3D12PipelineState> CreateMaterialProbePipeline(
-        std::span<const u8> pixel_shader, std::span<const u8> geometry_shader = {}) const;
+        std::span<const u8> pixel_shader, std::span<const u8> geometry_shader = {},
+        bool reflection_probe = false,
+        DXGI_FORMAT output_format = DXGI_FORMAT_R32G32B32A32_FLOAT) const;
 
     /// Port of Vulkan's ConfigureImpl: synchronizes and binds the guest's buffers and textures,
     /// writes the descriptor tables and transitions sampled and storage images. The render
