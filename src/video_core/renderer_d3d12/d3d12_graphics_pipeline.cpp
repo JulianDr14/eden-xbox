@@ -665,13 +665,28 @@ D3D12_GRAPHICS_PIPELINE_STATE_DESC GraphicsPipeline::Describe(
 }
 
 ComPtr<ID3D12PipelineState> GraphicsPipeline::CreateMaterialProbePipeline(
-    std::span<const u8> pixel_shader, std::span<const u8> geometry_shader) const {
-    // The authored diagnostic PS supports exactly two noperspective generic vectors.
-    // Reject side-effecting stages and depth/MSAA paths instead of silently approximating them.
-    if (!dxil || has_stage[1] || has_stage[2] || has_stage[3] ||
-        StageInfo(4).interpolation != 0xa || !StageInfo(0).stores.Generic(0) ||
-        !StageInfo(0).stores.Generic(1) || layout.NumResourceDescriptors() != 7 ||
-        layout.NumSamplerDescriptors() != 2) {
+    std::span<const u8> pixel_shader, std::span<const u8> geometry_shader,
+    bool reflection_probe, DXGI_FORMAT output_format) const {
+    // Private diagnostic sidecars have a fixed linked interface. Reject every other
+    // pipeline rather than applying a material-specific replacement to normal draws.
+    if (!dxil || has_stage[1] || has_stage[2] || has_stage[3]) {
+        throw std::runtime_error("material GPU probe: unsupported stages");
+    }
+    if (output_format != DXGI_FORMAT_R32G32B32A32_FLOAT &&
+        (!reflection_probe || output_format != DXGI_FORMAT_R11G11B10_FLOAT)) {
+        throw std::runtime_error("material GPU probe: unsupported output format");
+    }
+    if (reflection_probe) {
+        if (key.unique_hashes[1] != 0x55e0d63ec3a46b1fULL ||
+            key.unique_hashes[5] != 0xba9295f0d82e7ae1ULL || !geometry_shader.empty() ||
+            StageInfo(4).interpolation != 0x2000 ||
+            layout.NumResourceDescriptors() != 13 || layout.NumSamplerDescriptors() != 6 ||
+            (lower_noperspective_mask != 0 && lower_noperspective_mask != 0x40)) {
+            throw std::runtime_error("material reflection probe: unsupported linked interface");
+        }
+    } else if (StageInfo(4).interpolation != 0xa || !StageInfo(0).stores.Generic(0) ||
+               !StageInfo(0).stores.Generic(1) || layout.NumResourceDescriptors() != 7 ||
+               layout.NumSamplerDescriptors() != 2) {
         throw std::runtime_error("material GPU probe: unsupported shader interface");
     }
     for (const auto& info : stage_infos) {
@@ -681,20 +696,32 @@ ComPtr<ID3D12PipelineState> GraphicsPipeline::CreateMaterialProbePipeline(
         }
     }
     const auto& textures = StageInfo(4).texture_descriptors;
-    if (textures.size() != 2 || FirstTextureBinding(StageInfo(4), NumStageBindings(StageInfo(0))) != 5) {
+    const auto first_binding = FirstTextureBinding(StageInfo(4), NumStageBindings(StageInfo(0)));
+    if (textures.size() != (reflection_probe ? 5U : 2U) ||
+        first_binding != (reflection_probe ? 8U : 5U)) {
         throw std::runtime_error("material GPU probe: unsupported texture bindings");
     }
-    for (const auto& texture : textures) {
-        if (texture.type != Shader::TextureType::Color2D || texture.is_depth ||
-            texture.is_integer || texture.is_multisample || texture.count != 1) {
+    constexpr std::array reflection_types{Shader::TextureType::Color2D,
+        Shader::TextureType::Color2D, Shader::TextureType::ColorCube,
+        Shader::TextureType::Color1D, Shader::TextureType::Color2D};
+    for (size_t i = 0; i < textures.size(); ++i) {
+        const auto& texture = textures[i];
+        if (texture.type != (reflection_probe ? reflection_types[i] : Shader::TextureType::Color2D) ||
+            texture.is_depth || texture.is_integer || texture.is_multisample || texture.count != 1) {
             throw std::runtime_error("material GPU probe: unsupported texture type");
         }
     }
     std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
     auto desc = Describe(elements);
-    if (desc.DSVFormat != DXGI_FORMAT_UNKNOWN || desc.SampleDesc.Count != 1 ||
+    if ((!reflection_probe && desc.DSVFormat != DXGI_FORMAT_UNKNOWN) || desc.SampleDesc.Count != 1 ||
         desc.PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE) {
         throw std::runtime_error("material GPU probe: depth/MSAA/topology unsupported");
+    }
+    // Isolated probe does not attach or modify the guest depth/stencil surface.
+    if (reflection_probe) {
+        desc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        desc.DepthStencilState.DepthEnable = FALSE;
+        desc.DepthStencilState.StencilEnable = FALSE;
     }
     desc.PS = {pixel_shader.data(), pixel_shader.size()};
     if (!geometry_shader.empty()) {
@@ -702,7 +729,7 @@ ComPtr<ID3D12PipelineState> GraphicsPipeline::CreateMaterialProbePipeline(
     }
     desc.NumRenderTargets = 1;
     std::fill(std::begin(desc.RTVFormats), std::end(desc.RTVFormats), DXGI_FORMAT_UNKNOWN);
-    desc.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.RTVFormats[0] = output_format;
     desc.BlendState = {};
     desc.BlendState.RenderTarget[0] = {
         .SrcBlend = D3D12_BLEND_ONE, .DestBlend = D3D12_BLEND_ZERO,
