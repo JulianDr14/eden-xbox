@@ -111,7 +111,7 @@ private:
     /// While pipelines build (VideoCore::ShaderNotify), a small panel in the bottom-right corner
     /// of back buffer rtv (in RENDER_TARGET state): three dots that cycle and the shader count.
     void DrawShaderIndicator(CommandStream* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
-    /// Cached performance panel; samples process CPU and completed queue timestamps at 2 Hz.
+    /// Cached performance panel; CPU/queue at 2 Hz, resident process RAM at most 1 Hz.
     void DrawPerformanceOverlay(CommandStream* cmd,
                                 D3D12_CPU_DESCRIPTOR_HANDLE rtv);
     void DrawTraceIndicator(CommandStream* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv);
@@ -228,6 +228,8 @@ private:
     std::chrono::steady_clock::time_point last_load_present{};
     struct PerformanceOverlay {
         std::chrono::steady_clock::time_point sample_time{};
+        std::chrono::steady_clock::time_point memory_sample_time{};
+        std::string memory_line;
         u64 cpu_ticks{};
         u64 gpu_us{};
         u32 frames{};
