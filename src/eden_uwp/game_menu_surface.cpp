@@ -152,7 +152,7 @@ struct GameMenuSurface::Impl : UiPainter {
         float x = L::Margin;
         x += Prompt(L"A", ButtonColor::A, I18n::Tr(Text::ToggleCheat), x, L::Footer);
         x += Prompt(L"X", ButtonColor::X, I18n::Tr(Text::AllCheats), x, L::Footer);
-        if (Cheats::CheatTabs(view.session.Catalog()).size() > 1)
+        if (Cheats::CheatTabCount(view.session.Catalog()) > 1)
             x += Prompt(L"LB", ButtonColor::Neutral, I18n::Tr(Text::Category), x, L::Footer);
         x += Prompt(L"Y", ButtonColor::Y, I18n::Tr(Text::Refresh), x, L::Footer);
         Prompt(L"B", ButtonColor::B, I18n::Tr(Text::Back), x, L::Footer);
