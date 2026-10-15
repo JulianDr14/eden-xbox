@@ -132,6 +132,13 @@ de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
   simple (por ejemplo, el present por CPU).
 
 ## Ciclo de prueba
+Entrega única (preferencia explícita del usuario, 14 oct 2026): todos los paquetes
+UWP se preparan en `build-uwp/package/`; el instalador vigente es
+`build-uwp/package/eden-xbox.appx`. No crear carpetas `package-*` ni otra carpeta
+de entrega por compilación. Los objetos siguen en el build incremental, los
+símbolos en `symbols/<versión>` y las evidencias en `test-results/`. Antes de
+reemplazar el layout, comprobar que ninguna instancia PC lo esté utilizando.
+
 1. **Compilar** (ver `docs/xbox/xbox_internal.md`):
    `tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp`.
    Para cazar errores rápido, compila objetos sueltos con `ninja -C build-uwp <ruta>.cpp.obj`.
@@ -964,3 +971,42 @@ Sin commit/push. Evidencia y límites en docs/xbox/xbox_sm3dw_lighting.md.
 Confirmación posterior .44: usuario indica resultado visual positivo en Series
 («perfecto era eso»). Sin nuevos logs ni desglose de tubos/distancias/otros
 escenarios o benchmark; conservar esas limitaciones al informar del cierre.
+
+14oct tubos .48/.49: lecturaDownloads.48 identifica diferencia en salidaoriginal
+FLOAT32 antes deR11 (330/1618píxeles interiores), causa exacta aún pendiente.
+.49 diagnóstica lista en build-uwp/package/eden-xbox.appx: seis sondas delCFG
+original, controles finales float/R11 y corrección dewhitelistROI diagnóstica.
+IncrementalUWP,regresiones,replayGPU PC,728BlockMapSHA/CMS verificados; no parche
+visual ni rendimiento declarado. Una capturaSeries porView+Menu enmismo tubo
+aportaSSA originales faltantes. BC/.44 intactos,sincommit/push. Verlighting.
+
+14oct tubos .49/.50: primera diferenciaobservada enmuestreo implícito, coordenadas
+cubemap/ambiente/albedo/LUT exactosPC-Series. Ajustecontroladomips reproduce332/332
+píxelesafectados aLODmásgruesoSeries. .50 diagnósticaenpackage pruebaexclusivamente
+ramas/discard/retornos,6controlesGPU PCfullROIexactos. Build/tests/firma/verificación
+729blocks correctos; una tomaSeries pendiente. Causa delLOD incorrecto aúnporprobar,
+no parcheproducción ni cambiosBC/.44. Detalles enlighting,sincommit/push.
+
+14oct.50: seiscontrolesCFG sonbyteidénticosPC-Series; originalmantiene330píxeles
+incorrectos. ActivarDemotenativo descartado como solución: shaderrealregenerado
+produceexactamente mismoDXIL; cambiodeprofile revertido. Harnesssintético público
+paraSPIRV/link/derivadas. Falta canonicalizacióngenérica segura deretornosdescarte;
+no cambiar guardamúltiplesEpilogues a ciegas. No otra captura para repetirprueba,
+APPXvigente.50,ningúnfixproducción declarado. Verlighting,sincommit/push.
+
+14oct.51: corrección genéricaD3D12 DemoteReturnPass para brazos terminales de
+fragmentosdescartados, reconvergenciahelpers conservandolecturasLODimplícitas.
+Guardaexcluyeloops/Phi/subgrupos/efectoslaterales/memoria; otrosbackendsintactos.
+64regresionesrecursivas ySPIRV/DXIL pasan; GPUoracle7200visibles/7104descartados,
+96vecinos descartados/error≤2,60e-7. PasealIRrealtransforma2retornos,replay4MRT
+completosbyteidénticosPCcontrol/original/fixed. Incremental/firma719blocksCMS
+correctos,APPX.51enpackage,símbolosarchivados; sondasviejasdesactivadas. Seriesvisual
+ambostubos/otrosescenarios/rendimiento pendientes; ningúnFPS/costecero declarado.
+BC/.44intactos,sincommit/push. Diseño/fuentes ypruebasenlighting.
+
+CIERRE14oct2026: usuario confirma todos los tubos correctos enSeries.51; log
+aplica2retornos y replay1618/1618palabras exactas porcada4MRT, incluidoRT3.
+Iluminación.44+tubos.51 cerrados. Release0.2.88.0 enpackage (única entrega),
+biblioteca sinpreselección, sondas/dumps/capturemenu/debug desactivados; memoria5120,
+fastmem0,prewarm1 conservados. Símbolos0.2.88.0, verificaciónartefacto fuerarepo.
+Commits pequeños solicitados,sinpush niatribuciónIA. Historiacausal enlighting.
