@@ -25,6 +25,7 @@
 #include "eden_uwp/uwp_input.h"
 #include "eden_uwp/localization.h"
 #include "eden_uwp/uwp_controllers.h"
+#include "eden_uwp/controller_catalog.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
 #include "input_common/drivers/virtual_gamepad.h"
@@ -573,17 +574,21 @@ void GamepadInput::Run(std::stop_token stop) {
     bool menu_consumed_left_stick = false;
     bool menu_consumed_right_stick = false;
     std::vector<bool> announced(script.size());
-    u32 polls = 0;
+    ControllerCatalog<ControllerDevice> controllers;
     while (!stop.stop_requested()) {
         // The gamepad list is cheap to query but changes rarely: look again twice a second.
         const ControllerOptions current_options = Options();
-        if (controller_api_ready && polls++ % 125 == 0) {
+        if (controller_api_ready) {
             try {
-                const auto devices = EnumerateControllers();
-                const std::wstring had_id = pad ? pad->id : std::wstring{};
-                const auto selected = SelectController(devices, current_options.controller_id);
-                pad = selected ? std::optional<ControllerDevice>{devices[*selected]} : std::nullopt;
-                if ((pad ? pad->id : std::wstring{}) != had_id) {
+                const bool catalog_changed = controllers.Update(std::chrono::steady_clock::now(),
+                                   EnumerateControllers, SameControllerList);
+                const auto& devices = controllers.Devices();
+                const auto selected = controllers.Select(current_options.controller_id);
+                const bool selection_changed = bool(pad) != bool(selected) ||
+                    (pad && selected && pad->id != selected->id);
+                if (catalog_changed || selection_changed)
+                    pad = selected ? std::optional<ControllerDevice>{*selected} : std::nullopt;
+                if (selection_changed) {
                     if (pad) {
                         LOG_INFO(Input, "UWP input: player 1 is {} ({}, {} layout, {} connected)",
                                  winrt::to_string(pad->name),
@@ -606,6 +611,7 @@ void GamepadInput::Run(std::stop_token stop) {
             try {
                 state = ReadGamepad(*pad, current_options);
             } catch (...) {
+                controllers.ReadFailed();
                 pad.reset();
             }
         }

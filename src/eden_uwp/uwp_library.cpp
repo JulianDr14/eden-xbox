@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eden_uwp/uwp_library.h"
 #include "eden_uwp/stick_navigation.h"
+#include "eden_uwp/controller_catalog.h"
 #include "eden_uwp/uwp_library_canvas.h"
 #include "eden_uwp/uwp_rom_storage.h"
 #include "eden_uwp/storage_path.h"
@@ -473,7 +474,7 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
     StickNavigation stick_navigation;
     unsigned navigation_context = 0;
     std::optional<ControllerDevice> pad;
-    auto next_pad_check = std::chrono::steady_clock::now();
+    ControllerCatalog<ControllerDevice> controllers;
     while (true) {
         window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
         const auto now = std::chrono::steady_clock::now();
@@ -492,27 +493,28 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
         if (panel.keyboard.capturing && now >= capture_until) {
             panel.keyboard.capturing = false; dirty = true;
         }
-        if (now >= next_pad_check) {
+        const bool catalog_changed = controllers.Update(now, [] {
             RefreshProControllers();
-            auto devices = EnumerateControllers();
-            if (!SameControllerList(panel.devices, devices)) {
-                panel.devices = std::move(devices);
-                panel.choice = std::min(panel.choice, panel.devices.size() + 1);
-                // An open list must not apply a stale row after hotplug/reorder.
-                if (panel.expanded) {
-                    panel.expanded = false;
-                    actions &= ~Play;
-                }
-                dirty = true;
+            return EnumerateControllers();
+        }, SameControllerList);
+        if (catalog_changed) {
+            panel.devices = controllers.Devices();
+            panel.choice = std::min(panel.choice, panel.devices.size() + 1);
+            // An open list must not apply a stale row after hotplug/reorder.
+            if (panel.expanded) {
+                panel.expanded = false;
+                actions &= ~Play;
             }
-            const auto index = SelectController(panel.devices, options.controller_id);
-            const auto next = index ? std::optional<ControllerDevice>{panel.devices[*index]} : std::nullopt;
-            if (!pad || !next || pad->id != next->id) {
-                previous = {}; stick_navigation.Reset();
-            }
-            pad = next;
-            next_pad_check = now + std::chrono::milliseconds{500};
+            dirty = true;
         }
+        // Selection follows settings immediately; discovery remains rate limited.
+        const auto next = controllers.Select(options.controller_id);
+        if (bool(pad) != bool(next) || (pad && next &&
+            (pad->id != next->id || pad->pad != next->pad || pad->pro != next->pro))) {
+            previous = {}; stick_navigation.Reset();
+        }
+        if (catalog_changed || !pad || !next || pad->id != next->id)
+            pad = next ? std::optional<ControllerDevice>{*next} : std::nullopt;
         const unsigned context = game_options.open ? (cheat_session ? 8 : mod_session ? 9 : 7) :
             system_page.name_editor ? 6 : system_page.open ? 5 :
             panel.keyboard.open ? 3 : panel.expanded ? 2 : settings ? 1 : configuration.open ? 4 : 0;
@@ -592,7 +594,10 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                         if (hit(GamepadButtons::RightShoulder)) actions |= NextTab;
                     }
                 }
-            } catch (...) { pad.reset(); previous = {}; stick_navigation.Reset(); }
+            } catch (...) {
+                controllers.ReadFailed();
+                pad.reset(); previous = {}; stick_navigation.Reset();
+            }
         }
         if (window_closed || QuitRequested()) return std::nullopt;
         if (finish_name_editor) {
@@ -1117,7 +1122,6 @@ std::optional<std::string> ShowGameLibrary(void* core_window, unsigned width, un
                             std::wstring{KeyboardControllerId} : panel.devices[panel.choice - 2].id;
                         device_changed = true;
                         panel.expanded = false;
-                        next_pad_check = now;
                     }
                     dirty = true;
                 }
