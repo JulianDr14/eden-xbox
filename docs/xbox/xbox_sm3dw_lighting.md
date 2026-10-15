@@ -2316,3 +2316,221 @@ no aplicar la hipótesis y pasar a gradientes de las muestras originales. Manten
 controloriginal6/7 y umbralCB exacto. No declarar tubos corregidos ni hardware
 validado con datosPC. Sincommit/push.
 
+### Lectura .50: dependencia causal del CFG; demote nativo descartado como solución
+
+Descargas14oct16:51–16:52: SeriesS/SraKmd_arden, APPX.50, prefijo
+material_1792014658685033_1. Datos privados en series50-map/current. Ocho sondas
+exportadas;9238píxelesfinitos/23530sentinela/0NaN/cobertura consistente.472draws y
+944tiles completos, sin omisiones en los selectores. Los tres dumpsfinales decolor/
+aux/depth siguen fuera porcap64MiB; no faltan las sondas ni entradas seleccionadas.
+NoRenderError/Critical observado. Diag contiene una entrada previa de biblioteca
+cerrada porusuario yotra ejecución; no confundirlas ni afirmar cierre gameplayQ.
+
+Se verificaron las seis direccionesSRV actuales frente almapa antes de aceptar el
+replay, yCB9 byte20=1. Se ejecutaron ochoPSOs enGPU PC con los inputs actuales.
+Los seis controles tienen **bufferFLOAT32 completo byteidéntico PC/Series**:
+
+| Control | Comparación completa | Interiores exactos |
+|---|---|---|
+| Bypass primera rama | Igual524288bytes |1618/1618 |
+| Bypass segunda rama | Igual524288bytes |1618/1618 |
+| Bypass ambas | Igual524288bytes |1618/1618 |
+| Descarte predicado primero | Igual524288bytes |1618/1618 |
+| Descarte predicado segundo | Igual524288bytes |1618/1618 |
+| Descarte predicado ambos | Igual524288bytes |1618/1618 |
+| Shaderoriginal finalFLOAT32 | Distinto |1288/1618;330errores>1e-5,max0,10131669 |
+
+Esto demuestra que las perturbaciones de ramas eliminan la diferencia sin cambiar
+muestras, recursos, aritmética, blending o coordenadas del shader derivado.
+No identifica una rama como causa única: modificar cualquiera de las dos corrige,
+y cambiar CFG también cambia optimización/asignación de registros del driver.
+Por tanto no declarar todavía una instrucción ISA ovalor dehelper culpable.
+La anomalía deLOD está confirmada como dependiente del CFG de descarte/retorno.
+Los controlesbypass no son parches producción; solo válidos concondicionesfalse.
+Predicación conserva descarte pero cambia ejecución dehelpers/continuación.
+
+**Comprobación adicional antes de tocar producción:** se añadió demote-helper.cpp
+con fixtureIRcondicional, cálculoDPdxFine/DPdyFine posterior, variantesfallbackKill
+yDemote nativo. Emite conbackendreal, validaSPIRV ycompila/enlaza/firmaDXIL con
+ShaderCompiler/Mesa deproducción. Ambas variantes son válidas, pero generan DXIL
+byteidéntico. La primera prueba detectó un flaguses_derivatives faltante en el
+fixture; se corrigió elfixture, no elrenderer. No usarbuildfallido comoresultado.
+Runner público run-demote-helper.ps1 permite repetir sin datosguest; compila solo
+el harness/link, requiere libsconfiguradas y SPIRV-Tools instalados.
+
+Se comprobó también el shaderreal: copia privada de suSPIRV sustituye exactamente
+los dos patronesfallback deOpKill porDemote+continuación (cap/extension añadidos),
+sin tocar retornosguest. CompilePipeline acepta yfirma elresultado. El DXIL PS es
+**byteidéntico aloriginal descargado**: ambosSHA256
+1e20373c25d630077557941a2e172e03407d8c39e2e324ea691899f8f1d7c3f1.
+Así se descarta activar support_demote_to_helper_invocation=true como solución
+por sí sola. Cambio provisional revertido; d3d12_pipeline_cache.cpp no tiene
+modificación neta yelAPPX vigente sigue.50. No se publica una .51 idéntica comofix.
+
+Corrección de una hipótesis anterior: no basta atribuir estos retornos al lowering
+Mesa deOpKill. El IRcapturado ya contiene DemoteToHelperInvocation seguido de
+outputs cero/Epilogue/salida anticipada. host_info.needs_demote_reorder ya estrue
+enD3D12; DemoteCombinationPass aborta con más de unEpilogue y no resuelve esteCFG.
+Los retornos permanecen incluso conDemote nativo, como demuestra el DXIL idéntico.
+No cambiar indiscriminadamente la guarda de múltiples retornos: puede moverefectos
+laterales oalterar sombras/transparencias enotros shaders.
+
+El trabajo restante es una canonicalización segura del CFG/retornos terminales de
+descarte, o una representación equivalente que preservehelpers yefectos laterales,
+con regresiones de múltiples retornos y muestras derivadas. Los controles ya
+conservados son referenciaSeries positiva para esa transformación; **no hace falta
+repetir otra toma para volver a demostrar la dependencia de ramas**. Una corrección
+genérica nueva sí necesitará gateSeries de supropioDXIL yvalidaciónvisual deambos
+materiales. No se ha implementado aún un parcheproducción seguro ni se declara
+resuelto el tubo transparente. Sincommit/push, BC/.44 intactos. Datos ycomparación
+cuantitativa en exact-comparison.json, native-demote/ps.dxil ylos logs privados.
+
+### .51: canonicalización conservadora de retornos de fragmentos descartados
+
+Solicitud14oct: investigar fuentes, implementar una solución modular y optimizada,
+con pruebas recursivas. Se consultaron fuentes primarias:
+
+- [Microsoft discard](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-discard):
+  el descarte no equivale a terminar toda ejecución; pueden continuar instrucciones.
+- [SPIR-V OpDemoteToHelperInvocation](https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.pdf):
+  se suprimen escrituras/outputs, pero la invocación puede necesitar continuar para
+  derivadas; terminar helpers no debe invalidar esos cálculos ni crear divergencia.
+- [Khronos demote extension](https://docs.vulkan.org/glslext/latest/glslext/ext/GLSL_EXT_demote_to_helper_invocation.html):
+  participación de helpers en derivadas y diferencias frente a terminación.
+- [Código Mesa: nir_lower_discard_to_demote](https://chromium.googlesource.com/chromiumos/third_party/mesa/+/refs/heads/stabilize-13982.70.B-chromeos-amd/src/compiler/nir/nir_lower_discard_to_demote.c):
+  advierte que transformar descartes globalmente puede alterar subgrupos y bucles.
+- [Mesa, instrucciones de textura](https://docs.mesa3d.org/nir/tex.html): restricciones
+  de control de flujo de operaciones que calculan derivadas implícitas.
+
+Estas fuentes no documentan un erratum concreto de Series. Su semántica orienta
+la transformación; la evidencia causal específica sigue siendo .49/.50. No se
+promete coste cero ni mejoraFPS sin medir hardware.
+
+**Implementación:** DemoteReturnPass, llamado solo por el backendD3D12 justo antes
+deEmitSPIRV, después deConvertLegacyToGeneric. Reconoce un brazoIf terminal donde
+hayDemoteToHelperInvocation, luego soloIdentity/Void/escrituras de salidas/Epilogue,
+y finalmenteReturn antes delEndIf ysu bloque de unión. Elimina esas escrituras ya
+inobservables (el fragmento está descartado) yelReturn; conecta el bloque terminal
+almerge. Las operaciones posteriores se ejecutan comohelpers, con su rasterización
+ y escrituras suprimidas. Conserva la condición de descarte, todos los cálculos y
+samplers: no fuerzaLOD, no cambia normales/colores/blending/depth.
+
+D3D12 anuncia soporte deDemote nativo al emisor para que esta continuación no vuelva
+a abortarse medianteOpKill. **No basta esa opción por sí sola**, como ya probó.50;
+la novedad es la canonicalización de sus retornos. Mesa/DLL no se modifican ni
+recompilan. No hay hashes/títulos de juegos enla corrección. Shader hash enlog
+solo identifica compilaciones seleccionadas previamente para diagnóstico.
+
+Guardas conservadoras: solofragment, usaDemote y derivadas o muestreo implícito;
+rechaza programas conloops/repeat/break/unreachable, Phi/PhiMove, subgrupos/quadops,
+memoriaglobal/local/shared, SSBO/images o efectos laterales distintos de salidas/
+prologue/references/demote. Rechaza brazos anidados o conoperaciones adicionales;
+puede reconocer un brazo terminal simple ubicado dentro deIf exteriores anidados.
+Los retornos ordinarios ylos casos no reconocidos permanecen. No se quitó la guarda
+original deDemoteCombinationPass para múltiplesEpilogue.
+
+El pase es de emisión: actualiza AST yel nuevo arcoCFG; no se ejecutan pasesSSA
+posteriores yrechaza phis envez de inventar operandos. Usa pilas/vector locales,
+recorrido iterativo ycompactación estable: no recursiónC++ por profundidadguest.
+Es idempotente ysin estado compartido entreworkers. CosteO(instrucciones+AST) por
+compilación deun shadercandidato; shaderssinDemote salenO(1). **Nada por draw/frame**,
+ninguna textura/buffer/readback ni memoriaGPU adicional. La caché enlazada incluye
+los nuevos wordsSPIRV, así que no confunde nuevoDXIL conel anterior; cachédisk
+conserva entornosguest ylos vuelve a compilar, sin borrar datosdelusuario.
+
+La prueba necesaria para adoptar elpase no se limita alfixture:
+
+1. BuildUWP incremental correcto: nuevoobjeto delpase ypipeline_cache, librerías/
+   link; pasadafinal decompactación4operaciones. No buildcompleto ni descargaMesa.
+2. **64casos** enrun-demote-helper.ps1 -Fixture demote-return: secuencias de1..4
+   brazos terminales yIf exteriores anidados0..12niveles; validaciónSPIRV1.1 y
+   compilaciónDXIL firmada, idempotencia. Exclusiones: retorno sinDemote, memoria,
+   loops, Phi, quad/shuffle, Barrier, estadioincorrecto, ASTmalformado ysin derivadas.
+3. OráculoGPU demote-return-gpu.py usando elrunnerD3D12 existente: adapterPC
+   **AMD Radeon Pro5300M**, debuglimpio.7200píxelesvisibles y7104descartados
+   contrastados;96visibles compartenquad convecino descartado. Error máximo
+   respecto a derivada analítica2,60e-7; todoslosdescartados conservan sentinela.
+   No esuna pruebaSeries ni reproducción deldefectoPC.
+4. Cargadorprivado reconstruye el IRtipado conservado yla estructura dedosbrazos
+   terminales que muestranIR/SPIRVoriginales (no un reproductorgeneral). Control
+   usa los flags/bindingsD3D12 relevantes; aplica el MISMO paseC++producción al
+   programa real: **exactamente dos retornos transformados**. Ambas variantes
+   emiten/enlazan/firman con ShaderCompiler/Mesa real.
+5. ReplayGPU conVB/IB/CB/SRV/samplers exactos .50: controlreemitido yoriginalcapturado
+   producen **los cuatroMRT completos byteidénticos**; variantecorregida ycontrol
+   también **byteidénticos en los cuatroMRT completos**, incluyendo1618/1618
+   interiores cadauno. Debug0warnings/errors enlosreplaysoriginales. No soloROI ni
+   toleranciaaproximada. native-differential.json privado conserva comparación.
+6. DXILcorregido inspeccionado: cadadescarte vuelve a unmerge antes delas muestras;
+   cálculo de coordenadas ymuestras queda después de lareconvergencia, sinlosdos
+   escapesanteriores. PSlocal5885→5693bytes(-192,3,26%): tamaño bytecode medido,
+   **no medida deISA, registros, tiempos decompilación oFPS**.
+7. Siguen pasando dxil-probe, dxil-branches, material-reflections ydiffcheck.
+
+Trampas encontradas: harnessSPIRVsyntético necesitauses_derivatives para declarar
+DerivativeControl; lectorprivado debe crearInst yponerargumentos antes deemitir,
+no invocarPrependNewInst conlista vacía paraopconargumentos. El primercontrolprivado
+omitía unified_descriptor_binding/floatcontrolsD3D12: se corrigió antes deaceptar
+sus resultados. Tras corregirlo, se exigenMRTcompletos idénticos; no sevalidan los
+replaysconbindingsdistintos. AccesoAppx/VCLibs desdePowerShell7 necesitaPS5 separado,
+comoelrunnerpúblico. Datos/shadersguest yLLVM derivados permanecenignorados.
+
+**Archivos deproducción:** ir_opt/demote_return_pass.{h,cpp} contiene el algoritmo;
+shader_recompiler/CMakeLists registraelobjeto; d3d12_pipeline_cache.cpp habilita
+Demote nativo yllama elpase. Log acotado a shaderdumpseleccionado imprime
+`D3D12 helper-preserving discard: PS=... terminal_returns=... (compile-time)`.
+Pruebas públicas: demote-return.cpp, demote-return-gpu.py, runnerdemote-helper
+ampliado. Pruebashelperanteriores conservadas. Documentación/manifestactualizados.
+
+**Compatibilidad/rendimiento:** otrosbackends no invocanelpase. Shaders conUAV,
+subgrupos, loops oPhi conservanruta anterior; no seafirma corregirlos. No haycosteCPU
+porframe ni recursosGPU nuevos. Losfragmentosdescartados pueden realizartrabajo
+adicional dehelper para derivadas; depende deoptimización deldriver ydensidad de
+bordes/descartes, porlo que nocertificar costecero ni másFPS. Losfragmentosvivos
+conservan cálculos ymuestras. Menosoutputs/phis retornados podría reducir presión,
+pero no se midióISA/registros. Transparente puede usardistintoPS: comprobarlo en
+consola antesdeatribuirle estacorrección. BC/.44, memoria5120 yestados intactos.
+
+**Entrega.51:** build-uwp/package/eden-xbox.appx,14.844.907bytes,
+SHA2569c8e6dd416687e71800c1c56910f120664e208babdef64e1ab75e26099a4ec4b.
+EXE2e65aa49d1f4b4ad72316ab37bba45773a8570040c81628c3b42dde618c1b9c3;
+PDB636615f49a33ffca054c5e355d4be2ac8a05addbac0aaa84b600181d52f1317c.
+Símbolosarchivados,ZIPmanifest/config/EXE/719BlockMapSHA256/firmaCMS correctos.
+Sin lossidecarsprivados viejos, material_gpu_probe=0 (ocho pases scratchdesactivados);
+menú por mando, snapshotPS/count ydumps delshaderreal siguenhabilitados. No confundir
+controles.50 antiguoscon elshaderproducción corregido. No haycarpetanueva deentrega.
+
+**GateSeries pendiente:** instalar.51, comprobar paredverde ytubotransparente,
+variar cámara ydistancia yrealizaruna captura porView+Menu→Capturargráficosycontinuar
+→A; esperar10s, exportarlog/trace/diag aDescargas. Esa captura verificará elDXIL
+nuevo, elcontador de2retornos enPSba ysuMRT3 frente alreplay exactoPC. Esvalidación
+ deuna corrección nueva, no repetirla prueba decausalidad. .51 estácompilada y
+verificada técnicamente, **el resultadovisual enSeries aún no está certificado**.
+También pendientes otrosescenarios conalpha-testing/transparencias ymediciónFPS/
+memoria/compilación manualprolongada. Sincommit/push.
+
+### Cierre en Series y Release 0.2.88.0 — 14 octubre 2026
+
+El usuario confirma que todos los tubos, opacos y transparentes, se ven correctos
+en .51 y solicita cerrar la incidencia. Los nuevos logs de Descargas corresponden
+a .51/SraKmd_arden: PSba registra terminal_returns=2 en las compilaciones afectadas.
+Captura material_1792016944492521_1 archivada en series51-map/current;384draws
+completos sin omisiones. No Error/Critical de Render observado. El diag conservado
+no contiene cierre gameplayQ; no se inventa un retorno de ejecución.
+
+Replay del DXIL nuevo con entradas exactas de esa captura: los1618píxeles interiores
+coinciden palabra por palabra con Series en RT0,RT1,RT2 yRT3; máximoRGB0 en todos.
+Antes RT3 mantenía329–330 discrepancias. Evidencia closure-comparison.json privada.
+Esto valida técnicamente la pared opaca investigada; la validación de todos los
+tubos transparentes corresponde a la observación visual explícita del usuario.
+Iluminación .44 y tubos .51 quedan cerrados, sin atribuir automáticamente a ambos
+materiales el mismo shader. La corrección BC y la interpolación .44 se conservan.
+
+Release solicitada: versión APPX0.2.88.0, build UWP x64 Release (/O2,/DNDEBUG).
+Entrega única build-uwp/package/eden-xbox.appx, símbolos symbols/0.2.88.0.
+Biblioteca habilitada; sin game=preseleccionado, dumps de shaders, hashes selectores,
+sondas GPU, menú de captura ni capa debug. Conserva memoria5120, fastmem0 yprewarm1.
+La verificación de manifiesto/EXE/BlockMap/CMS y hashes se guarda fuera delrepo en
+package/verification.json. Los diagnósticos siguen disponibles opt-in en fuente.
+No se afirma mejoraFPS medida ni certificación universal de otros juegos/shaders.
+Cambios divididos en commits temáticos, identidad del usuario, sin push.
