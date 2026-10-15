@@ -1856,3 +1856,264 @@ El paquete .46 verificado se trasladó sin alterar sus bytes a
 Símbolos y evidencia causal permanecen en sus archivos originales. No repetir
 rutas históricas al indicar el instalador al usuario.
 
+### Series .46: diferencia RT3 reproducida con los mismos inputs en PC
+
+Descargas14octporlatarde contiene .46 y también exportaciones .45 antiguas: no
+mezclarlas. Archivo completo en `build-uwp/test-results/sm3dw-lighting-2026-10-14/
+series46-map`; subconjunto `current/` filtrado por prefijo obtenido del LOG actual,
+`material_1792007635931153_1`. Son80exports nativos actuales con tamaños exactos
+fila/bloque,721archivos de traza,236draws/472tiles completos sin omisiones.
+Los cuatro snapshots postdraw44 se exportaron correctamente. .45 permanece en el
+archivo original y no se contó como captura .46. Retorno10 tras volver a biblioteca,
+shutdown completo; sin RenderError/Critical. No es un crash ni prueba de fidelidad.
+
+RT3 justo después de draw44 contiene ya las barras verdes del tubo. El recorte
+`current/wall-rt3.png` y final muestran la misma distribución. El VB/IB/CB exacto,
+seis recursos (incluido LUT5a9594000), caras/mips y DXIL VS55/PSba están conservados.
+La proyección actual vuelve a localizar la misma pared (526v/904triángulos,
+x1480,94–1594,80 y354,99–485,08).
+
+Se construyó un harness D3D12 nativo privado (replay-wall.cpp + build-replay.cmd)
+que ejecuta **DXIL de producción descargado de consola**, no una versión HLSL del
+shader: mismos VB24/IB16/CB, bindings0–12, cubemaps con seis caras/todos sus mipmaps,
+SRVs/formats/swizzles/samplers de la traza, cuatro formatosMRT, viewport/scissor,
+cullCCW, depthLEQUAL/write. Selecciona el shader por key003571e9b310fb88. Su DSV
+local esD32_FLOAT con stencil desactivado (la captura usaD32_FLOAT_S8X24);
+solo se compara la región cubierta y comprobada, no se afirma replay completo de
+stencil/escena/hardware. Hay dosCBV auxiliares cero en espacios30/31. El código y
+assets permanecen ignorados, fuera del repositorio. No se modificó producción.
+
+**Resultado sobre1618píxeles interiores del cuerpo frontal**:
+
+|Salida|Palabras nativas idénticas PC/Series|Error máximo RGB|
+|---|---:|---:|
+|RT0 RGBA8 base|1618/1618|0|
+|RT1 RGB10 normales|1618/1618|0|
+|RT2 RG16 profundidad|1618/1618|0|
+|RT3 R11G11B10 ambiente/reflejos|1289/1618|0,1015625|
+
+El replayPC no tiene las barras (native-replay/crop.png); la salidaSeries sí.
+Por primera vez la comparación de este material usa inputs idénticos, sin exigir
+que el usuario alinee otra cámaraPC. Quedan329palabrasRT3 diferentes en estaROI;
+255píxeles oscuros tienenGexacto0,1875 y ninguno coincide con el replayPC.
+13de16triángulos de laROI contienen tanto píxeles idénticos como discrepantes;
+no es simplemente un color constante distinto asignado a un triángulo entero.
+No extrapolar a todo el frame ni tubo transparente.
+
+Se repitió el replay con una sola perturbación del sampler s10: MinLOD=MaxLOD
+0,1,2,3,4, conservando todo lo demás. Mip0 da las mismas1289coincidencias del control.
+Mips3/4 oscurecen y reducen el error medio de los255píxeles oscuros (0,070818→
+0,014872/0,013750), pero no reproducen el patrón:0/4palabras exactas respectivamente,
+y empeoran los demás. **No demuestra causaLOD ni justifica forzarLOD globalmente.**
+Seis ejecuciones finales pasan con warnings/errors0 en debugD3D12; warnings iniciales
+por falta de optimized-clear-value se corrigieron en el harness, no en el renderer.
+Resumen en native-replay/comparison.json,native-perturbations.json y
+triangle-residuals.json. El replay no mide FPS de gameplay.
+
+El modeloCPU previo evalúa solo el bloque aritmético superviviente autocontenido
+(ninguna referencia SSA externa), nunca el PS con ramas como si fuera lineal.
+Normales y base error≤1unidad cuantizada; RT3 difiere por limitaciones de muestras
+bilineales/mip0, filtrado seamless, log2/exp2 y precisión de interpolación. Sus
+perturbaciones (cubeRGB0,LUT0,mask0,ambienteVS0) tampoco reproducen todas las barras.
+No usar ese desacuerdoCPU como prueba de fallo aritméticoMesa/Series: el replayDXIL
+real es el discriminador más fuerte y confirma1289valores exactos.
+
+### Investigación web dirigida y comprobaciones sobre el DXIL real
+
+Fuentes primarias consultadas14oct:
+
+- [Microsoft, especificación funcional16.8 y3.5.7](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm):
+  derivadas sobre grupos2×2, temporales calculados bajo flujo variable y requisitos
+  de inicialización. `discard` solo no convierte automáticamente lo posterior en
+  flujo variable; no atribuir el bug por encontrar esa instrucción.
+- [AMD, Fetching From Cubes and Octahedrons](https://gpuopen.com/learn/fetching-from-cubes-and-octahedrons/):
+  conversión dirección→cara/coordenadas incluye operaciones de ALU antes del fetch.
+  Es una explicación de arquitecturaGCN, no un erratum confirmado deSeries/RDNA2.
+- [Microsoft, CalculateLevelOfDetail](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-to-calculate-lod),
+  [SampleGrad](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-to-samplegrad) y
+  [SampleLevel](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-to-samplelevel):
+  operaciones aptas para separar dirección/gradientes/LOD/muestra, sin requerirSM6.6.
+- [Microsoft, contratoDXIL](https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst):
+  operaciones de muestreo y parámetros no usados. `undef` en operandos no usados
+  no prueba un fallo. No sustituirlos ni cambiar Mesa basándose solo en su presencia.
+
+No se encontró un erratum público reproducible que identifique exactamente este
+fallo. Se contrastaron pistas con el DXIL real desensamblado mediante SDKdxc
+(actual-pixel-dxil.ll): **no contiene WaveRead ni QuadRead**. Por tanto, el antecedente
+SHFL/Wave64/helper no es una operación presente en este PS y no se puede copiar esa
+solución. Contiene seis Sample, dosdiscard, sinCalculateLOD explícito. El cubemap
+se consulta con una dirección normalizada por su eje mayor, resultante de normal
++posición de vista+matrizCB4; LUT usa saturate(N·V). CB9[20] capturado=1, por lo que
+la condición uniforme0>=CB9[20] es falsa y el ditheringCB9[20]<1 está desactivado.
+No afirmar divergencia efectiva por las ramas estáticas del shader. Mesa local
+26.2.3 dxil_nir_lower_discard_and_terminate transforma terminate en demote+return;
+queda como punto a inspeccionar, no modificación justificada.
+
+Prueba siguiente preparada, sin pedir otra captura de escena todavía:
+`current/material-coordinate-probe.hlsl/.dxil`, SM6.4/validator1.4, generada del
+sliceSSA de coordenadas/reflexión y LUT (no contiene texturas/bytes de juego).
+Instrumenta cuatroFLOAT4: dirección+LODunclamped, sampleimplícito, sampleLevel0,
+ambienteVS+LUT. Su interfaz compacta debe conservar TEXCOORD0–5 antes deSV_Position6;
+ordenarSV_Position primero produjo error de linkage detectado y se corrigió.
+La sonda compiló, enlazó con el VS real y ejecutó en GPU PC con debug limpio.
+LODPC medido[-1,51953125;0,453125]; muestra implícita vs mip0 máximo0,0055554;
+dirección vsIRCPU máximo0,00023991; LUT vssoftware máximo0,000088731.
+No son medidasSeries. Usar native-probe/summary.json como referencia. La sonda
+elimina las ramas y usa operaciones HLSLprecise, así que tampoco se presupone
+idéntica instrucción a instrucción al PS de producción: comparar primero sus
+entradas/salidas y mantener el original como control.
+
+**Dato causal aún faltante enSeries:** valores reales de dirección, gradientes,
+LOD y muestra cubemap/LUT/ambiente en los mismos píxeles deRT3 incorrectos. Si
+la muestra implícita difiere ySampleLevel0 coincide, discrimina cálculoLOD/helpers;
+si ambas difieren, dirección/SRV/fetch; si ambas yambiente coinciden peroRT3 falla,
+aritmética posterior o exportaciónR11. La salida FLOAT4 además separa cuantización
+R11 de ejecución del shader. Integración de esta sonda como pase scratch acotado
+por mando todavía pendiente; el APPX vigente sigue siendo .46 en **package**.
+No publicar el DXILguest ni incorporar los assets privados al repo. Sin parche
+especulativo, nuevo commit, push ni corrección visual declarada.
+
+### .47: sonda de reflejos integrada y paquete listo
+
+Se completó la integración solicitada; no terminar en la mera propuesta de sonda.
+CreateMaterialProbePipeline admite una interfaz de reflexión diagnóstica separada,
+guardada por los hashesVS55/PSba, interpolación0x2000, máscaraNoPerspective0/0x40,
+13recursos/6samplers y tipos/count de las cinco texturasFS. Rechaza GS/tess,
+SSBO/images yMSAA; no amplía la ruta anterior de iluminación. Reutiliza VS real,
+IA, root signature, bindings y rasterización. Anula depth/stencil solo en el PSO
+scratch y usaun únicoRTfloat4 con blendingdesactivado. No altera el PSOguest.
+
+ProbeMaterialIntermediates carga seis sidecars `material_reflection_0..5.dxil`
+del directorio del ejecutable solo con material_gpu_probe=1 y selecciónPS/count
+activa, una vez por captura. Valida tamaño32B–1MiB, lectura completa ymagicDXBC;
+D3D12 valida linkage/PSO. Ausencia/error se registra yno reintenta por draw.
+Reutiliza la textura scratch existente32MiB máximo, ROI256×128, asyncreadbacks
+con cap existente, queriesexcluidas y restauraciónBindDrawState al finalizar.
+Los seis pases (dirección/LOD, implícito, mip0, ambiente/LUT, gradX,gradY) conservan
+shader original/targets originales para comparación. No escribe en depthguest.
+El color/draworiginal siguecapturándose con sus cuatroMRT. Comparar cuerpo frontal
+sin solapamientos: scratchsin profundidad no reproduce occlusión de superficies
+superpuestas dentro de la misma malla; evita interpretar esas zonas comoerror.
+
+Los sidecars son kernels diagnósticos locales procedentes de un slice aritmético
+controlado, noDXILguest incrustado en el repo. Permanecen ignorados en test-results
+junto aHLSL ydatosprivados. package-appx.ps1 añade parámetroopt-inMaterialProbeShaders
+que copia exactamenteseis nombres fijos/tamañoacotado; por defecto no empaqueta nada.
+No cambian LOD, samplers o iluminación del juego. Preparar siempre enpackage,
+sin nuevas carpetas de entrega.
+
+Validación realizada:
+
+- IncrementalUWP20operaciones correcto. No buildcompleto ni recompilaciónde Mesa.
+- Seis kernelsSM6.4/validator1.4 compilados y seis PSOs1MRT/depthdesactivado
+  enlazados con el VS real, mismosrecursosSeries ydebugD3D12 limpioenGPU PC.
+- ReferenciaPC recortada256×128 (3MiB en seisraws, sin seisfullframe innecesarios),
+ 9238píxelescubiertosfinitos,23530sentinela,0no-finitos/0coberturasinconsistentes.
+  FullROIincluye otras partesdel tubo ybordes, por lo que LODunclamped abarca
+  -122,50390625..4,63671875; no confundir conlaROI1618píxelesdelcuerpo(-1,5195..0,4531).
+  Referencia en series46-map/current/reflection-reference. Rehacerreferencia con
+  CB/VB/texturas exactos de .47 si cambia cámara/estado; no comparar directamente
+  archivos de dos capturas distintas como si fueran lasmismas entradas.
+- Analizadorpúblico analyze-material-reflections.py lee seispasesfloat4 nativos,
+  exige origen/tamaño iguales ytile≤256×128, separasentinela/NaN yresumemuestras/LOD.
+  Regresión nueva pasa finite/sentinel/delta/NaN/truncado/origen/coberturainconsistente.
+  También pasan material-probe, material-intermediates yproject-captured-mesh.
+- Símbolos.47 archivados. ZIPmanifest/config/EXE, seisDXILbyteidénticosa probados,
+  725BlockMapSHA256 yfirmaCMS criptográfica correctos. No certificadohardware aún.
+
+**Paquete0.2.87.47 listo: build-uwp/package/eden-xbox.appx**,14857779B,
+SHA25656cb86a210058916ff8e8f14d403be4269a53b406f1074d5104e5248d2386c9f;
+EXE42eb8b42a345a50952ba7c613ca09e5af86bb79303bb1264867a88e83a9c024f;
+PDB874b8c8493080085947ee201a7c5b4cf25d5bdc30d5ff31c5da06c81c0d4ea7e.
+Sidecars31396B totales. Config siguelibrary/play/5120, mismoPS/count2712, ROIcentro
+1538,442 ymaterial_gpu_probe=1. Capturar porView+Menu→Capturargráficosycontinuar→A,
+esperarexportación yponerlog/trace/diag enDownloads. Bastaunatoma conel mismotubo
+arriba a la derecha. Soloahora faltala ejecuciónSeries de esta sonda, imprescindible
+para identificar el primer valor incorrecto; no pedirotras7tomas. No se midióFPS:
+normal sincaptura no ejecutanuevospases/lecturas; durantecaptura hayseisdraws y3MiB
+ROI adicionalesmás laúnica textura scratchreutilizada. BCylowering .44 intactos.
+Sin parchesdefidelidad especulativos, commitni push.
+
+### Lectura Series .47 y diagnóstico diferencial .48
+
+Descargas recibidos14oct~15:37: adapterSraKmd_arden,SM6.4,wave64,APPX.47.
+Archivo privado series47-map/log-export; current filtrado porprefijo
+material_1792010119214385_1 para no mezclar exports anteriores.86exports nativos
+actuales, seis sondas encoladas yexportadas, cuatroMRT originales;474draws/949tiles,
+0omitidosdraw/ROI/lineas,9238píxelesfinitos en las sondas/0NaN/0cobertura inconsistente.
+El cap64MiB omitió tres dumps finales (color/aux/depth) al llegar63395632B;
+no faltan las fuentes, sondas ni MRT seleccionados necesarios. No ampliar cap.
+
+La primera ejecución del replay falló de forma explícita porque el LUT cambió de
+addr5a9594000 a5c25c4000 (ruido16² también cambió a5cf3de000). No sustituir datos
+viejos por suposición. El harness privado ahora carga las seis direcciones de
+resource-addresses.txt, derivadas de los bindings de draw44 del log actual;
+replay final usa todos los inputs **.47**. Geometría yproyección coinciden con .46,
+peroCB0/CB4 tienen algunos bytes distintos y no se presume capturaidéntica.
+
+**Resultado decisivo**: los seis rawFLOAT4 de sondasSeries son byteidénticos a las
+seis sondasGPU PC con los inputs exactos de.47: dirección+LOD, muestraimplícita,
+mip0, ambiente/LUT ygradientesX/Y. Se verificó incluso el buffer completo524288B
+porpase, sentinelasincluidas. Los9238píxelescubiertos coinciden. Mientras tanto,
+el PS original produce otra vez1618/1618palabras exactas enRT0/RT1/RT2 y solo
+1289/1618enRT3 (329discrepantes, maxRGB0,1015625). Siete replaysPC finales sin
+avisos debug. Evidencia exact-input-comparison.json yseries-reflection-summary.json.
+
+Interpretación limitada: descarta diferencia de coordenadas/LOD/muestras en **la
+sonda aritmética aislada**; no prueba que el shaderoriginal con ramas produzca
+esas mismas muestras. No declarar descartados helpers/derivadas dentro del CFG
+original. Tampoco confundir haber localizado RT3 con la primera operación defectuosa.
+El siguiente discriminador debe conservar instrucciones originales y comparar
+resultadofloatantes de empaquetar contraR11, con el mismo control enPC.
+
+Se preparó una copia diagnóstica del DXIL original descargado. SDKdxc desensambla;
+IDxcAssembler reconstruye contenedor eIDxcValidator valida/firma (sin optimización
+HLSL ni reescritura de cálculos). **Solo cambian cuatro operandos deStoreOutputRT0**:
+reciben exactamente losSSA deRGBAdelRT3. Restoinstrucciones, muestras, ramas,
+discard,phi,depth ymetadata deinterfaz se conservan. Una comprobación del cuerpo
+LLVMdesensamblado confirmaigualnúmero/instrucciones excepto esascuatrostores
+(redirect-instruction-proof.json). El shaderderivado/assembler/LL yDXIL permanecen
+ignoradosen test-results, nuncaen código producción ni repositorio.
+
+MismoDXIL diagnosticoseejecuta en dosformatos: primeroFLOAT4 ydespuésR11G11B10.
+PC: redirecciónR11 reproduce1618/1618palabras delRT3 original; errorfloat32→R11
+máximo0,003902733 en el cuerpo. EnROI completo9238píxeles, máximo0,0156154,
+incluyeotras zonas más brillantes ycuantización normal. Haycuatro avisosD3D12
+esperados por outputsRT1/2/3 yDepth declarados pero no vinculados: el debug indica
+explícitamente que dichas escrituras se descartan legalmente. **No son errores ni
+se afirma cero warnings** para estos dos controles. PSOscreados/GPU termina,
+validaciónDXIL correcta. No tocar declaraciones para ocultarlos, porque alteraría
+más el shader que se intenta comparar. Evidencia redirect-validation.json,
+rt0-redirect-proof.json yreflection-reference/summary.json.
+
+Código diagnóstico ampliado: CreateMaterialProbePipeline acepta soloRGBA32F y,
+solo eninterfazreflexión, R11G11B10. Cuandoexiste sidecar6 carga también7 yañade
+pasesreflection_original_final/reflection_original_r11.6/7 son byteidénticos;
+solo cambia formato delPSO/target. Mantieneislamiento/query/restore. Se reutiliza
+scratchFLOAT32 y se añadeun únicoRT R11 de8294400B (~7,91MiB) compartido por
+ese pase, diferidopor fence; pico scratch≈39,55MiB en1080p frente31,64 anterior.
+DosROIextra:524288+131072B (0,625MiB). Estálimitado a capturapedida; no altera
+memoriapolítica5120, shaders/estadosproducción, BC,lowering. El capreadback64MiB
+no cambia. ParaR11clear0 (no puede representar sentinela negativa); máscara de
+cobertura viene delFLOAT32, excluirsolapamientoscomoantes.
+
+Package-appx admiteMaterialProbeShaderCount6..8 (default6) con mismosnombres fijos.
+Analizador aceptaopcionalmenteambosoutputs originales, validamismaROI/formatos,
+comparaRGBfloatcontraR11 yreporta cuantización sin llamarlacausa. Regresiónpasa
+fixtureRGB(.125,.25,.5) deR11 independiente ysentinela; parsersanteriores pasan.
+BuildincrementalUWP20operaciones correcto. Símbolos.48 archivados, ZIP/config/EXE,
+8sidecars (6/7idénticos),727BlockMapSHA256 yfirmaCMS verificadas.
+
+**Paquete0.2.87.48 listo en build-uwp/package/eden-xbox.appx**,14870929B,
+SHA25619dc17d61f4912fe06e48a5de7a6234aad64ce517e7faf2063bb46b4f4504fff;
+EXEbeada1b3a14238ec630bef38145ce60a5a3641e9a8de7cb2ba48da43e39af872;
+PDB011db7aa00edd1594ca694faf79292bdf79fa541c724fc74df4f62c9e5f034f7.
+Sidecars47686B. MismoPS/count, ROI ymando. Otra toma enSeries ahora sí aporta
+los dosvalores que no estaban en.47: salida del shaderoriginal enfloat yR11.
+SiFLOAT32difiere del controlPC, investigar ejecuciónCFG/aritméticaoriginal; si
+FLOAT32coincide peroR11difiere, investigar conversión/exportación. Siamboscontroles
+coinciden yelRT3originaldifiere, discriminar slotMRT/compilación delPSO: redirigir
+una salida puede cambiar optimización/registroshardware aunque elLLVMconserve
+las operaciones. No afirmar automáticamente causa raíz conun único resultado.
+Causa todavía pendiente, sin parche especulativo/commit/push niFPSmedidos.
+
