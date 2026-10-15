@@ -23,6 +23,7 @@
 #include <string_view>
 #include <vector>
 
+#include "eden_uwp/list_navigation.h"
 #include "eden_uwp/text_entry.h"
 
 namespace EdenXbox::Mods {
@@ -189,11 +190,7 @@ struct ModsCounts {
 
 /// Keeps the cursor inside a list of `count` rows and the window around it.
 inline void ClampModsList(ModsPage& page, std::size_t count) {
-    page.selected = count ? std::min(page.selected, count - 1) : 0;
-    if (page.selected < page.first) page.first = page.selected;
-    if (page.selected >= page.first + ModsLayout::VisibleRows)
-        page.first = page.selected + 1 - ModsLayout::VisibleRows;
-    page.first = std::min(page.first, count > ModsLayout::VisibleRows ? count - ModsLayout::VisibleRows : 0);
+    ClampListWindow(page.selected, page.first, count, ModsLayout::VisibleRows);
 }
 
 /// Keeps Explore's cursor inside `count` cards, with its row on screen.
