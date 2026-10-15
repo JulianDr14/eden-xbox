@@ -22,6 +22,7 @@ en documentación histórica ya no son carpetas de entrega vigentes.
 - [Audio XAudio2](xbox_audio.md): salida de audio para PC y Series.
 - [Actualizaciones y DLC](xbox_content.md): almacenamiento, selección y recorrido de importación.
 - [Biblioteca e interfaz](xbox_frontend.md): carátulas, navegación, mandos y teclado.
+- [Contratos compartidos del frontend](xbox_frontend_refactor.md): catálogo de mandos, acciones, captura modal y listas; migración y gates.
 - [Carpetas y almacenamiento USB](xbox_rom_storage.md): acceso UWP persistente y apertura de juegos sin copiarlos.
 
 ## Rendimiento y evidencia
