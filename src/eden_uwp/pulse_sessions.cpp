@@ -72,10 +72,24 @@ std::uint64_t Slot(std::string_view launch_path) {
     return slot;
 }
 
+// Who hears the publication steps of the save in progress (Save sets it).
+const std::function<void(const char*)>* save_phase{};
+
 // One Store owns the folder for the whole process (pulse_store.h).
 Common::Pulse::Store& Sessions() {
     static Common::Pulse::Store store{
-        Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir) / "pulse" / "sessions"};
+        Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir) / "pulse" / "sessions",
+        Common::Pulse::DefaultQuota, [](Common::Pulse::PublishStep step) {
+            if (!save_phase || !*save_phase) return;
+            using enum Common::Pulse::PublishStep;
+            switch (step) {
+            case Write: (*save_phase)("write"); break;
+            case Verify: (*save_phase)("verify"); break;
+            case Sync: (*save_phase)("sync"); break;
+            case Replace: (*save_phase)("replace"); break;
+            default: break;
+            }
+        }};
     return store;
 }
 
@@ -132,7 +146,12 @@ void Resume(Core::System& system, const Common::Pulse::Identity& identity,
 }
 
 std::string Save(Core::System& system, const Common::Pulse::Identity& identity,
-                 const std::function<std::uint64_t()>& headroom) {
+                 const std::function<std::uint64_t()>& headroom,
+                 const std::function<void(const char*)>& phase) {
+    save_phase = &phase;
+    struct Unset {
+        ~Unset() { save_phase = nullptr; }
+    } unset;
     try {
         const auto require = [&](std::uint64_t needed) {
             if (headroom && headroom() < needed) {
@@ -142,7 +161,7 @@ std::string Save(Core::System& system, const Common::Pulse::Identity& identity,
         require(MemoryFloor + SavePeak);
         std::uint32_t retries{};
         const auto checkpoint =
-            Core::Pulse::ProcessCheckpoint::CaptureAtBarrier(system, CaptureBudget, retries);
+            Core::Pulse::ProcessCheckpoint::CaptureAtBarrier(system, CaptureBudget, retries, phase);
         std::uint64_t next_check = MemoryCheckStep;
         Sessions().Publish(Common::Pulse::StorageKey(identity), identity, checkpoint.MaxEncodedSize(),
                            checkpoint.DecodedSize(),

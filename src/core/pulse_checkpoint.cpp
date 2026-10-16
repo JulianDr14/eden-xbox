@@ -389,7 +389,11 @@ void PutLe(std::vector<u8>& out, u64 value, size_t width) {
 
 ProcessCheckpoint ProcessCheckpoint::CaptureAtBarrier(Core::System& system,
                                                     std::chrono::milliseconds budget,
-                                                    u32& retries) {
+                                                    u32& retries,
+                                                    const std::function<void(const char*)>& phase) {
+    const auto step = [&](const char* name) {
+        if (phase) phase(name);
+    };
     auto& kernel = system.Kernel();
     kernel.SetCheckpointBarrier(true);
     struct Lower {
@@ -406,8 +410,11 @@ ProcessCheckpoint ProcessCheckpoint::CaptureAtBarrier(Core::System& system,
         try {
             // With the guest parked nothing new is queued: the GPU finishes what it has, so the
             // channels are between command lists when nvdrv serializes them.
+            step("idle");
             system.GPU().WaitForIdle();
+            step("process");
             auto checkpoint = Capture(system);
+            step("gpu");
             FlushGpuWrites(system);
             return checkpoint;
         } catch (const CheckpointRejected& rejected) {

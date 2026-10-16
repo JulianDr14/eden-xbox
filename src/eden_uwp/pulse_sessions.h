@@ -46,9 +46,12 @@ void Resume(Core::System& system, const Common::Pulse::Identity& identity,
 
 /// Captures the running (or paused) game and publishes it. Empty on success, else why not. The
 /// system is left paused either way, ready to shut down. `headroom` tells the bytes the app can
-/// still commit; a game that leaves too little for the capture keeps no session.
+/// still commit; a game that leaves too little for the capture keeps no session. `phase`, when
+/// set, hears each step as it starts: "idle", "process", "gpu" (the capture), then "write",
+/// "verify", "sync", "replace".
 std::string Save(Core::System& system, const Common::Pulse::Identity& identity,
-                 const std::function<std::uint64_t()>& headroom);
+                 const std::function<std::uint64_t()>& headroom,
+                 const std::function<void(const char*)>& phase = {});
 
 /// What the library shows for a game file: the newest session kept for it.
 struct Kept {
