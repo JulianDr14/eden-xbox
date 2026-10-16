@@ -83,6 +83,8 @@ public:
         used = 0;
     }
 
+    [[nodiscard]] size_t Size() const noexcept { return used; }
+
     [[nodiscard]] bool Empty() const noexcept {
         return used == 0;
     }
@@ -185,6 +187,7 @@ public:
 
     struct Options {
         bool threaded = false;
+        bool profile = false; ///< Per-chunk elapsed measurements; no clocks when disabled.
         const char* thread_name = "CommandRecorder";
         Common::ThreadPriority priority = Common::ThreadPriority::High;
         /// The worker spins this long before blocking; adaptive, so long gaps cost no CPU.
@@ -193,7 +196,7 @@ public:
 
     CommandRecorder(Context context_, Options options, std::function<void()> on_error_ = {})
         : context{std::move(context_)}, on_error{std::move(on_error_)}, threaded{options.threaded},
-          work{options.spin} {
+          work{options.spin}, profile{options.profile} {
         if (!threaded) {
             return;
         }
@@ -214,6 +217,14 @@ public:
 
     [[nodiscard]] bool IsThreaded() const noexcept {
         return threaded;
+    }
+
+    struct Statistics {
+        u64 chunks{}, bytes{}, handoff_ns{}, execute_ns{}, drain_ns{}, max_pending{};
+    };
+    [[nodiscard]] Statistics ReadStatistics() const noexcept {
+        return {stat_chunks.load(), stat_bytes.load(), stat_handoff_ns.load(),
+                stat_execute_ns.load(), stat_drain_ns.load(), stat_max_pending.load()};
     }
 
     template <typename Func>
@@ -255,7 +266,23 @@ public:
             chunk->Discard();
             return;
         }
+        const size_t bytes = profile ? chunk->Size() : 0;
+        const auto start = profile ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
         work.EmplaceWait(std::move(chunk));
+        if (profile) {
+            stat_chunks.fetch_add(1, std::memory_order_relaxed);
+            stat_bytes.fetch_add(bytes, std::memory_order_relaxed);
+            stat_handoff_ns.fetch_add(ElapsedNs(start), std::memory_order_relaxed);
+            // The consumer may finish before dispatched is published; never subtract unsigned
+            // executed from an older dispatched value without checking it.
+            const u64 issued = dispatched.load(std::memory_order_relaxed) + 1;
+            const u64 done = executed.load(std::memory_order_acquire);
+            const u64 pending = issued > done ? issued - done : 0;
+            u64 previous = stat_max_pending.load(std::memory_order_relaxed);
+            while (previous < pending && !stat_max_pending.compare_exchange_weak(
+                       previous, pending, std::memory_order_relaxed)) {}
+        }
         dispatched.store(dispatched.load(std::memory_order_relaxed) + 1,
                          std::memory_order_release);
         chunk = TakeSpareChunk();
@@ -267,11 +294,14 @@ public:
             return;
         }
         Dispatch();
+        const auto start = profile ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
         const u64 target = dispatched.load(std::memory_order_relaxed);
         for (u64 done = executed.load(std::memory_order_acquire); done < target;
              done = executed.load(std::memory_order_acquire)) {
             executed.wait(done, std::memory_order_acquire);
         }
+        if (profile) stat_drain_ns.fetch_add(ElapsedNs(start), std::memory_order_relaxed);
         RethrowError();
     }
 
@@ -317,10 +347,16 @@ public:
     }
 
 private:
+    static u64 ElapsedNs(std::chrono::steady_clock::time_point start) {
+        return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start).count());
+    }
     void WorkerLoop(std::stop_token stop) {
         std::unique_ptr<Chunk> next;
         // PopWait only reports a stop once the queue is empty, so everything dispatched runs.
         while (work.PopWait(next, stop)) {
+            const auto start = profile ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
             if (!failed.load(std::memory_order_relaxed)) {
                 try {
                     next->Execute(context);
@@ -337,6 +373,7 @@ private:
             } else {
                 next->Discard();
             }
+            if (profile) stat_execute_ns.fetch_add(ElapsedNs(start), std::memory_order_relaxed);
             ReturnSpareChunk(std::move(next));
             executed.fetch_add(1, std::memory_order_release);
             executed.notify_all();
@@ -377,6 +414,10 @@ private:
     std::atomic<bool> failed{false};
     std::mutex error_mutex;
     std::exception_ptr error;
+
+    const bool profile;
+    std::atomic<u64> stat_chunks{}, stat_bytes{}, stat_handoff_ns{}, stat_execute_ns{};
+    std::atomic<u64> stat_drain_ns{}, stat_max_pending{};
 
     std::jthread worker; ///< last: stopped before the members it uses are destroyed
 };

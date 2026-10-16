@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 #include "video_core/renderer_d3d12/d3d12_stage_bindings.h"
+#include "video_core/renderer_d3d12/d3d12_root_signature.h"
 
 namespace D3D12 {
 namespace {
@@ -90,6 +91,12 @@ std::shared_ptr<const StageBindings> InternStage(const Shader::Info& info) {
         }
     }
     bindings->uses_render_area = info.uses_render_area;
+    bindings->num_texture_views = Shader::NumDescriptors(info.texture_descriptors) +
+                                  Shader::NumDescriptors(info.image_descriptors);
+    bindings->num_buffer_views = Shader::NumDescriptors(info.texture_buffer_descriptors) +
+                                 Shader::NumDescriptors(info.image_buffer_descriptors);
+    bindings->first_texture_binding = FirstTextureBinding(info, 0);
+    bindings->num_bindings = NumStageBindings(info);
     const size_t hash = Hash(*bindings);
 
     Interner& interner = GetInterner();

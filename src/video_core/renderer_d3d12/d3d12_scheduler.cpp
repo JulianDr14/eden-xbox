@@ -64,6 +64,7 @@ Scheduler::Scheduler(Device& device_) : device{device_} {
                   "CreateCommandList");
     // Below the GPU thread's priority: it only has to keep up with what the GPU thread records.
     const ListRecorder::Options options{.threaded = async_recording.load(std::memory_order_relaxed),
+                                        .profile = VideoCore::Perf::DetailedGpuProfileEnabled(),
                                         .thread_name = "D3D12Recorder",
                                         .priority = Common::ThreadPriority::High};
     recorder.emplace(command_list.Get(), options, [this] { ReleaseWaitersAfterError(); });

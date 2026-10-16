@@ -1028,7 +1028,15 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
         // Stream buffer path to avoid stalling on non-Nvidia drivers or Vulkan
         const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
-        device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+        if constexpr (requires { runtime.UseWriteCombinedUniformCopy(size); }) {
+            if (runtime.UseWriteCombinedUniformCopy(size)) {
+                device_memory.ReadBlockUnsafeToWriteCombined(device_addr, span.data(), size);
+            } else {
+                device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+            }
+        } else {
+            device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+        }
         return;
     }
     // Classic cached path

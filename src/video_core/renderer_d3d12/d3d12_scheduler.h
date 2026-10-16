@@ -147,6 +147,8 @@ public:
     /// Frees retired allocators and released objects; called on every flush and frame.
     void CollectGarbage();
 
+    [[nodiscard]] auto RecorderStatistics() const noexcept { return recorder->ReadStatistics(); }
+
     /// The most frequent call stacks of submissions and blocking waits on the recording thread
     /// since the last call, as "count x rva<rva<..." (eden-uwp.exe RVAs for the build's PDB).
     /// Resets the histogram. Only recorded with the detailed GPU profile: capturing a stack on

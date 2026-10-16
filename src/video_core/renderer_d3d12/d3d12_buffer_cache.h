@@ -14,6 +14,7 @@
 #include "video_core/renderer_d3d12/d3d12_device.h"
 #include "video_core/renderer_d3d12/d3d12_staging_buffer_pool.h"
 #include "video_core/renderer_d3d12/d3d12_transfer_buffer_pool.h"
+#include "video_core/renderer_d3d12/d3d12_uniform_stream.h"
 
 namespace D3D12 {
 
@@ -21,6 +22,9 @@ class CommandStream;
 class Scheduler;
 class BufferCacheRuntime;
 class GuestDescriptorQueue;
+
+/// Opt-in regular SSE2 stores for short uploads, for subsequently created runtimes.
+void SetUniformUploadCopy(bool enabled);
 
 class Buffer : public VideoCommon::BufferBase {
 public:
@@ -136,6 +140,9 @@ public:
     void BindTransformFeedbackBuffer(u32, Buffer&, u32, u32) {}
     void BindTransformFeedbackBuffers(VideoCommon::HostBindings<Buffer>&) {}
     std::span<u8> BindMappedUniformBuffer(size_t, u32, u32 size);
+    bool UseWriteCombinedUniformCopy(u32 size) const noexcept {
+        return uniform_upload_copy && !trace_buffers && size <= 512;
+    }
     void BindUniformBuffer(Buffer& buffer, u32 offset, u32 size);
     void BindStorageBuffer(Buffer& buffer, u32 offset, u32 size, bool is_written);
     void BindTextureBuffer(Buffer& buffer, u32 offset, u32 size,
@@ -183,6 +190,8 @@ private:
     std::optional<D3D12_INDEX_BUFFER_VIEW> pending_index;
     std::optional<D3D12_INDEX_BUFFER_VIEW> applied_index; ///< what the command list holds
     std::array<D3D12_VERTEX_BUFFER_VIEW, VideoCommon::NUM_VERTEX_BUFFERS> pending_vertex{};
+    UniformStream uniform_stream;
+    bool uniform_upload_copy{};
     u32 pending_vertex_mask{};
     std::optional<u32> rewritten_count;
     std::vector<u32> rewrite_scratch;

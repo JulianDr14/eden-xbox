@@ -93,6 +93,7 @@ void ComputePipeline::Configure(const ComputeBindContext& context, PipelineBindi
 
     ImageViewList views;
     SamplerIdList samplers;
+    DrawSamplerCache<VideoCommon::SamplerId> sampler_cache{DrawSamplerReuseEnabled()};
 
     const auto& cbufs = qmd.const_buffer_config;
     const bool via_header_index = qmd.linked_tsc != 0;
@@ -100,7 +101,7 @@ void ComputePipeline::Configure(const ComputeBindContext& context, PipelineBindi
         return ReadTextureHandle(gpu_memory, desc, index, via_header_index,
                                  [&](u32 cbuf) { return cbufs[cbuf].Address(); });
     };
-    GatherStageViews(info, texture_cache, true, read_handle, views, samplers);
+    GatherStageViews(info, texture_cache, true, read_handle, views, samplers, sampler_cache);
     texture_cache.FillImageViews(std::span(views.data(), views.size()), true);
 
     buffer_cache.UnbindComputeTextureBuffers();
@@ -118,11 +119,14 @@ void ComputePipeline::Configure(const ComputeBindContext& context, PipelineBindi
 
     // The table is written in root-signature order: uniform, storage and texel buffers while the
     // buffer cache binds them, then textures and images.
+    // A full sampler heap can Finish/reset: do this before reserving descriptors and UBOs.
+    SamplerTableBuilder sampler_table;
+    for (const SamplerId id : samplers) sampler_table.Add(texture_cache.GetSampler(id));
+    out.sampler_table = sampler_table.Table(context.sampler_heap);
     GuestDescriptorQueue& queue = context.descriptor_queue;
     queue.Acquire(layout.NumResourceDescriptors());
     buffer_cache.BindHostComputeBuffers();
 
-    SamplerTableBuilder sampler_table;
     ImageTransitionList image_transitions;
     const SamplerId* samplers_it = samplers.data();
     const ImageViewInOut* views_it = views.data();
@@ -137,10 +141,9 @@ void ComputePipeline::Configure(const ComputeBindContext& context, PipelineBindi
             const ImageView& image_view = texture_cache.GetImageView(view_id);
             image_view.PrepareRead(desc.type);
             queue.AddCopy(image_view.Handle(desc.type));
-            const Sampler& sampler = texture_cache.GetSampler(*(samplers_it++));
-            sampler_table.Add(sampler);
+            const SamplerId sampler_id = *(samplers_it++);
             if (has_integer_samplers && desc.is_integer) {
-                integer_samplers.Add(texture_binding, sampler, image_view);
+                integer_samplers.Add(texture_binding, texture_cache.GetSampler(sampler_id), image_view);
             }
             image_transitions.emplace_back(view_id, false);
         }
@@ -164,7 +167,6 @@ void ComputePipeline::Configure(const ComputeBindContext& context, PipelineBindi
     barriers.Flush();
 
     out.resource_table = queue.Table();
-    out.sampler_table = sampler_table.Table(context.sampler_heap);
     out.integer_samplers = integer_samplers.Upload(buffer_cache);
 
     // No resolution scaling yet.

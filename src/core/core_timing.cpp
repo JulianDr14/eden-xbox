@@ -19,6 +19,7 @@
 #ifdef _WIN32
 #include "common/windows/precise_timer.h"
 #include "common/windows/timer_resolution.h"
+#include "common/windows/timed_wait_profile.h"
 #endif
 
 #include "common/settings.h"
@@ -126,6 +127,9 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
 #endif
         timer_thread = std::jthread([this](std::stop_token stop_token) {
             Common::SetCurrentThreadName("HostTiming");
+#ifdef _WIN32
+            Common::Windows::TimedWaitProfile::ActivateThread();
+#endif
             Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
             Common::SetCurrentThreadToPerformanceCores();
             on_thread_init();
