@@ -678,7 +678,10 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
             reason += (reason.empty() ? "" : "; ") +
                       std::string{"events of service processes no interface exports: "} + Join(unexported);
         }
-        Reject(missing.empty() && unexported.empty() && refused_retryable, reason);
+        // A refused interface exports none of its events, so they only make the rejection final
+        // when nothing was refused.
+        Reject(missing.empty() && (unexported.empty() || !refused.empty()) && refused_retryable,
+               reason);
     }
 
     // Memory map: what the rebuilt skeleton must reproduce, and what to store.
