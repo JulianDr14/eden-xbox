@@ -131,7 +131,7 @@ Cutting the per-draw cost of the D3D12 backend is the next target for optimisati
 | Cheats | Atmosphere cheats from the game's files and the online nx-cheats-db, turned on before playing or while playing | See [Cheats](#cheats) |
 | Input | Xbox controllers, keyboard on PC with rebindable keys | Emulated controller type (Pro, Joy-Cons, handheld) chosen per game; a chosen pad that disconnects is never silently replaced |
 | Recovery | A GPU failure returns to the library instead of killing the app | Still being validated on the Series |
-| Sessions (Pulse) | **Back to home** saves the running game; picking it again resumes it where it was | 64-bit and 32-bit games resume on PC; games still to be validated on the Series. See [Pulse: resume where you left off](#pulse-resume-where-you-left-off) |
+| Sessions (Pulse) | **Back to home** saves the running game; picking it again resumes it where it was | 64-bit and 32-bit games save and resume on the Series and on PC. See [Pulse: resume where you left off](#pulse-resume-where-you-left-off) |
 
 ### The memory wall
 
@@ -543,9 +543,9 @@ moment, instead of booting it from the start. The library marks a game with a sa
   command, an open applet or socket) is retried for a few seconds. A service with no serializer
   refuses for good; the reason is shown in the library and the game exits without a session. Normal
   game saves are never touched.
-- **Where it stands.** Homebrew passed 100 save and resume cycles on the Series. Commercial games,
-  64-bit and 32-bit, save and resume on PC, in about 10 s for a 2 GiB game; they are still to be
-  validated on the Series.
+- **Where it stands.** Commercial games, 64-bit and 32-bit, save and resume on the Series and on
+  PC; on PC a game with 2 GiB of memory resumes in about 10 s. Homebrew passed 100 save and resume
+  cycles on the Series.
 - **Limits.** A forced close during play leaves no session: the guarantee starts once Back to home
   finishes. A session belongs to the build that saved it; after an update it is kept but
   not resumed. Sessions live in `LocalState\eden\pulse\sessions` with a 20 GiB quota, and can be
