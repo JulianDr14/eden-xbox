@@ -131,6 +131,7 @@ Cutting the per-draw cost of the D3D12 backend is the next target for optimisati
 | Cheats | Atmosphere cheats from the game's files and the online nx-cheats-db, turned on before playing or while playing | See [Cheats](#cheats) |
 | Input | Xbox controllers, keyboard on PC with rebindable keys | Emulated controller type (Pro, Joy-Cons, handheld) chosen per game; a chosen pad that disconnects is never silently replaced |
 | Recovery | A GPU failure returns to the library instead of killing the app | Still being validated on the Series |
+| Sessions (Pulse) | **Back to home** saves the running game; picking it again resumes it where it was | 64-bit and 32-bit games resume on PC; games still to be validated on the Series. See [Pulse: resume where you left off](#pulse-resume-where-you-left-off) |
 
 ### The memory wall
 
@@ -210,6 +211,7 @@ flowchart TB
         warm["JIT warm-up<br/>per-game profile"]
         hle["HLE kernel and services<br/>file systems · NVDEC · audio<br/>spin-then-block core waits"]
         gpu["Maxwell GPU<br/>command processor"]
+        pulse["Pulse<br/>save and resume sessions"]
     end
 
     subgraph d3d["renderer_d3d12"]
@@ -239,6 +241,7 @@ flowchart TB
     end
 
     rom --> lib
+    lib -. "save on return · resume on pick" .-> pulse
     front <--> core
     warm -. "compiles known code at boot" .-> cpu
     gpu --> d3d
@@ -258,7 +261,8 @@ Where things live:
 | --- | --- |
 | `src/eden_uwp/` | Front end: CoreWindow boot, library and its metadata cache, in-game menu, settings, interface languages (`locales/`), controllers and keyboard, file import, external storage, `eden_uwp_diag.txt` |
 | `src/dynarmic/` | The JIT, with W^X for the AppContainer, the warm-up profiles and compact block metadata |
-| `src/common/` | Shared pieces this port added to: the memory ledger, the spin-then-block core wait, fiber stacks that grow on demand |
+| `src/common/` | Shared pieces this port added to: the memory ledger, the spin-then-block core wait, fiber stacks that grow on demand, Pulse's archive format |
+| `src/core/pulse_*` | Pulse: capture and restore of the guest process (threads, memory, kernel objects) and of each HLE service's state; the sessions in the library live in `src/eden_uwp/pulse_sessions.*` |
 | `src/video_core/renderer_d3d12/` | The D3D12 renderer: scheduler, buffer and texture caches, pipelines, root signatures, presentation (see [Inside the renderer](#inside-the-renderer)) |
 | `src/shader_recompiler/` | Eden's shader recompiler, with the adjustments the D3D12 profile needs |
 | `tools/xbox/mesa/` | Our additions to Mesa's `spirv_to_dxil` (pipeline linking, integer sampling) |
@@ -522,6 +526,34 @@ with no restart, even for a game that booted without cheats.
   not fit, instead of the VM quietly running none.
 - **No cost when unused.** A game with no cheats on runs no cheat engine at all; the in-game menu's
   surface exists only while it is open.
+
+### Pulse: resume where you left off
+
+Choosing **Back to home** in the in-game menu saves the whole session: the game's memory,
+its threads, and the state of every service it talks to. Picking the game again resumes it at that
+moment, instead of booting it from the start. The library marks a game with a saved session
+("Pulse · date").
+
+- **What is saved.** The guest process (memory, threads with their registers, kernel objects and
+  waits) and the state each HLE service keeps for the game: GPU address spaces and syncpoints,
+  audio renderer, controllers, applet state, file systems, time, accounts and so on. Host caches
+  (shaders, pipelines, textures, the JIT's code) are not saved: they are rebuilt after resuming.
+  What the GPU wrote is copied back to the game's memory before saving.
+- **When it refuses.** A game in the middle of something that cannot be saved (a system call, a GPU
+  command, an open applet or socket) is retried for a few seconds. A service with no serializer
+  refuses for good; the reason is shown in the library and the game exits without a session. Normal
+  game saves are never touched.
+- **Where it stands.** Homebrew passed 100 save and resume cycles on the Series. Commercial games,
+  64-bit and 32-bit, save and resume on PC, in about 10 s for a 2 GiB game; they are still to be
+  validated on the Series.
+- **Limits.** A forced close during play leaves no session: the guarantee starts once Back to home
+  finishes. A session belongs to the build that saved it; after an update it is kept but
+  not resumed. Sessions live in `LocalState\eden\pulse\sessions` with a 20 GiB quota, and can be
+  turned off in **Settings > System > Pulse sessions** or discarded per game from its options.
+- **Its own log.** `LocalState\eden_pulse.txt` records every save, resume and refusal, and the frames
+  shown in each of the first 30 seconds after a resume.
+
+Design, phases and evidence: [docs/xbox/xbox_pulse.md](docs/xbox/xbox_pulse.md) (in Spanish).
 
 ## Running it on a console
 
