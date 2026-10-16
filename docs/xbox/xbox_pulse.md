@@ -199,6 +199,10 @@ Nada del archivo es puntero, handle host ni código JIT.
 | 0x70 | Exclusive | reservas del monitor exclusivo |
 | 0x80 | Timing | cola CoreTiming por nombre de evento y relojes; el temporizador hardware se rearma desde las esperas |
 
+Un hilo que ya salió (terminado y señalado) pero cuyo handle el guest aún no cerró se
+guarda como `Terminated` y se recrea así: terminado, señalado y sin correr nunca. Uno que
+aún está saliendo se rechaza como reintentable.
+
 Captura (sistema en pausa): un hilo dentro de un SVC (`is_calling_svc`, ahora
 mantenido por `Svc::Call`) o esperando IPC/un lock interno se rechaza como
 **reintentable**: el llamador hace Run unos ms y vuelve a capturar. Todo lo que no

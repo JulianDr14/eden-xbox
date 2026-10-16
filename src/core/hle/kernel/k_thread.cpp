@@ -1577,6 +1577,18 @@ namespace Kernel {
         this->Open(kernel);
     }
 
+    void KThread::RestoreTerminated(KernelCore& kernel) {
+        ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
+        if (m_thread_type != ThreadType::User || m_parent == nullptr || !IsFreshCheckpointThread()) {
+            throw std::invalid_argument("Pulse: termination requires a fresh restored thread");
+        }
+        m_parent->GetResourceLimit()->Release(kernel, LimitableResource::ThreadCountMax, 0, 1);
+        m_resource_limit_release_hint = true;
+        m_suspend_allowed_flags = 0;
+        this->SetState(kernel, ThreadState::Terminated);
+        m_signaled = true;
+    }
+
     void KThread::CompleteRestoredWait(KernelCore& kernel) {
         if (m_checkpoint_wait_kind == CheckpointWaitKind::None) return;
         ASSERT(this == GetCurrentThreadPointer(kernel));

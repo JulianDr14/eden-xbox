@@ -362,7 +362,8 @@ inline std::vector<ObjectRecord> DecodeObjects(std::span<const u8> bytes) {
 
 // ---------------------------------------------------------------- section Threads
 
-enum class ThreadRun : u32 { Initialized = 0, Runnable = 1, Waiting = 2 };
+// Terminated: exited, kept alive by a guest handle (a thread nobody joined or closed yet).
+enum class ThreadRun : u32 { Initialized = 0, Runnable = 1, Waiting = 2, Terminated = 3 };
 
 struct ThreadRecord {
     u64 id{};        // graph identity
@@ -382,7 +383,7 @@ inline void ValidateThreads(std::span<const ThreadRecord> records) {
     if (records.empty() || records.size() > MaxGuestThreads) Wire::Invalid("Pulse: thread count");
     std::unordered_set<u64> ids, thread_ids, tls;
     for (const auto& r : records) {
-        if (r.run > ThreadRun::Waiting || r.flags > 1 || !r.id || !r.thread_id || !r.tls ||
+        if (r.run > ThreadRun::Terminated || r.flags > 1 || !r.id || !r.thread_id || !r.tls ||
             (r.tls & 0x1ff) || r.base_priority < 0 || r.base_priority > 63 || r.ideal_core < -1 ||
             r.ideal_core > 3 || !r.affinity || (r.affinity >> 4) ||
             (r.ideal_core >= 0 && !((r.affinity >> r.ideal_core) & 1)) ||
