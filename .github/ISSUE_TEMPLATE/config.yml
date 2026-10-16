@@ -1,4 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Eden Discord
-    url: https://discord.gg/HstXbPch7X
+  - name: Bug that also happens in the desktop builds of Eden
+    url: https://git.eden-emu.dev/eden-emu/eden/issues
+    about: Report it to Eden, not here.

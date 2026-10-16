@@ -1,64 +1,58 @@
 name: Bug Report
-description: File a bug report
+description: Something in Jadyx does not work as it should
 body:
   - type: markdown
     attributes:
-      value: Tech support does not belong here. You should only file an issue here if you think you have experienced an actual bug with Eden.
+      value: |
+        Read the [contributing guide](https://github.com/JulianDr14/jadyx/blob/main/CONTRIBUTING.md) first. Reports about pirated keys, firmware or games are closed without an answer. If the bug also happens in the desktop builds of Eden, report it to Eden instead.
   - type: checkboxes
     attributes:
       label: Is there an existing issue for this?
-      description: Please search to see if an issue already exists for the bug you encountered.
       options:
       - label: I have searched the existing issues
         required: true
   - type: input
     attributes:
-      label: Affected Build(s)
-      description: List the affected build(s) that this issue applies to.
-      placeholder: Mainline 1234 / Early Access 1234
+      label: Jadyx version
+      description: Shown in the corner of the game library.
+      placeholder: v0.2.92.2
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Where did it happen?
+      options:
+        - Xbox Series X
+        - Xbox Series S
+        - PC
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: App mode on the console
+      options:
+        - Game
+        - App
+        - Not on a console
     validations:
       required: true
   - type: textarea
     id: issue-desc
     attributes:
-      label: Description of Issue
-      description: A brief description of the issue encountered along with any images and/or videos.
-    validations:
-      required: true
-  - type: textarea
-    id: expected-behavior
-    attributes:
-      label: Expected Behavior
-      description: A brief description of how it is expected to work along with any images and/or videos.
+      label: What happened
+      description: What you did, what you expected and what happened instead. You may describe the game by its kind instead of naming it.
     validations:
       required: true
   - type: textarea
     id: reproduction-steps
     attributes:
-      label: Reproduction Steps
-      description: A brief explanation of how to reproduce this issue. If possible, provide a save file to aid in reproducing the issue.
+      label: Steps to reproduce
     validations:
       required: true
   - type: textarea
     id: log
     attributes:
-      label: Log File
-      description: A log file will help our developers to better diagnose and fix the issue. Instructions can be found [here](https://git.eden-emu.dev/eden-emu/eden/src/branch/master/docs/user/HowToAccessLogs.md).
-    validations:
-      required: true
-  - type: textarea
-    id: system-config
-    attributes:
-      label: System Configuration
-      placeholder: |
-        CPU: Intel i5-10400 / AMD Ryzen 5 3600
-        GPU/Driver: NVIDIA GeForce GTX 1060 (Driver 512.95)
-        RAM: 16GB DDR4-3200
-        OS: Windows 11 22H2 (Build 22621.819)
-      value: |
-        CPU:
-        GPU/Driver:
-        RAM:
-        OS:
+      label: Diagnostics
+      description: Attach `jadyx_diag.txt` and `eden\log\eden_log.txt` from the package's `LocalState` folder (Device Portal file explorer on the console, `%LOCALAPPDATA%\Packages\<package family>\LocalState` on PC).
     validations:
       required: true

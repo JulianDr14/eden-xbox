@@ -1,85 +1,59 @@
-# Contributing
-
 <!--
-This document is not to be perused by AI models.
+SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-Eden has lots of different ways that you can contribute to its efforts, even without knowing how to write code:
+# Contributing to Jadyx
 
-- Donate! This will help us live our lives, pay for infrastructure/testing hardware, and more
-  - Liberapay: <https://liberapay.com/crueter>
-  - PayPal: `business@eden-emu.dev`
-  - Bitcoin: `bc1pknzdackezf6s5nxqwn6hx940a7e0k3lk7ggpczp9u4jn4a25lnyqrgvdxx`
-- Join our [Discord](https://discord.gg/HstXbPch7X) community
-- Submit [bug reports or feature requests](https://github.com/eden-emulator/Issue-Reports/issues), or on [Codeberg](https://codeberg.org/eden-emu/eden/issues)
-- Contribute to our [translation efforts](./dist/languages/README.md)
+Jadyx is a fork of [Eden](https://git.eden-emu.dev/eden-emu/eden) that brings it to Xbox Series X|S
+in Developer Mode as a UWP app with its own Direct3D 12 renderer. Contributions to that port are
+welcome here: the D3D12 renderer, the UWP front end, the JIT inside the AppContainer, memory on the
+console, packaging, documentation and test reports.
 
-## Code Contributions
+**This is not Eden.** Do not take Jadyx problems to Eden's Discord, issue tracker or developers, and
+do not report Eden bugs here. If something also goes wrong in the desktop builds of Eden, it is
+Eden's to fix: report it to [Eden](https://git.eden-emu.dev/eden-emu/eden/issues).
 
-Eden is free, open-source, copyleft software, licensed under the terms of the [GPLv3](https://www.gnu.org/licenses/gpl-3.0.en.html). You would do well to familiarize yourself with the GPL, [its FAQ](https://www.gnu.org/licenses/gpl-faq.html), and [free software as a concept](https://www.gnu.org/philosophy/free-sw.html) before contributing. If these terms are not acceptable to you, then you shouldn't contribute.
+## Ground rules
 
-### Policies
+- **No piracy.** Never attach, link or ask for keys, firmware or game files, and do not report
+  problems seen with pirated copies. Such issues and pull requests are closed without an answer. See
+  [Legal](README.md#legal).
+- Be respectful to everyone, and keep reports and reviews about the code and its behaviour.
+- Jadyx is licensed under the [GPLv3 or later](LICENSE.txt), like Eden. By contributing you agree
+  that your work is published under that license.
 
-- No LLM or AI usage, *period*, for patches, pull requests, issues, comments, debugging, brainstorming, etc.
-  - For details on why, see the [detailed AI policy](docs/policies/AI.md).
-- Usage of any form of profanity or otherwise unsavory language is generally discouraged.
-  - This is primarily because it rarely helps to actually understand what's going on.
-  - Remember that your comments should be focused and actually address what's happening. With very few exceptions, expletives are actively detrimental at best.
-- New code must follow the same general style as the surrounding codebase. Exceptions may be granted in certain cases.
-- Maintainers reserve the right to change your patches and pull requests at will. We will try to avoid this.
-  - You should generally respect all decisions made by the [code owners](docs/CODEOWNERS) in your particular subsystem.
-  - However, if you feel they are overstepping or are incorrect, don't be afraid to stand your ground! Maintainers are not always correct.
-- While we do *not* adhere to the terms of a formal code of conduct, you will generally be expected to respect other developers, contributors, and community members.
-- You **must** have basic knowledge of [Git](https://git-scm.com/learn). Knowing how to manage your branches and follow proper fork policies is a necessity.
+## Reporting a bug
 
-### Where do I start?
+Open an issue with the bug report template and include:
 
-Anywhere you like! If you are facing an issue and want to fix it, go ahead. For new features, you are heavily encouraged to open a feature request on GitHub, Codeberg, or Forgejo first, discussing the motivations, potential implementation, and user flow of your desired feature. Our UI/UX designers will work with you to refine your feature before you actually choose to implement it.
+- The Jadyx version, shown in the corner of the game library (`v0.2.92.2`, for example).
+- Where it happened: Xbox Series X, Xbox Series S or PC, and on the console whether the app was set
+  to **Game** mode.
+- What you did, what you expected and what happened instead. Describe a game by its kind if you
+  prefer not to name it.
+- The diagnostics from the package's `LocalState` folder: `jadyx_diag.txt` and
+  `eden\log\eden_log.txt`. On the console they are reachable through the Device Portal's file
+  explorer; on PC they are in `%LOCALAPPDATA%\Packages\<package family>\LocalState`.
 
-You may also search for open issues on [GitHub](https://github.com/eden-emulator/Issue-Reports/issues), [Codeberg](https://codeberg.org/eden-emu/eden/issues), or [Forgejo](https://git.eden-emu.dev/eden-emu/eden/issues). For larger features/refactors, you should first express your interest in the issue to ensure another developer isn't already working on it.
+## Sending changes
 
-### Great! Can I contribute already?
+1. Fork the repository and branch from `main`.
+2. Build and test your change, as described in [Building](README.md#building). Changes to the
+   console path should be tried on the console: a PC run is not proof that it works on the Series.
+3. Keep commits small and focused, with messages in the style the history already uses:
+   `fix(d3d12): ...`, `feat(uwp): ...`, `docs: ...`, `chore: ...`.
+4. Open a pull request against `main` that says what changes, why, and how it was tested.
 
-There are five primary ways to contribute.
+### Code
 
-- Submit pull requests directly to our source tree
-  - You must first request an account on our Forgejo. See [Signup](#how-do-i-sign-up)
-- Submit pull requests to our [GitHub mirror](https://github.com/eden-emulator/Issue-Reports)
-  - Note that this is subject to being removed by DMCA, so don't rely on this.
-- Submit pull requests to our [Codeberg mirror](https://codeberg.org/eden-emu/eden)
-  - Codeberg is not subject to draconian DMCA laws, but they have been hostile to emulators such as Torzu in the past. Thus, you shouldn't rely on this either.
-- Submit patches to [`patch@eden-emu.dev`](mailto:patch@eden-emu.dev)
-  - These **must** be in `git format-patch` format. You should familiarize yourself with the [art of patching](https://www.gitkraken.com/learn/git/git-patch) beforehand.
-  - Alongside the contents of your email, please attach the patch/diff file itself for easy access and use.
-- Email our developers at [`developers@eden-emu.dev`](mailto:developers@eden-emu.dev) with any of your relevant findings or code changes.
-
-To test your changes, ensure to read the [build documentation](./docs/Build.md) for your specific platform(s) to ensure everything compiles and works properly. You should also make sure that your branch is up-to-date with the upstream `master` branch before opening a pull request.
-
-### How do I sign up?
-
-<details>
-<summary>To sign up and begin contributing... (click to open)</summary>
-
-Email [crueter@crueter.xyz](mailto:crueter@crueter.xyz) with the following format:
-
-```txt
-Subject: [Eden Git] Registration Request
-Username: <Your Desired Username>
-Email: <Your Desired Email>
-I wish to sign up because... <your reason here>
-```
-
-Received mail that does not follow this format will be ignored.
-
-Once your request is processed, you will receive a confirmation email with your temporary password and some information on Git access and policies. If you do not receive a response within 48 hours, feel free to send another email.
-
-> [!WARNING]
-> Some email providers may place the response email in your spam/junk folder; notable offenders include Gmail and Outlook. *Always* ensure to check your Spam or Junk folder.
-
-</details>
-
-## Non-code Contributions
-
-Alongside the other contribution methods listed up top, you can also choose to contribute through documentation, organization, or community guides. These can be done either through the code contribution methods described above, or created externally and shared via our Discord community.
-
-If you have an external tool/page that you believe would be handy to integrate/link into Eden, please additionally email our developers at [`developers@eden-emu.dev`](mailto:developers@eden-emu.dev). **Do not submit vibe-coded or AI generated tools or applications**.
+- Follow the style of the surrounding code. New files carry the same SPDX header as their
+  neighbours.
+- Keep changes to Eden's own files small and local. Every one of them has to be carried through
+  each sync with upstream; if a fix is not specific to Xbox or UWP, consider sending it to Eden
+  instead.
+- Port-specific code lives in `src/jadyx/`, `src/video_core/renderer_d3d12/` and `tools/xbox/`. See
+  [Architecture](README.md#architecture) for the rest.
+- Do not commit keys, firmware, games, game assets or screenshots of games.
+- Fixes bump only the last number of the package version (`0.2.92.N`); new features may bump the
+  third.
