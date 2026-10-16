@@ -18,6 +18,7 @@
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/device_memory.h"
 #include "core/hle/kernel/k_client_port.h"
 #include "core/hle/kernel/k_client_session.h"
 #include "core/hle/kernel/k_event.h"
@@ -170,6 +171,33 @@ u64 Physical(KProcess& process, u64 address) {
     }
     return GetInteger(physical);
 }
+
+// A set of DRAM pages, one bit each: a set of every page a game maps costs a few hundred KiB
+// where a hash set of them cost tens of MiB at the moment of the save.
+class PhysicalPages {
+public:
+    // False if the page was already in.
+    bool Insert(u64 physical) {
+        const u64 page = Index(physical);
+        if (page / 64 >= words.size()) words.resize(page / 64 + 1);
+        u64& word = words[page / 64];
+        const u64 bit = u64{1} << (page % 64);
+        if (word & bit) return false;
+        word |= bit;
+        return true;
+    }
+    bool Contains(u64 physical) const {
+        const u64 page = Index(physical);
+        return page / 64 < words.size() && (words[page / 64] >> (page % 64)) & 1;
+    }
+
+private:
+    static u64 Index(u64 physical) {
+        if (physical < Core::DramMemoryMap::Base) Reject(false, "guest page outside the DRAM");
+        return (physical - Core::DramMemoryMap::Base) / PageSize;
+    }
+    std::vector<u64> words;
+};
 
 // Identities of the objects a captured process reaches, assigned in discovery order. Never the
 // KAutoObject address: identities are graph references, not host pointers.
@@ -545,7 +573,7 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
         }
     }
     std::unordered_map<u64, size_t> shared_by_physical; // physical start -> record index
-    std::unordered_set<u64> lent_pages;                 // physical pages of transfer memory
+    PhysicalPages lent_pages;                           // physical pages of transfer memory
     for (size_t i = 0; i < registry.Records().size(); ++i) {
         auto& record = registry.Records()[i];
         if (record.kind == ObjectKind::TransferMemory) {
@@ -558,7 +586,7 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
             PutLe(record.payload, size, 8);
             PutLe(record.payload, static_cast<u32>(transfer->GetOwnerPermission()), 4);
             for (u64 page = 0; page < size; page += PageSize) {
-                lent_pages.insert(Physical(*process, address + page));
+                lent_pages.Insert(Physical(*process, address + page));
             }
         } else if (record.kind == ObjectKind::SharedMemory) {
             const auto* shared = static_cast<const Kernel::KSharedMemory*>(registry.Objects()[i]);
@@ -750,11 +778,11 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
     const u64 heap_end = layout.heap_start + layout.heap_size;
     const u64 main_stack_end = layout.main_stack_address + layout.main_stack_size;
     std::unordered_map<u64, u64> locked_sources; // physical page -> heap address
-    std::unordered_set<u64> stored;
+    PhysicalPages stored;
     auto& aliases = layout.aliases;
     auto& runs = layout.runs;
     const auto store_page = [&](u64 address) {
-        if (!stored.insert(Physical(*process, address)).second) return;
+        if (!stored.Insert(Physical(*process, address))) return;
         if (!runs.empty() && runs.back().address + runs.back().pages * PageSize == address) {
             ++runs.back().pages;
         } else {
@@ -863,7 +891,7 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
     // A locked heap page with no readable alias cannot be read back: fail closed. Transfer memory
     // the guest cannot read is a service's work memory: rebuilt locked, its content not kept.
     for (const auto& [physical, address] : locked_sources) {
-        if (!stored.contains(physical) && !lent_pages.contains(physical)) {
+        if (!stored.Contains(physical) && !lent_pages.Contains(physical)) {
             Reject(false, "locked heap page with no readable mapping");
         }
     }
