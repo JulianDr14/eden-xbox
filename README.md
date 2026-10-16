@@ -12,106 +12,37 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <p align="center">
   Eden, the Nintendo Switch emulator, rebuilt as a UWP app for <b>Xbox Series X|S in Developer Mode</b>,<br>
   with a <b>native Direct3D 12 renderer</b> written for this port.<br>
-  <b>Game A at a locked 60 FPS on Xbox Series X</b> · <a href="#on-the-console">see it running</a>
-</p>
-
-<p align="center">
-  <img src="docs/xbox/screenshots/library.jpg" alt="Jadyx game library with four games" width="800">
-  <br>
-  <sub>The game library, built for a controller on the TV.</sub>
 </p>
 
 > **Work in progress.** This is a development fork, not a release. Some games reach gameplay on the
 > console, none is free of bugs, and there are no published packages: you build and sign the app
-> yourself. Bring your own keys, firmware and game dumps; this repository contains none of them.
+> yourself. It contains no keys, firmware or games and never will: use only the ones you dumped
+> from a console and games you own. See [Legal](#legal).
 
-**Contents:** [Progress](#progress) ([games](#games), [screenshots](#on-the-console),
-[the memory wall](#the-memory-wall)) · [Architecture](#architecture) ·
-[Running it on a console](#running-it-on-a-console) · [Building](#building) ·
-[Documentation](#documentation) · [Acknowledgements](#acknowledgements) · [License](#license)
+**Contents:** [Progress](#progress) ([the memory wall](#the-memory-wall)) ·
+[Architecture](#architecture) · [Running it on a console](#running-it-on-a-console) ·
+[Building](#building) · [Documentation](#documentation) · [Acknowledgements](#acknowledgements) ·
+[Legal](#legal) · [License](#license)
 
 ## Progress
 
 ### Games
 
 Tested only with dumps of games the tester owns, on a retail Xbox Series X in Developer Mode with
-the app in Game mode. Frame rates are for areas whose shaders are already compiled: the first visit
-to a new area still stutters while its shaders build.
+the app in Game mode. This page does not list titles. In short:
 
-| Game | Xbox Series X | State |
-| --- | --- | --- |
-| Game A | **60 FPS** in races, stable | No graphical errors. The first 32-bit game of the list; the JIT warm-up covers 32-bit games too |
-| Game B | **60 FPS** in matches, stable | No graphical errors, special move cutscenes included |
-| Game G | **60 FPS**, stable | No graphical errors |
-| Game C | **55–60 FPS**, stable | No crashes or graphical errors |
-| Game D | **About 20 FPS** in the open world, of the game's 30 | **Work in progress.** Renders without graphical errors; limited by the cost of recording its draws, see [Work in progress](#work-in-progress-game-d) |
-| Game E | Renders **without graphical errors**, then **hits the memory wall** | The heaviest loads need more than the app's 5120 MiB, see [The memory wall](#the-memory-wall). On PC it reaches the open world at **30 FPS** |
+- Several 64-bit and 32-bit games reach gameplay at **55–60 FPS**, stable and without graphical
+  errors, once their shaders are compiled. The first visit to a new area still stutters while its
+  shaders build.
+- Large open worlds render correctly but run at about **20 FPS** where the game targets 30: the
+  renderer's GPU thread spends about 32 ms of host CPU time recording some 4 000 draws per frame
+  (about 8 µs per draw), while the GPU itself needs only about 8 ms. Cutting the per-draw cost of the
+  D3D12 backend is the next target for optimisation.
+- The heaviest loads need more memory than the app's 5120 MiB, see
+  [The memory wall](#the-memory-wall).
 
-Audio works without problems in every game above. None of them has been played from start to
-finish, so none is called "fully playable" yet.
-
-### On the console
-
-Captured on a retail Xbox Series X from the Device Portal, at the console's 4K output. The overlay
-in the top right corner is the app's own: frame rate, frame time with its worst case, emulated CPU
-load and GPU time per frame.
-
-**Game A runs at a locked 60 FPS on the Series X** once its shaders are compiled. In
-the race below every frame takes 16.7 ms and the slowest one 17.1 ms: no drops, with rain and the
-whole track on screen. The GPU is busy only 16 % of the time, so there is plenty of room left for
-the graphics.
-
-<table>
-  <tr>
-    <td colspan="2" align="center">
-      <img src="docs/xbox/screenshots/game-a-race.jpg" alt="Game A race at 60 FPS on Xbox Series X">
-      <br>
-      <sub><b>Game A</b>: mid-race at 60 FPS, 16.7 ms per frame, slowest frame 17.1 ms.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/xbox/screenshots/game-a-closeup.jpg" alt="Game A in the rain at 60 FPS on Xbox Series X">
-      <br>
-      <sub><b>Game A</b>: rain, reflections and particles at 60 FPS. The 472 ms worst
-      frame is a shader being compiled the first time the effect appears; it does not repeat.</sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/xbox/screenshots/game-b-match.jpg" alt="Game B match at 60 FPS on Xbox Series X">
-      <br>
-      <sub><b>Game B</b>: a match at 60 FPS, GPU at 14 %.</sub>
-    </td>
-  </tr>
-</table>
-
-#### Work in progress: Game D
-
-Game D already draws its open world correctly on the Series, but it runs at about
-20 FPS where the game targets 30. The renderer's own report shows where the time goes:
-
-- The GPU itself needs only about 8 ms per frame.
-- The open world issues about 4 000 draws per frame, and the renderer's GPU thread spends about
-  32 ms of host CPU time recording them, some 8 µs per draw.
-- The screen runs at 60 Hz, so a frame that misses 33.3 ms waits for the next refresh and takes
-  50 ms: a little over budget becomes 20 FPS instead of 30. In lighter areas, with under 2 000 draws
-  per frame, the game holds its 30 FPS.
-
-Cutting the per-draw cost of the D3D12 backend is the next target for optimisation.
-
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/xbox/screenshots/game-d-vista.jpg" alt="Game D title screen vista at 21 FPS on Xbox Series X">
-      <br>
-      <sub><b>Game D</b>: the whole of the open world in view at 21 FPS, GPU 9.5 ms per frame.</sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/xbox/screenshots/game-d-field.jpg" alt="Game D on the starting area at 21 FPS on Xbox Series X">
-      <br>
-      <sub><b>Game D</b>: the starting area at 21 FPS, no graphical errors.</sub>
-    </td>
-  </tr>
-</table>
+Audio works in every game tested. None has been played from start to finish, so none is called
+"fully playable" yet.
 
 ### Subsystems
 
@@ -135,7 +66,7 @@ Cutting the per-draw cost of the D3D12 backend is the next target for optimisati
 
 ### The memory wall
 
-Game E is where this port meets its hardest limit. On the Series it draws correctly,
+The heaviest game tested is where this port meets its hardest limit. On the Series it draws correctly,
 but in the heaviest area loads the app runs out of memory: the renderer cannot create a buffer and
 the game returns to the library.
 
@@ -412,7 +343,7 @@ Series.
 
 ### The bug tracker
 
-**The problem.** The first run of Game B turned up a series of bugs. About
+**The problem.** The first run of one game turned up a series of bugs. About
 thirty pipelines were rejected for sampling integer textures, geometry shaders wrote to streams,
 the GPU hung, an nvmap assert fired and the movie player aborted. Each had to be dug out of
 `eden_log.txt`. That was hard for three reasons:
@@ -558,7 +489,7 @@ Design, phases and evidence: [docs/xbox/xbox_pulse.md](docs/xbox/xbox_pulse.md) 
 ## Running it on a console
 
 Requirements: an Xbox Series X|S in Developer Mode, the package you built (see
-[Building](#building)), and your own `prod.keys`, `title.keys`, firmware and games.
+[Building](#building)), and the keys, firmware and games dumped from your own Switch.
 
 1. Open the Device Portal at `https://<console-ip>:11443`.
 2. Install `jadyx.appx` together with its `Microsoft.VCLibs.x64.14.00.appx` dependency.
@@ -615,6 +546,15 @@ This fork stands on other people's work:
 
 Jadyx is an independent fork. It is not affiliated with or endorsed by the Eden project,
 Nintendo or Microsoft. Please do not report problems from this fork to Eden.
+
+## Legal
+
+- Jadyx contains no Nintendo code, keys, firmware, games or game assets, and does not explain how to
+  obtain them. It runs only software you dumped yourself from hardware you own.
+- Piracy is not supported. Issues, pull requests or messages that ask for, link to or are based on
+  pirated games, keys or firmware are closed without an answer.
+- Nintendo Switch is a trademark of Nintendo. Xbox and Xbox Series X|S are trademarks of Microsoft.
+  They are named only to describe what this software does; no endorsement is implied.
 
 ## License
 
