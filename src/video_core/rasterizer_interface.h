@@ -93,6 +93,13 @@ public:
         return false;
     }
 
+    /// Pulse fallback, region by region: writes back only what the GPU wrote and the CPU has not
+    /// overwritten since. A plain FlushRegion also writes stale images over memory the guest
+    /// reused (shader code replaced by old render target pixels).
+    virtual void FlushCheckpointRegion(DAddr addr, u64 size) {
+        FlushRegion(addr, size);
+    }
+
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     virtual void FlushRegion(DAddr addr, u64 size,
                              VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;

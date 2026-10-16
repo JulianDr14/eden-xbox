@@ -262,7 +262,8 @@ namespace {
 // What the GPU wrote and the host caches still hold goes back to guest memory, which the
 // checkpoint stores; the caches themselves are rebuilt after a restore. The exact readback is
 // tried first; a texture it cannot read back exactly (rescaled, aliased...) falls back to the
-// renderer's own flush of every range the GPU can reach, which keeps what a CPU read would see.
+// renderer's flush of every range the GPU can reach, limited to the images the GPU wrote and
+// the CPU has not overwritten since.
 void FlushGpuWrites(Core::System& system) {
     std::vector<std::pair<DAddr, u64>> ranges;
     if (const auto nvdrv = system.ServiceManager().GetService<Service::Nvidia::NVDRV>("nvdrv:s",
@@ -280,7 +281,9 @@ void FlushGpuWrites(Core::System& system) {
             LOG_INFO(Core, "Pulse: GPU writes flushed by region ({})", inexact.what());
         }
         try {
-            for (const auto& [address, size] : ranges) rasterizer->FlushRegion(address, size);
+            for (const auto& [address, size] : ranges) {
+                rasterizer->FlushCheckpointRegion(address, size);
+            }
             rasterizer->FlushAll();
         } catch (const std::exception& error) {
             failure = error.what();

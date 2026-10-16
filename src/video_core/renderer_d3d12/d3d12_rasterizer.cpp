@@ -488,6 +488,19 @@ bool RasterizerD3D12::MaterializeCheckpointMemory() {
     return true;
 }
 
+void RasterizerD3D12::FlushCheckpointRegion(DAddr address, u64 size) {
+    if (!address || !size) return;
+    {
+        std::scoped_lock lock{texture_cache.mutex};
+        texture_cache.DownloadMemory(address, size, true);
+    }
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        buffer_cache.DownloadMemory(address, size);
+    }
+    query_cache.FlushRegion(address, size);
+}
+
 void RasterizerD3D12::FlushRegion(DAddr address, u64 size, VideoCommon::CacheType which) {
     if (!address || !size) return;
     if (True(which & VideoCommon::CacheType::TextureCache)) {
