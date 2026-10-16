@@ -5,7 +5,7 @@ Los docs "de verdad" son [`uwp_build.md`](uwp_build.md) (toolchain) y [`xbox_dep
 (empaquetar y desplegar). Aquí va el resumen rápido y todo lo que no cabe en ellos.
 
 **Reglas de la casa**
-- Los commits van solo a nuestro fork: `origin` = `JulianDr14/Jadyx`, fork de
+- Los commits van solo a nuestro fork: `origin` = `JulianDr14/jadyx`, fork de
   `eden-emulator/mirror` (el espejo oficial de Eden en GitHub), rama `xbox`.
   - `eden` (espejo de Eden) y `upstream` (juanresendiz813/eden-xbox) son solo lectura, con el push
     deshabilitado.

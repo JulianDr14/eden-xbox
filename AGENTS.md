@@ -87,13 +87,13 @@ No60 sostenidos ni mejora general demostrados; revisar seleccion/cobertura antes
 de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
 
 ## Reglas duras
-1. **Solo nuestro fork.** Los commits y pushes van únicamente a `origin` (`JulianDr14/Jadyx`,
+1. **Solo nuestro fork.** Los commits y pushes van únicamente a `origin` (`JulianDr14/jadyx`,
    fork de `eden-emulator/mirror`).
    - `eden` (el espejo oficial de Eden) y `upstream` (juanresendiz813/eden-xbox, el fork original, ya
      abandonado) son de **solo lectura**: tienen el push deshabilitado y así deben seguir.
    - `legacy` (`JulianDr14/eden-xbox-legacy`) es el repo anterior, que queda como archivo.
    - **Nunca abras PRs ni issues contra Eden.** En un fork, GitHub y `gh pr create` proponen por
-     defecto el repo padre: indica siempre `--repo JulianDr14/Jadyx` y comprueba el destino.
+     defecto el repo padre: indica siempre `--repo JulianDr14/jadyx` y comprueba el destino.
 2. **Commit solo cuando el usuario lo pida.** Nunca por iniciativa propia. Nunca añadir a Codex, OpenAI
    ni al asistente como autor/coautor o mediante un trailer `Co-Authored-By`.
    Los commits del usuario conservan únicamente su identidad; preferencia global explícita.
