@@ -387,8 +387,10 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
     if (!system.IsPaused()) Reject(false, "capture requires a paused system");
     auto& kernel = system.Kernel();
     auto* process = system.ApplicationProcess();
-    if (!process || !process->Is64Bit() || process->GetState() != KProcess::State::Running) {
-        Reject(false, "no running 64-bit application process");
+    // A32 and A64 share the context (ArmDynarmic32 maps r0-r15 and the CPSR onto it), the
+    // exclusive monitor and the r0/r1 results of the waits a restore completes.
+    if (!process || process->GetState() != KProcess::State::Running) {
+        Reject(false, "no running application process");
     }
 
     ProcessCheckpoint checkpoint;
@@ -1043,7 +1045,7 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
         if (system.ApplicationProcess()) Invalid("Pulse: restore requires a fresh system");
         load(layout.pin);
         process = system.ApplicationProcess();
-        if (!process || !process->IsRestoringCheckpoint() || !process->Is64Bit()) {
+        if (!process || !process->IsRestoringCheckpoint()) {
             Incompatible("Pulse: skeleton loader did not create a pinned process");
         }
         if (process->GetLayoutPin() != layout.pin || process->GetProgramId() != layout.program_id ||
