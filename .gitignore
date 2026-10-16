@@ -69,3 +69,6 @@ externals/generated
 
 # Python bytecode (tools/xbox scripts)
 __pycache__/
+
+# Local test run output
+/test-results/
