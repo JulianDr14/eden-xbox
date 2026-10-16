@@ -344,6 +344,9 @@ SessionRequestHandlerPtr NVDRV::PulseRestore(std::string_view kind, Pulse::Handl
         syncpoint.interface_managed = in.Bool();
         syncpoint.guest_value = in.U32();
         syncpoint.host_value = in.U32();
+        LOG_INFO(Service_NVDRV, "Pulse: syncpoint {} restored: min {}, max {}, guest {}, host {}",
+                 syncpoint.id, syncpoint.counter_min, syncpoint.counter_max,
+                 syncpoint.guest_value, syncpoint.host_value);
         syncpoint_manager.PulseRestore(syncpoint);
     }
 
