@@ -88,6 +88,7 @@ CDmaPusher::CDmaPusher(Host1x::Host1x& host1x_, s32 id)
                     break;
                 }
             }
+            pending.fetch_sub(1, std::memory_order_release);
         }
     });
 }

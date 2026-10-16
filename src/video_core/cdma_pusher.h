@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -111,8 +112,14 @@ public:
 
     void PushEntries(ChCommandHeaderList&& entries) {
         std::scoped_lock l{command_mutex};
+        pending.fetch_add(1, std::memory_order_relaxed);
         command_lists.push_back(std::move(entries));
         command_cv.notify_one();
+    }
+
+    /// Pulse: every command list pushed has been executed.
+    bool Idle() const {
+        return pending.load(std::memory_order_acquire) == 0;
     }
 
 protected:
@@ -130,6 +137,7 @@ protected:
     std::condition_variable_any command_cv;
     Host1x::Control host_processor;
     std::mutex command_mutex;
+    std::atomic<u32> pending{}; ///< Command lists pushed and not yet executed.
     Host1x::Host1x& host1x;
     ChClassId current_class;
     std::jthread thread;

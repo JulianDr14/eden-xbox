@@ -171,6 +171,13 @@ public:
     void StartDevice(s32 fd, ChannelType type, u32 syncpt);
     void StopDevice(s32 fd, ChannelType type);
 
+    /// Pulse: the device on fd has executed everything pushed to it (true when none is open).
+    bool DeviceIdle(s32 fd) const {
+        if (auto const nvdec = std::get_if<Tegra::Host1x::Nvdec>(&devices[fd])) return nvdec->Idle();
+        if (auto const vic = std::get_if<Tegra::Host1x::Vic>(&devices[fd])) return vic->Idle();
+        return true;
+    }
+
     void PushEntries(s32 fd, ChCommandHeaderList&& entries) {
         if (auto const nvdec = std::get_if<Tegra::Host1x::Nvdec>(&devices[fd])) {
             nvdec->PushEntries(std::move(entries));
