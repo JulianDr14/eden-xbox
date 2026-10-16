@@ -1019,7 +1019,12 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                         // The only capture: when the player leaves, never while playing.
                         WritePulseLog("saving the session | " + MemoryReport() + " | " + MemoryOwners());
                         const auto save_start = std::chrono::steady_clock::now();
-                        const std::string reason = PulseSessions::Save(system, *pulse_identity);
+                        const std::string reason =
+                            PulseSessions::Save(system, *pulse_identity, [] {
+                                u64 used{}, limit{};
+                                if (!QueryAppMemory(used, limit)) return ~u64{};
+                                return limit > used ? limit - used : u64{};
+                            });
                         const auto save_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                                  std::chrono::steady_clock::now() - save_start)
                                                  .count();
