@@ -2066,8 +2066,8 @@ void InstallCrashHandlers() {
 }
 
 // ---- User data seeding ------------------------------------------------------------------------
-// The user's own keys, firmware and game dumps reach the console inside a local-only package
-// (package-appx.ps1 -Game, never the repo), under InstalledLocation\userdata. Eden
+// Data for a local test reaches the console inside a local-only package, never the repo, under
+// InstalledLocation\userdata (package-appx.ps1 -Game, or what a local -StageScript adds). Eden
 // reads keys and firmware from its writable user dir, so they are copied into LocalState once;
 // LocalState survives package updates, so later packages can leave them out.
 //   userdata\keys\*      -> LocalState\eden\keys

@@ -26,6 +26,9 @@ param(
     # once seeded, later packages can pass just -Game <file name> without the file.
     #   -Game      game dump (.nsp/.xci) to boot instead of boot.nro, or the name of one already seeded
     [string] $Game,
+    # A script kept outside the repo, run with -Layout <package layout folder> before packing: local
+    # additions to a test package that never go into the repo.
+    [string] $StageScript,
     # Folder library for PC/Series; game files live under the app's LocalState\games.
     [switch] $Library,
     # Diagnostic builds: the in-process sampling profiler (boot.cfg profile=1). "full" also turns on
@@ -146,6 +149,10 @@ if ($Game) {
     } else {
         Write-Host "game     : $gameName (expected already in LocalState\games)"
     }
+}
+if ($StageScript) {
+    & $StageScript -Layout $layout
+    Write-Host "staged   : $StageScript"
 }
 
 # uwp_boot.cpp reads Package.InstalledLocation\boot.nro - the payload must sit at the layout root.

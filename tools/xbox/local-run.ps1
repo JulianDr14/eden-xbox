@@ -8,17 +8,18 @@
 #
 #   powershell -ExecutionPolicy Bypass -File tools\xbox\local-run.ps1 [-NoBuild] [-TimeoutSec 75]
 #       [-BootNro path\to\payload.nro] [-RunSeconds 20] [-DebugLayer]
-#       [-Game path\to\game.nsp] [-MemoryLimitMiB 5120]
+#       [-Game path\to\game.nsp] [-StageScript path] [-MemoryLimitMiB 5120]
 #
 # -RunSeconds runs payloads without the sentinels (deko3d examples, ...) for that long, then exits.
 # -DebugLayer turns on the D3D12 debug layer; its errors and warnings land in eden_log.txt.
 # -Game passes the user's own game dump through package-appx.ps1 (copied into LocalState
-# on the first run; afterwards -Game with just the file name is enough).
+# on the first run; afterwards -Game with just the file name is enough). -StageScript is handed to
+# package-appx.ps1 as is.
 # The log is left in %LOCALAPPDATA%\Packages\<family>\LocalState\eden\log\eden_log.txt (path
 # printed at the end).
 
 param([int] $TimeoutSec = 75, [switch] $NoBuild, [string] $BootNro, [int] $RunSeconds = 0,
-      [switch] $DebugLayer, [string] $Game, [string[]] $BootCfg = @(),
+      [switch] $DebugLayer, [string] $Game, [string] $StageScript, [string[]] $BootCfg = @(),
       [ValidateRange(0, 1048576)] [int] $MemoryLimitMiB = 5120, [switch] $Library, [switch] $AllowVersionDowngrade)
 $ErrorActionPreference = 'Stop'
 # Match package-appx's comma-separated -BootCfg handling before applying defaults.
@@ -46,7 +47,7 @@ Get-Process -Name jadyx -ErrorAction SilentlyContinue | Stop-Process -Force
 Push-Location $r
 try {
     & "$r\tools\xbox\package-appx.ps1" -BootNro $BootNro -RunSeconds $RunSeconds `
-        -DebugLayer:$DebugLayer -Game $Game -BootCfg $BootCfg *> $null
+        -DebugLayer:$DebugLayer -Game $Game -StageScript $StageScript -BootCfg $BootCfg *> $null
 } finally {
     Pop-Location
 }
