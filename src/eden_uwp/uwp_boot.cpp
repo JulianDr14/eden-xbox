@@ -1017,7 +1017,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     result == GameMenuResult::LibraryWithoutSession) {
                     if (result == GameMenuResult::Library && pulse_identity) {
                         // The only capture: when the player leaves, never while playing.
-                        WritePulseLog("saving the session | " + MemoryReport());
+                        WritePulseLog("saving the session | " + MemoryReport() + " | " + MemoryOwners());
                         const auto save_start = std::chrono::steady_clock::now();
                         const std::string reason = PulseSessions::Save(system, *pulse_identity);
                         const auto save_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1025,7 +1025,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                                                  .count();
                         if (reason.empty()) {
                             WritePulseLog("session saved in " + std::to_string(save_ms) + " ms | " +
-                                          MemoryReport());
+                                          MemoryReport() + " | " + MemoryOwners());
                             PulseSessions::SetNotice(I18n::ToUtf8(I18n::Tr(I18n::Text::PulseKept)));
                         } else {
                             WritePulseLog("no session (" + reason + ") after " +
