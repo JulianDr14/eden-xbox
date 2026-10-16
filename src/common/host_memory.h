@@ -113,4 +113,14 @@ std::string HostMemoryCommitStats();
 /// told apart, such as a file-backed section.
 std::optional<u64> EmulatedDramCommittedBytes();
 
+/// Xbox private DRAM backing: the run of host pages around `host` that share its commit state,
+/// clamped to the backing. `untouched` pages are reserved but never committed, and the guest reads
+/// them as zero. Empty outside such a backing (fastmem section, file, desktop).
+struct DramRegion {
+    const u8* begin{};
+    const u8* end{};
+    bool untouched{};
+};
+std::optional<DramRegion> QueryDramRegion(const void* host);
+
 } // namespace Common

@@ -1747,6 +1747,33 @@ std::optional<u64> EmulatedDramCommittedBytes() {
 #endif
 }
 
+std::optional<DramRegion> QueryDramRegion(const void* host) {
+#ifdef HOST_MEMORY_USE_FROM_APP
+    if (g_backing_is_file.load(std::memory_order_acquire) ||
+        g_backing_is_section.load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+    const u8* const base = g_backing_base.load(std::memory_order_acquire);
+    const size_t size = g_backing_size.load(std::memory_order_acquire);
+    const auto* const address = static_cast<const u8*>(host);
+    if (base == nullptr || address < base || address >= base + size) {
+        return std::nullopt;
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(address, &info, sizeof(info)) == 0) {
+        return std::nullopt;
+    }
+    const auto* const region = static_cast<const u8*>(info.BaseAddress);
+    return DramRegion{
+        .begin = (std::max)(region, base),
+        .end = (std::min)(region + info.RegionSize, base + size),
+        .untouched = info.State == MEM_RESERVE,
+    };
+#else
+    return std::nullopt;
+#endif
+}
+
 std::string HostMemoryCommitStats() {
 #ifdef HOST_MEMORY_USE_FROM_APP
     if (!g_backing_is_section.load(std::memory_order_acquire)) {
