@@ -24,6 +24,11 @@ public:
     explicit IGeneralService(Core::System& system_);
     ~IGeneralService() override;
 
+    // Pulse: the profiles and scan data are the host's; nothing of the guest's lives here.
+    std::string_view PulseKind() const override {
+        return "nifm:IGeneralService";
+    }
+
 private:
     void GetClientId(HLERequestContext& ctx);
     void CreateScanRequest(HLERequestContext& ctx);

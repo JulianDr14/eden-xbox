@@ -12,6 +12,22 @@
 
 namespace Service::APM {
 
+namespace {
+
+void CaptureConfigurations(Controller& controller, Pulse::StateWriter& out) {
+    for (const auto mode : {PerformanceMode::Normal, PerformanceMode::Boost}) {
+        out.U32(static_cast<u32>(controller.GetCurrentPerformanceConfiguration(mode)));
+    }
+}
+
+void RestoreConfigurations(Controller& controller, Pulse::StateReader& in) {
+    for (const auto mode : {PerformanceMode::Normal, PerformanceMode::Boost}) {
+        controller.SetPerformanceConfiguration(mode, static_cast<PerformanceConfiguration>(in.U32()));
+    }
+}
+
+} // namespace
+
 class ISession final : public ServiceFramework<ISession> {
 public:
     explicit ISession(Core::System& system_, Controller& controller_)
@@ -22,6 +38,13 @@ public:
             {2, &ISession::SetCpuOverclockEnabled, "SetCpuOverclockEnabled"},
         };
         RegisterHandlers(functions);
+    }
+
+    std::string_view PulseKind() const override {
+        return "apm:ISession";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        CaptureConfigurations(controller, capture.state);
     }
 
 private:
@@ -76,6 +99,25 @@ APM::APM(Core::System& system_, std::shared_ptr<Module> apm_, Controller& contro
 }
 
 APM::~APM() = default;
+
+void APM::PulseCapture(Pulse::HandlerCapture& capture) const {
+    CaptureConfigurations(controller, capture.state);
+}
+
+SessionRequestHandlerPtr APM::PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) {
+    auto& in = restore.state;
+    if (kind == PulseKind()) {
+        RestoreConfigurations(controller, in);
+        in.End();
+        return shared_from_this();
+    }
+    if (kind == "apm:ISession") {
+        RestoreConfigurations(controller, in);
+        in.End();
+        return std::make_shared<ISession>(system, controller);
+    }
+    return nullptr;
+}
 
 void APM::OpenSession(HLERequestContext& ctx) {
     LOG_DEBUG(Service_APM, "called");

@@ -41,6 +41,12 @@ public:
 
     ~StaticService() override = default;
 
+    // Pulse: a stateless root; its clocks and time zone service are handed out again.
+    std::string_view PulseKind() const override {
+        return "time:StaticService";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) override;
+
     Result GetStandardUserSystemClock(OutInterface<Service::PSC::Time::SystemClock> out_service);
     Result GetStandardNetworkSystemClock(OutInterface<Service::PSC::Time::SystemClock> out_service);
     Result GetStandardSteadyClock(OutInterface<Service::PSC::Time::SteadyClock> out_service);

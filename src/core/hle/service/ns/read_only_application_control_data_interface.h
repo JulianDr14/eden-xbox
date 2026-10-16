@@ -19,6 +19,10 @@ public:
     explicit IReadOnlyApplicationControlDataInterface(Core::System& system_);
     ~IReadOnlyApplicationControlDataInterface() override;
 
+    std::string_view PulseKind() const override {
+        return "ns:IReadOnlyApplicationControlDataInterface";
+    }
+
     Result GetApplicationControlData(OutBuffer<BufferAttr_HipcMapAlias> out_buffer,
                                      Out<u32> out_actual_size,
                                      ApplicationControlSource application_control_source,

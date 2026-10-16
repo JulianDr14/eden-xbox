@@ -11,6 +11,10 @@ class IECommerceInterface final : public ServiceFramework<IECommerceInterface> {
 public:
     explicit IECommerceInterface(Core::System& system_);
     ~IECommerceInterface() override;
+
+    std::string_view PulseKind() const override {
+        return "ns:IECommerceInterface";
+    }
 };
 
 } // namespace Service::NS

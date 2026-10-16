@@ -12,6 +12,10 @@ public:
     explicit IDownloadTaskInterface(Core::System& system_);
     ~IDownloadTaskInterface() override;
 
+    std::string_view PulseKind() const override {
+        return "ns:IDownloadTaskInterface";
+    }
+
 private:
     Result EnableAutoCommit();
     Result DisableAutoCommit();

@@ -39,6 +39,13 @@ public:
     Errno CloseImpl(s32 fd);
     std::optional<std::shared_ptr<Network::SocketBase>> GetSocket(s32 fd);
 
+    // Pulse: a socket is a host connection and cannot be stored; the capture waits until the
+    // guest has closed them all. The descriptor table is shared by every bsd session.
+    std::string_view PulseKind() const override {
+        return "bsd";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+
 private:
     /// Maximum number of file descriptors
     static constexpr size_t MAX_FD = 128;
@@ -196,12 +203,22 @@ class BSDCFG final : public ServiceFramework<BSDCFG> {
 public:
     explicit BSDCFG(Core::System& system_, const char *name);
     ~BSDCFG() override;
+
+    // Pulse: no state.
+    std::string_view PulseKind() const override {
+        return "bsdcfg";
+    }
 };
 
 class BSD_NU final : public ServiceFramework<BSD_NU> {
 public:
     explicit BSD_NU(Core::System& system_);
     ~BSD_NU() override;
+
+    // Pulse: no state.
+    std::string_view PulseKind() const override {
+        return "bsd:nu";
+    }
 };
 
 } // namespace Service::Sockets

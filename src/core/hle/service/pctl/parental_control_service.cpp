@@ -9,6 +9,8 @@
 #include "core/core.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/hle/kernel/k_event.h"
+#include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/pctl/parental_control_service.h"
 #include "core/hle/service/pctl/pctl_results.h"
@@ -153,6 +155,85 @@ IParentalControlService::IParentalControlService(Core::System& system_, Capabili
 }
 
 IParentalControlService::~IParentalControlService() = default;
+
+Event* IParentalControlService::PulseEventAt(u32 slot) {
+    switch (slot) {
+    case 0:
+        return &synchronization_event;
+    case 1:
+        return &unlinked_event;
+    case 2:
+        return &request_suspension_event;
+    default:
+        return nullptr;
+    }
+}
+
+void IParentalControlService::PulseCapture(Pulse::HandlerCapture& capture) const {
+    auto& out = capture.state;
+    out.U32(static_cast<u32>(capability));
+    out.U64(program_id);
+    out.U64(states.current_tid);
+    out.U64(states.application_info.application_id);
+    out.Bytes(states.application_info.age_rating);
+    out.U32(states.application_info.parental_control_flag);
+    out.U32(static_cast<u32>(states.application_info.capability));
+    out.U64(states.tid_from_event);
+    out.Bool(states.launch_time_valid);
+    out.Bool(states.is_suspended);
+    out.Bool(states.temporary_unlocked);
+    out.Bool(states.free_communication);
+    out.Bool(states.stereo_vision);
+    out.Bool(settings.is_stero_vision_restricted);
+    out.Bool(settings.is_free_communication_default_on);
+    out.Bool(settings.disabled);
+    out.U8(restriction_settings.rating_age);
+    out.Bool(restriction_settings.sns_post_restriction);
+    out.Bool(restriction_settings.free_communication_restriction);
+    out.Bytes({reinterpret_cast<const u8*>(pin_code.data()), pin_code.size()});
+    for (const u32 value : raw_play_timer_settings.settings) out.U32(value);
+
+    auto* const self = const_cast<IParentalControlService*>(this);
+    for (u32 slot = 0; slot < 3; ++slot) {
+        capture.ExportEvent(slot, self->PulseEventAt(slot)->GetHandle()->GetParent());
+    }
+}
+
+Kernel::KEvent* IParentalControlService::PulseEvent(u32 slot) {
+    auto* const event = PulseEventAt(slot);
+    return event ? event->GetHandle()->GetParent() : nullptr;
+}
+
+std::shared_ptr<IParentalControlService> IParentalControlService::PulseCreate(
+    Core::System& system, Pulse::StateReader& in) {
+    const auto capability = static_cast<Capability>(in.U32());
+    const auto program_id = in.U64();
+    auto service = std::make_shared<IParentalControlService>(system, capability, program_id);
+    service->PulseApply(in);
+    return service;
+}
+
+void IParentalControlService::PulseApply(Pulse::StateReader& in) {
+    states.current_tid = in.U64();
+    states.application_info.application_id = in.U64();
+    in.Bytes(states.application_info.age_rating);
+    states.application_info.parental_control_flag = in.U32();
+    states.application_info.capability = static_cast<Capability>(in.U32());
+    states.tid_from_event = in.U64();
+    states.launch_time_valid = in.Bool();
+    states.is_suspended = in.Bool();
+    states.temporary_unlocked = in.Bool();
+    states.free_communication = in.Bool();
+    states.stereo_vision = in.Bool();
+    settings.is_stero_vision_restricted = in.Bool();
+    settings.is_free_communication_default_on = in.Bool();
+    settings.disabled = in.Bool();
+    restriction_settings.rating_age = in.U8();
+    restriction_settings.sns_post_restriction = in.Bool();
+    restriction_settings.free_communication_restriction = in.Bool();
+    in.Bytes({reinterpret_cast<u8*>(pin_code.data()), pin_code.size()});
+    for (u32& value : raw_play_timer_settings.settings) value = in.U32();
+}
 
 bool IParentalControlService::CheckFreeCommunicationPermissionImpl() const {
     if (states.temporary_unlocked) {

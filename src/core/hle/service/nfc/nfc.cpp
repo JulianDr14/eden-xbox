@@ -18,6 +18,11 @@ namespace Service::NFC {
 
 class IUser final : public NfcInterface {
 public:
+    static constexpr std::string_view PulseInterfaceKind = "nfc:IUser";
+    std::string_view PulseKind() const override {
+        return PulseInterfaceKind;
+    }
+
     explicit IUser(Core::System& system_) : NfcInterface(system_, "NFC::IUser", BackendType::Nfc) {
         // clang-format off
         static const FunctionInfo functions[] = {
@@ -52,6 +57,11 @@ public:
 
 class ISystem final : public NfcInterface {
 public:
+    static constexpr std::string_view PulseInterfaceKind = "nfc:ISystem";
+    std::string_view PulseKind() const override {
+        return PulseInterfaceKind;
+    }
+
     explicit ISystem(Core::System& system_)
         : NfcInterface{system_, "NFC::ISystem", BackendType::Nfc} {
         // clang-format off
@@ -93,6 +103,11 @@ public:
 using MFInterface = NfcInterface;
 class MFIUser final : public MFInterface {
 public:
+    static constexpr std::string_view PulseInterfaceKind = "nfc:IMifare";
+    std::string_view PulseKind() const override {
+        return PulseInterfaceKind;
+    }
+
     explicit MFIUser(Core::System& system_)
         : MFInterface{system_, "NFC::MFInterface", BackendType::Mifare} {
         // clang-format off
@@ -120,6 +135,11 @@ public:
 
 class IAm final : public ServiceFramework<IAm> {
 public:
+    // Pulse: a stub with no state.
+    std::string_view PulseKind() const override {
+        return "nfc:IAm";
+    }
+
     explicit IAm(Core::System& system_) : ServiceFramework{system_, "NFC::IAm"} {
         // clang-format off
         static const FunctionInfo functions[] = {
@@ -135,6 +155,18 @@ public:
 
 class NFC_AM final : public ServiceFramework<NFC_AM> {
 public:
+    std::string_view PulseKind() const override {
+        return "nfc:am";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override {
+        restore.state.End();
+        if (kind == PulseKind()) {
+            return shared_from_this();
+        }
+        return kind == "nfc:IAm" ? std::make_shared<IAm>(system) : nullptr;
+    }
+
     explicit NFC_AM(Core::System& system_) : ServiceFramework{system_, "nfc:am"} {
         // clang-format off
         static const FunctionInfo functions[] = {
@@ -157,6 +189,14 @@ private:
 
 class NFC_MF_U final : public ServiceFramework<NFC_MF_U> {
 public:
+    std::string_view PulseKind() const override {
+        return "nfc:mf:u";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override {
+        return PulseRestoreInterface<MFIUser>(*this, system, kind, restore);
+    }
+
     explicit NFC_MF_U(Core::System& system_) : ServiceFramework{system_, "nfc:mf:u"} {
         // clang-format off
         static const FunctionInfo functions[] = {
@@ -179,6 +219,14 @@ private:
 
 class NFC_U final : public ServiceFramework<NFC_U> {
 public:
+    std::string_view PulseKind() const override {
+        return "nfc:user";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override {
+        return PulseRestoreInterface<IUser>(*this, system, kind, restore);
+    }
+
     explicit NFC_U(Core::System& system_) : ServiceFramework{system_, "nfc:user"} {
         // clang-format off
         static const FunctionInfo functions[] = {
@@ -201,6 +249,14 @@ private:
 
 class NFC_SYS final : public ServiceFramework<NFC_SYS> {
 public:
+    std::string_view PulseKind() const override {
+        return "nfc:sys";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override {
+        return PulseRestoreInterface<ISystem>(*this, system, kind, restore);
+    }
+
     explicit NFC_SYS(Core::System& system_) : ServiceFramework{system_, "nfc:sys"} {
         // clang-format off
         static const FunctionInfo functions[] = {

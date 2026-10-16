@@ -14,6 +14,10 @@ public:
     explicit IDocumentInterface(Core::System& system_);
     ~IDocumentInterface() override;
 
+    std::string_view PulseKind() const override {
+        return "ns:IDocumentInterface";
+    }
+
 private:
     Result ResolveApplicationContentPath(ContentPath content_path);
     Result GetRunningApplicationProgramId(Out<u64> out_program_id, u64 caller_program_id);

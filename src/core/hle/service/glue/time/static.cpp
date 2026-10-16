@@ -81,18 +81,76 @@ StaticService::StaticService(Core::System& system_,
     ASSERT(res == ResultSuccess);
 }
 
+SessionRequestHandlerPtr StaticService::PulseRestore(std::string_view kind,
+                                                     Pulse::HandlerRestore& restore) {
+    auto& in = restore.state;
+    if (kind == PulseKind()) {
+        in.End();
+        return shared_from_this();
+    }
+    if (kind == "time:SystemClock") {
+        const u32 clock = in.U32();
+        const bool has_event = in.Bool();
+        in.End();
+        std::shared_ptr<Service::PSC::Time::SystemClock> out;
+        Result result = ResultSuccess;
+        switch (clock) {
+        case 1:
+            result = GetStandardUserSystemClock(&out);
+            break;
+        case 2:
+            result = GetStandardNetworkSystemClock(&out);
+            break;
+        case 3:
+            result = GetStandardLocalSystemClock(&out);
+            break;
+        case 4:
+            result = GetEphemeralNetworkSystemClock(&out);
+            break;
+        default:
+            throw std::invalid_argument("Pulse: unknown system clock");
+        }
+        if (result.IsSuccess() && out && has_event) result = out->OpenOperationEvent();
+        if (result.IsError() || !out) throw std::invalid_argument("Pulse: time could not reopen a clock");
+        return out;
+    }
+    if (kind == "time:SteadyClock") {
+        in.End();
+        std::shared_ptr<Service::PSC::Time::SteadyClock> out;
+        if (GetStandardSteadyClock(&out).IsError() || !out) {
+            throw std::invalid_argument("Pulse: time could not reopen the steady clock");
+        }
+        return out;
+    }
+    if (kind == "time:TimeZoneService") {
+        const bool has_event = in.Bool();
+        in.End();
+        std::shared_ptr<TimeZoneService> out;
+        if (GetTimeZoneService(&out).IsError() || !out) {
+            throw std::invalid_argument("Pulse: time could not reopen the time zone service");
+        }
+        if (has_event) out->OpenOperationEvent();
+        return out;
+    }
+    return nullptr;
+}
+
 Result StaticService::GetStandardUserSystemClock(
     OutInterface<Service::PSC::Time::SystemClock> out_service) {
     LOG_DEBUG(Service_Time, "called.");
 
-    R_RETURN(m_wrapped_service->GetStandardUserSystemClock(out_service));
+    R_TRY(m_wrapped_service->GetStandardUserSystemClock(out_service));
+    (*out_service)->SetPulseClock(1);
+    R_SUCCEED();
 }
 
 Result StaticService::GetStandardNetworkSystemClock(
     OutInterface<Service::PSC::Time::SystemClock> out_service) {
     LOG_DEBUG(Service_Time, "called.");
 
-    R_RETURN(m_wrapped_service->GetStandardNetworkSystemClock(out_service));
+    R_TRY(m_wrapped_service->GetStandardNetworkSystemClock(out_service));
+    (*out_service)->SetPulseClock(2);
+    R_SUCCEED();
 }
 
 Result StaticService::GetStandardSteadyClock(
@@ -115,14 +173,18 @@ Result StaticService::GetStandardLocalSystemClock(
     OutInterface<Service::PSC::Time::SystemClock> out_service) {
     LOG_DEBUG(Service_Time, "called.");
 
-    R_RETURN(m_wrapped_service->GetStandardLocalSystemClock(out_service));
+    R_TRY(m_wrapped_service->GetStandardLocalSystemClock(out_service));
+    (*out_service)->SetPulseClock(3);
+    R_SUCCEED();
 }
 
 Result StaticService::GetEphemeralNetworkSystemClock(
     OutInterface<Service::PSC::Time::SystemClock> out_service) {
     LOG_DEBUG(Service_Time, "called.");
 
-    R_RETURN(m_wrapped_service->GetEphemeralNetworkSystemClock(out_service));
+    R_TRY(m_wrapped_service->GetEphemeralNetworkSystemClock(out_service));
+    (*out_service)->SetPulseClock(4);
+    R_SUCCEED();
 }
 
 Result StaticService::GetSharedMemoryNativeHandle(

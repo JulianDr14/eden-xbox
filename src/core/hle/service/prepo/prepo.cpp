@@ -62,6 +62,11 @@ public:
         RegisterHandlers(functions);
     }
 
+    // Pulse: reports go straight to the reporter; nothing is kept between calls.
+    std::string_view PulseKind() const override {
+        return "prepo";
+    }
+
 private:
     template <Core::Reporter::PlayReportType Type>
     void SaveReport(HLERequestContext& ctx) {

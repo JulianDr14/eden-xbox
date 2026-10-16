@@ -19,6 +19,14 @@ public:
                                  FileSys::SaveDataSpaceId space);
     ~ISaveDataInfoReader() override;
 
+    // Pulse: short-lived; the capture waits for the guest to close it.
+    std::string_view PulseKind() const override {
+        return "ISaveDataInfoReader";
+    }
+    void PulseCapture(Pulse::HandlerCapture&) const override {
+        throw Pulse::ServiceRejected(true, "a save data listing is open");
+    }
+
     struct SaveDataInfo {
         u64_le save_id_unknown;
         FileSys::SaveDataSpaceId space;

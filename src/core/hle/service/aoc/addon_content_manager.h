@@ -24,6 +24,18 @@ public:
     explicit IAddOnContentManager(Core::System& system);
     ~IAddOnContentManager() override;
 
+    // Pulse: the add-on list is the System's; only the change event is the guest's.
+    std::string_view PulseKind() const override {
+        return "aoc:u";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.ExportEvent(0, aoc_change_event);
+    }
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 ? aoc_change_event : nullptr;
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) override;
+
     Result CountAddOnContent(Out<u32> out_count, ClientProcessId process_id);
     Result ListAddOnContent(Out<u32> out_count, OutBuffer<BufferAttr_HipcMapAlias> out_addons,
                             u32 offset, u32 count, ClientProcessId process_id);

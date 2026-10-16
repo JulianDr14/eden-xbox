@@ -34,13 +34,63 @@ IHardwareOpusDecoder::~IHardwareOpusDecoder() = default;
 Result IHardwareOpusDecoder::Initialize(const OpusParametersEx& params,
                                         Kernel::KTransferMemory* transfer_memory,
                                         u64 transfer_memory_size) {
+    pulse_multi_stream = false;
+    pulse_params = {};
+    pulse_params.sample_rate = params.sample_rate;
+    pulse_params.channel_count = params.channel_count;
+    pulse_params.use_large_frame_size = params.use_large_frame_size;
+    pulse_buffer_size = transfer_memory_size;
     return impl->Initialize(params, transfer_memory, transfer_memory_size);
 }
 
 Result IHardwareOpusDecoder::Initialize(const OpusMultiStreamParametersEx& params,
                                         Kernel::KTransferMemory* transfer_memory,
                                         u64 transfer_memory_size) {
+    pulse_multi_stream = true;
+    pulse_params = {};
+    pulse_params.sample_rate = params.sample_rate;
+    pulse_params.channel_count = params.channel_count;
+    pulse_params.total_stream_count = params.total_stream_count;
+    pulse_params.stereo_stream_count = params.stereo_stream_count;
+    pulse_params.use_large_frame_size = params.use_large_frame_size;
+    pulse_params.mappings = params.mappings;
+    pulse_buffer_size = transfer_memory_size;
     return impl->Initialize(params, transfer_memory, transfer_memory_size);
+}
+
+void IHardwareOpusDecoder::PulseCapture(Pulse::HandlerCapture& capture) const {
+    auto& out = capture.state;
+    out.Bool(pulse_multi_stream);
+    out.U32(pulse_params.sample_rate);
+    out.U32(pulse_params.channel_count);
+    out.Bool(pulse_params.use_large_frame_size);
+    out.U64(pulse_buffer_size);
+    if (pulse_multi_stream) {
+        out.U32(pulse_params.total_stream_count);
+        out.U32(pulse_params.stereo_stream_count);
+        out.Bytes(pulse_params.mappings);
+    }
+}
+
+Result IHardwareOpusDecoder::PulseApply(Pulse::StateReader& in) {
+    const bool multi_stream = in.Bool();
+    OpusMultiStreamParametersEx params{};
+    params.sample_rate = in.U32();
+    params.channel_count = in.U32();
+    params.use_large_frame_size = in.Bool();
+    const auto buffer_size = in.U64();
+    if (!multi_stream) {
+        const OpusParametersEx single{
+            .sample_rate = params.sample_rate,
+            .channel_count = params.channel_count,
+            .use_large_frame_size = params.use_large_frame_size,
+        };
+        return Initialize(single, nullptr, buffer_size);
+    }
+    params.total_stream_count = in.U32();
+    params.stereo_stream_count = in.U32();
+    in.Bytes(params.mappings);
+    return Initialize(params, nullptr, buffer_size);
 }
 
 Result IHardwareOpusDecoder::DecodeInterleavedOld(OutBuffer<BufferAttr_HipcMapAlias> out_pcm_data,

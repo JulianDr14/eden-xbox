@@ -23,6 +23,13 @@ public:
                            const char* name);
         ~Interface() override;
 
+        // Pulse: application_info is never filled in (no launch property), so roots are stateless.
+        std::string_view PulseKind() const override {
+            return "acc";
+        }
+        SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                              Pulse::HandlerRestore& restore) override;
+
         void GetUserCount(HLERequestContext& ctx);
         void GetUserExistence(HLERequestContext& ctx);
         void ListAllUsers(HLERequestContext& ctx);

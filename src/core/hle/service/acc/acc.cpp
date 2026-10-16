@@ -602,6 +602,11 @@ protected:
 
     ProfileManager& profile_manager;
     Common::UUID user_id{}; ///< The user id this profile refers to.
+
+public:
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.state.Raw(user_id);
+    }
 };
 
 class IProfile final : public IProfileCommon {
@@ -609,6 +614,10 @@ public:
     explicit IProfile(Core::System& system_, Common::UUID user_id_,
                       ProfileManager& profile_manager_)
         : IProfileCommon{system_, "IProfile", false, user_id_, profile_manager_} {}
+
+    std::string_view PulseKind() const override {
+        return "acc:IProfile";
+    }
 };
 
 class IProfileEditor final : public IProfileCommon {
@@ -616,6 +625,10 @@ public:
     explicit IProfileEditor(Core::System& system_, Common::UUID user_id_,
                             ProfileManager& profile_manager_)
         : IProfileCommon{system_, "IProfileEditor", true, user_id_, profile_manager_} {}
+
+    std::string_view PulseKind() const override {
+        return "acc:IProfileEditor";
+    }
 };
 
 class ISessionObject final : public ServiceFramework<ISessionObject> {
@@ -660,6 +673,17 @@ public:
     }
     ~EnsureTokenIdCacheAsyncInterface() = default;
 
+    // Pulse: always complete; a new one is equivalent.
+    std::string_view PulseKind() const override {
+        return "acc:EnsureTokenIdCacheAsync";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.ExportEvent(0, completion_event);
+    }
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 ? completion_event : nullptr;
+    }
+
     void LoadIdTokenCache(HLERequestContext& ctx) {
         LOG_WARNING(Service_ACC, "(STUBBED) called");
 
@@ -703,6 +727,11 @@ public:
         // clang-format on
 
         RegisterHandlers(functions);
+    }
+
+    // Pulse: the profiles live in the System's profile manager.
+    std::string_view PulseKind() const override {
+        return "acc:IManagerForApplication";
     }
 
 private:
@@ -1239,6 +1268,30 @@ Module::Interface::Interface(std::shared_ptr<Module> module_,
       profile_manager{std::move(profile_manager_)} {}
 
 Module::Interface::~Interface() = default;
+
+SessionRequestHandlerPtr Module::Interface::PulseRestore(std::string_view kind,
+                                                         Pulse::HandlerRestore& restore) {
+    auto& in = restore.state;
+    if (kind == PulseKind()) {
+        in.End();
+        return shared_from_this();
+    }
+    if (kind == "acc:IProfile" || kind == "acc:IProfileEditor") {
+        const auto user_id = in.Raw<Common::UUID>();
+        in.End();
+        if (kind == "acc:IProfile") return std::make_shared<IProfile>(system, user_id, *profile_manager);
+        return std::make_shared<IProfileEditor>(system, user_id, *profile_manager);
+    }
+    if (kind == "acc:IManagerForApplication") {
+        in.End();
+        return std::make_shared<IManagerForApplication>(system, profile_manager);
+    }
+    if (kind == "acc:EnsureTokenIdCacheAsync") {
+        in.End();
+        return std::make_shared<EnsureTokenIdCacheAsyncInterface>(system);
+    }
+    return nullptr;
+}
 
 class ACC_AA final : public Module::Interface {
 public:

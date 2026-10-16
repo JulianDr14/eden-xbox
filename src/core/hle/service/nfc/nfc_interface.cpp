@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <stdexcept>
+
 #include "common/logging.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
@@ -300,6 +302,73 @@ void NfcInterface::SendCommandByPassThrough(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
     rb.Push(static_cast<u32>(out_data.size()));
+}
+
+void NfcInterface::PulseCapture(Pulse::HandlerCapture& capture) const {
+    capture.state.Raw(state);
+    capture.state.Bool(device_manager != nullptr);
+    if (!device_manager) {
+        return;
+    }
+    capture.state.Bool(device_manager->IsInitialized());
+    capture.ExportEvent(0, device_manager->PulseAvailabilityEvent());
+    for (std::size_t index = 0; index < device_manager->PulseDeviceCount(); ++index) {
+        const auto& device = device_manager->PulseDevice(index);
+        const auto device_state = device->GetCurrentState();
+        if (device_state == DeviceState::TagFound || device_state == DeviceState::TagMounted) {
+            throw Pulse::ServiceRejected(true, "an NFC tag is in use");
+        }
+        // A removed tag leaves the detection running: restore it as a search.
+        const bool searching = device_state == DeviceState::SearchingForTag ||
+                               device_state == DeviceState::TagRemoved;
+        capture.state.Bool(searching);
+        if (searching) {
+            capture.state.Raw(device->GetAllowedProtocols());
+        }
+        const auto slot = static_cast<u32>(1 + index * 2);
+        capture.ExportEvent(slot, device->PulseEvent(false));
+        capture.ExportEvent(slot + 1, device->PulseEvent(true));
+    }
+}
+
+Kernel::KEvent* NfcInterface::PulseEvent(u32 slot) {
+    if (!device_manager) {
+        return nullptr;
+    }
+    if (slot == 0) {
+        return device_manager->PulseAvailabilityEvent();
+    }
+    const std::size_t index = (slot - 1) / 2;
+    if (index >= device_manager->PulseDeviceCount()) {
+        return nullptr;
+    }
+    return device_manager->PulseDevice(index)->PulseEvent(slot % 2 == 0);
+}
+
+void NfcInterface::PulseApply(Pulse::StateReader& in) {
+    const auto saved_state = in.Raw<State>();
+    if (saved_state != State::NonInitialized && saved_state != State::Initialized) {
+        throw std::invalid_argument("Pulse: nfc state");
+    }
+    state = saved_state;
+    if (!in.Bool()) {
+        return;
+    }
+    auto manager = GetManager();
+    if (in.Bool()) {
+        manager->Initialize();
+    }
+    for (std::size_t index = 0; index < manager->PulseDeviceCount(); ++index) {
+        if (!in.Bool()) {
+            continue;
+        }
+        const auto protocols = in.Raw<NfcProtocol>();
+        // A controller without NFC on this console leaves the device unavailable, as a
+        // disconnect would.
+        if (manager->IsInitialized()) {
+            static_cast<void>(manager->PulseDevice(index)->StartDetection(protocols));
+        }
+    }
 }
 
 std::shared_ptr<DeviceManager> NfcInterface::GetManager() {

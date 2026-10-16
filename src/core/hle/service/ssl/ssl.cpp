@@ -127,6 +127,14 @@ public:
         shared_data->connection_count++;
     }
 
+    // Pulse: a TLS session lives in the host; the capture waits for the guest to close it.
+    std::string_view PulseKind() const override {
+        return "ssl:ISslConnection";
+    }
+    void PulseCapture(Pulse::HandlerCapture&) const override {
+        throw Pulse::ServiceRejected(true, "a TLS connection is open");
+    }
+
     ~ISslConnection() {
         shared_data->connection_count--;
         if (fd_to_close.has_value()) {
@@ -471,6 +479,15 @@ public:
         RegisterHandlers(functions);
     }
 
+    // Pulse: the version; options and imported keys are not kept, and an open connection rejects
+    // the capture on its own.
+    std::string_view PulseKind() const override {
+        return "ssl:ISslContext";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.state.U32(ssl_version.raw);
+    }
+
 private:
     SslVersion ssl_version;
     std::shared_ptr<SslContextSharedData> shared_data;
@@ -583,6 +600,27 @@ public:
         // clang-format on
 
         RegisterHandlers(functions);
+    }
+
+    // Pulse: the certificate store is the system's; it reopens each context.
+    std::string_view PulseKind() const override {
+        return "ssl";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override {
+        auto& in = restore.state;
+        SessionRequestHandlerPtr service;
+        if (kind == PulseKind()) {
+            service = shared_from_this();
+        } else if (kind == "ssl:ISslContext") {
+            SslVersion version{};
+            version.raw = in.U32();
+            service = std::make_shared<ISslContext>(system, version);
+        } else {
+            return nullptr;
+        }
+        in.End();
+        return service;
     }
 
 private:

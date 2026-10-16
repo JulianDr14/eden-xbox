@@ -21,6 +21,11 @@ public:
     explicit ISettingsServer(Core::System& system_);
     ~ISettingsServer() override;
 
+    // Pulse: a stateless root; settings belong to the system.
+    std::string_view PulseKind() const override {
+        return "set";
+    }
+
 private:
     Result GetLanguageCode(Out<LanguageCode> out_language_code);
 

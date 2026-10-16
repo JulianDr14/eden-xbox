@@ -14,6 +14,11 @@ namespace Service::NFP {
 
 class IUser final : public Interface {
 public:
+    static constexpr std::string_view PulseInterfaceKind = "nfp:IUser";
+    std::string_view PulseKind() const override {
+        return PulseInterfaceKind;
+    }
+
     explicit IUser(Core::System& system_) : Interface(system_, "NFP:IUser") {
         // clang-format off
         static const FunctionInfoTyped<IUser> functions[] = {
@@ -52,6 +57,11 @@ public:
 
 class ISystem final : public Interface {
 public:
+    static constexpr std::string_view PulseInterfaceKind = "nfp:ISystem";
+    std::string_view PulseKind() const override {
+        return PulseInterfaceKind;
+    }
+
     explicit ISystem(Core::System& system_) : Interface(system_, "NFP:ISystem") {
         // clang-format off
         static const FunctionInfoTyped<ISystem> functions[] = {
@@ -92,6 +102,11 @@ public:
 
 class IDebug final : public Interface {
 public:
+    static constexpr std::string_view PulseInterfaceKind = "nfp:IDebug";
+    std::string_view PulseKind() const override {
+        return PulseInterfaceKind;
+    }
+
     explicit IDebug(Core::System& system_) : Interface(system_, "NFP:IDebug") {
         // clang-format off
         static const FunctionInfoTyped<IDebug> functions[] = {
@@ -144,6 +159,14 @@ public:
 
 class IUserManager final : public ServiceFramework<IUserManager> {
 public:
+    std::string_view PulseKind() const override {
+        return "nfp:user";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override {
+        return NFC::PulseRestoreInterface<IUser>(*this, system, kind, restore);
+    }
+
     explicit IUserManager(Core::System& system_) : ServiceFramework{system_, "nfp:user"} {
         // clang-format off
         static const FunctionInfo functions[] = {
@@ -166,6 +189,14 @@ private:
 
 class ISystemManager final : public ServiceFramework<ISystemManager> {
 public:
+    std::string_view PulseKind() const override {
+        return "nfp:sys";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override {
+        return NFC::PulseRestoreInterface<ISystem>(*this, system, kind, restore);
+    }
+
     explicit ISystemManager(Core::System& system_) : ServiceFramework{system_, "nfp:sys"} {
         // clang-format off
         static const FunctionInfo functions[] = {
@@ -188,6 +219,14 @@ private:
 
 class IDebugManager final : public ServiceFramework<IDebugManager> {
 public:
+    std::string_view PulseKind() const override {
+        return "nfp:dbg";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override {
+        return NFC::PulseRestoreInterface<IDebug>(*this, system, kind, restore);
+    }
+
     explicit IDebugManager(Core::System& system_) : ServiceFramework{system_, "nfp:dbg"} {
         // clang-format off
         static const FunctionInfo functions[] = {

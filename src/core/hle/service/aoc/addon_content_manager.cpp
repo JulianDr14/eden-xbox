@@ -93,6 +93,14 @@ IAddOnContentManager::~IAddOnContentManager() {
     service_context.CloseEvent(aoc_change_event);
 }
 
+SessionRequestHandlerPtr IAddOnContentManager::PulseRestore(std::string_view kind,
+                                                            Pulse::HandlerRestore& restore) {
+    restore.state.End();
+    if (kind == PulseKind()) return shared_from_this();
+    if (kind == "aoc:IPurchaseEventManager") return std::make_shared<IPurchaseEventManager>(system);
+    return nullptr;
+}
+
 Result IAddOnContentManager::CountAddOnContent(Out<u32> out_count, ClientProcessId process_id) {
     LOG_DEBUG(Service_AOC, "called. process_id={}", process_id.pid);
 

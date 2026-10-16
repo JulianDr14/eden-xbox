@@ -17,6 +17,10 @@ public:
     explicit IContentManagementInterface(Core::System& system_);
     ~IContentManagementInterface() override;
 
+    std::string_view PulseKind() const override {
+        return "ns:IContentManagementInterface";
+    }
+
 public:
     Result CalculateApplicationOccupiedSize(Out<ApplicationOccupiedSize> out_size,
                                             u64 application_id);

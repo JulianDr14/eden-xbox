@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <utility>
@@ -146,6 +147,14 @@ void BSD_USA::SendToWork::Response(HLERequestContext& ctx) {
     rb.Push(ResultSuccess);
     rb.Push<s32>(ret);
     rb.PushEnum(bsd_errno);
+}
+
+void BSD_USA::PulseCapture(Pulse::HandlerCapture&) const {
+    const auto open = std::count_if(file_descriptors.begin(), file_descriptors.end(),
+                                    [](const auto& fd) { return fd.has_value(); });
+    if (open > 0) {
+        throw Pulse::ServiceRejected(true, fmt::format("{} sockets are open", open));
+    }
 }
 
 void BSD_USA::RegisterClient(HLERequestContext& ctx) {

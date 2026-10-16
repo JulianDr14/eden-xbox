@@ -23,6 +23,16 @@ IStorage::IStorage(Core::System& system_, FileSys::VirtualFile backend_)
     RegisterHandlers(functions);
 }
 
+void IStorage::PulseCapture(Pulse::HandlerCapture& capture) const {
+    if (pulse_origin == PulseOrigin::None || !pulse_opener) {
+        throw Pulse::ServiceRejected(false, "IStorage opened by a call Pulse cannot replay");
+    }
+    capture.state.U64(capture.Reference(pulse_opener));
+    capture.state.U32(static_cast<u32>(pulse_origin));
+    capture.state.U32(static_cast<u32>(pulse_args.size()));
+    capture.state.Bytes(pulse_args);
+}
+
 Result IStorage::Read(
     OutBuffer<BufferAttr_HipcMapAlias | BufferAttr_HipcMapTransferAllowsNonSecure> out_bytes,
     s64 offset, s64 length) {

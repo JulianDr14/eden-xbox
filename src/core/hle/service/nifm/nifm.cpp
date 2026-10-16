@@ -22,6 +22,7 @@
 #include <chrono>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 #include "common/container/unordered_map.h"
 #include <common/settings.h>
@@ -256,6 +257,28 @@ public:
             worker.join();
     }
 
+    // Pulse: the scan result the guest reads next; a running scan is waited out.
+    std::string_view PulseKind() const override {
+        return "nifm:IScanRequest";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        const auto current = state.load();
+        if (current == State::Processing) {
+            throw Pulse::ServiceRejected(true, "a Wi-Fi scan is running");
+        }
+        capture.state.Bool(current == State::Finished);
+        capture.state.Raw(worker_result.load());
+        capture.ExportEvent(0, evt_scan_complete);
+        capture.ExportEvent(1, evt_processing);
+    }
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 ? evt_scan_complete : slot == 1 ? evt_processing : nullptr;
+    }
+    void PulseApply(Pulse::StateReader& in) {
+        state.store(in.Bool() ? State::Finished : State::Idle);
+        worker_result.store(in.Raw<Result>());
+    }
+
 private:
     std::vector<Network::ScanData> scan_results;
 
@@ -380,6 +403,26 @@ public:
     ~IRequest() override {
         service_context.CloseEvent(event1);
         service_context.CloseEvent(event2);
+    }
+
+    // Pulse: the request state; the connection is re-evaluated on the next GetResult.
+    std::string_view PulseKind() const override {
+        return "nifm:IRequest";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.state.Raw(state);
+        capture.ExportEvent(0, event1);
+        capture.ExportEvent(1, event2);
+    }
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 ? event1 : slot == 1 ? event2 : nullptr;
+    }
+    void PulseApply(Pulse::StateReader& in) {
+        const auto saved = in.Raw<RequestState>();
+        if (saved < RequestState::NotSubmitted || saved > RequestState::Blocking) {
+            throw std::invalid_argument("Pulse: nifm request state");
+        }
+        state = saved;
     }
 
 private:
@@ -515,6 +558,11 @@ public:
             {2, nullptr, "Persist"},
         };
         RegisterHandlers(functions);
+    }
+
+    // Pulse: every command is unimplemented, there is no state.
+    std::string_view PulseKind() const override {
+        return "nifm:INetworkProfile";
     }
 };
 
@@ -1121,6 +1169,35 @@ public:
             {5, &NetworkInterface::CreateGeneralService, "CreateGeneralService"},
         };
         RegisterHandlers(functions);
+    }
+
+    // Pulse: the three ports share a stateless root that rebuilds every nifm interface.
+    std::string_view PulseKind() const override {
+        return "nifm";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override {
+        auto& in = restore.state;
+        SessionRequestHandlerPtr service;
+        if (kind == PulseKind()) {
+            service = shared_from_this();
+        } else if (kind == "nifm:IGeneralService") {
+            service = std::make_shared<IGeneralService>(system);
+        } else if (kind == "nifm:INetworkProfile") {
+            service = std::make_shared<INetworkProfile>(system);
+        } else if (kind == "nifm:IRequest") {
+            auto request = std::make_shared<IRequest>(system);
+            request->PulseApply(in);
+            service = std::move(request);
+        } else if (kind == "nifm:IScanRequest") {
+            auto scan = std::make_shared<IScanRequest>(system);
+            scan->PulseApply(in);
+            service = std::move(scan);
+        } else {
+            return nullptr;
+        }
+        in.End();
+        return service;
     }
 
 private:

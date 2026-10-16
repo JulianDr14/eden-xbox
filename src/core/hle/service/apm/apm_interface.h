@@ -16,6 +16,13 @@ public:
                  const char* name);
     ~APM() override;
 
+    // Pulse: the performance configurations the application set live in the System's controller.
+    std::string_view PulseKind() const override {
+        return "apm";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) override;
+
 private:
     void OpenSession(HLERequestContext& ctx);
     void GetPerformanceMode(HLERequestContext& ctx);

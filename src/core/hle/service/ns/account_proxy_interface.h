@@ -11,6 +11,10 @@ class IAccountProxyInterface final : public ServiceFramework<IAccountProxyInterf
 public:
     explicit IAccountProxyInterface(Core::System& system_);
     ~IAccountProxyInterface() override;
+
+    std::string_view PulseKind() const override {
+        return "ns:IAccountProxyInterface";
+    }
 };
 
 } // namespace Service::NS

@@ -16,6 +16,10 @@ public:
     explicit IDynamicRightsInterface(Core::System& system_);
     ~IDynamicRightsInterface() override;
 
+    std::string_view PulseKind() const override {
+        return "ns:IDynamicRightsInterface";
+    }
+
 private:
     Result NotifyApplicationRightsCheckStart();
     Result GetRunningApplicationStatus(Out<u32> out_status, u64 rights_handle);

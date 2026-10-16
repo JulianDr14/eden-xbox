@@ -18,6 +18,10 @@ public:
     explicit IReadOnlyApplicationRecordInterface(Core::System& system_);
     ~IReadOnlyApplicationRecordInterface() override;
 
+    std::string_view PulseKind() const override {
+        return "ns:IReadOnlyApplicationRecordInterface";
+    }
+
 private:
     Result HasApplicationRecord(Out<bool> out_has_application_record, u64 program_id);
     Result IsDataCorruptedResult(Out<bool> out_is_data_corrupted_result, Result result);

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <stdexcept>
+
 #include "core/hle/service/audio/hardware_opus_decoder.h"
 #include "core/hle/service/audio/hardware_opus_decoder_manager.h"
 #include "core/hle/service/cmif_serialization.h"
@@ -29,6 +31,24 @@ IHardwareOpusDecoderManager::IHardwareOpusDecoderManager(Core::System& system_)
 }
 
 IHardwareOpusDecoderManager::~IHardwareOpusDecoderManager() = default;
+
+SessionRequestHandlerPtr IHardwareOpusDecoderManager::PulseRestore(
+    std::string_view kind, Pulse::HandlerRestore& restore) {
+    auto& in = restore.state;
+    if (kind == PulseKind()) {
+        in.End();
+        return shared_from_this();
+    }
+    if (kind != "hwopus:IHardwareOpusDecoder") {
+        return nullptr;
+    }
+    auto decoder = std::make_shared<IHardwareOpusDecoder>(system, impl.GetHardwareOpus());
+    if (R_FAILED(decoder->PulseApply(in))) {
+        throw std::invalid_argument("Pulse: the Opus decoder could not be reopened");
+    }
+    in.End();
+    return decoder;
+}
 
 Result IHardwareOpusDecoderManager::OpenHardwareOpusDecoder(
     Out<SharedPointer<IHardwareOpusDecoder>> out_decoder, OpusParameters params, u32 tmem_size,

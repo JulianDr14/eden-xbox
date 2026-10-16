@@ -406,7 +406,7 @@ actualizado: faltaba la fila de estadísticas).
 ### Límites honestos (fase 5)
 
 - Un juego comercial aún puede rechazarse al volver al inicio si usa un servicio
-  sin serializador (set, time, acc, apm, pctl, friends…; ver fase 5). El motivo se
+  sin serializador (bcat, mii, caps, ldn…; ver fase 5). El motivo se
   muestra y se sale sin sesión; el juego no se pierde porque las partidas normales
   no se tocan.
 - La reanudación tarda lo que la restauración (≈3 s en la Series) más la carga.
@@ -448,13 +448,52 @@ resto. Compila para UWP; **no está probado en la Series**.
 - **Rechazos reintentables**: un applet de biblioteca abierto (teclado, selector de
   usuario…), un accesor de `IStorage` abierto o el applet ocupado. El motivo se
   muestra y se puede volver a intentar al cerrarlo.
+- **Servicios de sistema (15 oct 2026)**, casi sin estado propio:
+  - `IStorage` de fs (RomFS): guarda cómo se abrió (proceso actual, data id o
+    índice de programa) y referencia el `fsp-srv` que lo abrió, que lo vuelve a
+    abrir. El RomFS abierto como sistema de archivos también se reabre.
+  - time: relojes de sistema (usuario, red, local, efímero) por su origen, reloj
+    estable y zona horaria; se exportan sus eventos de operación.
+  - set y set:sys: raíces sin estado.
+  - apm: las configuraciones de rendimiento de los modos normal y boost.
+  - lm: el destino del logger; los paquetes de log a medias se descartan.
+  - acc: `IProfile`/`IProfileEditor` (id de usuario), `IManagerForApplication` y
+    su contexto asíncrono (siempre completo; se exporta su evento).
+  - pctl: estados, ajustes, restricciones, pin y temporizador de juego de
+    `IParentalControlService`, con sus tres eventos.
+  - ns (`ns:am2` y sus interfaces hijas, salvo `IApplicationManagerInterface`),
+    prepo y spl/csrng: sin estado.
+  - aoc: la lista de DLC es del System; se exportan los eventos de cambio y de
+    compra.
+  - nfc/nfp: inicialización y detección por mando (se reinicia al restaurar) y
+    sus eventos. Un amiibo leído o montado rechaza con reintento.
+  - nifm: `IRequest` (estado de la solicitud; la conexión se vuelve a evaluar) e
+    `IScanRequest` (resultado del último escaneo), con sus eventos. Un escaneo en
+    curso rechaza con reintento.
+  - friends: `IFriendService` (su evento) e `INotificationService` (usuario,
+    notificaciones pendientes y evento).
+  - hwopus: cada decodificador se reabre con sus parámetros; el historial de Opus
+    empieza de cero, como un paquete con reset.
+  - bsd, sfdnsres, nsd: sin estado mientras no haya sockets. Un socket abierto
+    rechaza con reintento.
+  - ssl: `ISslContext` guarda su versión; una conexión TLS abierta rechaza con
+    reintento.
+  - Rechazos reintentables nuevos: `IDirectory`, `ISaveDataInfoReader` e
+    `IMultiCommitManager` de fs, y `nvhost-nvdec`, `nvhost-vic` y `nvhost-nvjpg`
+    (solo están abiertos mientras el juego decodifica).
 
 ### Límites honestos (fase 5)
 
 - Sin evidencia en consola todavía: todo lo anterior compila, nada más.
-- Servicios sin serializador (set, time, acc, apm, pctl, friends, nifm…) siguen
-  rechazando sin reintento. Es probable que el siguiente rechazo de un juego real
-  venga de ahí.
+- Servicios sin serializador (bcat, mii, caps, ngc, ldn, npns, audin, psm,
+  `IApplicationManagerInterface` de ns…) siguen rechazando sin reintento. Es
+  probable que el siguiente rechazo de un juego real venga de ahí.
+- Un juego que mantiene un socket o una conexión TLS abiertos todo el tiempo no
+  llega a capturarse: el rechazo reintentable no se resuelve nunca.
+- Bloqueos del kernel: `svcMapPhysicalMemory`, los NRO cargados con `nn::ro`
+  (memoria `AliasCode`, sin serializador de ro) y la memoria de código del JIT.
+- Las opciones y certificados importados de un `ISslContext` no se guardan (son
+  stubs).
 - La memoria de transferencia que solo retiene un servicio, sin mapeo en el
   proceso, no se cubre.
 - IRS y hidbus se restauran sin estado; la vibración no se restaura.

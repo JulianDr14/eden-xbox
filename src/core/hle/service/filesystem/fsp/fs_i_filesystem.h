@@ -58,7 +58,7 @@ public:
     Result GetFileSystemAttribute(Out<FileSys::FileSystemAttribute> out_attribute);
 
     // Pulse: the FSP_SRV call that opened it and its arguments, replayed on restore.
-    enum class PulseOrigin : u32 { None, SdCard, SaveData, SystemSaveData };
+    enum class PulseOrigin : u32 { None, SdCard, SaveData, SystemSaveData, DataCurrentProcess };
     void SetPulseOrigin(PulseOrigin origin, std::vector<u8> args) {
         pulse_origin = origin;
         pulse_args = std::move(args);
