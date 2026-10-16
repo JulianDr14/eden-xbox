@@ -660,6 +660,8 @@ public:
     Result CleanupForIpcClient(KProcessAddress address, size_t size, KMemoryState dst_state);
 
     Result MapPhysicalMemory(KProcessAddress address, size_t size);
+    /// For callers outside a guest thread (Pulse restore): the owner is named, not current.
+    Result MapPhysicalMemory(KProcessAddress address, size_t size, u64 process_id);
     Result UnmapPhysicalMemory(KProcessAddress address, size_t size);
 
     Result MapPhysicalMemoryUnsafe(KProcessAddress address, size_t size);
