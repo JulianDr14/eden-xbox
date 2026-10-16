@@ -64,7 +64,7 @@ struct CheckpointStats {
 // emulated RAM, so the system must stay paused from Capture until Write returns.
 class ProcessCheckpoint final {
 public:
-    // System paused; the application process is a 64-bit process created from metadata.
+    // System paused; the application process is created from metadata (A32 or A64).
     static ProcessCheckpoint Capture(Core::System& system);
 
     // The system running: raises the kernel checkpoint barrier, so threads entering an SVC park
