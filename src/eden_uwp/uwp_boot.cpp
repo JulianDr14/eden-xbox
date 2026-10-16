@@ -17,6 +17,7 @@
 // OutputDebugString, so observing this line is positive proof the JIT decoded + executed guest code.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -1019,12 +1020,51 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                         // The only capture: when the player leaves, never while playing.
                         WritePulseLog("saving the session | " + MemoryReport() + " | " + MemoryOwners());
                         const auto save_start = std::chrono::steady_clock::now();
-                        const std::string reason =
-                            PulseSessions::Save(system, *pulse_identity, [] {
-                                u64 used{}, limit{};
-                                if (!QueryAppMemory(used, limit)) return ~u64{};
-                                return limit > used ? limit - used : u64{};
-                            });
+                        // Samples the app memory while the save runs: the highest use of each
+                        // step against the use before it, so the step that peaks is known.
+                        constexpr std::array<const char*, 7> save_steps{
+                            "idle", "process", "gpu", "write", "verify", "sync", "replace"};
+                        std::array<std::atomic<u64>, save_steps.size()> step_peak{};
+                        std::atomic<int> step{-1};
+                        u64 save_base{}, save_limit{};
+                        QueryAppMemory(save_base, save_limit);
+                        std::string reason;
+                        {
+                            std::jthread sampler{[&](std::stop_token stop) {
+                                while (!stop.stop_requested()) {
+                                    const int at = step.load(std::memory_order_relaxed);
+                                    if (u64 used{}, limit{}; at >= 0 && QueryAppMemory(used, limit)) {
+                                        auto& peak = step_peak[at];
+                                        u64 seen = peak.load(std::memory_order_relaxed);
+                                        while (used > seen && !peak.compare_exchange_weak(seen, used)) {
+                                        }
+                                    }
+                                    std::this_thread::sleep_for(std::chrono::milliseconds{2});
+                                }
+                            }};
+                            reason = PulseSessions::Save(
+                                system, *pulse_identity,
+                                [] {
+                                    u64 used{}, limit{};
+                                    if (!QueryAppMemory(used, limit)) return ~u64{};
+                                    return limit > used ? limit - used : u64{};
+                                },
+                                [&](const char* name) {
+                                    for (int i = 0; i < static_cast<int>(save_steps.size()); ++i) {
+                                        if (std::string_view{name} == save_steps[i]) step.store(i);
+                                    }
+                                });
+                        }
+                        std::string peaks = "save peak over " + std::to_string(save_base >> 20) +
+                                            " MiB:";
+                        for (std::size_t i = 0; i < save_steps.size(); ++i) {
+                            const u64 peak = step_peak[i].load();
+                            if (peak == 0) continue;
+                            peaks += std::string{" "} + save_steps[i] + " " +
+                                     (peak >= save_base ? "+" + std::to_string((peak - save_base) >> 20)
+                                                        : "-" + std::to_string((save_base - peak) >> 20));
+                        }
+                        WritePulseLog(peaks + " MiB");
                         const auto save_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                                  std::chrono::steady_clock::now() - save_start)
                                                  .count();
