@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -943,15 +944,16 @@ u64 ProcessCheckpoint::MaxEncodedSize() const {
 
 void ProcessCheckpoint::Write(Common::Pulse::Writer& writer) const {
     auto& memory = process->GetMemory();
-    UntouchedPages untouched;
-    u64 untouched_bytes{};
+    // The writer reads several blocks at once, from its own threads; the game is paused.
+    std::atomic<u64> untouched_bytes{};
     const auto read_guest = [&](u64 address, u8* out, size_t size) {
+        UntouchedPages untouched;
         for (size_t done = 0; done < size;) {
             const auto count = static_cast<size_t>(
                 std::min<u64>(size - done, PageSize - ((address + done) & (PageSize - 1))));
             if (untouched.Contains(memory.GetPointerSilent(address + done))) {
                 std::memset(out + done, 0, count);
-                untouched_bytes += count;
+                untouched_bytes.fetch_add(count, std::memory_order_relaxed);
             } else if (!memory.ReadBlockUnsafe(address + done, out + done, count)) {
                 Invalid("Pulse: guest memory read failed");
             }
@@ -987,7 +989,7 @@ void ProcessCheckpoint::Write(Common::Pulse::Writer& writer) const {
         write_bytes(entry);
     }
     LOG_INFO(Core, "Pulse: {} of {} MiB of guest memory never committed, stored as zero",
-             untouched_bytes >> 20, memory_size >> 20);
+             untouched_bytes.load() >> 20, memory_size >> 20);
 }
 
 // ---------------------------------------------------------------------------------- restore
