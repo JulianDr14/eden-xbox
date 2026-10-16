@@ -16,7 +16,7 @@
 
   <Identity Name="Jadyx"
             Publisher="CN=JadyxDev"
-            Version="0.2.92.1"
+            Version="0.2.92.2"
             ProcessorArchitecture="x64" />
 
   <Properties>
