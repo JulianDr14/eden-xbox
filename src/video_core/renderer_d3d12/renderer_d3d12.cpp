@@ -272,12 +272,13 @@ void RendererD3D12::Composite(std::span<const Tegra::FramebufferConfig> framebuf
                 CopyGuestImage(framebuffer, upload.mapped_span.data(),
                                guest_footprint.Footprint.RowPitch);
                 RecordUpload(upload);
-                // CopyGuestImage already cropped and flipped the image; the blit has always shown
-                // its first row at the bottom of the screen.
+                // CopyGuestImage already cropped and flipped the image: its first row is the top
+                // of the screen, as ScaleGuestImage and the GPU path (Tegra::NormalizeCrop) show
+                // it. Flipping it again here showed a resumed game's first frames upside down.
                 RecordComposite(*frame, {.srv = guest_srv,
                                          .width = guest_width,
                                          .height = guest_height,
-                                         .crop = {0.0f, 1.0f, 1.0f, 0.0f}});
+                                         .crop = {0.0f, 0.0f, 1.0f, 1.0f}});
                 Present(std::move(frame));
             } else {
                 const StagingBufferRef upload =
