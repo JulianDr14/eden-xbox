@@ -2,9 +2,10 @@
 
 Estado: fases 1–4 implementadas y fase 5 en curso. La biblioteca guarda la sesión
 al volver al inicio y la reanuda al elegir el juego (fase 4, abajo). Homebrew con
-vídeo, audio y archivos se reanuda. La fase 5 añade GPU, audren, HID y AM (abajo),
-pero aún sin probar en la Series; un juego que use un servicio sin serializador
-sigue **rechazándose con motivo**. No cambia el nombre del emulador. Sin commits
+vídeo, audio y archivos se reanuda. La fase 5 añade GPU, audren, HID, AM y los
+servicios de sistema (abajo): juegos comerciales de 64 y de 32 bits guardan y se
+reanudan en PC (16 oct 2026), aún sin validar en la Series. Un juego que use un
+servicio sin serializador sigue **rechazándose con motivo**. No cambia el nombre del emulador. Sin commits
 automáticos.
 
 ## Contrato de producto aprobado
@@ -141,7 +142,7 @@ Los errores IO/cuota están inyectados; no confundirlos con esos gates físicos.
 | 2: barrera/CPU/memoria/kernel/timing | **Cerrada**: gate de 100 ciclos PASS en la Series (0.2.87.12); fuga JIT por ciclo corregida y verificada en PC |
 | 3: servicios/FS/GPU/audio | **Cerrada para homebrew**: vi/nvnflinger, nvdrv, audout y fs serializados; banco de 100 ciclos PASS en la Series (0.2.87.16) |
 | 4: biblioteca/múltiples sesiones | **Implementada**: guardar al volver al inicio, reanudar al elegir, distintivo, descarte, ajuste. Pendiente validar en la Series (0.2.87.17) |
-| 5: compatibilidad/rendimiento | Pendiente |
+| 5: compatibilidad/rendimiento | **En curso**: juegos comerciales de 64 y 32 bits guardan y se reanudan en PC (0.2.91.20); pendiente validar en la Series |
 
 ## Fuentes y decisiones
 
@@ -210,7 +211,8 @@ tiene serializador se rechaza **sin reintento**: objetos distintos de los anteri
 servicios sin serializador, memoria compartida de un dueño no reconocido, memoria
 de transferencia de otro proceso, memoria física,
 estados de memoria fuera de código/heap/pila/TLS, eventos de timing con nombre
-repetido, suspensión de depurador o proceso, procesos de 32 bits.
+repetido, suspensión de depurador o proceso. Los procesos de 32 bits (A32) se
+capturan igual: comparten contexto, monitor exclusivo y resultados r0/r1 de las esperas.
 
 Restauración: secciones en orden; la última termina la reconstrucción dentro del
 callback de `Store::RestoreAndConsume`, así un fallo no consume la captura.
@@ -416,7 +418,7 @@ actualizado: faltaba la fila de estadísticas).
 ### Límites honestos (fase 5)
 
 - Un juego comercial aún puede rechazarse al volver al inicio si usa un servicio
-  sin serializador (bcat, mii, caps, ldn…; ver fase 5). El motivo se
+  sin serializador (bcat, caps, ldn…; ver fase 5). El motivo se
   muestra y se sale sin sesión; el juego no se pierde porque las partidas normales
   no se tocan.
 - La reanudación tarda lo que la restauración (≈3 s en la Series) más la carga.
@@ -439,7 +441,18 @@ resto. Compila para UWP; **no está probado en la Series**.
   memoria del guest. Se guardan el espacio de direcciones de `nvhost-as-gpu`
   (reservas, mapeos y remapeos por handle nvmap), los canales con su syncpoint y
   el estado de motores que dejó el juego, y los valores de syncpoint de host1x.
+  Al restaurar, un syncpoint sube hasta su máximo reservado: esos incrementos son de
+  trabajo GPU en vuelo al capturar, que no se restaura, y un fence del juego sobre
+  ellos esperaría para siempre.
   Las cachés del host (texturas, shaders, buffers) no se guardan: se reconstruyen.
+  Una textura que no se puede leer de vuelta exacta cae al volcado por región, que
+  solo baja las imágenes que la GPU escribió y la CPU no sobrescribió después
+  (bajar todas pisaba memoria que el juego reutilizó, p. ej. código de shaders con
+  píxeles viejos). Las imágenes convertidas en el host (ASTC decodificado…) se
+  omiten: su formato no es el del guest.
+- **Procesos de 32 bits (16 oct 2026)**: A32 y A64 comparten el contexto
+  (ArmDynarmic32 mapea r0–r15 y el CPSR sobre él), el monitor exclusivo y los
+  resultados r0/r1 de las esperas que completa la restauración.
 - **audren**: solo el estado lógico del renderer (parámetros, voces, mezclas,
   efectos, splitters); los buffers del backend se regeneran.
 - **HID**: estilos de npad soportados, asignaciones que fijó el juego (modo de
@@ -493,6 +506,8 @@ resto. Compila para UWP; **no está probado en la Series**.
     gestionada que sigue viva (ese estado no se captura).
   - ectx:aw y sus `IContextRegistrar`, ngc:u y ngct:u: sin estado.
   - mm:u: sesiones de reloj por módulo con su rango pedido y el siguiente id.
+  - mii:e y mii:u: sin estado; cada `IDatabaseService` guarda su metadata de sesión (la base de
+    datos vive en el save del sistema del host y se recarga al arrancar).
   - Rechazos reintentables nuevos: `IDirectory`, `ISaveDataInfoReader` e
     `IMultiCommitManager` de fs, y `nvhost-nvdec`, `nvhost-vic` y `nvhost-nvjpg`
     (solo están abiertos mientras el juego decodifica).
@@ -505,10 +520,16 @@ guardado, reanudación, el motivo final de cada sesión no guardada y una línea
 el cupo de excepciones del diag). Un evento de servicio que ninguna interfaz
 exporta aparece con el nombre que le dio su servicio.
 
+Tras reanudar, el log anota durante 30 s los frames presentados en cada segundo
+(`resumed +N s: F frames`), para ver si el juego se detiene y cuándo. En
+`eden\log\eden_log.txt` quedan los syncpoints restaurados (mín., máx., guest y
+host) y cada espera de `nvhost-ctrl` que bloquea nvservices hasta un valor de
+syncpoint, con los valores de ese momento.
+
 ### Límites honestos (fase 5)
 
-- Sin evidencia en consola todavía: todo lo anterior compila, nada más.
-- Servicios sin serializador (bcat, mii, caps, ldn, npns, audin, psm,
+- Probado en PC con juegos comerciales de 64 y 32 bits; sin evidencia en consola todavía.
+- Servicios sin serializador (bcat, caps, ldn, npns, audin, psm,
   `IApplicationManagerInterface` de ns…) siguen rechazando sin reintento. Es
   probable que el siguiente rechazo de un juego real venga de ahí.
 - Un juego que mantiene un socket o una conexión TLS abiertos todo el tiempo no
