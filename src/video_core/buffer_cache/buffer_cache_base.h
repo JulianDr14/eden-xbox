@@ -227,6 +227,9 @@ class BufferCache : public VideoCommon::ChannelSetupCaches<BufferCacheChannelInf
 public:
     explicit BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, Runtime& runtime_);
 
+    /// The largest single download, for the Pulse capture's memory log.
+    u64 largest_download{};
+
     ~BufferCache();
 
     void TickFrame();

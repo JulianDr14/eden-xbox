@@ -493,16 +493,41 @@ bool RasterizerD3D12::MaterializeCheckpointMemory() {
 
 void RasterizerD3D12::FlushCheckpointRegion(DAddr address, u64 size) {
     if (!address || !size) return;
+    // What each cache's download leaves in the app's memory, for the save's peak log.
+    const auto used = [this] { return query_cache.GetDevice().QueryCacheMemoryPressure().app_used; };
+    const auto mib = [](u64 after, u64 before) {
+        return (static_cast<s64>(after) - static_cast<s64>(before)) / (1 << 20);
+    };
+    const u64 start = used();
+    size_t images{};
+    u64 largest_image{}, swizzle{}, pooled{};
     {
         std::scoped_lock lock{texture_cache.mutex};
+        texture_cache.checkpoint_downloads = {};
         texture_cache.DownloadMemory(address, size, true);
+        images = texture_cache.checkpoint_downloads.images;
+        largest_image = texture_cache.checkpoint_downloads.largest;
+        pooled = texture_cache.checkpoint_downloads.pooled;
+        swizzle = texture_cache.SwizzleScratchBytes();
     }
+    const u64 textures = used();
+    u64 largest_buffer{};
     {
         std::scoped_lock lock{buffer_cache.mutex};
+        buffer_cache.largest_download = 0;
         buffer_cache.DownloadMemory(address, size);
+        largest_buffer = buffer_cache.largest_download;
         staging.ReleaseRetiredDownloads();
     }
+    const u64 buffers = used();
     query_cache.FlushRegion(address, size);
+    if (start && (mib(textures, start) || mib(buffers, textures))) {
+        LOG_INFO(Render,
+                 "Pulse: flush of {:#x}+{} MiB: {} images (largest {} MiB, transfers {} MiB, swizzle "
+                 "scratch {} MiB) {:+} MiB, buffers (largest {} MiB) {:+} MiB",
+                 address, size >> 20, images, largest_image >> 20, pooled >> 20, swizzle >> 20,
+                 mib(textures, start), largest_buffer >> 20, mib(buffers, textures));
+    }
 }
 
 void RasterizerD3D12::FlushRegion(DAddr address, u64 size, VideoCommon::CacheType which) {
