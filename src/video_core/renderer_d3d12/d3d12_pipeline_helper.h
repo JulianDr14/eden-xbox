@@ -16,6 +16,7 @@
 #include "shader_recompiler/shader_info.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
+#include "video_core/renderer_d3d12/d3d12_draw_sampler_cache.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 #include "video_core/surface.h"
@@ -85,7 +86,8 @@ template <typename Descriptor, typename CbufAddress>
 /// Info is a Shader::Info or the StageBindings a graphics pipeline keeps of one.
 template <typename Info, typename ReadHandle>
 void GatherStageViews(const Info& info, TextureCache& texture_cache, bool is_compute,
-                      ReadHandle&& read_handle, ImageViewList& views, SamplerIdList& samplers) {
+                      ReadHandle&& read_handle, ImageViewList& views, SamplerIdList& samplers,
+                      DrawSamplerCache<VideoCommon::SamplerId>& sampler_cache) {
     const auto add_image = [&](const auto& desc, bool blacklist) {
         for (u32 index = 0; index < desc.count; ++index) {
             const auto handle = read_handle(desc, index);
@@ -102,7 +104,9 @@ void GatherStageViews(const Info& info, TextureCache& texture_cache, bool is_com
         for (u32 index = 0; index < desc.count; ++index) {
             const auto handle = read_handle(desc, index);
             views.push_back({handle.first});
-            samplers.push_back(texture_cache.GetSamplerId(handle.second, is_compute));
+            samplers.push_back(sampler_cache.Get(handle.second, [&](u32 index) {
+                return texture_cache.GetSamplerId(index, is_compute);
+            }));
         }
     }
     for (const auto& desc : info.image_descriptors) {

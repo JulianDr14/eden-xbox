@@ -10,6 +10,7 @@
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/perf_counters.h"
+#include "video_core/renderer_d3d12/d3d12_draw_metrics.h"
 #include "video_core/renderer_d3d12/d3d12_log.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
@@ -37,7 +38,7 @@ void RasterizerD3D12::DrawIndirect() {
         DrawIndirectOnCpu(params);
         return;
     }
-    VideoCore::Perf::ScopedNsTimer draw_timer{VideoCore::Perf::Counter::DrawNs};
+    DrawMetrics::ScopedDrawTimer draw_timer;
     SCOPE_EXIT {
         FlushIfUploadHeavy();
         gpu.TickWork();
@@ -49,7 +50,9 @@ void RasterizerD3D12::DrawIndirect() {
     if (!pipeline) {
         return;
     }
+    const DrawMetrics::CacheLockTimer lock_timer;
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+    lock_timer.Locked();
     // With the indirect state set, Configure also synchronizes the argument and count buffers.
     PipelineBindings bindings;
     buffer_cache.SetDrawIndirect(&params);

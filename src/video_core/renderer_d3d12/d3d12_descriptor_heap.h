@@ -195,7 +195,9 @@ private:
     std::unordered_map<std::vector<u64>, u32, KeyHash, KeyEqual> tables; ///< keys -> first slot
     /// The table the previous call returned: consecutive draws mostly sample the same way, and
     /// comparing against it skips hashing the keys.
-    std::vector<u64> last_keys;
+    // unordered_map nodes keep their keys stable across rehash. Borrow the immutable key
+    // instead of copying it on every non-consecutive cache hit; clear before tables.clear().
+    std::span<const u64> last_keys;
     u32 last_first{};
     bool logged_cache{};
     bool logged_reuse{};

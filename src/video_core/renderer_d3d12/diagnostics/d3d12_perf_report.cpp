@@ -10,8 +10,10 @@
 
 #include "common/logging.h"
 #include "core/arm/cpu_profile.h"
+#include "common/windows/timed_wait_profile.h"
 #include "dynarmic/interface/jit_profile.h"
 #include "video_core/perf_counters.h"
+#include "video_core/renderer_d3d12/d3d12_draw_metrics.h"
 #include "video_core/renderer_d3d12/renderer_d3d12.h"
 
 // Frame pacing statistics and the periodic performance reports in the log.
@@ -328,6 +330,58 @@ void RendererD3D12::ReportPerfWindow(u32 frames, double total_ms) {
     LOG_INFO(Render, "D3D12 perf over {} frames ({:.0f} ms), mostly {} | {}", frames, total_ms,
              LikelyCause(delta, total_ms), DescribePerf(delta, total_ms));
     LOG_INFO(Render, "D3D12 GPU thread: {}", DescribeDrawCosts(delta, total_ms));
+    if (VideoCore::Perf::DetailedGpuProfileEnabled()) {
+        std::array<u64, 64> bins{};
+        u64 samples{};
+        for (size_t i = 0; i < bins.size(); ++i) {
+            bins[i] = DrawMetrics::draw_bins[i].load(std::memory_order_relaxed);
+            samples += bins[i];
+        }
+        const auto percentile_us = [&](u64 percentile) {
+            const u64 rank = (samples * percentile + 99) / 100;
+            u64 count{};
+            for (size_t i = 0; i < bins.size(); ++i) {
+                count += bins[i];
+                if (count >= rank) return static_cast<double>(i == 63 ? ~u64{0} : (u64{1} << i) - 1) / 1000.0;
+            }
+            return 0.0;
+        };
+        const auto recorder = scheduler.RecorderStatistics();
+        const u64 binding_samples = DrawMetrics::stage_binding_samples.load();
+        LOG_INFO(Render, "D3D12 binding session: sampler requests {}, draw-local reused {}; "
+                 "streamed UBO bytes {}, sizes <=64/128/256/512/>512: {}/{}/{}/{}/{}; "
+                 "stage bind nested elapsed mean {:.3f} us / {} samples (1 draw in 64)",
+                 DrawMetrics::sampler_resolve_requests.load(), DrawMetrics::sampler_resolve_reused.load(),
+                 DrawMetrics::uniform_upload_bytes.load(),
+                 DrawMetrics::uniform_upload_sizes[0].load(), DrawMetrics::uniform_upload_sizes[1].load(),
+                 DrawMetrics::uniform_upload_sizes[2].load(), DrawMetrics::uniform_upload_sizes[3].load(),
+                 DrawMetrics::uniform_upload_sizes[4].load(),
+                 binding_samples ? DrawMetrics::stage_binding_sample_ns.load() / (1000.0 * binding_samples) : 0.0,
+                 binding_samples);
+        LOG_INFO(Render, "D3D12 recorder session (elapsed, async only): {} chunks, {} bytes, "
+                 "handoff {:.3f} ms, execute {:.3f} ms, drain {:.3f} ms, max pending {}",
+                 recorder.chunks, recorder.bytes, recorder.handoff_ns / 1e6,
+                 recorder.execute_ns / 1e6, recorder.drain_ns / 1e6, recorder.max_pending);
+        LOG_INFO(Render, "D3D12 cache lock session (acquisition elapsed): {} samples, {:.3f} ms, "
+                 ">=200us {}, max {:.3f} us",
+                 DrawMetrics::cache_lock_samples.load(), DrawMetrics::cache_lock_ns.load() / 1e6,
+                 DrawMetrics::cache_lock_long.load(), DrawMetrics::cache_lock_max_ns.load() / 1e3);
+        LOG_INFO(Render,
+            "D3D12 draw preparation session (inclusive elapsed, attempted calls): {} samples, "
+            "p50 <= {:.3f} us, p95 <= {:.3f} us, p99 <= {:.3f} us, max {:.3f} us",
+            samples, percentile_us(50), percentile_us(95), percentile_us(99),
+            DrawMetrics::max_draw_ns.load(std::memory_order_relaxed) / 1000.0);
+
+    }
+    if (Common::Windows::TimedWaitProfile::enabled.load(std::memory_order_relaxed)) {
+        const auto t = Common::Windows::TimedWaitProfile::Read();
+        LOG_INFO(Render, "HostTiming wait session (elapsed, not CPU busy): {} waits, requested {:.3f} ms, "
+                 "elapsed {:.3f} ms, spin {:.3f} ms, {} sleeps/{:.3f} ms, {} fallback waits, "
+                 "max margin {:.3f} us, max lateness {:.3f} us, durations <=100us/250us/1ms/>1ms {}/{}/{}/{}",
+                 t.waits, t.requested_ns / 1e6, t.elapsed_ns / 1e6, t.spin_ns / 1e6,
+                 t.sleeps, t.sleep_ns / 1e6, t.fallbacks, t.margin_max_ns / 1e3,
+                 t.late_max_ns / 1e3, t.durations[0], t.durations[1], t.durations[2], t.durations[3]);
+    }
     LOG_INFO(Render, "D3D12 frame chain: {}", DescribeFrameChain(delta));
     LOG_INFO(Render,
              "D3D12 pipeline preparation: frontend {:.1f} ms, dependent waits {} / {:.1f} ms; "

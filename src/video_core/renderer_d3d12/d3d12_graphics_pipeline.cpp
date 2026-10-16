@@ -25,6 +25,7 @@
 #include "video_core/renderer_d3d12/d3d12_barrier_batch.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
 #include "video_core/renderer_d3d12/d3d12_draw_targets.h"
+#include "video_core/renderer_d3d12/d3d12_draw_metrics.h"
 #include "video_core/renderer_d3d12/d3d12_graphics_pipeline.h"
 #include "video_core/renderer_d3d12/d3d12_log.h"
 #include "video_core/renderer_d3d12/d3d12_maxwell_to_d3d12.h"
@@ -40,6 +41,16 @@
 #include <psapi.h>
 
 namespace D3D12 {
+
+namespace {
+std::atomic_bool draw_sampler_reuse{};
+}
+void SetDrawSamplerReuse(bool enabled) {
+    draw_sampler_reuse.store(enabled, std::memory_order_relaxed);
+}
+bool DrawSamplerReuseEnabled() {
+    return draw_sampler_reuse.load(std::memory_order_relaxed);
+}
 
 namespace {
 
@@ -296,6 +307,7 @@ bool GraphicsPipeline::Evict(Scheduler& scheduler) {
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
+    transition_order.push_back(static_cast<u32>(transition_keys.size()));
     transition_keys.push_back(transition->key);
     transitions.push_back(transition);
 }
@@ -336,6 +348,8 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
 
     ImageViewList views;
     SamplerIdList samplers;
+    DrawSamplerCache<SamplerId> sampler_cache{DrawSamplerReuseEnabled()};
+    const bool sample_stage_bindings = DrawMetrics::SampleStageBindings();
     VideoCore::Perf::LapTimer lap;
 
     texture_cache.SynchronizeDescriptors(false);
@@ -359,9 +373,13 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
             return ReadTextureHandle(gpu_memory, desc, index, via_header_index,
                                      [&](u32 cbuf) { return cbufs[cbuf].address; });
         };
-        GatherStageViews(info, texture_cache, false, read_handle, views, samplers);
+        GatherStageViews(info, texture_cache, false, read_handle, views, samplers, sampler_cache);
     }
     texture_cache.FillImageViews(std::span(views.data(), views.size()), false, has_images);
+    if (VideoCore::Perf::DetailedGpuProfileEnabled()) {
+        DrawMetrics::sampler_resolve_requests.fetch_add(samplers.size(), std::memory_order_relaxed);
+        DrawMetrics::sampler_resolve_reused.fetch_add(sampler_cache.Hits(), std::memory_order_relaxed);
+    }
     lap.Lap(VideoCore::Perf::Counter::DrawTexturesNs);
 
     const ImageViewInOut* texture_buffer_it = views.data();
@@ -379,8 +397,7 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
                                         stage, index, view.GpuAddr(), view.BufferSize(), format,
                                         is_written, is_image);
                                 });
-        texture_buffer_it += Shader::NumDescriptors(info.texture_descriptors);
-        texture_buffer_it += Shader::NumDescriptors(info.image_descriptors);
+        texture_buffer_it += info.num_texture_views;
     }
 
     buffer_cache.UpdateGraphicsBuffers(is_indexed);
@@ -407,9 +424,14 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
 
     // The table is written in root-signature order while the caches bind, stage by stage:
     // uniform, storage and texel buffers from the buffer cache, then textures and images.
+    // Sampler exhaustion may Finish/reset the list. Reserve it before the resource range and
+    // streamed UBOs, whose lifetime must cover the submission that actually executes this draw.
+    SamplerTableBuilder sampler_table;
+    for (const SamplerId id : samplers) sampler_table.Add(texture_cache.GetSampler(id));
+    out.sampler_table = sampler_table.Table(context.sampler_heap);
+    lap.Lap(VideoCore::Perf::Counter::DrawSamplersNs);
     GuestDescriptorQueue& queue = context.descriptor_queue;
     queue.Acquire(layout.NumResourceDescriptors());
-    SamplerTableBuilder sampler_table;
     ImageTransitionList image_transitions;
     bool uses_render_area = false;
     const bool has_integer_samplers = layout.IntegerSamplerIndex() != PipelineLayout::NO_TABLE;
@@ -421,12 +443,14 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
         if (!HasStage(stage)) {
             continue;
         }
-        buffer_cache.BindHostStageBuffers(stage);
+        {
+            const DrawMetrics::SampledStageBindingTimer binding_timer{sample_stage_bindings};
+            buffer_cache.BindHostStageBuffers(stage);
+        }
         const StageBindings& info = *stage_infos[stage];
-        views_it += Shader::NumDescriptors(info.texture_buffer_descriptors);
-        views_it += Shader::NumDescriptors(info.image_buffer_descriptors);
-        u32 texture_binding = FirstTextureBinding(info, stage_binding);
-        stage_binding += NumStageBindings(info);
+        views_it += info.num_buffer_views;
+        u32 texture_binding = stage_binding + info.first_texture_binding;
+        stage_binding += info.num_bindings;
         for (const auto& desc : info.texture_descriptors) {
             for (u32 index = 0; index < desc.count; ++index, ++texture_binding) {
                 const VideoCommon::ImageViewId view_id = (views_it++)->id;
@@ -443,16 +467,17 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
                     image_view.PrepareRead(desc.type);
                     queue.AddCopy(image_view.Handle(desc.type));
                 }
-                const Sampler& sampler = texture_cache.GetSampler(*(samplers_it++));
-                sampler_table.Add(sampler);
+                const SamplerId sampler_id = *(samplers_it++);
                 if (has_integer_samplers && desc.is_integer) {
-                    integer_samplers.Add(texture_binding, sampler, image_view);
+                    integer_samplers.Add(texture_binding, texture_cache.GetSampler(sampler_id),
+                                         image_view);
                 }
                 image_transitions.emplace_back(view_id, false);
                 if (out.trace_views) {
                     out.trace_views->push_back(view_id);
                 }
                 if (out.trace_filters) {
+                    const Sampler& sampler = texture_cache.GetSampler(sampler_id);
                     out.trace_filters->push_back(fmt::format(
                         "stage={} binding={} cbuf={}+{:x} element={} depth={} integer={} "
                         "srv=[{}] sampler=[{}]",
@@ -511,7 +536,6 @@ void GraphicsPipeline::Configure(bool is_indexed, const PipelineBindContext& con
     lap.Lap(VideoCore::Perf::Counter::DrawTargetsNs);
 
     out.resource_table = queue.Table();
-    out.sampler_table = sampler_table.Table(context.sampler_heap);
     out.integer_samplers = integer_samplers.Upload(buffer_cache);
     lap.Lap(VideoCore::Perf::Counter::DrawSamplersNs);
 
