@@ -1024,7 +1024,8 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                                                  std::chrono::steady_clock::now() - save_start)
                                                  .count();
                         if (reason.empty()) {
-                            WritePulseLog("session saved in " + std::to_string(save_ms) + " ms");
+                            WritePulseLog("session saved in " + std::to_string(save_ms) + " ms | " +
+                                          MemoryReport());
                             PulseSessions::SetNotice(I18n::ToUtf8(I18n::Tr(I18n::Text::PulseKept)));
                         } else {
                             WritePulseLog("no session (" + reason + ") after " +
