@@ -668,10 +668,20 @@ bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
 }
 
 template <class P>
-void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
+void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size, bool modified_only) {
     boost::container::small_vector<ImageId, 16> images;
-    ForEachImageInRegion(cpu_addr, size, [this, &images](ImageId image_id, ImageBase& image) {
+    ForEachImageInRegion(cpu_addr, size, [&](ImageId image_id, ImageBase& image) {
         if (!IsDownloadable(image)) {
+            return;
+        }
+        if (modified_only && (False(image.flags & ImageFlagBits::GpuModified) ||
+                              True(image.flags & ImageFlagBits::CpuModified))) {
+            return;
+        }
+        // A converted image (ASTC decoded on the host...) holds another format than the guest
+        // layout: its texels do not fit the staging buffer sized for it, nor belong in guest memory.
+        if (modified_only && (True(image.flags & ImageFlagBits::Converted) ||
+                              IsPixelFormatASTC(image.info.format))) {
             return;
         }
         image.flags &= ~ImageFlagBits::GpuModified;
