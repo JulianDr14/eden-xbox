@@ -21,6 +21,7 @@
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/sm/sm.h"
 
@@ -99,6 +100,7 @@ ServerManager::ServerManager(Core::System& system)
 
     // Register event.
     Kernel::KEvent::Register(system.Kernel(), m_wakeup_event);
+    KernelHelpers::NameEvent(m_wakeup_event, "ServerManager wakeup");
 
     // Link to holder.
     m_wakeup_holder.emplace(std::addressof(m_wakeup_event->GetReadableEvent()));
@@ -139,10 +141,12 @@ ServerManager::~ServerManager() {
     }
 
     // Close wakeup event.
+    KernelHelpers::ForgetEvent(m_wakeup_event);
     m_wakeup_event->GetReadableEvent().Close(m_system.Kernel());
     m_wakeup_event->Close(m_system.Kernel());
 
     if (m_deferral_event) {
+        KernelHelpers::ForgetEvent(m_deferral_event);
         m_deferral_event->GetReadableEvent().Close(m_system.Kernel());
         // Write event is owned by ServiceManager
     }
@@ -256,6 +260,7 @@ Result ServerManager::ManageDeferral(Kernel::KEvent** out_event) {
 
     // Register the event.
     Kernel::KEvent::Register(m_system.Kernel(), m_deferral_event);
+    KernelHelpers::NameEvent(m_deferral_event, "ServerManager deferral");
 
     // Set the output.
     *out_event = m_deferral_event;

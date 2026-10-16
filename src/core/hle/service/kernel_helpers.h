@@ -34,4 +34,16 @@ public:
     bool process_created{false};
 };
 
+// The name a service gave an event it created (empty: unknown). Diagnostics only: Pulse names
+// the events it cannot store with it.
+std::string EventName(const Kernel::KEvent* event);
+
+// Names an event created outside ServiceContext::CreateEvent; it is forgotten with ForgetEvent.
+void NameEvent(const Kernel::KEvent* event, std::string name);
+void ForgetEvent(const Kernel::KEvent* event);
+
+// Whether the service that created this event already closed it with CloseEvent: an event the
+// guest still holds then has no signaller left, and Pulse stores it as an application event.
+bool IsClosedServiceEvent(const Kernel::KEvent* event);
+
 } // namespace Service::KernelHelpers
