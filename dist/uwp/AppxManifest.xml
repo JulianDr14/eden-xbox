@@ -16,7 +16,7 @@
 
   <Identity Name="EdenEmuProject.EdenXbox"
             Publisher="CN=EdenXboxDev"
-            Version="0.2.91.42"
+            Version="0.2.92.0"
             ProcessorArchitecture="x64" />
 
   <Properties>
