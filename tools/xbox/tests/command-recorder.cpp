@@ -201,6 +201,47 @@ void TestTooLarge() {
     std::cout << "  too large PASS\n";
 }
 
+void TestStatistics() {
+    Log log;
+    {
+        Recorder recorder{&log, Threaded()};
+        recorder.Record([](Log* l) { l->values.push_back(1); });
+        recorder.WaitIdle();
+        const auto stats = recorder.ReadStatistics();
+        Check(stats.chunks == 0 && stats.bytes == 0 && stats.execute_ns == 0 &&
+              stats.handoff_ns == 0 && stats.drain_ns == 0, "profiling off leaves counters zero");
+    }
+    {
+        auto options = Threaded();
+        options.profile = true;
+        Recorder recorder{&log, options};
+        std::atomic_bool release{};
+        recorder.Record([&](Log*) { release.wait(false); });
+        recorder.Dispatch();
+        // Hold the worker until the producer has filled the bounded queue. The releaser is a
+        // test-only thread; production never waits on a cache lock from the worker.
+        std::jthread releaser{[&] {
+            while (recorder.ReadStatistics().chunks < Recorder::QUEUE_CHUNKS + 1) {
+                std::this_thread::yield();
+            }
+            std::this_thread::sleep_for(2ms);
+            release.store(true); release.notify_one();
+        }};
+        for (size_t i = 0; i < Recorder::QUEUE_CHUNKS + 16; ++i) {
+            recorder.Record([](Log* l) { l->values.push_back(2); });
+            recorder.Dispatch();
+        }
+        recorder.WaitIdle();
+        const auto stats = recorder.ReadStatistics();
+        Check(stats.chunks == Recorder::QUEUE_CHUNKS + 17, "all chunks measured");
+        Check(stats.bytes > 0 && stats.execute_ns > 0 && stats.handoff_ns > 0,
+              "enabled profiling measures chunks and execution/handoff elapsed");
+        Check(stats.max_pending <= Recorder::QUEUE_CHUNKS + 1 && stats.max_pending > 0,
+              "pending count bounded, including the worker chunk");
+    }
+    std::cout << "  statistics off/on, blocked worker/backpressure/drain PASS\n";
+}
+
 void Benchmark() {
     // Small commands as a draw records them: the recording thread's cost per command.
     Log log;
@@ -232,6 +273,7 @@ int main() {
     TestError();
     TestShutdown();
     TestTooLarge();
+    TestStatistics();
     Benchmark();
     std::cout << "command recorder: order, inline, record points, error, shutdown PASS\n";
     return 0;

@@ -14,12 +14,20 @@
 #include "video_core/perf_counters.h"
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_descriptor_heap.h"
+#include "video_core/renderer_d3d12/d3d12_draw_metrics.h"
 #include "video_core/renderer_d3d12/d3d12_resource_utils.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
 #include "video_core/surface.h"
 
 namespace D3D12 {
+namespace {
+std::atomic_bool uniform_upload_copy_enabled{};
+}
+void SetUniformUploadCopy(bool enabled) {
+    uniform_upload_copy_enabled.store(enabled, std::memory_order_relaxed);
+}
+
 
 void BufferCacheRuntime::ReadCheckpointBuffer(Buffer& buffer, u64 offset,
                                              std::span<u8> output) {
@@ -191,8 +199,10 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, Scheduler& schedul
                                        TransferBufferPool& transfer_buffers_,
                                        Tegra::MaxwellDeviceMemoryManager& device_memory_)
     : device{device_}, scheduler{scheduler_}, staging{staging_},
-      transfer_buffers{transfer_buffers_}, device_memory{device_memory_} {
-    LOG_INFO(Render, "D3D12: buffer cache runtime ready");
+      transfer_buffers{transfer_buffers_}, device_memory{device_memory_},
+      uniform_upload_copy{uniform_upload_copy_enabled.load(std::memory_order_relaxed)} {
+    LOG_INFO(Render, "D3D12: buffer cache runtime ready (short uniform upload copy {})", uniform_upload_copy ? "on" : "off");
+
 }
 
 ComPtr<ID3D12Resource> BufferCacheRuntime::CreateDefaultBuffer(u64 size) {
@@ -461,19 +471,25 @@ void BufferCacheRuntime::ApplyGeometry(CommandStream* cmd) {
 
 std::span<u8> BufferCacheRuntime::BindMappedUniformBuffer(size_t, u32, u32 size) {
     VideoCore::Perf::AddDetailed(VideoCore::Perf::Counter::CbvStreamed, 1);
-    const StagingBufferRef ref =
-        staging.Request(Common::AlignUp(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT),
-                        MemoryUsage::Upload);
+    if (VideoCore::Perf::DetailedGpuProfileEnabled()) {
+        DrawMetrics::uniform_upload_bytes.fetch_add(size, std::memory_order_relaxed);
+        const size_t bin = size <= 64 ? 0 : size <= 128 ? 1 : size <= 256 ? 2 : size <= 512 ? 3 : 4;
+        DrawMetrics::uniform_upload_sizes[bin].fetch_add(1, std::memory_order_relaxed);
+    }
+    const UniformUpload upload = uniform_stream.Request(size, scheduler.CurrentTick(),
+        [this](size_t bytes) {
+            const auto ref = staging.Request(bytes, MemoryUsage::Upload);
+            return UniformUpload{ref.mapped_span, ref.buffer->GetGPUVirtualAddress() + ref.offset};
+        });
     if (trace_buffers) {
         trace_buffers->push_back({.kind = TracedBuffer::Kind::StreamedUniform,
                                   .slot = traced_uniforms++, .size = size,
-                                  .mapped = ref.mapped_span.data()});
+                                  .mapped = upload.mapped.data()});
     }
     if (descriptor_queue) {
-        descriptor_queue->AddConstantBuffer(ref.buffer->GetGPUVirtualAddress() + ref.offset,
-                                            size);
+        descriptor_queue->AddConstantBuffer(upload.address, size);
     }
-    return ref.mapped_span.first(size);
+    return upload.mapped.first(size);
 }
 
 void BufferCacheRuntime::BindUniformBuffer(Buffer& buffer, u32 offset, u32 size) {

@@ -23,6 +23,7 @@
 #include <windows.h>
 #include "common/string_util.h"
 #include "common/windows/timer_resolution.h"
+#include "common/windows/timed_wait_profile.h"
 #ifdef _MSC_VER
 #include "common/windows/sampling_profiler.h"
 #endif
@@ -662,6 +663,7 @@ void Event::WakeTimedWaiter() {
 }
 
 bool Event::WaitFor(const std::chrono::nanoseconds time) {
+    Windows::TimedWaitProfile::Sample profile{time.count()};
     const auto& clock = Common::g_wall_clock;
     const s64 deadline = clock.GetUptime() + static_cast<s64>(clock.NsToTicks(time));
     if (!timer_slack) {
@@ -679,6 +681,7 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
         }
     }
     if (timer) {
+        profile.Margin(timer_slack->Margin());
         // Sleeps on the timer until its usual lateness before the deadline, re-sleeping after a
         // wake that did not come from Set, and waits only that last stretch on the CPU.
         const s64 deadline_ns = (clock.GetTimeNS() + time).count();
@@ -694,20 +697,25 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
             timer_sleeping.store(true);
             bool woken = true;
             if (!IsSet()) {
+                profile.BeginSleep();
                 woken = timer->Sleep(std::chrono::nanoseconds{wake_at - now});
+                profile.EndSleep();
             }
             timer_sleeping.store(false);
             if (!woken) {
                 timer_slack->Record(clock.GetTimeNS().count() - wake_at);
             }
         }
+        profile.BeginSpin();
         if (CpuWaitForBits(is_set, 1, deadline, BestCpuWaitMethod())) {
             is_set = 0;
             return true;
         }
         return false;
     }
+    profile.Fallback();
     const auto margin = PreciseWaitMargin();
+    profile.Margin(margin.count());
     const auto block_until = clock.GetTimeNS() + time - margin;
     // Most of a long wait blocks in the OS on the flag itself, where Set wakes it at once and the
     // core is free for other threads. The OS timeout counts whole milliseconds, so the rest is
@@ -729,6 +737,7 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
     while (!IsSet() && clock.GetUptime() < spin_from) {
         Common::Windows::SleepForOneTick();
     }
+    profile.BeginSpin();
     if (CpuWaitForBits(is_set, 1, deadline, BestCpuWaitMethod())) {
         is_set = 0;
         return true;

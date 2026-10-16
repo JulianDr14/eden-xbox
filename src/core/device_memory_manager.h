@@ -115,6 +115,8 @@ public:
 
     void ReadBlock(DAddr address, void* dest_pointer, size_t size);
     void ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size);
+    /// Same page translation and unmapped behavior; destination must be CPU write-combined.
+    void ReadBlockUnsafeToWriteCombined(DAddr address, void* dest_pointer, size_t size);
     void WriteBlock(DAddr address, const void* src_pointer, size_t size);
     void WriteBlockUnsafe(DAddr address, const void* src_pointer, size_t size);
 
@@ -127,6 +129,9 @@ public:
     void UpdatePagesCachedBatch(std::span<const std::pair<DAddr, size_t>> ranges, s32 delta);
 
 private:
+    template <typename Copy>
+    void ReadBlockUnsafeCopy(DAddr address, void* dest_pointer, size_t size, Copy&& copy);
+
     struct TranslationEntry {
         DAddr guest_page{};
         u8* host_ptr{};

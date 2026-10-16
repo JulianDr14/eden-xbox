@@ -19,7 +19,7 @@
 
 param([int] $TimeoutSec = 75, [switch] $NoBuild, [string] $BootNro, [int] $RunSeconds = 0,
       [switch] $DebugLayer, [string] $Keys, [string] $Firmware, [string] $Game, [string[]] $BootCfg = @(),
-      [ValidateRange(0, 1048576)] [int] $MemoryLimitMiB = 5120, [switch] $Library)
+      [ValidateRange(0, 1048576)] [int] $MemoryLimitMiB = 5120, [switch] $Library, [switch] $AllowVersionDowngrade)
 $ErrorActionPreference = 'Stop'
 # Match package-appx's comma-separated -BootCfg handling before applying defaults.
 # Otherwise an explicit developer_hotkeys=0 later in the string gets overridden.
@@ -53,7 +53,8 @@ try {
 # The layout is recreated on every package; a same-version re-register does not re-grant the
 # AppContainer read access, and the app then cannot open its own files (Load status 2).
 & icacls "$r\build-uwp\package\layout" /grant "*S-1-15-2-1:(OI)(CI)RX" /T /Q | Out-Null
-Add-AppxPackage -Register "$r\build-uwp\package\layout\AppxManifest.xml" -ForceApplicationShutdown
+Add-AppxPackage -Register "$r\build-uwp\package\layout\AppxManifest.xml" -ForceApplicationShutdown `
+    -ForceUpdateFromAnyVersion:$AllowVersionDowngrade
 
 $pkg = Get-AppxPackage -Name EdenEmuProject.EdenXbox
 $local = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalState"

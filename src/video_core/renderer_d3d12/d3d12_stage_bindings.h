@@ -26,6 +26,12 @@ struct StageBindings {
     u64 interpolation{}; ///< Two bits per generic, Shader::Interpolation; diagnostic only.
     bool uses_render_area{};
 
+    // Derived once from immutable shader metadata, never from guest handles or cache IDs.
+    u32 num_texture_views{}; ///< textures + images, skipped after binding texel buffers
+    u32 num_buffer_views{};  ///< texture buffers + image buffers
+    u32 first_texture_binding{};
+    u32 num_bindings{};
+
     bool operator==(const StageBindings& other) const;
 };
 
