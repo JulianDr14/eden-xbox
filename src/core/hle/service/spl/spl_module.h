@@ -25,6 +25,11 @@ public:
                            const char* name);
         ~Interface() override;
 
+        // Pulse: the random generators are reseeded; nothing else is the guest's.
+        std::string_view PulseKind() const override {
+            return "spl";
+        }
+
         // General
         void GetConfig(HLERequestContext& ctx);
         void ModularExponentiate(HLERequestContext& ctx);

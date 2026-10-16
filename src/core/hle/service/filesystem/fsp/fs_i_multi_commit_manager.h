@@ -13,6 +13,14 @@ public:
     explicit IMultiCommitManager(Core::System& system_);
     ~IMultiCommitManager() override;
 
+    // Pulse: short-lived; the capture waits for the guest to close it.
+    std::string_view PulseKind() const override {
+        return "IMultiCommitManager";
+    }
+    void PulseCapture(Pulse::HandlerCapture&) const override {
+        throw Pulse::ServiceRejected(true, "a multi-commit is open");
+    }
+
 private:
     Result Add(std::shared_ptr<IFileSystem> filesystem);
     Result Commit();

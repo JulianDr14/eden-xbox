@@ -168,6 +168,12 @@ Result TimeZoneService::GetDeviceLocationNameOperationEventReadableHandle(
     OutCopyHandle<Kernel::KReadableEvent> out_event) {
     LOG_DEBUG(Service_Time, "called.");
 
+    OpenOperationEvent();
+    *out_event = &m_operation_event.m_event->GetReadableEvent();
+    R_SUCCEED();
+}
+
+void TimeZoneService::OpenOperationEvent() {
     if (!operation_event_initialized) {
         operation_event_initialized = false;
 
@@ -178,9 +184,6 @@ Result TimeZoneService::GetDeviceLocationNameOperationEventReadableHandle(
         std::scoped_lock l{m_mutex};
         m_list_nodes.push_back(m_operation_event);
     }
-
-    *out_event = &m_operation_event.m_event->GetReadableEvent();
-    R_SUCCEED();
 }
 
 Result TimeZoneService::ToCalendarTime(

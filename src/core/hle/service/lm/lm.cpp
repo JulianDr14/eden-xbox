@@ -97,6 +97,17 @@ public:
         RegisterHandlers(functions);
     }
 
+    // Pulse: the destination survives; a log message split across packets is dropped.
+    std::string_view PulseKind() const override {
+        return "lm:ILogger";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.state.U32(static_cast<u32>(destination));
+    }
+    void PulseApply(Pulse::StateReader& in) {
+        destination = static_cast<LogDestination>(in.U32());
+    }
+
 private:
     void Log(HLERequestContext& ctx) {
         std::size_t offset{};
@@ -345,6 +356,24 @@ public:
         // clang-format on
 
         RegisterHandlers(functions);
+    }
+
+    std::string_view PulseKind() const override {
+        return "lm";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) override {
+        auto& in = restore.state;
+        if (kind == PulseKind()) {
+            in.End();
+            return shared_from_this();
+        }
+        if (kind == "lm:ILogger") {
+            auto logger = std::make_shared<ILogger>(system);
+            logger->PulseApply(in);
+            in.End();
+            return logger;
+        }
+        return nullptr;
     }
 
 private:

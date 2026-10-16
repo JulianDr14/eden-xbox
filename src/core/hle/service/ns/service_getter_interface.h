@@ -25,6 +25,11 @@ public:
     explicit IServiceGetterInterface(Core::System& system_, const char* name);
     ~IServiceGetterInterface() override;
 
+    std::string_view PulseKind() const override {
+        return "ns:IServiceGetterInterface";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) override;
+
 public:
     Result GetDynamicRightsInterface(Out<SharedPointer<IDynamicRightsInterface>> out_interface);
     Result GetReadOnlyApplicationControlDataInterface(

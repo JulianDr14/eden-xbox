@@ -19,6 +19,13 @@ public:
                            const char* name);
         ~Interface() override;
 
+        // Pulse: a stateless root shared by the friend ports; the module holds nothing.
+        std::string_view PulseKind() const override {
+            return "friend";
+        }
+        SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                              Pulse::HandlerRestore& restore) override;
+
         void CreateFriendService(HLERequestContext& ctx);
         void CreateNotificationService(HLERequestContext& ctx);
 

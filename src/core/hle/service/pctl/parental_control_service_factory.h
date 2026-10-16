@@ -17,6 +17,13 @@ public:
                                             Capability capability_);
     ~IParentalControlServiceFactory() override;
 
+    // Pulse: the capability comes from the port name, so the root is stateless.
+    std::string_view PulseKind() const override {
+        return "pctl";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override;
+
     Result CreateService(Out<SharedPointer<IParentalControlService>> out_service,
                          ClientProcessId process_id);
     Result CreateServiceWithoutInitialize(Out<SharedPointer<IParentalControlService>> out_service,

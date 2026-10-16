@@ -19,6 +19,11 @@ public:
     explicit NSD(Core::System& system_, const char* name);
     ~NSD() override;
 
+    // Pulse: answers come from the settings; no state.
+    std::string_view PulseKind() const override {
+        return "nsd";
+    }
+
 private:
     void SetChangeEnvironmentIdentifierDisabled(HLERequestContext& ctx);
     void Resolve(HLERequestContext& ctx);

@@ -25,6 +25,21 @@ IParentalControlServiceFactory::IParentalControlServiceFactory(Core::System& sys
 
 IParentalControlServiceFactory::~IParentalControlServiceFactory() = default;
 
+SessionRequestHandlerPtr IParentalControlServiceFactory::PulseRestore(
+    std::string_view kind, Pulse::HandlerRestore& restore) {
+    auto& in = restore.state;
+    if (kind == PulseKind()) {
+        in.End();
+        return shared_from_this();
+    }
+    if (kind == "pctl:IParentalControlService") {
+        auto service = IParentalControlService::PulseCreate(system, in);
+        in.End();
+        return service;
+    }
+    return nullptr;
+}
+
 Result IParentalControlServiceFactory::CreateService(
     Out<SharedPointer<IParentalControlService>> out_service, ClientProcessId process_id) {
     LOG_DEBUG(Service_PCTL, "called, process_id={}", process_id.pid);

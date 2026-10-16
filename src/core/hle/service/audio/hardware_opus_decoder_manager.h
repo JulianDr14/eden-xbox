@@ -21,6 +21,13 @@ public:
     explicit IHardwareOpusDecoderManager(Core::System& system_);
     ~IHardwareOpusDecoderManager() override;
 
+    // Pulse: the manager holds no guest state; it reopens each decoder.
+    std::string_view PulseKind() const override {
+        return "hwopus";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override;
+
 private:
     Result OpenHardwareOpusDecoder(Out<SharedPointer<IHardwareOpusDecoder>> out_decoder,
                                    OpusParameters params, u32 tmem_size,

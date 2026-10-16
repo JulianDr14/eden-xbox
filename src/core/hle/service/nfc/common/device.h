@@ -98,6 +98,14 @@ public:
     Kernel::KReadableEvent& GetActivateEvent() const;
     Kernel::KReadableEvent& GetDeactivateEvent() const;
 
+    // Pulse: the detection a checkpoint restarts and the events it exports.
+    NfcProtocol GetAllowedProtocols() const {
+        return allowed_protocols;
+    }
+    Kernel::KEvent* PulseEvent(bool deactivate) const {
+        return deactivate ? deactivate_event : activate_event;
+    }
+
 private:
     void NpadUpdate(Core::HID::ControllerTriggerType type);
     bool LoadNfcTag(u8 protocol, u8 tag_type, u8 uuid_length, UniqueSerialNumber uuid);

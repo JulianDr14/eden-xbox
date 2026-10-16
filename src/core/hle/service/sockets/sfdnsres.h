@@ -19,6 +19,11 @@ public:
     explicit SFDNSRES(Core::System& system_);
     ~SFDNSRES() override;
 
+    // Pulse: resolutions are synchronous; no state.
+    std::string_view PulseKind() const override {
+        return "sfdnsres";
+    }
+
 private:
     void GetHostByNameRequest(HLERequestContext& ctx);
     void GetGaiStringErrorRequest(HLERequestContext& ctx);
@@ -32,6 +37,11 @@ class DNS_PRIV final : public ServiceFramework<DNS_PRIV> {
 public:
     explicit DNS_PRIV(Core::System& system_);
     ~DNS_PRIV() override;
+
+    // Pulse: no state.
+    std::string_view PulseKind() const override {
+        return "dns:priv";
+    }
 };
 
 } // namespace Service::Sockets

@@ -11,6 +11,10 @@ class IApplicationVersionInterface final : public ServiceFramework<IApplicationV
 public:
     explicit IApplicationVersionInterface(Core::System& system_);
     ~IApplicationVersionInterface() override;
+
+    std::string_view PulseKind() const override {
+        return "ns:IApplicationVersionInterface";
+    }
 };
 
 } // namespace Service::NS

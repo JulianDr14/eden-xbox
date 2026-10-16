@@ -15,7 +15,7 @@ en documentación histórica ya no son carpetas de entrega vigentes.
 
 ## Diseño y funciones
 
-- [Pulse: sesiones persistentes](xbox_pulse.md): diseño, archivo/almacén y coordinador de proceso de fase 2 (gate de homebrew pendiente en la Series); todavía sin restauración de juegos.
+- [Pulse: sesiones persistentes](xbox_pulse.md): guarda y reanuda sesiones desde la biblioteca; homebrew probado en la Series, servicios de juegos (fase 5) sin probar todavía.
 
 - [Direct3D 12, fase 3](xbox_d3d12_phase3.md): scheduler, recursos, cachés y fences.
 - [Direct3D 12, fase 4](xbox_d3d12_phase4.md): pipelines y shaders del guest.

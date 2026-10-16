@@ -20,7 +20,19 @@ public:
                                      u64 program_id_);
     ~IParentalControlService() override;
 
+    // Pulse: the guest-visible states and settings; the events are never signaled.
+    std::string_view PulseKind() const override {
+        return "pctl:IParentalControlService";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    Kernel::KEvent* PulseEvent(u32 slot) override;
+    void PulseApply(Pulse::StateReader& in);
+    static std::shared_ptr<IParentalControlService> PulseCreate(Core::System& system,
+                                                                Pulse::StateReader& in);
+
 private:
+    Event* PulseEventAt(u32 slot);
+
     bool CheckFreeCommunicationPermissionImpl() const;
     bool ConfirmStereoVisionPermissionImpl() const;
     void SetStereoVisionRestrictionImpl(bool is_restricted);

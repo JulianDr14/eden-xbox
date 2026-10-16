@@ -297,7 +297,10 @@ void NVDRV::PulseCapture(Pulse::HandlerCapture& capture) const {
         if (!device || name.empty()) throw Pulse::ServiceRejected(false, "nvdrv fd without a device");
         Pulse::StateWriter device_state;
         if (!device->PulseCapture(fd, device_state)) {
-            throw Pulse::ServiceRejected(false, "nvdrv device " + name + " has no serializer");
+            // Video and JPEG engines are only open while the guest decodes: wait for the close.
+            const bool transient = name == "/dev/nvhost-nvdec" || name == "/dev/nvhost-vic" ||
+                                   name == "/dev/nvhost-nvjpg";
+            throw Pulse::ServiceRejected(transient, "nvdrv device " + name + " has no serializer");
         }
         out.S32(fd);
         out.String(name);

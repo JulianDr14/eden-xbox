@@ -20,6 +20,14 @@ public:
     explicit IDirectory(Core::System& system_, FileSys::VirtualDir directory_,
                         FileSys::OpenDirectoryMode mode);
 
+    // Pulse: short-lived; the capture waits for the guest to close it.
+    std::string_view PulseKind() const override {
+        return "IDirectory";
+    }
+    void PulseCapture(Pulse::HandlerCapture&) const override {
+        throw Pulse::ServiceRejected(true, "a directory listing is open");
+    }
+
 private:
     std::unique_ptr<FileSys::Fsa::IDirectory> backend;
 

@@ -30,7 +30,20 @@ public:
     Result SetSystemClockContext(const SystemClockContext& context);
     Result GetOperationEventReadableHandle(OutCopyHandle<Kernel::KReadableEvent> out_event);
 
+    // Pulse: which clock the glue static service handed out (glue/time/static.h), so a fresh
+    // System hands out the same one; untagged clocks (time:su) are rejected.
+    void SetPulseClock(u32 clock) {
+        pulse_clock = clock;
+    }
+    std::string_view PulseKind() const override {
+        return "time:SystemClock";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    Kernel::KEvent* PulseEvent(u32 slot) override;
+    Result OpenOperationEvent();
+
 private:
+    u32 pulse_clock{};
     SystemClockCore& m_clock_core;
     bool m_can_write_clock;
     bool m_can_write_uninitialized_clock;

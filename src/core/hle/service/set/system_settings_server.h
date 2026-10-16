@@ -37,6 +37,11 @@ public:
     explicit ISystemSettingsServer(Core::System& system_);
     ~ISystemSettingsServer() override;
 
+    // Pulse: a stateless root; what the guest set is already in the system's settings.
+    std::string_view PulseKind() const override {
+        return "set:sys";
+    }
+
     Result GetSettingsItemValueImpl(std::span<u8> out_value, u64& out_size,
                                     const std::string& category, const std::string& name);
 

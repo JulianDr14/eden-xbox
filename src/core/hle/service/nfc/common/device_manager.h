@@ -77,6 +77,20 @@ public:
     Result WriteBackupData(u64 device_handle, std::span<const u8> data);
     Result WriteNtf(u64 device_handle, NFP::WriteType, std::span<const u8> data);
 
+    // Pulse: the devices by npad index and the availability event, for the checkpoint.
+    bool IsInitialized() const {
+        return is_initialized;
+    }
+    std::size_t PulseDeviceCount() const {
+        return devices.size();
+    }
+    const std::shared_ptr<NfcDevice>& PulseDevice(std::size_t index) const {
+        return devices[index];
+    }
+    Kernel::KEvent* PulseAvailabilityEvent() const {
+        return availability_change_event;
+    }
+
 private:
     Result IsNfcEnabled() const;
     Result IsNfcParameterSet() const;

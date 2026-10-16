@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <queue>
+#include <stdexcept>
 #include "common/logging.h"
 #include "common/uuid.h"
 #include "core/core.h"
@@ -146,6 +147,17 @@ public:
 
     ~IFriendService() override {
         service_context.CloseEvent(completion_event);
+    }
+
+    // Pulse: every list is answered empty; only the completion event is the guest's.
+    std::string_view PulseKind() const override {
+        return "friend:IFriendService";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.ExportEvent(0, completion_event);
+    }
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 ? completion_event : nullptr;
     }
 
 private:
@@ -394,6 +406,39 @@ public:
         service_context.CloseEvent(notification_event);
     }
 
+    // Pulse: the user, the pending notifications and the event.
+    std::string_view PulseKind() const override {
+        return "friend:INotificationService";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.state.Raw(uuid);
+        capture.state.Bool(states.has_updated_friends);
+        capture.state.Bool(states.has_received_friend_request);
+        auto pending = notifications;
+        capture.state.U32(static_cast<u32>(pending.size()));
+        for (; !pending.empty(); pending.pop()) {
+            capture.state.Raw(pending.front());
+        }
+        capture.ExportEvent(0, notification_event);
+    }
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 ? notification_event : nullptr;
+    }
+    static std::shared_ptr<INotificationService> PulseCreate(Core::System& system,
+                                                             Pulse::StateReader& in) {
+        auto service = std::make_shared<INotificationService>(system, in.Raw<Common::UUID>());
+        service->states.has_updated_friends = in.Bool();
+        service->states.has_received_friend_request = in.Bool();
+        const auto count = in.U32();
+        if (count > MaxPulseNotifications) {
+            throw std::invalid_argument("Pulse: friend notifications");
+        }
+        for (u32 i = 0; i < count; ++i) {
+            service->notifications.push(in.Raw<SizedNotificationInfo>());
+        }
+        return service;
+    }
+
 private:
     void GetEvent(HLERequestContext& ctx) {
         LOG_DEBUG(Service_Friend, "called");
@@ -465,6 +510,8 @@ private:
         bool has_received_friend_request;
     };
 
+    static constexpr u32 MaxPulseNotifications = 0x1000;
+
     Common::UUID uuid;
     KernelHelpers::ServiceContext service_context;
 
@@ -496,6 +543,23 @@ Module::Interface::Interface(std::shared_ptr<Module> module_, Core::System& syst
 {}
 
 Module::Interface::~Interface() = default;
+
+SessionRequestHandlerPtr Module::Interface::PulseRestore(std::string_view kind,
+                                                         Pulse::HandlerRestore& restore) {
+    auto& in = restore.state;
+    SessionRequestHandlerPtr service;
+    if (kind == PulseKind()) {
+        service = shared_from_this();
+    } else if (kind == "friend:IFriendService") {
+        service = std::make_shared<IFriendService>(system);
+    } else if (kind == "friend:INotificationService") {
+        service = INotificationService::PulseCreate(system, in);
+    } else {
+        return nullptr;
+    }
+    in.End();
+    return service;
+}
 
 class IServiceForApplication final : public ServiceFramework<IServiceForApplication> {
 public:

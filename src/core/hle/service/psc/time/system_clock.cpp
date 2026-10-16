@@ -75,15 +75,30 @@ Result SystemClock::GetOperationEventReadableHandle(
     OutCopyHandle<Kernel::KReadableEvent> out_event) {
     LOG_DEBUG(Service_Time, "called.");
 
+    R_TRY(OpenOperationEvent());
+    *out_event = &m_operation_event->m_event->GetReadableEvent();
+    R_SUCCEED();
+}
+
+Result SystemClock::OpenOperationEvent() {
     if (!m_operation_event) {
         m_operation_event = std::make_unique<OperationEvent>(system);
         R_UNLESS(m_operation_event != nullptr, ResultFailed);
 
         m_clock_core.LinkOperationEvent(*m_operation_event);
     }
-
-    *out_event = &m_operation_event->m_event->GetReadableEvent();
     R_SUCCEED();
+}
+
+void SystemClock::PulseCapture(Pulse::HandlerCapture& capture) const {
+    if (!pulse_clock) throw Pulse::ServiceRejected(false, "system clock of an unknown time service");
+    capture.state.U32(pulse_clock);
+    capture.state.Bool(m_operation_event != nullptr);
+    if (m_operation_event) capture.ExportEvent(0, m_operation_event->m_event);
+}
+
+Kernel::KEvent* SystemClock::PulseEvent(u32 slot) {
+    return slot == 0 && m_operation_event ? m_operation_event->m_event : nullptr;
 }
 
 } // namespace Service::PSC::Time

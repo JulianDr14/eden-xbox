@@ -11,6 +11,10 @@ class IFactoryResetInterface final : public ServiceFramework<IFactoryResetInterf
 public:
     explicit IFactoryResetInterface(Core::System& system_);
     ~IFactoryResetInterface() override;
+
+    std::string_view PulseKind() const override {
+        return "ns:IFactoryResetInterface";
+    }
 };
 
 } // namespace Service::NS

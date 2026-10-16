@@ -15,6 +15,17 @@ public:
     explicit IPurchaseEventManager(Core::System& system_);
     ~IPurchaseEventManager() override;
 
+    // Pulse: the delivery target is a stub; a new manager only needs its event exported.
+    std::string_view PulseKind() const override {
+        return "aoc:IPurchaseEventManager";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.ExportEvent(0, purchased_event);
+    }
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 ? purchased_event : nullptr;
+    }
+
     Result SetDefaultDeliveryTarget(ClientProcessId process_id,
                                     InBuffer<BufferAttr_HipcMapAlias> in_buffer);
     Result SetDeliveryTarget(u64 unknown, InBuffer<BufferAttr_HipcMapAlias> in_buffer);

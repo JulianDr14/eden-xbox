@@ -222,6 +222,12 @@ SessionRequestHandlerPtr FSP_SRV::PulseRestore(std::string_view kind, Pulse::Han
         case IFileSystem::PulseOrigin::SdCard:
             result = OpenSdCardFileSystem(&filesystem);
             break;
+        case IFileSystem::PulseOrigin::DataCurrentProcess:
+            if (!romfs_controller) {
+                throw std::invalid_argument("Pulse: fsp-srv content without a process");
+            }
+            result = OpenDataFileSystemByCurrentProcess(&filesystem);
+            break;
         case IFileSystem::PulseOrigin::SaveData:
         case IFileSystem::PulseOrigin::SystemSaveData: {
             const auto space_id = arg.Raw<FileSys::SaveDataSpaceId>();
@@ -257,7 +263,48 @@ SessionRequestHandlerPtr FSP_SRV::PulseRestore(std::string_view kind, Pulse::Han
         }
         return file;
     }
+    if (kind == "IStorage") {
+        const auto opener = restore.Resolve(in.U64());
+        const u32 origin = in.U32();
+        std::vector<u8> args(in.Count(1));
+        in.Bytes(args);
+        in.End();
+        if (!opener || opener->PulseKind() != PulseKind()) {
+            throw std::invalid_argument("Pulse: storage without the fsp-srv session that opened it");
+        }
+        Pulse::StateReader arg{args};
+        auto storage = std::static_pointer_cast<FSP_SRV>(opener)->PulseOpenStorage(origin, arg);
+        arg.End();
+        return storage;
+    }
     return nullptr;
+}
+
+std::shared_ptr<IStorage> FSP_SRV::PulseOpenStorage(u32 origin, Pulse::StateReader& args) {
+    if (!romfs_controller) throw std::invalid_argument("Pulse: fsp-srv content without a process");
+    std::shared_ptr<IStorage> storage;
+    Result result = ResultSuccess;
+    switch (static_cast<IStorage::PulseOrigin>(origin)) {
+    case IStorage::PulseOrigin::CurrentProcess:
+        result = OpenDataStorageByCurrentProcess(&storage);
+        break;
+    case IStorage::PulseOrigin::DataId: {
+        const auto storage_id = args.Raw<FileSys::StorageId>();
+        const u32 unknown = args.U32();
+        const u64 title_id = args.U64();
+        result = OpenDataStorageByDataId(&storage, storage_id, unknown, title_id);
+        break;
+    }
+    case IStorage::PulseOrigin::ProgramIndex:
+        result = OpenDataStorageWithProgramIndex(&storage, args.U8());
+        break;
+    default:
+        throw std::invalid_argument("Pulse: unknown storage origin");
+    }
+    if (result.IsError() || !storage) {
+        throw std::invalid_argument("Pulse: fsp-srv could not reopen a storage");
+    }
+    return storage;
 }
 
 Result FSP_SRV::SetCurrentProcess(ClientProcessId pid) {
@@ -563,6 +610,7 @@ Result FSP_SRV::OpenDataFileSystemByCurrentProcess(OutInterface<IFileSystem> out
 
     *out_interface = std::make_shared<IFileSystem>(
         system, extracted_romfs, SizeGetter::FromStorageId(fsc, FileSys::StorageId::NandUser));
+    (*out_interface)->SetPulseOrigin(IFileSystem::PulseOrigin::DataCurrentProcess, {});
 
     R_SUCCEED();
 }
@@ -582,6 +630,7 @@ Result FSP_SRV::OpenDataStorageByCurrentProcess(OutInterface<IStorage> out_inter
     }
 
     *out_interface = std::make_shared<IStorage>(system, romfs);
+    (*out_interface)->SetPulseOrigin(shared_from_this(), IStorage::PulseOrigin::CurrentProcess, {});
 
     R_SUCCEED();
 }
@@ -591,6 +640,11 @@ Result FSP_SRV::OpenDataStorageByDataId(OutInterface<IStorage> out_interface,
     LOG_DEBUG(Service_FS, "called with storage_id={:02X}, unknown={:08X}, title_id={:016X}",
               storage_id, unknown, title_id);
 
+    Pulse::StateWriter pulse_args;
+    pulse_args.Raw(storage_id);
+    pulse_args.U32(unknown);
+    pulse_args.U64(title_id);
+
     auto data = romfs_controller->OpenRomFS(title_id, storage_id, FileSys::ContentRecordType::Data);
 
     if (!data) {
@@ -598,6 +652,8 @@ Result FSP_SRV::OpenDataStorageByDataId(OutInterface<IStorage> out_interface,
 
         if (archive != nullptr) {
             *out_interface = std::make_shared<IStorage>(system, archive);
+            (*out_interface)->SetPulseOrigin(shared_from_this(), IStorage::PulseOrigin::DataId,
+                                             std::move(pulse_args.bytes));
             R_SUCCEED();
         }
 
@@ -614,6 +670,8 @@ Result FSP_SRV::OpenDataStorageByDataId(OutInterface<IStorage> out_interface,
         romfs_controller->OpenBaseNca(title_id, storage_id, FileSys::ContentRecordType::Data);
     auto storage = std::make_shared<IStorage>(
         system, pm.PatchRomFS(base.get(), std::move(data), FileSys::ContentRecordType::Data));
+    storage->SetPulseOrigin(shared_from_this(), IStorage::PulseOrigin::DataId,
+                            std::move(pulse_args.bytes));
 
     *out_interface = std::move(storage);
     R_SUCCEED();
@@ -641,6 +699,10 @@ Result FSP_SRV::OpenDataStorageWithProgramIndex(OutInterface<IStorage> out_inter
     }
 
     *out_interface = std::make_shared<IStorage>(system, std::move(patched_romfs));
+    Pulse::StateWriter pulse_args;
+    pulse_args.U8(program_index);
+    (*out_interface)->SetPulseOrigin(shared_from_this(), IStorage::PulseOrigin::ProgramIndex,
+                                     std::move(pulse_args.bytes));
 
     R_SUCCEED();
 }

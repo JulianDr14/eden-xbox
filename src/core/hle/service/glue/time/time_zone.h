@@ -79,6 +79,19 @@ public:
                                  OutArray<s64, BufferAttr_HipcPointer> out_times,
                                  const Service::PSC::Time::CalendarTime& calendar_time);
 
+    // Pulse: the rule and location are the system's; only the operation event is the guest's.
+    std::string_view PulseKind() const override {
+        return "time:TimeZoneService";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        capture.state.Bool(operation_event_initialized);
+        if (operation_event_initialized) capture.ExportEvent(0, m_operation_event.m_event);
+    }
+    Kernel::KEvent* PulseEvent(u32 slot) override {
+        return slot == 0 && operation_event_initialized ? m_operation_event.m_event : nullptr;
+    }
+    void OpenOperationEvent();
+
 private:
     std::shared_ptr<Service::Set::ISystemSettingsServer> m_set_sys;
     bool m_can_write_timezone_device_location;

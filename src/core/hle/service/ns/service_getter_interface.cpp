@@ -40,6 +40,32 @@ IServiceGetterInterface::IServiceGetterInterface(Core::System& system_, const ch
 
 IServiceGetterInterface::~IServiceGetterInterface() = default;
 
+// Pulse: the roots and the interfaces they hand out have no state of their own.
+SessionRequestHandlerPtr IServiceGetterInterface::PulseRestore(std::string_view kind,
+                                                               Pulse::HandlerRestore& restore) {
+    restore.state.End();
+    if (kind == PulseKind()) return shared_from_this();
+    if (kind == "ns:IDynamicRightsInterface") return std::make_shared<IDynamicRightsInterface>(system);
+    if (kind == "ns:IReadOnlyApplicationControlDataInterface") {
+        return std::make_shared<IReadOnlyApplicationControlDataInterface>(system);
+    }
+    if (kind == "ns:IReadOnlyApplicationRecordInterface") {
+        return std::make_shared<IReadOnlyApplicationRecordInterface>(system);
+    }
+    if (kind == "ns:IECommerceInterface") return std::make_shared<IECommerceInterface>(system);
+    if (kind == "ns:IApplicationVersionInterface") {
+        return std::make_shared<IApplicationVersionInterface>(system);
+    }
+    if (kind == "ns:IFactoryResetInterface") return std::make_shared<IFactoryResetInterface>(system);
+    if (kind == "ns:IAccountProxyInterface") return std::make_shared<IAccountProxyInterface>(system);
+    if (kind == "ns:IDownloadTaskInterface") return std::make_shared<IDownloadTaskInterface>(system);
+    if (kind == "ns:IContentManagementInterface") {
+        return std::make_shared<IContentManagementInterface>(system);
+    }
+    if (kind == "ns:IDocumentInterface") return std::make_shared<IDocumentInterface>(system);
+    return nullptr;
+}
+
 Result IServiceGetterInterface::GetDynamicRightsInterface(
     Out<SharedPointer<IDynamicRightsInterface>> out_interface) {
     LOG_DEBUG(Service_NS, "called");

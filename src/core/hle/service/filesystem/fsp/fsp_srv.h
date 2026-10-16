@@ -56,6 +56,7 @@ public:
     SessionRequestHandlerPtr PulseRestore(std::string_view kind, Pulse::HandlerRestore& restore) override;
 
 private:
+    std::shared_ptr<IStorage> PulseOpenStorage(u32 origin, Pulse::StateReader& args);
     Result SetCurrentProcess(ClientProcessId pid);
     Result OpenDataFileSystemByCurrentProcess(OutInterface<IFileSystem> out_interface);
     Result OpenFileSystemWithPatch(OutInterface<IFileSystem> out_interface,

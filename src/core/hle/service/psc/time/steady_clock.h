@@ -34,6 +34,11 @@ public:
     Result GetSetupResultValue(Out<Result> out_result);
     Result GetInternalOffset(Out<s64> out_internal_offset);
 
+    // Pulse: no state of its own; the glue static service hands out a new one.
+    std::string_view PulseKind() const override {
+        return "time:SteadyClock";
+    }
+
 private:
     StandardSteadyClockCore& m_clock_core;
     bool m_can_write_steady_clock;

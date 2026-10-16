@@ -20,6 +20,15 @@ public:
     Result Initialize(const AudioCore::OpusDecoder::OpusMultiStreamParametersEx& params,
                       Kernel::KTransferMemory* transfer_memory, u64 transfer_memory_size);
 
+    // Pulse: the parameters it was opened with. The decoder works on a host buffer (the transfer
+    // memory only gives its size), so a fresh one is opened; the Opus history restarts as on a
+    // reset packet.
+    std::string_view PulseKind() const override {
+        return "hwopus:IHardwareOpusDecoder";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    Result PulseApply(Pulse::StateReader& in);
+
 private:
     Result DecodeInterleavedOld(OutBuffer<BufferAttr_HipcMapAlias> out_pcm_data,
                                 Out<u32> out_data_size, Out<u32> out_sample_count,
@@ -57,6 +66,9 @@ private:
         bool reset);
 
     std::unique_ptr<AudioCore::OpusDecoder::OpusDecoder> impl;
+    bool pulse_multi_stream{};
+    AudioCore::OpusDecoder::OpusMultiStreamParametersEx pulse_params{};
+    u64 pulse_buffer_size{};
     Common::ScratchBuffer<u8> output_data;
 };
 
