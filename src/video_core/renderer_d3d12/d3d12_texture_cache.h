@@ -84,6 +84,7 @@ public:
     void SetBlitHelper(BlitImageHelper* helper) noexcept { blit_helper = helper; }
     StagingBufferRef UploadStagingBuffer(size_t size, bool deferred = false);
     StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
+    void ReleaseCheckpointStaging() { staging.ReleaseRetiredDownloads(); }
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
     [[nodiscard]] bool CanCheckpointImage(
         const Image& image, std::span<const VideoCommon::BufferImageCopy> copies) const;

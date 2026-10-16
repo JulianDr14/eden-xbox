@@ -701,6 +701,10 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size, bool modified_
         runtime.Finish();
         SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span,
                      swizzle_data_buffer);
+        // A Pulse capture holds one image's readback at a time instead of all of them.
+        if constexpr (requires { runtime.ReleaseCheckpointStaging(); }) {
+            if (modified_only) runtime.ReleaseCheckpointStaging();
+        }
     }
 }
 
