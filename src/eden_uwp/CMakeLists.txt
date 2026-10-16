@@ -12,6 +12,8 @@ add_executable(eden-uwp WIN32
     pulse_gate.h
     pulse_sessions.cpp
     pulse_sessions.h
+    pulse_screen.cpp
+    pulse_screen.h
     pulse_store_gate.cpp
     pulse_store_gate.h
     alloc_watch.cpp

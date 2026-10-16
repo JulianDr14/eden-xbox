@@ -88,6 +88,7 @@
 #include "eden_uwp/headless_emu_window.h"
 #include "eden_uwp/prewarm_budget.h"
 #include "eden_uwp/pulse_gate.h"
+#include "eden_uwp/pulse_screen.h"
 #include "eden_uwp/pulse_sessions.h"
 #include "eden_uwp/pulse_store_gate.h"
 #include "eden_uwp/uwp_input.h"
@@ -542,7 +543,11 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     // Set only after a failed Load has returned from Core's own synchronous cleanup.
     // Other early Load failures still require the frontend to tear down the kernel.
     bool load_already_shutdown = false;
+    // Shown while Pulse saves or resumes a session (pulse_screen.h); it draws through the GPU
+    // thread, so it goes before anything is torn down.
+    std::optional<PulseScreen> pulse_screen;
     const auto shutdown = [&] {
+        pulse_screen.reset();
         Common::SamplingProfiler::Stop(); // writes the window in progress, if it runs
         if (config.gpu_failure_probe) WriteDiag("GPU recovery shutdown: input.Stop");
         input.Stop();
@@ -652,6 +657,9 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 system.GPU().Start();
                 system.GetCpuManager().OnGpuReady();
                 gpu_started = true;
+                std::string title;
+                void(system.GetAppLoader().ReadTitle(title));
+                pulse_screen.emplace(system, PulseScreen::Kind::Resume, Utf8ToUtf16(title));
             });
             resumed = true;
             WritePulseLog("session resumed in " +
@@ -723,10 +731,13 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         // later are appended to the file. The renderer shows the progress on screen.
         WriteDiag("step: building the disk shader cache | " + MemoryReport());
         VideoCore::RendererBase& renderer = system.Renderer();
+        if (pulse_screen) pulse_screen->ShadersStarting();
         renderer.ReadRasterizer()->LoadDiskResources(
             system.GetApplicationProcessProgramID(), std::stop_token{},
-            [&renderer](VideoCore::LoadCallbackStage, size_t done, size_t total) {
-                D3D12::ShowLoadProgress(renderer, done, total);
+            [&renderer, &pulse_screen](VideoCore::LoadCallbackStage, size_t done, size_t total) {
+                // A resume's screen shows the count itself; two presenters would race.
+                if (pulse_screen) pulse_screen->Shaders(done, total);
+                else D3D12::ShowLoadProgress(renderer, done, total);
             });
         WriteDiag("step: disk shader cache built | " + MemoryReport());
     }
@@ -761,6 +772,8 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                   " Hz, " + std::to_string(config.profile_window) + " s windows");
     }
     // Run the guest. CpuManager spins up guest threads; dynarmic compiles + executes their code.
+    // A resume's screen stays over it until the game presents.
+    if (pulse_screen) pulse_screen->GameStarting();
     void(system.Run());
     input.Start(system.HIDCore());
     if (config.gpu_failure_probe) {
@@ -817,6 +830,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
             return count;
         };
         const auto draw_menu = [&] {
+            pulse_screen.reset(); // The menu takes the screen.
             const auto screen = D3D12::GameMenuScreenSize(system.Renderer());
             D3D12::MenuImage image;
             try {
@@ -1019,6 +1033,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     if (result == GameMenuResult::Library && pulse_identity) {
                         // The only capture: when the player leaves, never while playing.
                         WritePulseLog("saving the session | " + MemoryReport() + " | " + MemoryOwners());
+                        pulse_screen.emplace(system, PulseScreen::Kind::Save, game_title);
                         const auto save_start = std::chrono::steady_clock::now();
                         // Samples the app memory while the save runs: the highest use of each
                         // step against the use before it, so the step that peaks is known.
@@ -1050,6 +1065,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                                     return limit > used ? limit - used : u64{};
                                 },
                                 [&](const char* name) {
+                                    pulse_screen->SaveStep(name);
                                     for (int i = 0; i < static_cast<int>(save_steps.size()); ++i) {
                                         if (std::string_view{name} == save_steps[i]) step.store(i);
                                     }
@@ -1078,6 +1094,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                             PulseSessions::SetNotice(I18n::ToUtf8(
                                 I18n::Format(I18n::Text::PulseNotKept, {Utf8ToUtf16(reason)})));
                         }
+                        pulse_screen->Finish(reason.empty());
                     }
                     WriteDiag("menu: back to the library, shutting the game down | " +
                               MemoryReport());
