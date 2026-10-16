@@ -24,6 +24,10 @@ public:
 
     ~IContextRegistrar() override = default;
 
+    std::string_view PulseKind() const override {
+        return "ectx:IContextRegistrar";
+    }
+
 private:
     void Complete(HLERequestContext& ctx) {
         struct InputParameters {
@@ -79,6 +83,20 @@ ECTX_AW::ECTX_AW(Core::System& system_) : ServiceFramework{system_, "ectx:aw"} {
 }
 
 ECTX_AW::~ECTX_AW() = default;
+
+SessionRequestHandlerPtr ECTX_AW::PulseRestore(std::string_view kind,
+                                               Pulse::HandlerRestore& restore) {
+    SessionRequestHandlerPtr service;
+    if (kind == PulseKind()) {
+        service = shared_from_this();
+    } else if (kind == "ectx:IContextRegistrar") {
+        service = std::make_shared<IContextRegistrar>(system);
+    } else {
+        return nullptr;
+    }
+    restore.state.End();
+    return service;
+}
 
 void ECTX_AW::CreateContextRegistrar(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};

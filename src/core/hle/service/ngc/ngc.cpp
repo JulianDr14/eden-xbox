@@ -32,6 +32,11 @@ public:
         RegisterHandlers(functions);
     }
 
+    // Pulse: stateless (nothing is filtered, nothing is kept).
+    std::string_view PulseKind() const override {
+        return "ngct:u";
+    }
+
 private:
     void Match(HLERequestContext& ctx) {
         const auto buffer = ctx.ReadBuffer();
@@ -78,6 +83,11 @@ public:
         // clang-format on
 
         RegisterHandlers(functions);
+    }
+
+    // Pulse: stateless (nothing is filtered, nothing is kept).
+    std::string_view PulseKind() const override {
+        return "ngc:u";
     }
 
 private:

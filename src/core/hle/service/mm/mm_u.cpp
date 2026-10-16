@@ -10,6 +10,7 @@
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/sm/sm.h"
 
+#include <stdexcept>
 #include <vector>
 
 namespace Service::MM {
@@ -64,6 +65,47 @@ public:
         // clang-format on
 
         RegisterHandlers(functions);
+    }
+
+    // Pulse: the clock sessions the guest opened, with their last requested range.
+    std::string_view PulseKind() const override {
+        return "mm:u";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        auto& out = capture.state;
+        out.U32(request_id);
+        out.U32(static_cast<u32>(sessions.size()));
+        for (const auto& session : sessions) {
+            out.U32(static_cast<u32>(session.module));
+            out.U32(session.request_id);
+            out.U32(session.min);
+            out.S32(session.max);
+            out.Bool(session.is_auto_clear_event);
+        }
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override {
+        if (kind != PulseKind()) return nullptr;
+        auto& in = restore.state;
+        const u32 next_id = in.U32();
+        std::vector<Session> restored;
+        const auto count = in.Count(4 + 4 + 4 + 4 + 1);
+        for (u32 i = 0; i < count; ++i) {
+            const u32 module = in.U32();
+            if (module > static_cast<u32>(Module::TEST)) {
+                throw std::invalid_argument("Pulse: mm module");
+            }
+            const u32 id = in.U32();
+            const u32 min = in.U32();
+            const s32 max = in.S32();
+            Session session{static_cast<Module>(module), id, in.Bool()};
+            session.SetAndWait(min, max);
+            restored.push_back(session);
+        }
+        in.End();
+        sessions = std::move(restored);
+        request_id = next_id;
+        return shared_from_this();
     }
 
 private:

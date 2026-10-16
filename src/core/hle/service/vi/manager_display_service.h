@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <set>
+
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/service.h"
 
@@ -21,6 +23,16 @@ class IManagerDisplayService final : public ServiceFramework<IManagerDisplayServ
 public:
     explicit IManagerDisplayService(Core::System& system_, std::shared_ptr<Container> container);
     ~IManagerDisplayService() override;
+
+    // Pulse: no state of its own; a managed layer the guest created here is not recorded
+    // anywhere a restore reaches, so one still alive rejects the capture.
+    std::string_view PulseKind() const override {
+        return "IManagerDisplayService";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    static SessionRequestHandlerPtr PulseRestoreFrom(Core::System& system,
+                                                     std::shared_ptr<Container> container,
+                                                     Pulse::HandlerRestore& restore);
 
     Result CreateSharedLayerSession(Kernel::KProcess* owner_process, u64* out_buffer_id,
                                     u64* out_layer_handle, u64 display_id, bool enable_blending);
@@ -38,6 +50,7 @@ public:
 
 private:
     const std::shared_ptr<Container> m_container;
+    std::set<u64> m_managed_layer_ids;
 };
 
 } // namespace Service::VI
