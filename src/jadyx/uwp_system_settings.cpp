@@ -98,6 +98,8 @@ ResolvedSystem ApplySystemSettings() {
     I18n::SetUiLanguage(*resolved.ui_language);
     Settings::values.language_index = resolved.game_language;
     Settings::values.region_index = resolved.region;
+    // The console's nickname, which some games show; Eden's default is its own name.
+    Settings::values.device_name.SetValue("Jadyx");
     LOG_INFO(Frontend, "System: Windows language {}, region {}; interface {}, game language {}, region {}",
              locale.languages.empty() ? std::string{"(none)"} : I18n::ToUtf8(locale.languages.front()),
              locale.region.empty() ? std::string{"(none)"} : I18n::ToUtf8(locale.region),

@@ -125,7 +125,7 @@ public:
         target->Clear(D2D1::ColorF(0x0b1018));
         if (logo) target->DrawBitmap(logo.Get(), D2D1::RectF(50, 38, 104, 92), 1,
                                      D2D1_INTERPOLATION_MODE_LINEAR);
-        Text(L"eden", 120, 40, 32, 0xf4f7fa, 140, 48, true);
+        Text(L"Jadyx", 120, 40, 32, 0xf4f7fa, 140, 48, true);
         Text(Tr(T::LibraryHeading), 266, 54, 16, 0x9ba9ba, 200);
         Round(839, 43, 225, 44, 14, 0x202b39);
         ControlPrompt(Navigation::AddFolder, Tr(T::SettingsTitle), 849, 49, 174);
@@ -742,7 +742,7 @@ private:
                                D2D1_INTERPOLATION_MODE_LINEAR);
             target->PopLayer();
         } else {
-            Text(L"EDEN", x + size * 0.12f, y + size * 0.32f, size > 150 ? 34.0f : 20.0f,
+            Text(L"JADYX", x + size * 0.12f, y + size * 0.32f, size > 150 ? 34.0f : 20.0f,
                  0x77e3bd, size * 0.85f, 54, true);
             Text(entry.relative_path.extension().wstring().substr(1), x + size * 0.12f,
                  y + size * 0.58f, 16, 0x9ba9ba, size * 0.85f);
