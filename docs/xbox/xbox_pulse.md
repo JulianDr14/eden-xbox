@@ -4,7 +4,7 @@ Estado: fases 1–4 implementadas y fase 5 en curso. La biblioteca guarda la ses
 al volver al inicio y la reanuda al elegir el juego (fase 4, abajo). Homebrew con
 vídeo, audio y archivos se reanuda. La fase 5 añade GPU, audren, HID, AM y los
 servicios de sistema (abajo): juegos comerciales de 64 y de 32 bits guardan y se
-reanudan en PC (16 oct 2026), aún sin validar en la Series. Un juego que use un
+reanudan en la Series y en PC (16 oct 2026). Un juego que use un
 servicio sin serializador sigue **rechazándose con motivo**. No cambia el nombre del emulador. Sin commits
 automáticos.
 
@@ -141,8 +141,8 @@ Los errores IO/cuota están inyectados; no confundirlos con esos gates físicos.
 | 1: formato/storage | **Cerrada en PC**: harness de archivo/store PASS y cada ciclo de los gates de fase 2/3 publica y consume por `Store`. Riesgos residuales: corte eléctrico real y disco físico lleno (solo inyectados) |
 | 2: barrera/CPU/memoria/kernel/timing | **Cerrada**: gate de 100 ciclos PASS en la Series (0.2.87.12); fuga JIT por ciclo corregida y verificada en PC |
 | 3: servicios/FS/GPU/audio | **Cerrada para homebrew**: vi/nvnflinger, nvdrv, audout y fs serializados; banco de 100 ciclos PASS en la Series (0.2.87.16) |
-| 4: biblioteca/múltiples sesiones | **Implementada**: guardar al volver al inicio, reanudar al elegir, distintivo, descarte, ajuste. Pendiente validar en la Series (0.2.87.17) |
-| 5: compatibilidad/rendimiento | **En curso**: juegos comerciales de 64 y 32 bits guardan y se reanudan en PC (0.2.91.20); pendiente validar en la Series |
+| 4: biblioteca/múltiples sesiones | **Cerrada**: guardar al volver al inicio, reanudar al elegir, distintivo, descarte, ajuste. Validada en la Series |
+| 5: compatibilidad/rendimiento | **En curso**: juegos comerciales de 64 y 32 bits guardan y se reanudan en la Series y en PC (0.2.91.20); un servicio sin serializador sigue rechazando |
 
 ## Fuentes y decisiones
 
@@ -428,7 +428,7 @@ actualizado: faltaba la fila de estadísticas).
 ## Fase 5: servicios de juegos (12 oct 2026)
 
 Misma política que la fase 3: guardar solo lo que el juego observa y regenerar el
-resto. Compila para UWP; **no está probado en la Series**.
+resto. Probado con juegos comerciales de 64 y 32 bits en la Series y en PC.
 
 - **Memoria compartida (kind 7)**: nunca se guarda su contenido; se nombra al
   dueño (fuente de `pl:u`, IRS, time, hidbus, HID por aruid) y la restauración
@@ -528,7 +528,8 @@ syncpoint, con los valores de ese momento.
 
 ### Límites honestos (fase 5)
 
-- Probado en PC con juegos comerciales de 64 y 32 bits; sin evidencia en consola todavía.
+- Probado con juegos comerciales de 64 y 32 bits en la Series y en PC; un juego que no se probó
+  puede rechazar por un servicio sin serializador.
 - Servicios sin serializador (bcat, caps, ldn, npns, audin, psm,
   `IApplicationManagerInterface` de ns…) siguen rechazando sin reintento. Es
   probable que el siguiente rechazo de un juego real venga de ahí.
