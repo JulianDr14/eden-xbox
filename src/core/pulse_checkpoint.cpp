@@ -676,9 +676,12 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
 
     // Memory map: what the rebuilt skeleton must reproduce, and what to store.
     auto& table = process->GetPageTable();
-    if (table.GetBasePageTable().GetMappedPhysicalMemorySize()) {
-        Reject(false, "the application maps physical memory");
-    }
+    // svcMapPhysicalMemory memory: Normal blocks in the alias region, rebuilt by mapping the same
+    // ranges again. The layout needs no field for it; their total must match the kernel's.
+    const u64 alias_start = GetInteger(table.GetAliasRegionStart());
+    const u64 alias_end = alias_start + table.GetAliasRegionSize();
+    const u64 physical_size = table.GetBasePageTable().GetMappedPhysicalMemorySize();
+    u64 physical_found{};
     ProcessLayout layout;
     layout.program_id = process->GetProgramId();
     layout.process_id = process->GetProcessId();
@@ -713,21 +716,32 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
                                      "(block {:#x}+{:#x} state {:#x} attribute {:#x})",
                                      block.address, block.size, block.state, block.attribute));
         }
-        // PermissionLocked (libnx locks its RELRO page) is replayed by the restore, DeviceShared by
-        // the nvdrv serializer re-sharing its nvmap handles; Uncached is not.
+        // PermissionLocked (libnx locks its RELRO page) and Uncached (svcSetMemoryAttribute on GPU
+        // buffers) are replayed by the restore, DeviceShared by the nvdrv serializer re-sharing its
+        // nvmap handles.
         if (True(attribute & ~(KMemoryAttribute::Locked | KMemoryAttribute::PermissionLocked |
-                               KMemoryAttribute::DeviceShared))) {
+                               KMemoryAttribute::DeviceShared | KMemoryAttribute::Uncached))) {
             Reject(false, fmt::format("memory attribute {:#x} has no serializer", block.attribute));
         }
         const bool normal = state == KMemoryState::Normal;
         if (True(attribute & KMemoryAttribute::DeviceShared) && !normal) {
-            Reject(false, "device-shared memory outside the heap");
+            Reject(false, fmt::format("device-shared memory outside the heap (block {:#x}+{:#x} "
+                                      "state {:#x})",
+                                      block.address, block.size, block.state));
         }
-        if (True(attribute & KMemoryAttribute::Locked) && !normal) {
-            Reject(false, "locked memory outside the heap");
+        // svcMapMemory (a thread stack) and transfer memory lock their source, which may be static
+        // data (.bss, CodeData) as well as the heap: the restore replays the same calls.
+        if (True(attribute & KMemoryAttribute::Locked) && !normal &&
+            state != KMemoryState::CodeData) {
+            Reject(false, fmt::format("locked memory outside the heap and static data (block "
+                                      "{:#x}+{:#x} state {:#x})",
+                                      block.address, block.size, block.state));
         }
         if (normal && (block.address < layout.heap_start || block.address + block.size > heap_end)) {
-            Reject(false, "normal memory outside the heap");
+            if (block.address < alias_start || block.address + block.size > alias_end) {
+                Reject(false, "normal memory outside the heap and the alias region");
+            }
+            physical_found += block.size;
         }
         if (state != KMemoryState::Code && state != KMemoryState::CodeData && !normal &&
             state != KMemoryState::Stack && state != KMemoryState::ThreadLocal &&
@@ -763,6 +777,10 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
                 locked_sources.emplace(Physical(*process, block.address + page), block.address + page);
             }
         }
+    }
+    if (physical_found != physical_size) {
+        Reject(false, fmt::format("physical memory mappings ({:#x}) differ from the kernel's ({:#x})",
+                                  physical_found, physical_size));
     }
     for (const auto& block : layout.blocks) {
         const auto state = static_cast<KMemoryState>(block.state);
@@ -1055,6 +1073,17 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
             Check(table.SetHeapSize(std::addressof(heap), layout.heap_size), "Pulse: heap rebuild failed");
             if (GetInteger(heap) != layout.heap_start) Incompatible("Pulse: rebuilt heap address differs");
         }
+        // Normal memory outside the heap was mapped with svcMapPhysicalMemory (checked at capture).
+        const u64 heap_end = layout.heap_start + layout.heap_size;
+        for (const auto& block : layout.blocks) {
+            if (static_cast<KMemoryState>(block.state) != KMemoryState::Normal ||
+                (block.address >= layout.heap_start && block.address + block.size <= heap_end)) {
+                continue;
+            }
+            // No guest thread runs here, so the owner is passed instead of the current process.
+            Check(table.MapPhysicalMemory(block.address, block.size, process->GetProcessId()),
+                  "Pulse: physical memory rebuild failed");
+        }
         for (const auto& alias : layout.aliases) {
             Check(table.MapMemory(alias.destination, alias.source, alias.size),
                   "Pulse: stack mapping rebuild failed");
@@ -1064,7 +1093,8 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
         for (const auto& block : layout.blocks) {
             const auto block_state = static_cast<KMemoryState>(block.state);
             if ((block_state != KMemoryState::CodeData && block_state != KMemoryState::Normal) ||
-                (block.attribute & ~static_cast<u32>(KMemoryAttribute::DeviceShared)) != 0) {
+                (block.attribute & ~static_cast<u32>(KMemoryAttribute::DeviceShared |
+                                                     KMemoryAttribute::Uncached)) != 0) {
                 continue;
             }
             for (u64 address = block.address; address < block.address + block.size;) {
@@ -1082,6 +1112,14 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
                 }
                 address = end;
             }
+        }
+        for (const auto& block : layout.blocks) {
+            if (False(static_cast<KMemoryAttribute>(block.attribute) & KMemoryAttribute::Uncached)) {
+                continue;
+            }
+            Check(table.SetMemoryAttribute(block.address, block.size, KMemoryAttribute::Uncached,
+                                           KMemoryAttribute::Uncached),
+                  "Pulse: uncached memory rebuild failed");
         }
         for (const auto& block : layout.blocks) {
             if (False(static_cast<KMemoryAttribute>(block.attribute) &

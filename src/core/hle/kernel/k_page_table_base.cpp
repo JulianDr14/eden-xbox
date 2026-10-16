@@ -5192,6 +5192,11 @@ void KPageTableBase::CleanupForIpcClientOnServerSetupFailure(PageLinkedList* pag
 }
 
 Result KPageTableBase::MapPhysicalMemory(KProcessAddress address, size_t size) {
+    R_RETURN(this->MapPhysicalMemory(address, size,
+                                     GetCurrentProcess(m_system.Kernel()).GetId()));
+}
+
+Result KPageTableBase::MapPhysicalMemory(KProcessAddress address, size_t size, u64 process_id) {
     // Lock the physical memory lock.
     KScopedLightLock phys_lk(m_map_physical_memory_lock);
 
@@ -5254,7 +5259,7 @@ Result KPageTableBase::MapPhysicalMemory(KProcessAddress address, size_t size) {
             KPageGroup pg(m_system.Kernel(), m_block_info_manager);
             R_TRY(m_system.Kernel().MemoryManager().AllocateForProcess(
                 std::addressof(pg), (size - mapped_size) / PageSize, m_allocate_option,
-                GetCurrentProcess(m_system.Kernel()).GetId(), m_heap_fill_value));
+                process_id, m_heap_fill_value));
 
             // If we fail in the next bit (or retry), we need to cleanup the pages.
             auto pg_guard = SCOPE_GUARD {

@@ -334,6 +334,9 @@ public:
     Result MapPhysicalMemory(KProcessAddress address, size_t size) {
         R_RETURN(m_page_table.MapPhysicalMemory(address, size));
     }
+    Result MapPhysicalMemory(KProcessAddress address, size_t size, u64 process_id) {
+        R_RETURN(m_page_table.MapPhysicalMemory(address, size, process_id));
+    }
 
     Result UnmapPhysicalMemory(KProcessAddress address, size_t size) {
         R_RETURN(m_page_table.UnmapPhysicalMemory(address, size));
