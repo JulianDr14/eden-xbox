@@ -171,7 +171,14 @@ void SyncpointManager::PulseRestore(const PulseSyncpoint& state) {
             syncpoint.counter_max = state.counter_max;
         }
     }
-    host1x.GetSyncpointManager().PulseRaise(state.id, state.guest_value, state.host_value);
+    // Increments up to counter_max belong to GPU work in flight at the capture, which is not
+    // restored: they would never land and a guest fence on them would wait forever. They are
+    // treated as done.
+    const auto raised = [&](u32 value) {
+        return static_cast<s32>(state.counter_max - value) > 0 ? state.counter_max : value;
+    };
+    host1x.GetSyncpointManager().PulseRaise(state.id, raised(state.guest_value),
+                                            raised(state.host_value));
 }
 
 u32 SyncpointManager::PulseAdopt(u32 allocated, u32 captured) {
