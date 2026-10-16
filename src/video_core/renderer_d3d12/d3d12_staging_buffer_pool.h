@@ -67,6 +67,10 @@ public:
     /// runs (Scheduler::CollectGarbage retire callbacks) acquires a cache mutex. Keep it that way.
     [[nodiscard]] bool GuardMemory(const CacheMemorySnapshot& snapshot);
 
+    /// Frees every readback buffer the GPU is done with. A Pulse capture downloads each image
+    /// once, at sizes the game never asks for again; kept, they outlive the save.
+    void ReleaseRetiredDownloads();
+
     /// Upload bytes requested for the command list being recorded (stream and dedicated).
     [[nodiscard]] u64 PendingUploadBytes() const noexcept;
 

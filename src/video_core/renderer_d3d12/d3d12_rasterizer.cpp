@@ -500,6 +500,7 @@ void RasterizerD3D12::FlushCheckpointRegion(DAddr address, u64 size) {
     {
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.DownloadMemory(address, size);
+        staging.ReleaseRetiredDownloads();
     }
     query_cache.FlushRegion(address, size);
 }
