@@ -104,7 +104,7 @@ link completo y el gate en consola.
 ## Gate en la Series (pendiente)
 
 1. Arrancar con `upscaling=fsr` en `boot.cfg`, o activarlo en el menú de pausa.
-2. En `eden_log.txt`:
+2. En `jadyx_log.txt`:
    - `D3D12: FSR 1 ready (EASU + RCAS, 32-bit, ...)`, sin `FSR 1 unavailable`.
    - `D3D12: FSR target WxH`.
    - `D3D12: FSR 1 1280x720 -> 1920x1080 (1.50x1.50), RCAS 0.25 stops`.

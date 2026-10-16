@@ -29,7 +29,7 @@ def main():
     args = parser.parse_args()
     original = json.loads(args.vertex_ir.read_text(encoding='utf-8'))
     vertex = lighting.ir.attribute_slice(original, {28, 29, 30, 31})
-    log = (args.capture_root / 'eden_log.txt').read_text(encoding='utf-8', errors='replace')
+    log = (args.capture_root / 'jadyx_log.txt').read_text(encoding='utf-8', errors='replace')
     captures = lighting.material.captures(log.splitlines())
     matches = [d for d in captures[args.capture - 1]['draws']
                if d['vs'] == vertex['hash'] and d['ps'] == args.pixel_shader and

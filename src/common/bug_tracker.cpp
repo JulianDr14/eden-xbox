@@ -269,8 +269,8 @@ public:
         build_info = std::move(build);
         std::error_code ec;
         std::filesystem::create_directories(directory, ec);
-        log_path = directory / "eden_graphics_bugs.log";
-        json_path = directory / "eden_graphics_bugs.json";
+        log_path = directory / "jadyx_graphics_bugs.log";
+        json_path = directory / "jadyx_graphics_bugs.json";
         Rotate(log_path);
         Rotate(json_path);
 #ifdef _WIN32
@@ -291,8 +291,8 @@ public:
             char date[64]{};
             std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", &local);
             fmt::print(log_file,
-                       "Eden bug tracker - {}\nStarted {}. Each line is the first occurrence of a "
-                       "bug; the summary with counts is in eden_graphics_bugs.json and at the end "
+                       "Jadyx bug tracker - {}\nStarted {}. Each line is the first occurrence of a "
+                       "bug; the summary with counts is in jadyx_graphics_bugs.json and at the end "
                        "of this file.\n\n",
                        build_info, date);
             std::fflush(log_file);

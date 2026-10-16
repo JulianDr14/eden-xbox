@@ -745,7 +745,7 @@ todo lo demás:
   libarchive sondea bibliotecas del sistema antes de que el árbol las construya). No usa
   `archive_write_disk`: la extracción la escribe el frontend.
 - **Dónde lee**: el archivo se abre donde está, por la VFS de la app (interna o USB vía
-  `FutureAccessList`), sin copiarlo antes. Pestaña *Archivos*: `LocalState\eden\mods\inbox`
+  `FutureAccessList`), sin copiarlo antes. Pestaña *Archivos*: `LocalState\jadyx\mods\inbox`
   (Device Portal) y las carpetas USB autorizadas (las de juegos y contenido, más *Añadir una
   carpeta*).
 - **Qué hay dentro** (`mods/mod_layout.cpp`, solo con la lista de rutas, antes de extraer): carpeta
@@ -763,7 +763,7 @@ todo lo demás:
   IPS/pchtxt: gana el último aplicado, así que va invertido. Sin lista, el orden por nombre de
   siempre. Corrige dos derefs nulos en `PatchExeFS`/`ApplyLayeredFS` (título sin SD o sin load).
 - **Activar/desactivar**: `disabled_addons` (que UWP nunca escribía). `Mods::ApplyModChoices`
-  lee todos los manifiestos (`LocalState\eden\mods\<TID>.json`) antes de `system.Load`. Los
+  lee todos los manifiestos (`LocalState\jadyx\mods\<TID>.json`) antes de `system.Load`. Los
   cheats de un mod apagado tampoco salen en la página de Cheats.
 - **Conflictos y versión** (`mods/mod_analysis.h`, `mods/mod_inspect.cpp`): qué archivos del juego
   pisa cada mod (romfs, exefs y los `.stub`/`.ips` de romfs_ext) y quién gana por orden; y si sus

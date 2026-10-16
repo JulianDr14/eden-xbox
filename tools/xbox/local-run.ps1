@@ -11,11 +11,11 @@
 #       [-Game path\to\game.nsp] [-StageScript path] [-MemoryLimitMiB 5120]
 #
 # -RunSeconds runs payloads without the sentinels (deko3d examples, ...) for that long, then exits.
-# -DebugLayer turns on the D3D12 debug layer; its errors and warnings land in eden_log.txt.
+# -DebugLayer turns on the D3D12 debug layer; its errors and warnings land in jadyx_log.txt.
 # -Game passes the user's own game dump through package-appx.ps1 (copied into LocalState
 # on the first run; afterwards -Game with just the file name is enough). -StageScript is handed to
 # package-appx.ps1 as is.
-# The log is left in %LOCALAPPDATA%\Packages\<family>\LocalState\eden\log\eden_log.txt (path
+# The log is left in %LOCALAPPDATA%\Packages\<family>\LocalState\jadyx\log\jadyx_log.txt (path
 # printed at the end).
 
 param([int] $TimeoutSec = 75, [switch] $NoBuild, [string] $BootNro, [int] $RunSeconds = 0,
@@ -79,4 +79,4 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 500
 }
 Get-Content $diag
-Write-Host "log: $(Join-Path $local 'eden\log\eden_log.txt')"
+Write-Host "log: $(Join-Path $local 'jadyx\log\jadyx_log.txt')"

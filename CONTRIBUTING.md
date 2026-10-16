@@ -33,7 +33,7 @@ Open an issue with the bug report template and include:
 - What you did, what you expected and what happened instead. Describe a game by its kind if you
   prefer not to name it.
 - The diagnostics from the package's `LocalState` folder: `jadyx_diag.txt` and
-  `eden\log\eden_log.txt`. On the console they are reachable through the Device Portal's file
+  `jadyx\log\jadyx_log.txt`. On the console they are reachable through the Device Portal's file
   explorer; on PC they are in `%LOCALAPPDATA%\Packages\<package family>\LocalState`.
 
 ## Sending changes

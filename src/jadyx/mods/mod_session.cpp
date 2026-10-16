@@ -30,7 +30,7 @@ std::int64_t Now() {
         .count();
 }
 
-/// Archives on internal storage go here (LocalState\eden\mods\inbox), through the Device Portal.
+/// Archives on internal storage go here (LocalState\jadyx\mods\inbox), through the Device Portal.
 fs::path InboxFolder() {
     return DefaultModPaths().data / "inbox";
 }

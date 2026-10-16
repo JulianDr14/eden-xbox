@@ -346,7 +346,7 @@ const Catalog EnglishCatalog = MakeCatalog({
     {Text::ModsSourceArchive, L"From {0}"},
     {Text::ModsAddFolder, L"Add a USB folder..."},
     {Text::ModsInternal, L"Internal storage"},
-    {Text::ModsSourcesHint, L"Copy your .zip, .7z or .rar to LocalState\\eden\\mods\\inbox with the Device Portal, or add a folder from a USB drive."},
+    {Text::ModsSourcesHint, L"Copy your .zip, .7z or .rar to LocalState\\jadyx\\mods\\inbox with the Device Portal, or add a folder from a USB drive."},
     {Text::ModsFolderEmpty, L"There are no .zip, .7z or .rar files here."},
     {Text::ModsVolumes, L"{0} parts"},
     {Text::ModsActionMove, L"Move (change which wins)"},

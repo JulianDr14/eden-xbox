@@ -424,7 +424,7 @@ warnings/errores de Render y ningún device removed. El bucle de 600 frames tard
 
 ## Cómo se prueba cada sub-fase
 1. Se compila con `tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp`.
-2. Se prueba en el PC con `local-run.ps1` (loose register) y se revisa `eden_log.txt`.
+2. Se prueba en el PC con `local-run.ps1` (loose register) y se revisa `jadyx_log.txt`.
 3. Se sube la versión del manifest, se empaqueta y se prueba en la Series en modo Game.
 4. Se anota el resultado en [`xbox_internal.md`](xbox_internal.md).
 

@@ -67,7 +67,7 @@ def native_input_tile(path, address, sampling_format):
 class Capture:
     def __init__(self, root, capture_index, vertex, pixel):
         self.root, self.vertex, self.pixel = root, vertex, pixel
-        captures = material.captures((root / 'eden_log.txt').read_text(
+        captures = material.captures((root / 'jadyx_log.txt').read_text(
             encoding='utf-8', errors='replace').splitlines())
         self.draw = next(d for d in captures[capture_index]['draws'] if d['ps'] == pixel['hash'])
         self.prefix = sorted((root / 'trace').glob('*_probe.csv'))[capture_index].stem[:-6]
@@ -242,7 +242,7 @@ def main():
     vertex = json.loads(args.vertex_ir.read_text(encoding='utf-8'))
     pixel = json.loads(args.pixel_ir.read_text(encoding='utf-8'))
     all_results = []
-    count = len(material.captures((args.capture_root / 'eden_log.txt').read_text(
+    count = len(material.captures((args.capture_root / 'jadyx_log.txt').read_text(
         encoding='utf-8', errors='replace').splitlines()))
     for index in range(count):
         capture = Capture(args.capture_root, index, vertex, pixel)

@@ -763,7 +763,7 @@ Implementado para x64, habilitado explicitamente en UWP con boot.cfg:
 No es aun una cache de bytes host como PPTC. El perfil guarda descriptor A64
 relativo al entrypoint del proceso (incluye FPCR), hash FNV64 de las instrucciones
 consumidas y su longitud. Cada core tiene su archivo en
-`LocalState/eden/cache/jit-profile/<title-id>/core-N.bin`; el directorio exacto
+`LocalState/jadyx/cache/jit-profile/<title-id>/core-N.bin`; el directorio exacto
 depende del CacheDir configurado. Header EDJITP01, title, BuildId completo del
 ejecutable guest, core, count y checksum del payload. Enteros little endian,
 sin padding nativo, instrucciones guest ni direcciones/punteros host persistidos.
@@ -1495,7 +1495,7 @@ sin inventar una ruta especificaD3D12 ni alterar orden de trabajo.
 Gates analizador: unionrecortada/anidada, atribucion porcore, eviction/recreation,
 readyobsoleto descartado, parser fixture y compatibilidad dosT archivadas56,25/57FPS
 correctos. Build/manual y gatecapacidad/Series por registrar. Usar:
-python tools/xbox/analyze-frame-trace.py <eden_log.txt>
+python tools/xbox/analyze-frame-trace.py <jadyx_log.txt>
 
 Gate build del diagnosticoT: incremental UWP pasa (incluye objetos D3D12/Vulkan
 por header comun). Analizador pasa fixtures y dosTprevias. Prueba manual lanzada

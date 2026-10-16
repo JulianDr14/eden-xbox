@@ -846,7 +846,7 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to get the temp folder, error {}", GetLastError());
             return INVALID_HANDLE_VALUE;
         }
-        const std::wstring path = std::wstring(temp) + L"eden_dram.bin";
+        const std::wstring path = std::wstring(temp) + L"jadyx_dram.bin";
         CREATEFILE2_EXTENDED_PARAMETERS params{};
         params.dwSize = sizeof(params);
         params.dwFileAttributes = FILE_ATTRIBUTE_TEMPORARY;

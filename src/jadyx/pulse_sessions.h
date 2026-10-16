@@ -4,7 +4,7 @@
 
 // Pulse sessions (docs/xbox/xbox_pulse.md, phase 4): "Back to home" captures the running game and
 // picking it again in the library resumes it. One session per game file and user, kept in
-// LocalState/eden/pulse/sessions under the Store's quota; a session is consumed by the restore
+// LocalState/jadyx/pulse/sessions under the Store's quota; a session is consumed by the restore
 // that uses it and is never deleted without the player asking. Nothing runs while playing: the
 // capture happens only when the game is left.
 

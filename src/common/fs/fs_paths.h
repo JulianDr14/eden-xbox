@@ -39,6 +39,10 @@
 #define RYUJINX_DIR "Ryujinx"
 
 // yuzu-specific files
+#ifdef YUZU_UWP_APPCONTAINER
+#define LOG_FILE "jadyx_log.txt"
+#else
 #define LOG_FILE "eden_log.txt"
+#endif
 #define LOSSLESS_DLL_FILE "Lossless.dll"
 #define LOSSLESS_CACHE_FILE "lsfg_spirv.cache"

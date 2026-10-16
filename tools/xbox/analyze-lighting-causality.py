@@ -116,7 +116,7 @@ def main():
     args = parser.parse_args()
     vertex = json.loads((args.ir_directory / 'd4896447533c2378.ir.json').read_text(encoding='utf-8'))
     pixel = json.loads((args.ir_directory / 'd3e840710932bff7.ir.json').read_text(encoding='utf-8'))
-    captures = lighting.material.captures((args.capture_root / 'eden_log.txt').read_text(
+    captures = lighting.material.captures((args.capture_root / 'jadyx_log.txt').read_text(
         encoding='utf-8', errors='replace').splitlines())
     results = [analyze(lighting.Capture(args.capture_root, i, vertex, pixel)) for i in range(len(captures))]
     args.output.write_text(json.dumps(results, indent=2), encoding='utf-8')

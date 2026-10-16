@@ -181,7 +181,7 @@ Procedimiento:
 2. Terminar con Q. Archivar log/diag; localizar `D3D12 material frame` y
    `D3D12 material complete`. Verificar omisiones antes de interpretar ausencia
    de una textura/binding como evidencia.
-   Para resumen: `python tools/xbox/analyze-material-trace.py <eden_log.txt>`.
+   Para resumen: `python tools/xbox/analyze-material-trace.py <jadyx_log.txt>`.
    Hacer una captura lejos con líneas y otra cerca sin ellas, en la misma escena.
 3. Agrupar draws por PS, recursos y targets; buscar los materiales del terreno
    y `@597640000`, sin asumir identidad estable de direcciones entre corridas.

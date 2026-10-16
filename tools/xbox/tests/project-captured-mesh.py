@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory() as directory:
             struct.pack('<3f',x+offset,y,0) for x,y in ((-.1,-.1),(.1,-.1),(0,.1))))
         (trace/(stem+'_binding_1_kind_4_slot_0.bin')).write_bytes(struct.pack('<3H',0,1,2))
     log.append('D3D12 material complete: matched=2 selected=2 omitted_draws=0 dropped_lines=0 intervals_complete=1')
-    (root/'eden_log.txt').write_text('\n'.join(log),encoding='utf8')
+    (root/'jadyx_log.txt').write_text('\n'.join(log),encoding='utf8')
     bounds = []
     for draw in (None,2):
         output = root/f'mesh-{draw}.json'

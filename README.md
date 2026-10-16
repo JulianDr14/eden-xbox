@@ -249,7 +249,7 @@ nothing to do with the GPU.
 1. While you play, each emulated CPU core records the blocks it compiles: guest address, length and
    a hash of the ARM64 instructions. No host machine code is stored.
 2. On exit the list is saved per game, per core and per executable build
-   (`LocalState\eden\cache\jit-profile\<title-id>\core-N.bin`), written to a temporary file and
+   (`LocalState\jadyx\cache\jit-profile\<title-id>\core-N.bin`), written to a temporary file and
    renamed, so a crash never leaves a half-written profile.
 3. On the next launch, before the guest runs, the cores replay their profiles in parallel, each with
    its own JIT and a budget of emitted code. The loading screen shows the progress.
@@ -351,18 +351,18 @@ Series.
 **The problem.** The first run of one game turned up a series of bugs. About
 thirty pipelines were rejected for sampling integer textures, geometry shaders wrote to streams,
 the GPU hung, an nvmap assert fired and the movie player aborted. Each had to be dug out of
-`eden_log.txt`. That was hard for three reasons:
+`jadyx_log.txt`. That was hard for three reasons:
 - Unsupported features are reported only once per process, or not at all (unsupported texture
   formats, for example).
 - Lost draws are never counted.
 - Every `UNIMPLEMENTED` ends up mixed into the general log.
 
 **What this fork does.** The tracker deduplicates and counts these bugs and writes them to two
-files of their own in `LocalState\eden\log\`:
-- `eden_graphics_bugs.log` holds one line per bug the first time it appears. Each line gives the
+files of their own in `LocalState\jadyx\log\`:
+- `jadyx_graphics_bugs.log` holds one line per bug the first time it appears. Each line gives the
   time, frame, category, source location and context (shader hashes, format, HRESULT). A table
   with the counts follows at exit.
-- `eden_graphics_bugs.json` is the same summary for scripts. For each bug it lists hits, first and
+- `jadyx_graphics_bugs.json` is the same summary for scripts. For each bug it lists hits, first and
   last frame, the first message, and per-detail counts (one per format, shader pair or HRESULT).
 
 It covers:
@@ -376,7 +376,7 @@ It covers:
 
 Warnings reach the tracker even when `log_filter` hides them. `bug_tracker=0` in `boot.cfg`
 turns the tracker off. To get the files off a console, use the Device Portal file explorer
-(LocalAppData → the package → LocalState → eden → log).
+(LocalAppData → the package → LocalState → jadyx → log).
 
 **Why it is built this way.**
 - **Close to free.** Each call site owns its counters, held in static storage. A repeated hit of a
@@ -484,7 +484,7 @@ moment, instead of booting it from the start. The library marks a game with a sa
   cycles on the Series.
 - **Limits.** A forced close during play leaves no session: the guarantee starts once Back to home
   finishes. A session belongs to the build that saved it; after an update it is kept but
-  not resumed. Sessions live in `LocalState\eden\pulse\sessions` with a 20 GiB quota, and can be
+  not resumed. Sessions live in `LocalState\jadyx\pulse\sessions` with a 20 GiB quota, and can be
   turned off in **Settings > System > Pulse sessions** or discarded per game from its options.
 - **Its own log.** `LocalState\jadyx_pulse.txt` records every save, resume and refusal, and the frames
   shown in each of the first 30 seconds after a resume.
@@ -504,7 +504,7 @@ Requirements: an Xbox Series X|S in Developer Mode, the package you built (see
 5. Add games: copy them to the app's `LocalState\games` folder with the Device Portal file explorer,
    or add an external folder from the library.
 
-If something fails, `jadyx_diag.txt` (in `LocalState`) and `eden\log\eden_log.txt` describe what
+If something fails, `jadyx_diag.txt` (in `LocalState`) and `jadyx\log\jadyx_log.txt` describe what
 happened. The diagnostic switches are listed in [docs/xbox/xbox_deploy.md](docs/xbox/xbox_deploy.md).
 
 ## Building

@@ -12,7 +12,7 @@ if (Get-Process -Name jadyx,eden-cli,yuzu-cmd -ErrorAction SilentlyContinue) {
 $pkg = Get-AppxPackage -Name Jadyx
 if (-not $pkg) { throw 'No se encontro el paquete de Xbox instalado en PC.' }
 $local = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalState"
-$data = Join-Path $local 'eden'
+$data = Join-Path $local 'jadyx'
 $gamePath = if ([IO.Path]::IsPathRooted($Game)) { $Game } else { Join-Path $local "games\$Game" }
 if (-not (Test-Path -LiteralPath $gamePath)) { throw "No existe el juego: $gamePath" }
 . (Join-Path $PSScriptRoot 'process-memory-limit.ps1')

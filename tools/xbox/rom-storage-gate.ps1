@@ -66,7 +66,7 @@ foreach ($phase in @('record', 'restore')) {
     $local = Split-Path -Parent $gateDir
     $diag = Join-Path $local 'jadyx_diag.txt'
     Copy-Item -LiteralPath $diag -Destination (Join-Path $output "$phase-diag.txt")
-    $log = Join-Path $local 'eden\log\eden_log.txt'
+    $log = Join-Path $local 'jadyx\log\jadyx_log.txt'
     if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination (Join-Path $output "$phase-log.txt") }
     $text = Get-Content -LiteralPath $diag -Raw
     if ($text -notmatch "ROM storage gate PASS phase=$phase" -or $text -notmatch 'RunHeadlessBoot returned 0') {

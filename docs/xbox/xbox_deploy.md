@@ -90,7 +90,7 @@ audio_profile=1
 ```
 
 Use `audio=null` for a timed silent comparison. An unknown `audio=` value writes a warning and
-falls back to XAudio2. With profiling enabled, inspect `eden_log.txt` for the periodic `XAudio2
+falls back to XAudio2. With profiling enabled, inspect `jadyx_log.txt` for the periodic `XAudio2
 profile` line and for any `GlitchesSinceEngineStarted` increase. The console acceptance gate is at
 least 15 minutes of continuous game audio over HDMI (and controller headphones when available),
 with no repeated pops, distortion, `Critical`, deadlock or frame-pacing regression. If the endpoint
@@ -104,7 +104,7 @@ explorer:
 - **`jadyx_diag.txt`** — coarse startup breadcrumbs written before Eden's logging is up
   (`BootView::Run entered`, the resolved NRO path, `RunHeadlessBoot returned <rc>`, or the exception
   that killed it). This is the file to read when the app flashes and closes.
-- **`eden_log.txt`** — Eden's own log, once logging initialises. GATE 2 passes on:
+- **`jadyx_log.txt`** — Eden's own log, once logging initialises. GATE 2 passes on:
   `Headless boot: JIT liveness CONFIRMED ('JADYX_JIT_ALIVE' observed).`
 
 Return codes from `RunHeadlessBoot`: `0` liveness confirmed · `2` the NRO failed to load ·
@@ -167,13 +167,13 @@ powershell -ExecutionPolicy Bypass -File tools\xbox\package-appx.ps1 -Library -P
 - Con `-BootCfg` se ajustan la frecuencia, `profile_hz=` (10-1000, 250 por defecto), y la
   duración de cada ventana, `profile_window=` (segundos, 20 por defecto).
 
-Cada ventana se añade a `LocalState\eden\log\eden_profile.txt`. Incluye el tiempo de CPU de cada
+Cada ventana se añade a `LocalState\jadyx\log\jadyx_profile.txt`. Incluye el tiempo de CPU de cada
 hilo y cada pila distinta, con cuántas veces se vio corriendo (R) o esperando (W). El archivo se
 vacía al abrir la app; cada juego que se abre desde la biblioteca añade sus ventanas. En el PC,
 con el PDB del mismo build:
 
 ```
-python tools/xbox/profile-report.py eden_profile.txt --out informe.md --folded perfil.folded
+python tools/xbox/profile-report.py jadyx_profile.txt --out informe.md --folded perfil.folded
 ```
 
 El informe incluye:

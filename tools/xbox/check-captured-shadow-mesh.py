@@ -109,7 +109,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     original = json.loads(args.vertex_ir.read_text(encoding='utf-8'))
-    captures = lighting.material.captures((args.capture_root / 'eden_log.txt').read_text(
+    captures = lighting.material.captures((args.capture_root / 'jadyx_log.txt').read_text(
         encoding='utf-8', errors='replace').splitlines())
     results = [check(args.capture_root, i, original, c['draws']) for i, c in enumerate(captures)]
     args.output.write_text(json.dumps(results, indent=2), encoding='utf-8')

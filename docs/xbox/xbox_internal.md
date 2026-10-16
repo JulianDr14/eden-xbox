@@ -62,11 +62,11 @@ tools\xbox\build-env.bat ninja -C build-uwp src/video_core/CMakeFiles/video_core
   - Compila, empaqueta, registra el layout con `Add-AppxPackage -Register` y lanza la app.
   - Al terminar imprime el diag.
   - Con `-DebugLayer` activa la capa de debug de D3D12, y sus errores y avisos acaban en
-    `eden_log.txt` como `D3D12 debug layer [id]: ...`. Necesita la función opcional "Herramientas
+    `jadyx_log.txt` como `D3D12 debug layer [id]: ...`. Necesita la función opcional "Herramientas
     de gráficos" de Windows y solo sirve en el PC.
 - **Dónde quedan los archivos en el PC:**
   - El diag, en `%LOCALAPPDATA%\Packages\Jadyx_s0hs1mdp2yrec\LocalState\`.
-  - El log **no** está ahí, sino en `LocalState\eden\log\eden_log.txt`.
+  - El log **no** está ahí, sino en `LocalState\jadyx\log\jadyx_log.txt`.
 - Desde PowerShell, `cmd` puede resolver al `cmd` de devkitPro. Hay que usar
   `& "$env:SystemRoot\System32\cmd.exe" /c ...`, y lo mismo pasa con `tar`.
 - Al rehacer el layout **con la misma versión**, la app pierde el permiso de lectura y falla con
@@ -79,7 +79,7 @@ tools\xbox\build-env.bat ninja -C build-uwp src/video_core/CMakeFiles/video_core
 1. Abrir el Device Portal en `https://<ip-xbox>:11443`.
 2. Instalar el appx junto con la dependencia VCLibs.
 3. Poner la app en modo **Game**. Sin eso el límite de memoria es mucho menor.
-4. Ejecutarla y recoger `jadyx_diag.txt` y `eden_log.txt`. Los dejamos en `Descargas`.
+4. Ejecutarla y recoger `jadyx_diag.txt` y `jadyx_log.txt`. Los dejamos en `Descargas`.
 
 Qué buscar en esos archivos:
 - En el diag: `RunHeadlessBoot returned 0`.
@@ -123,7 +123,7 @@ el PC viven fuera del repo, en `..\eden-data\` (`keys\`, `firmware\` con los `.n
     confirmar si son ellos los que cuelgan la GPU.
   - `drop_gs=<hash>` (hasta 4 líneas): arma los pipelines de ese VS sin su geometry shader (se
     dibujan mal), para separar un cuelgue del VS solo del de la pareja VS+GS.
-- **Para ver el progreso:** en `eden\log` quedan `frame.bmp` y un `frame_<n>.bmp` cada ~10 s.
+- **Para ver el progreso:** en `jadyx\log` quedan `frame.bmp` y un `frame_<n>.bmp` cada ~10 s.
 - **Si el proceso muere sin línea `CRASH`:**
   - buscar `C++ throw` en el diag;
   - con `-DebugLayer`, buscar `device removed` y `DRED` en el log.

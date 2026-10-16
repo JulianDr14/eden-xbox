@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Turns the in-process sampling profile (boot.cfg "profile=1", LocalState/eden/log/eden_profile.txt)
+"""Turns the in-process sampling profile (boot.cfg "profile=1", LocalState/jadyx/log/jadyx_profile.txt)
 into a bottleneck report, with the build's PDB.
 
-    python tools/xbox/profile-report.py eden_profile.txt [--exe build-uwp/bin/jadyx.exe]
+    python tools/xbox/profile-report.py jadyx_profile.txt [--exe build-uwp/bin/jadyx.exe]
         [--window N[-M]] [--top 25] [--out report.md] [--folded profile.folded]
 
 The report starts with a verdict (which threads are saturated and what fills them), then per

@@ -494,7 +494,7 @@ Dónde se usa:
   `debug_layer=1` en `boot.cfg`, y `uwp_boot` activa entonces `renderer_debug`.
 - **Qué hace `Device`:**
   - Llama a `EnableDebugLayer()` antes de crear el dispositivo.
-  - Vuelca en cada frame los errores y avisos de `ID3D12InfoQueue` a `eden_log.txt`, con un máximo
+  - Vuelca en cada frame los errores y avisos de `ID3D12InfoQueue` a `jadyx_log.txt`, con un máximo
     de 500 mensajes.
 - **Mensajes ocultos:** los de "clear value" no coincidente (`CLEARRENDERTARGETVIEW_` y
   `CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE`). Las imágenes del guest se crean antes de saber con
@@ -1256,7 +1256,7 @@ Arrancar un juego de verdad destapó cuatro fallos que ningún homebrew tocaba:
     (`LoadDiskResources`, `SerializePipeline` a `d3d12.bin`), pero el arranque UWP nunca lo
     llamaba. Ahora `RunHeadlessBoot` llama a `LoadDiskResources` tras `OnGpuReady()` y antes de
     `system.Run()`, como `yuzu_cmd`:
-    - precompila los pipelines de sesiones anteriores (`LocalState/eden/shader/<title>/d3d12.bin`);
+    - precompila los pipelines de sesiones anteriores (`LocalState/jadyx/shader/<title>/d3d12.bin`);
     - ese mismo paso activa el guardado de cada pipeline nuevo.
 
     Se recompila SPIR-V → DXIL → PSO en cada arranque; los blobs del PSO no se cachean.
@@ -1577,7 +1577,7 @@ aplican.
 
 **0.2.56.0 (misma versión, reempaquetada):** la DRAM de fastmem es una sección sobre un archivo.
 - `OpenBackingFile`:
-  - crea `eden_dram.bin` en la carpeta temporal de la app (`GetTempPathW`, `AC\Temp`) con
+  - crea `jadyx_dram.bin` en la carpeta temporal de la app (`GetTempPathW`, `AC\Temp`) con
     `CreateFile2`;
   - el archivo es `FILE_ATTRIBUTE_TEMPORARY` (el sistema intenta no escribirlo a disco) y
     `FILE_FLAG_DELETE_ON_CLOSE` (se borra al cerrar, también si el proceso muere);

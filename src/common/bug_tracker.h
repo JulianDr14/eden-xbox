@@ -4,8 +4,8 @@
 #pragma once
 
 // Bug tracker: records graphics bugs, unsupported GPU features, failed API calls and every
-// UNIMPLEMENTED/assert of the emulator in LogDir/eden_graphics_bugs.log (readable) and
-// eden_graphics_bugs.json (summary), deduplicated and counted.
+// UNIMPLEMENTED/assert of the emulator in LogDir/jadyx_graphics_bugs.log (readable) and
+// jadyx_graphics_bugs.json (summary), deduplicated and counted.
 //
 // Cost model (the tracker is always on, so it must be close to free):
 // - A repeated hit of a known bug is a few relaxed loads and stores on that site's own static

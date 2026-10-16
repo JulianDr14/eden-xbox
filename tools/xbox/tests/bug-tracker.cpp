@@ -192,7 +192,7 @@ void HitPipelineRejected(int frame) {
 }
 
 void TestEndToEnd() {
-    const auto dir = std::filesystem::temp_directory_path() / "eden-bug-tracker-test";
+    const auto dir = std::filesystem::temp_directory_path() / "jadyx-bug-tracker-test";
     std::filesystem::remove_all(dir);
     Detail::enabled.store(false);
     Install(dir, "test build");
@@ -227,8 +227,8 @@ void TestEndToEnd() {
     Shutdown();
     assert(!Enabled());
 
-    const std::string log = ReadFile(dir / "eden_graphics_bugs.log");
-    const std::string json = ReadFile(dir / "eden_graphics_bugs.json");
+    const std::string log = ReadFile(dir / "jadyx_graphics_bugs.log");
+    const std::string json = ReadFile(dir / "jadyx_graphics_bugs.json");
     assert(log.find("=== Game 01000000000BB000 Game B") != std::string::npos);
     assert(log.find("f=1] [PipelineRejected]") != std::string::npos);
     assert(log.find("PSO rejected at frame 0") != std::string::npos);

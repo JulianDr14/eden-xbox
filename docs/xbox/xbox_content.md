@@ -8,7 +8,7 @@ No modifica renderer, JIT, presupuestos de memoria ni partidas.
 USB directo es el modo inicial: conserva una identidad `eden-usb:/token/ruta`,
 sin mover ni borrar el paquete. Copia interna es opcional y publica solamente
 los NCA, Meta y tickets necesarios de cada unidad seleccionada en
-`LocalState/eden/content/objects/<id>`. No instala el juego base ni modifica NAND.
+`LocalState/jadyx/content/objects/<id>`. No instala el juego base ni modifica NAND.
 La ubicación exacta parte del directorio padre de `NANDDir`, no de una letra USB.
 
 Cada unidad tiene identidad SHA-256 del hash completo del Meta NCA, Title ID y

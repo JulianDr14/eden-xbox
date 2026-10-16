@@ -397,7 +397,7 @@ presupuesto; la barrera se baja siempre (RAII).
   aplicación, versión, build id y ruta; `revision` es esta compilación. Cualquier
   diferencia hace la sesión incompatible: se conserva y no se reanuda.
 - **Volver al inicio** (menú del juego) captura con `CaptureAtBarrier` (3 s de
-  presupuesto) y publica en `LocalState/eden/pulse/sessions`. Solo después se
+  presupuesto) y publica en `LocalState/jadyx/pulse/sessions`. Solo después se
   destruye el guest. La fila ofrece "sin guardar la sesión" para salir sin
   captura. Un rechazo se muestra en la biblioteca con su motivo.
 - **Reanudar**: al elegir un juego con sesión compatible, `ProcessRestore` carga
@@ -522,7 +522,7 @@ exporta aparece con el nombre que le dio su servicio.
 
 Tras reanudar, el log anota durante 30 s los frames presentados en cada segundo
 (`resumed +N s: F frames`), para ver si el juego se detiene y cuándo. En
-`eden\log\eden_log.txt` quedan los syncpoints restaurados (mín., máx., guest y
+`jadyx\log\jadyx_log.txt` quedan los syncpoints restaurados (mín., máx., guest y
 host) y cada espera de `nvhost-ctrl` que bloquea nvservices hasta un valor de
 syncpoint, con los valores de ese momento.
 

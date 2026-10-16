@@ -201,7 +201,7 @@ static void ApplyHeadlessBootSettings(const BootSurface& surface) {
                                             ? Settings::RendererBackend::Direct3D12
                                             : Settings::RendererBackend::Null;
     Settings::values.sink_id = Settings::AudioEngine::XAudio2;
-    // The on-console failure mode is a hard crash with no eden_log.txt; the default 4 KiB write
+    // The on-console failure mode is a hard crash with no jadyx_log.txt; the default 4 KiB write
     // buffering loses exactly the lines that say where it died. Flush every line instead.
     Settings::values.log_flush_line = true;
     // Player 1 is bound to the virtual_gamepad engine (uwp_input.h) and presented to the game as
@@ -294,7 +294,7 @@ struct BootConfig {
     bool cpu_profile{};
     /// In-process sampling profiler over every named thread ("profile=1"; "profile=full" adds the
     /// gpu_profile and cpu_profile timers): stacks and CPU time per thread in
-    /// LocalState/eden/log/eden_profile.txt, read by tools/xbox/profile-report.py. Off unless a
+    /// LocalState/jadyx/log/jadyx_profile.txt, read by tools/xbox/profile-report.py. Off unless a
     /// diagnostic package asks for it (package-appx.ps1 -Profile).
     bool profile{};
     u32 profile_hz{250};      ///< "profile_hz=": samples per second of each running thread.
@@ -330,7 +330,7 @@ struct BootConfig {
     /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
     std::string log_filter;
     /// Graphics bugs, unsupported features and every UNIMPLEMENTED/assert, deduplicated and
-    /// counted in LocalState/eden/log/eden_graphics_bugs.{log,json} ("bug_tracker=0" disables it).
+    /// counted in LocalState/jadyx/log/jadyx_graphics_bugs.{log,json} ("bug_tracker=0" disables it).
     bool bug_tracker{true};
     /// Null renderer even with a window, to tell GPU hangs from CPU ones.
     bool null_renderer{};
@@ -727,7 +727,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     }
 
     if (Settings::values.use_disk_shader_cache.GetValue()) {
-        // As yuzu_cmd: build the pipelines earlier sessions saved (LocalState/eden/shader/<title>/
+        // As yuzu_cmd: build the pipelines earlier sessions saved (LocalState/jadyx/shader/<title>/
         // d3d12.bin) before the guest runs, so they do not stutter in; the ones the game meets
         // later are appended to the file. The renderer shows the progress on screen.
         WriteDiag("step: building the disk shader cache | " + MemoryReport());
@@ -765,7 +765,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
 
     if (config.profile) {
         const auto output =
-            Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "eden_profile.txt";
+            Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "jadyx_profile.txt";
         Common::SamplingProfiler::Start({.hz = config.profile_hz,
                                          .window_seconds = config.profile_window,
                                          .output = output});
@@ -1295,7 +1295,7 @@ namespace {
 
 // Best-effort startup diagnostics that survive an early crash (before Eden's own logging is up):
 // append to a pullable file in the app's LocalFolder AND emit on the debugger channel. This is how we
-// see *where* the headless boot fails on-console when no eden_log.txt and no crash dump are produced.
+// see *where* the headless boot fails on-console when no jadyx_log.txt and no crash dump are produced.
 //
 // Every line carries milliseconds since launch, so a hang (steps stop, heartbeats continue) reads
 // differently from a crash (steps stop, a CRASH line follows, or nothing at all).
@@ -1733,8 +1733,8 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* info) {
     }
     WriteDiagRaw(line);
     WriteDiagRaw(FormatFaultStack(*info->ContextRecord, "[jadyx] crash stack:").c_str());
-    Common::BugTracker::DrainForCrash(); // first occurrences still queued for eden_graphics_bugs.log
-    Common::Log::Stop(); // flush eden_log.txt
+    Common::BugTracker::DrainForCrash(); // first occurrences still queued for jadyx_graphics_bugs.log
+    Common::Log::Stop(); // flush jadyx_log.txt
     return EXCEPTION_CONTINUE_SEARCH; // let the OS finish the crash (and WER take its dump)
 }
 
@@ -1752,7 +1752,7 @@ void OnAbort(int) {
     char line[200];
     std::snprintf(line, sizeof(line),
                   "[jadyx] [+%llums] CRASH: abort() on thread %lu - fatal ASSERT/UNREACHABLE "
-                  "(see eden\\log\\eden_log.txt) or an exception escaped a thread\n",
+                  "(see jadyx\\log\\jadyx_log.txt) or an exception escaped a thread\n",
                   ElapsedMs(), GetCurrentThreadId());
     WriteDiagRaw(line);
     if (t_last_exception[0] != '\0') {
@@ -2070,8 +2070,8 @@ void InstallCrashHandlers() {
 // InstalledLocation\userdata (package-appx.ps1 -Game, or what a local -StageScript adds). Eden
 // reads keys and firmware from its writable user dir, so they are copied into LocalState once;
 // LocalState survives package updates, so later packages can leave them out.
-//   userdata\keys\*      -> LocalState\eden\keys
-//   userdata\firmware\*  -> LocalState\eden\nand\system\Contents\registered
+//   userdata\keys\*      -> LocalState\jadyx\keys
+//   userdata\firmware\*  -> LocalState\jadyx\nand\system\Contents\registered
 //   userdata\games\*     -> LocalState\games
 // A file is copied when it is missing or its size differs.
 void SeedDirectory(const std::filesystem::path& from, const std::filesystem::path& to,
@@ -2114,8 +2114,10 @@ void SeedDirectory(const std::filesystem::path& from, const std::filesystem::pat
 
 void SeedUserData(const std::filesystem::path& install, const std::filesystem::path& local) {
     const std::filesystem::path userdata = install / "userdata";
-    SeedDirectory(userdata / "keys", local / "eden" / "keys", "keys");
-    SeedDirectory(userdata / "firmware", local / "eden" / "nand" / "system" / "Contents" / "registered",
+    // Through the path manager, which knows the data folder.
+    const auto data = Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir);
+    SeedDirectory(userdata / "keys", data / "keys", "keys");
+    SeedDirectory(userdata / "firmware", data / "nand" / "system" / "Contents" / "registered",
                   "firmware");
     SeedDirectory(userdata / "games", local / "games", "games");
 }

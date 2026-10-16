@@ -76,7 +76,7 @@ def load_sample(argument):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('sample', nargs='+', help='LABEL=PATH[@INDEX], e.g. near=eden_log.txt@0')
+    parser.add_argument('sample', nargs='+', help='LABEL=PATH[@INDEX], e.g. near=jadyx_log.txt@0')
     args = parser.parse_args()
     try:
         if len(args.sample) < 2:
