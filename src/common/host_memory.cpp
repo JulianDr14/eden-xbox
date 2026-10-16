@@ -56,8 +56,11 @@
 
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <mutex>
 #include <random>
+
+#include "common/pulse_diagnostics.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -291,9 +294,79 @@ LONG SectionDemandCommit(u8* fault_addr) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// Diagnostic: DRAM pages write-protected to catch their first writer.
+constexpr size_t WatchSlots = 256;
+std::array<std::atomic<uintptr_t>, WatchSlots> g_watch_pages{};
+std::atomic<size_t> g_watch_count{0};
+std::atomic<size_t> g_watch_armed{0};
+const auto g_watch_epoch = std::chrono::steady_clock::now();
+
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+
+using PFN_GetThreadDescription = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+
+BOOL WatchProtect(uintptr_t page, DWORD protection) {
+    static Common::DynamicLibrary kernelbase("Kernelbase");
+    static PFN_VirtualProtect protect = [] {
+        PFN_VirtualProtect function{};
+        if (kernelbase.IsOpen()) kernelbase.GetSymbol("VirtualProtectFromApp", &function);
+        return function;
+    }();
+    DWORD old{};
+    return protect && protect(reinterpret_cast<void*>(page), 4096, protection, &old);
+}
+
+std::string CurrentThreadName() {
+    static Common::DynamicLibrary kernelbase("Kernelbase");
+    static PFN_GetThreadDescription describe = [] {
+        PFN_GetThreadDescription function{};
+        if (kernelbase.IsOpen()) kernelbase.GetSymbol("GetThreadDescription", &function);
+        return function;
+    }();
+    PWSTR wide{};
+    if (!describe || FAILED(describe(GetCurrentThread(), &wide)) || !wide) return "?";
+    std::string name;
+    for (const wchar_t* c = wide; *c; ++c) name.push_back(*c < 128 ? static_cast<char>(*c) : '?');
+    LocalFree(wide);
+    return name;
+}
+
+LONG CheckWatchedWrite(EXCEPTION_POINTERS* ep) {
+    if (g_watch_armed.load(std::memory_order_acquire) == 0) return EXCEPTION_CONTINUE_SEARCH;
+    if (ep->ExceptionRecord->ExceptionInformation[0] != 1) return EXCEPTION_CONTINUE_SEARCH;
+    const uintptr_t address = ep->ExceptionRecord->ExceptionInformation[1];
+    const uintptr_t page = address & ~uintptr_t{4095};
+    const size_t count = (std::min)(g_watch_count.load(std::memory_order_acquire), WatchSlots);
+    for (size_t i = 0; i < count; ++i) {
+        uintptr_t expected = page;
+        if (!g_watch_pages[i].compare_exchange_strong(expected, 0)) continue;
+        WatchProtect(page, PAGE_READWRITE);
+        g_watch_armed.fetch_sub(1, std::memory_order_acq_rel);
+        const auto image = reinterpret_cast<uintptr_t>(&__ImageBase);
+        const auto rip = static_cast<uintptr_t>(ep->ContextRecord->Rip);
+        const auto* words = reinterpret_cast<const u64*>(page);
+        size_t nonzero{};
+        for (size_t w = 0; w < 512; ++w) nonzero += words[w] != 0;
+        const auto at = std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                      g_watch_epoch).count();
+        LOG_WARNING(Common_Memory,
+                    "Watched DRAM page {:#x} (offset {:#x}) first written at {:.3f} s by thread '{}' "
+                    "({}), rip {:#x} {}{:#x}, before: {} of 512 words nonzero, {:016x} {:016x} "
+                    "{:016x} {:016x}",
+                    page, address - page, at, CurrentThreadName(), GetCurrentThreadId(), rip,
+                    rip - image < 0x10000000 ? "image+" : "outside image, delta ", rip - image,
+                    nonzero, words[0], words[1], words[2], words[3]);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 LONG NTAPI BackingDemandCommitHandler(EXCEPTION_POINTERS* ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
         return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (CheckWatchedWrite(ep) == EXCEPTION_CONTINUE_EXECUTION) {
+        return EXCEPTION_CONTINUE_EXECUTION;
     }
     u8* const base = g_backing_base.load(std::memory_order_acquire);
     const size_t size = g_backing_size.load(std::memory_order_acquire);
@@ -1632,8 +1705,138 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission 
 #endif
 }
 
+namespace {
+// Diagnostic: the latest clears that decommitted DRAM, as host ranges.
+struct Decommit {
+    uintptr_t begin{};
+    uintptr_t end{};
+    u64 serial{};
+    std::chrono::steady_clock::time_point when{};
+};
+std::mutex decommit_mutex;
+std::array<Decommit, 8192> decommits{};
+u64 decommit_serial{};
+const auto decommit_epoch = std::chrono::steady_clock::now();
+thread_local const char* clear_tag = nullptr;
+
+void NoteDecommit(uintptr_t begin, uintptr_t end) {
+    std::scoped_lock lock{decommit_mutex};
+    decommits[decommit_serial % decommits.size()] =
+        Decommit{begin, end, decommit_serial, std::chrono::steady_clock::now()};
+    ++decommit_serial;
+}
+} // namespace
+
+void WatchDramPage(const void* host) {
+#ifdef HOST_MEMORY_USE_FROM_APP
+    const auto page = reinterpret_cast<uintptr_t>(host) & ~uintptr_t{4095};
+    const size_t count = g_watch_count.load(std::memory_order_acquire);
+    for (size_t i = 0; i < (std::min)(count, WatchSlots); ++i) {
+        if (g_watch_pages[i].load(std::memory_order_relaxed) == page) return;
+    }
+    const size_t slot = g_watch_count.fetch_add(1, std::memory_order_acq_rel);
+    if (slot < WatchSlots) g_watch_pages[slot].store(page, std::memory_order_release);
+#endif
+}
+
+void ResetDramWatch() {
+#ifdef HOST_MEMORY_USE_FROM_APP
+    for (auto& page : g_watch_pages) page.store(0, std::memory_order_release);
+    g_watch_count.store(0, std::memory_order_release);
+#endif
+}
+
+std::string DescribeWatchedPages() {
+    std::string out;
+#ifdef HOST_MEMORY_USE_FROM_APP
+    const size_t count = (std::min)(g_watch_count.load(std::memory_order_acquire), WatchSlots);
+    size_t committed{}, with_data{};
+    for (size_t i = 0; i < count; ++i) {
+        const uintptr_t page = g_watch_pages[i].load(std::memory_order_acquire);
+        MEMORY_BASIC_INFORMATION info{};
+        if (!page || VirtualQuery(reinterpret_cast<void*>(page), &info, sizeof(info)) == 0 ||
+            info.State != MEM_COMMIT) {
+            out += " r";
+            continue;
+        }
+        ++committed;
+        const auto* words = reinterpret_cast<const u64*>(page);
+        size_t nonzero{};
+        for (size_t w = 0; w < 512; ++w) nonzero += words[w] != 0;
+        with_data += nonzero != 0;
+        out += fmt::format(" {}", nonzero);
+    }
+    out = fmt::format("{} pages, {} committed, {} with data:", count, committed, with_data) + out;
+#endif
+    return out;
+}
+
+void ArmDramWriteWatch() {
+#ifdef HOST_MEMORY_USE_FROM_APP
+    const size_t count = (std::min)(g_watch_count.load(std::memory_order_acquire), WatchSlots);
+    size_t armed{}, uncommitted{};
+    for (size_t i = 0; i < count; ++i) {
+        const uintptr_t page = g_watch_pages[i].load(std::memory_order_acquire);
+        if (!page) continue;
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<void*>(page), &info, sizeof(info)) == 0 ||
+            info.State != MEM_COMMIT) {
+            // A reserved page commits read-write on its first touch, so it cannot be watched.
+            g_watch_pages[i].store(0, std::memory_order_release);
+            ++uncommitted;
+            continue;
+        }
+        g_watch_armed.fetch_add(1, std::memory_order_acq_rel);
+        if (WatchProtect(page, PAGE_READONLY)) {
+            ++armed;
+        } else {
+            g_watch_armed.fetch_sub(1, std::memory_order_acq_rel);
+            g_watch_pages[i].store(0, std::memory_order_release);
+        }
+    }
+    LOG_INFO(Common_Memory, "DRAM write watch armed on {} of {} pages ({} never committed)", armed,
+             count, uncommitted);
+#endif
+}
+
+ScopedClearTag::ScopedClearTag(const char* tag) : previous{clear_tag} {
+    clear_tag = tag;
+}
+
+ScopedClearTag::~ScopedClearTag() {
+    clear_tag = previous;
+}
+
+std::string DescribeDramPage(const void* host) {
+    const auto region = QueryDramRegion(host);
+    if (!region) return "not in the private DRAM backing";
+    std::string state = region->untouched ? "never committed" : "committed";
+    const auto address = reinterpret_cast<uintptr_t>(host);
+    std::scoped_lock lock{decommit_mutex};
+    const u64 count = (std::min<u64>)(decommit_serial, decommits.size());
+    for (u64 i = 0; i < count; ++i) {
+        const auto& entry = decommits[(decommit_serial - 1 - i) % decommits.size()];
+        if (address < entry.begin || address >= entry.end) continue;
+        const auto at = std::chrono::duration<double>(entry.when - decommit_epoch).count();
+        return fmt::format("{}, decommitted by clear #{} of {:#x} bytes at {:.3f} s ({} clears ago)",
+                           state, entry.serial, entry.end - entry.begin, at,
+                           decommit_serial - 1 - entry.serial);
+    }
+    return fmt::format("{}, no decommit in the last {} clears", state, count);
+}
+
 void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
 #ifdef HOST_MEMORY_USE_FROM_APP
+    if (Common::Pulse::Diagnostics() && length >= (1ULL << 20)) {
+        u64 serial;
+        {
+            std::scoped_lock lock{decommit_mutex};
+            serial = decommit_serial;
+        }
+        LOG_INFO(Common_Memory, "DRAM clear (next #{}) of {:#x} bytes at physical {:#x}, fill {:#x}, by {} on thread {}",
+                 serial, length, physical_offset, fill_value, clear_tag ? clear_tag : "untagged",
+                 GetCurrentThreadId());
+    }
     // Xbox/UWP: the backing is demand-committed, so a memset of zero COMMITS every page it touches.
     // The kernel clears every newly allocated heap page, and libnx's default heap is all available
     // memory (~3.x GiB): that memset alone busts the Game-mode title budget, the handler's commit
@@ -1696,6 +1899,7 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
         if (pages_begin < pages_end &&
             VirtualFree(reinterpret_cast<void*>(pages_begin), pages_end - pages_begin,
                         MEM_DECOMMIT)) {
+            if (Common::Pulse::Diagnostics()) NoteDecommit(pages_begin, pages_end);
             std::memset(reinterpret_cast<void*>(begin), 0, pages_begin - begin);
             std::memset(reinterpret_cast<void*>(pages_end), 0, end - pages_end);
             return;

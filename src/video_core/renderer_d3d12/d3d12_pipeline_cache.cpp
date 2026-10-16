@@ -779,6 +779,16 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) {
     return pipeline;
 }
 
+namespace {
+// A shader that fails to build: whether its code came from the disk cache or from guest memory,
+// and from where in guest memory.
+void LogShaderSources(std::span<Shader::Environment* const> envs) {
+    for (size_t i = 0; i < envs.size(); ++i) {
+        LOG_ERROR(Render, "D3D12: failed shader stage {}: {}", i, envs[i]->DescribeCode());
+    }
+}
+} // namespace
+
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, bool build_in_parallel, bool build_pso) try {
@@ -963,6 +973,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "D3D12: recompiling VS {:016x} PS {:016x} failed: {}", key.unique_hashes[1],
               key.unique_hashes[5], exception.what());
+    LogShaderSources(envs);
     return nullptr;
 } catch (const std::exception& exception) {
     BUG_TRACK_KEY(ShaderCompile, key.unique_hashes[1] ^ std::rotl(key.unique_hashes[5], 1),
@@ -1045,6 +1056,8 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     const Common::BugTracker::TapMute bug_tracker_mute;
     LOG_ERROR(Render, "D3D12: recompiling compute {:016x} failed: {}", key.unique_hash,
               exception.what());
+    Shader::Environment* const compute_env[]{&env};
+    LogShaderSources(compute_env);
     return nullptr;
 } catch (const std::exception& exception) {
     BUG_TRACK_KEY(ShaderCompile, key.unique_hash, "building compute pipeline {:016x} failed: {}",

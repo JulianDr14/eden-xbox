@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <string>
 #include "common/container/unordered_map.h"
 
 #include "common/common_types.h"
@@ -98,6 +99,11 @@ public:
                                                                                u32 offset) = 0;
 
     virtual void Dump(u64 pipeline_hash, u64 shader_hash) = 0;
+
+    /// Where the shader's code came from, for a log of a shader that failed to build.
+    [[nodiscard]] virtual std::string DescribeCode() const {
+        return "code from the disk cache";
+    }
 
     [[nodiscard]] const ProgramHeader& SPH() const noexcept {
         return sph;

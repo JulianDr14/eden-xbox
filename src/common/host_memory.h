@@ -123,4 +123,30 @@ struct DramRegion {
 };
 std::optional<DramRegion> QueryDramRegion(const void* host);
 
+/// Diagnostic: the commit state of the DRAM page at `host`, and the last kernel clear that
+/// decommitted it.
+std::string DescribeDramPage(const void* host);
+
+/// Diagnostic: queue a DRAM page whose first write after ArmDramWriteWatch is logged.
+void WatchDramPage(const void* host);
+
+/// Diagnostic: forget the queued pages.
+void ResetDramWatch();
+
+/// Diagnostic: each queued page as its nonzero word count, or 'r' when never committed.
+std::string DescribeWatchedPages();
+
+/// Diagnostic: write-protect the queued pages; each one logs its first writer and unprotects.
+void ArmDramWriteWatch();
+
+/// Diagnostic: names the kernel path whose DRAM clears follow, on this thread.
+class ScopedClearTag {
+public:
+    explicit ScopedClearTag(const char* tag);
+    ~ScopedClearTag();
+
+private:
+    const char* previous;
+};
+
 } // namespace Common

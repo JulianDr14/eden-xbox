@@ -41,6 +41,7 @@ add_library(
     pulse_archive.cpp
     pulse_archive.h
     pulse_store.cpp
+    pulse_diagnostics.h
     pulse_store.h
     concepts.h
     container_hash.h

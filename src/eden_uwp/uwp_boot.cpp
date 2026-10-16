@@ -42,6 +42,7 @@
 #include "common/fs/path_util.h"
 #include "common/host_memory.h"
 #include "common/logging.h"
+#include "common/pulse_diagnostics.h"
 #include "common/memory_ledger.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
@@ -2586,6 +2587,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         } else if (line == "memory_audit=1") {
                             config.memory_audit = true;
                             WriteDiag("boot.cfg: memory audit every minute of play");
+                        } else if (line == "pulse_diag=1") {
+                            Common::Pulse::SetDiagnostics(true);
+                            WriteDiag("boot.cfg: Pulse diagnostics on (GPU VA, shader code, page watch)");
                         } else if (line == "play=1") {
                             config.play = true;
                             WriteDiag("boot.cfg: played by hand, no time limit or frame dumps");

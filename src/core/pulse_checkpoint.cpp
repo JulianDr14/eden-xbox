@@ -15,6 +15,8 @@
 
 #include "common/host_memory.h"
 #include "common/logging.h"
+#include "common/pulse_diagnostics.h"
+#include "common/pulse_store.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
 #include "core/core_timing.h"
@@ -978,6 +980,10 @@ u64 ProcessCheckpoint::MaxEncodedSize() const {
 }
 
 void ProcessCheckpoint::Write(Common::Pulse::Writer& writer) const {
+    if (Common::Pulse::Diagnostics()) {
+        LOG_INFO(Core, "Pulse: GPU 0x400000000+256 KiB as written is {}",
+                 Common::DescribeWatchedPages());
+    }
     auto& memory = process->GetMemory();
     // The writer reads several blocks at once, from its own threads; the game is paused.
     std::atomic<u64> untouched_bytes{};
@@ -1053,6 +1059,10 @@ void ProcessRestore::Consume(Common::Pulse::Section section, u64 offset, std::sp
         if (section.version != ProcessSectionVersion) Incompatible("Pulse: process section version");
         if (!section.size) Invalid("Pulse: empty process section");
         buffer.clear();
+        if (Common::Pulse::Diagnostics()) {
+            LOG_INFO(Core, "Pulse: restore section {} begins",
+                     static_cast<u32>(SectionOrder[next_section]));
+        }
         if (SectionOrder[next_section] == ProcessSection::Memory) {
             if (section.size != state->layout.ContentSize()) Invalid("Pulse: memory section size");
             VerifyLayout();
@@ -1110,6 +1120,9 @@ void ProcessRestore::Consume(Common::Pulse::Section section, u64 offset, std::sp
             Complete(id, buffer);
         }
         buffer.clear();
+        if (Common::Pulse::Diagnostics()) {
+            LOG_INFO(Core, "Pulse: restore section {} done", static_cast<u32>(id));
+        }
         // The last section completes the rebuild here, inside the Store's rebuild callback, so a
         // failure leaves the published state unconsumed.
         if (++next_section == SectionOrder.size()) Finish();
@@ -1701,6 +1714,22 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
 void ProcessRestore::Finish() {
     if (finished) return;
     if (next_section != SectionOrder.size() || !layout_verified) Invalid("Pulse: missing process sections");
+    if (Common::Pulse::Diagnostics()) {
+        // What each restored page holds before the guest runs, and the watch on the shader code.
+        Common::Pulse::ClearRestoredPages();
+        auto& memory = process->GetMemory();
+        UntouchedPages untouched;
+        for (const auto& run : state->layout.runs) {
+            for (u64 page = 0; page < run.pages; ++page) {
+                const u8* const host = memory.GetPointerSilent(run.address + page * PageSize);
+                if (!host) continue;
+                Common::Pulse::NoteRestoredPage(host, untouched.Contains(host));
+            }
+        }
+        LOG_INFO(Core, "Pulse: restored GPU 0x400000000+256 KiB is {}",
+                 Common::DescribeWatchedPages());
+        Common::ArmDramWriteWatch();
+    }
     auto& kernel = system.Kernel();
     for (const auto& [thread, run] : state->threads) {
         if (run == ThreadRun::Runnable) {

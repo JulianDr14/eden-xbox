@@ -10,6 +10,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/assert.h"
+#include "common/pulse_diagnostics.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/object_pool.h"
 #include "video_core/control/channel_state.h"
@@ -51,6 +52,15 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) {
     dirty[VideoCommon::Dirty::Shaders] = false;
 
     const GPUVAddr base_addr{maxwell3d->regs.program_region.Address()};
+    if (Common::Pulse::Diagnostics()) {
+        static std::atomic<u64> logged_region{~u64{}};
+        const u64 device = gpu_memory->GpuToCpuAddress(base_addr).value_or(0);
+        const u64 key = (base_addr ^ (device << 1)) ^ (u64{gpu_memory->GetID()} << 56);
+        if (logged_region.exchange(key) != key) {
+            LOG_INFO(Render, "Shader program region now at GPU {:#x}, device {:#x}, gmmu {}",
+                     base_addr, device, gpu_memory->GetID());
+        }
+    }
     for (size_t index = 0; index < Tegra::Engines::Maxwell3D::Regs::MaxShaderProgram; ++index) {
         if (!maxwell3d->regs.IsShaderConfigEnabled(index)) {
             unique_hashes[index] = 0;

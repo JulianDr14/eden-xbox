@@ -12,8 +12,15 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common_types.h"
+#include "common/host_memory.h"
+#include "common/pulse_diagnostics.h"
+#include "common/scope_exit.h"
+#include <mutex>
+#include <unordered_map>
 #include "common/logging.h"
 #include "core/core.h"
+#include "core/hle/kernel/k_process.h"
+#include "core/memory.h"
 #include "core/hle/service/nvdrv/core/container.h"
 #include "core/hle/service/nvdrv/core/nvmap.h"
 #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
@@ -25,6 +32,7 @@
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
+#include "video_core/renderer_base.h"
 
 namespace Service::Nvidia::Devices {
 
@@ -94,6 +102,22 @@ NvResult nvhost_as_gpu::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> i
 
 void nvhost_as_gpu::OnOpen(NvCore::SessionId session_id, DeviceFD fd) {}
 void nvhost_as_gpu::OnClose(DeviceFD fd) {}
+
+namespace {
+// Diagnostic: logs each change of where the start of the shader program region maps.
+void WatchProgramRegion(const void* owner, const Tegra::MemoryManager* gmmu, const char* by) {
+    if (!Common::Pulse::Diagnostics()) return;
+    static std::mutex mutex;
+    static std::unordered_map<const void*, u64> last;
+    const u64 device = gmmu ? gmmu->GpuToCpuAddress(0x400000000ULL).value_or(0) : 0;
+    std::scoped_lock lock{mutex};
+    const auto [it, inserted] = last.try_emplace(owner, ~u64{});
+    if (it->second == device) return;
+    LOG_INFO(Service_NVDRV, "GPU 0x400000000 of address space {} (gmmu {}) now maps device {:#x} "
+             "(was {:#x}), after {}", owner, gmmu ? gmmu->GetID() : ~size_t{}, device, it->second, by);
+    it->second = device;
+}
+} // namespace
 
 NvResult nvhost_as_gpu::AllocAsEx(IoctlAllocAsEx& params) {
     LOG_DEBUG(Service_NVDRV, "called, big_page_size={:#x}", params.big_page_size);
@@ -259,6 +283,9 @@ NvResult nvhost_as_gpu::Remap(std::span<IoctlRemapEntry> entries) {
     LOG_DEBUG(Service_NVDRV, "called, num_entries={:#x}", entries.size());
 
     std::scoped_lock lock(mutex);
+    SCOPE_EXIT {
+        WatchProgramRegion(this, gmmu.get(), "Remap");
+    };
 
     if (!vm.initialised) {
         return NvResult::BadValue;
@@ -318,6 +345,9 @@ NvResult nvhost_as_gpu::MapBufferEx(IoctlMapBufferEx& params) {
               params.offset);
 
     std::scoped_lock lock(mutex);
+    SCOPE_EXIT {
+        WatchProgramRegion(this, gmmu.get(), "MapBufferEx");
+    };
 
     if (!vm.initialised) {
         return NvResult::BadValue;
@@ -404,6 +434,9 @@ NvResult nvhost_as_gpu::MapBufferEx(IoctlMapBufferEx& params) {
 
 NvResult nvhost_as_gpu::UnmapBuffer(IoctlUnmapBuffer& params) {
     std::scoped_lock lock(mutex);
+    SCOPE_EXIT {
+        WatchProgramRegion(this, gmmu.get(), "UnmapBuffer");
+    };
     if (auto const offset_it = map_buffer_offsets.find(params.offset); offset_it != map_buffer_offsets.end()) {
         LOG_DEBUG(Service_NVDRV, "called, offset={:#x}", params.offset);
         if (!vm.initialised) {
@@ -473,6 +506,43 @@ void nvhost_as_gpu::PulseForgetRemaps(u64 offset, u64 size) {
 
 bool nvhost_as_gpu::PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const {
     std::scoped_lock lock(mutex);
+    if (Common::Pulse::Diagnostics()) {
+        // The start of the shader program region (where the bug this found showed), as saved.
+        PulseCheckMappings("at save");
+        WatchProgramRegion(this, gmmu.get(), "save");
+        Common::ResetDramWatch();
+        for (GPUVAddr at = 0x400000000ULL; at < 0x400040000ULL; at += 0x1000) {
+            if (const u8* const host = gmmu->GetPointer(at)) Common::WatchDramPage(host);
+        }
+        LOG_INFO(Service_NVDRV, "Pulse at save: GPU 0x400000000+256 KiB is {}",
+                 Common::DescribeWatchedPages());
+        if (const auto device = gmmu->GpuToCpuAddress(0x400000000ULL)) {
+            constexpr u64 Size = 0x40000;
+            bool pinned{};
+            for (const auto& [address, size] : container.GetNvMapFile().PulsePinnedRanges()) {
+                pinned |= address < *device + Size && *device < address + size;
+            }
+            bool buffers{}, textures{};
+            size_t buffer_pages{}, texture_pages{};
+            auto& gpu = system.GPU();
+            gpu.RunOnGpuThread([&] {
+                auto* const rasterizer = gpu.Renderer().ReadRasterizer();
+                if (!rasterizer) return;
+                buffers = rasterizer->MustFlushRegion(*device, Size, VideoCommon::CacheType::BufferCache);
+                textures = rasterizer->MustFlushRegion(*device, Size, VideoCommon::CacheType::TextureCache);
+                for (u64 at = 0; at < Size; at += 0x1000) {
+                    buffer_pages += rasterizer->MustFlushRegion(*device + at, 0x1000,
+                                                                VideoCommon::CacheType::BufferCache);
+                    texture_pages += rasterizer->MustFlushRegion(*device + at, 0x1000,
+                                                                 VideoCommon::CacheType::TextureCache);
+                }
+            });
+            LOG_INFO(Service_NVDRV,
+                     "Pulse at save: GPU 0x400000000 is device {:#x}, in a pinned nvmap range: {}, GPU "
+                     "modified in the buffer cache: {} ({} pages), in the texture cache: {} ({} pages)",
+                     *device, pinned, buffers, buffer_pages, textures, texture_pages);
+        }
+    }
     out.Bool(vm.initialised);
     if (!vm.initialised) return true;
     out.U32(vm.big_page_size);
@@ -617,6 +687,65 @@ void nvhost_as_gpu::PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) {
         }
         pulse_remaps.emplace(offset, remap);
     }
+    if (Common::Pulse::Diagnostics()) {
+        PulseCheckMappings("at restore");
+        WatchProgramRegion(this, gmmu.get(), "restore");
+        // The start of the shader program region, watched for its first writes.
+        Common::ResetDramWatch();
+        for (GPUVAddr at = 0x400000000ULL; at < 0x400040000ULL; at += 0x1000) {
+            if (const u8* const host = gmmu->GetPointer(at)) Common::WatchDramPage(host);
+        }
+    }
+}
+
+// A restored GPU mapping must reach the same guest pages as the CPU address of its nvmap handle:
+// where it does not, what the GPU reads is not what the game wrote.
+void nvhost_as_gpu::PulseCheckMappings(const char* when) const {
+    u64 pages{}, differ{}, differ_data{}, no_cpu{};
+    unsigned logged{};
+    const auto nonzero = [](const u8* page) {
+        if (!page) return false;
+        for (size_t i = 0; i < VM::YUZU_PAGESIZE; ++i) {
+            if (page[i]) return true;
+        }
+        return false;
+    };
+    const auto check = [&](u64 gpu, NvCore::NvMap::Handle::Id id, u64 handle_offset, u64 size) {
+        const auto handle = nvmap.GetHandle(id);
+        if (handle && !handle->address) no_cpu += size / VM::YUZU_PAGESIZE;
+        if (!handle || !handle->address) return;
+        auto* const session = container.GetSession(handle->session_id);
+        if (!session || !session->process) return;
+        auto& memory = session->process->GetMemory();
+        for (u64 at = 0; at < size && handle_offset + at < handle->aligned_size;
+             at += VM::YUZU_PAGESIZE) {
+            ++pages;
+            const u8* const gpu_view = gmmu->GetPointer(gpu + at);
+            const u8* const cpu_view = memory.GetPointerSilent(handle->address + handle_offset + at);
+            if (gpu_view == cpu_view) continue;
+            ++differ;
+            const bool gpu_data = nonzero(gpu_view), cpu_data = nonzero(cpu_view);
+            if (gpu_data && !cpu_data) ++differ_data;
+            if (logged++ < 8) {
+                LOG_ERROR(Service_NVDRV,
+                          "Pulse {}: GPU {:#x} (handle {} at CPU {:#x}+{:#x}) reaches host {} "
+                          "({}) where the CPU reaches {} ({})",
+                          when, gpu + at, id, handle->address, handle_offset + at,
+                          fmt::ptr(gpu_view), gpu_data ? "data" : "zero", fmt::ptr(cpu_view),
+                          cpu_data ? "data" : "zero");
+            }
+        }
+    };
+    for (const auto& [offset, mapping] : mapping_map) {
+        check(offset, mapping.handle, mapping.handle_offset, mapping.size);
+    }
+    for (const auto& [offset, remap] : pulse_remaps) {
+        if (remap.handle) check(offset, remap.handle, remap.handle_offset, remap.size);
+    }
+    LOG_INFO(Service_NVDRV,
+             "Pulse {}: GPU mappings checked, {} of {} pages differ from the CPU view ({} hold "
+             "data only the GPU sees), {} pages of handles without a CPU address",
+             when, differ, pages, differ_data, no_cpu);
 }
 
 void nvhost_as_gpu::GetVARegionsImpl(IoctlGetVaRegions& params) {

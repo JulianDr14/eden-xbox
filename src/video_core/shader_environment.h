@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <type_traits>
 #include "common/container/unordered_map.h"
 #include <vector>
@@ -68,6 +69,14 @@ public:
     bool HasHLEMacroState() const override {
         return has_hle_engine_state;
     }
+
+    /// Where in guest memory the shader's code came from, and how it starts.
+    [[nodiscard]] std::string DescribeCode() const override;
+
+protected:
+    void CheckCodeMemory() const;
+
+public:
 
 protected:
     std::optional<u64> TryFindSize();

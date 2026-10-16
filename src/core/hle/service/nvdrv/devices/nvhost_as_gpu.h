@@ -167,6 +167,7 @@ private:
     [[nodiscard]] bool FreeMappingLocked(u64 offset) noexcept;
     // Pulse: drops the remaps recorded over a range a mapping or an unmap replaces.
     void PulseForgetRemaps(u64 offset, u64 size);
+    void PulseCheckMappings(const char* when) const;
 
     Module& module;
 

@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include "common/host_memory.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
@@ -1439,6 +1440,7 @@ Result KPageTableBase::MapInsecureMemory(KProcessAddress address, size_t size) {
     R_UNLESS(memory_reservation.Succeeded(), ResultOutOfMemory);
 
     // Allocate pages for the insecure memory.
+    Common::ScopedClearTag clear_tag{"MapInsecureMemory"};
     KPageGroup pg(m_system.Kernel(), m_block_info_manager);
     R_TRY(m_system.Kernel().MemoryManager().AllocateAndOpen(
         std::addressof(pg), size / PageSize,
@@ -1648,6 +1650,7 @@ Result KPageTableBase::AllocateAndMapPagesImpl(PageLinkedList* page_list, KProce
     ASSERT(this->IsLockedByCurrentThread());
 
     // Create a page group to hold the pages we allocate.
+    Common::ScopedClearTag clear_tag{"AllocateAndMapPages"};
     KPageGroup pg(m_system.Kernel(), m_block_info_manager);
 
     // Allocate the pages.
@@ -2238,6 +2241,7 @@ Result KPageTableBase::SetHeapSize(KProcessAddress* out, size_t size) {
     R_UNLESS(memory_reservation.Succeeded(), ResultLimitReached);
 
     // Allocate pages for the heap extension.
+    Common::ScopedClearTag clear_tag{"SetHeapSize"};
     KPageGroup pg(m_system.Kernel(), m_block_info_manager);
     R_TRY(m_system.Kernel().MemoryManager().AllocateAndOpen(std::addressof(pg), allocation_size / PageSize,
                                                    m_allocate_option));
@@ -5197,6 +5201,7 @@ Result KPageTableBase::MapPhysicalMemory(KProcessAddress address, size_t size) {
 }
 
 Result KPageTableBase::MapPhysicalMemory(KProcessAddress address, size_t size, u64 process_id) {
+    Common::ScopedClearTag clear_tag{"MapPhysicalMemory"};
     // Lock the physical memory lock.
     KScopedLightLock phys_lk(m_map_physical_memory_lock);
 

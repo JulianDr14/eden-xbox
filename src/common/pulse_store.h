@@ -13,6 +13,12 @@
 
 namespace Common::Pulse {
 [[nodiscard]] std::string StorageKey(const Identity& identity);
+
+// Diagnostic: the hash of each host page a restore wrote, so a later reader of bad guest memory
+// can tell whether the session held it or something overwrote it after the resume.
+void ClearRestoredPages();
+void NoteRestoredPage(const void* host_page, bool untouched);
+[[nodiscard]] std::string DescribeRestoredPages(const void* host, std::size_t size);
 // Fault points are used by the storage regression gate. No callbacks at runtime
 // unless explicitly supplied. A failed operation never deletes a published state.
 enum class PublishStep { Write, Verify, Sync, Replace, Rebuild, Consume, Consumed };

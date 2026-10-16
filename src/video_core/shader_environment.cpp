@@ -18,6 +18,11 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/host_memory.h"
+#include "common/pulse_diagnostics.h"
+#include "common/pulse_store.h"
+#include <mutex>
+#include <unordered_set>
 #include "common/settings.h"
 #include <ranges>
 #include "shader_recompiler/environment.h"
@@ -155,6 +160,7 @@ u64 GenericEnvironment::ReadInstruction(u32 address) {
 
 std::optional<u64> GenericEnvironment::Analyze() {
     const std::optional<u64> size{TryFindSize()};
+    CheckCodeMemory();
     if (!size) {
         return std::nullopt;
     }
@@ -168,6 +174,44 @@ void GenericEnvironment::SetCachedSize(size_t size_bytes) {
     cached_highest = start_address + static_cast<u32>(size_bytes);
     code.resize(CachedSizeWords());
     gpu_memory->ReadBlock(program_base + cached_lowest, code.data(), code.size() * sizeof(u64));
+    CheckCodeMemory();
+}
+
+// Diagnostic: shader code read from DRAM the host holds no pages for reads as zero.
+void GenericEnvironment::CheckCodeMemory() const {
+    if (!Common::Pulse::Diagnostics()) return;
+    static std::mutex mutex;
+    static std::unordered_set<GPUVAddr> logged;
+    const GPUVAddr start = program_base + start_address;
+    const u8* const host = gpu_memory->GetPointer(start);
+    if (!host || (!code.empty() && code[0] != 0)) return;
+    {
+        std::scoped_lock lock{mutex};
+        if (logged.size() > 256 || !logged.insert(start).second) return;
+    }
+    LOG_WARNING(Render, "Shader code at GPU {:#x} starts with zero: page {}", start,
+                Common::DescribeDramPage(host));
+}
+
+std::string GenericEnvironment::DescribeCode() const {
+    const GPUVAddr start = program_base + start_address;
+    const auto device = gpu_memory ? gpu_memory->GpuToCpuAddress(start) : std::nullopt;
+    const auto zero = std::ranges::count(code, u64{0});
+    // The same words read again now: when they differ, the code was read before the game wrote it.
+    std::array<u64, 4> now{};
+    const size_t count = (std::min)(code.size(), now.size());
+    if (gpu_memory && device) gpu_memory->ReadBlockUnsafe(start, now.data(), count * sizeof(u64));
+    std::string words, words_now;
+    for (size_t i = 0; i < count; ++i) {
+        words += fmt::format(" {:016x}", code[i]);
+        words_now += fmt::format(" {:016x}", now[i]);
+    }
+    const u8* const host = gpu_memory && device ? gpu_memory->GetPointer(start) : nullptr;
+    return fmt::format("guest code at GPU {:#x} (device {}), {} of {} words zero, first{}, "
+                       "memory now{}; {}",
+                       start, device ? fmt::format("{:#x}", *device) : std::string{"unmapped"},
+                       zero, code.size(), words, words_now,
+                       Common::Pulse::DescribeRestoredPages(host, code.size() * sizeof(u64)));
 }
 
 size_t GenericEnvironment::CachedSizeWords() const noexcept {

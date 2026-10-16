@@ -16,7 +16,9 @@
 #include <unistd.h>
 #endif
 
+#include "common/cityhash.h"
 #include "common/logging.h"
+#include <unordered_map>
 
 namespace Common::Pulse {
 namespace {
@@ -259,5 +261,51 @@ void Store::Discard(std::string_view key) {
     const auto consumed = Path(key, ".consumed");
     RequireRegularOrAbsent(consumed);
     std::filesystem::remove(consumed);
+}
+namespace {
+constexpr std::uintptr_t ProbePage = 0x1000;
+constexpr std::uint64_t UntouchedHash = ~std::uint64_t{0};
+std::mutex probe_mutex;
+std::unordered_map<std::uintptr_t, std::uint64_t> restored_pages;
+
+std::uint64_t HashPage(std::uintptr_t page) {
+    return CityHash64(reinterpret_cast<const char*>(page), ProbePage);
+}
+} // namespace
+
+void ClearRestoredPages() {
+    std::scoped_lock lock{probe_mutex};
+    restored_pages = {};
+}
+
+void NoteRestoredPage(const void* host_page, bool untouched) {
+    const auto page = reinterpret_cast<std::uintptr_t>(host_page) & ~(ProbePage - 1);
+    const std::uint64_t hash = untouched ? UntouchedHash : HashPage(page);
+    std::scoped_lock lock{probe_mutex};
+    restored_pages[page] = hash;
+}
+
+std::string DescribeRestoredPages(const void* host, std::size_t size) {
+    if (!host || !size) return "no host memory";
+    const auto first = reinterpret_cast<std::uintptr_t>(host) & ~(ProbePage - 1);
+    const auto end = reinterpret_cast<std::uintptr_t>(host) + size;
+    std::size_t same{}, changed{}, untouched{}, unknown{};
+    std::scoped_lock lock{probe_mutex};
+    if (restored_pages.empty()) return "no restore recorded";
+    for (auto page = first; page < end; page += ProbePage) {
+        const auto it = restored_pages.find(page);
+        if (it == restored_pages.end()) {
+            ++unknown;
+        } else if (it->second == UntouchedHash) {
+            ++untouched;
+        } else if (it->second == HashPage(page)) {
+            ++same;
+        } else {
+            ++changed;
+        }
+    }
+    return fmt::format("pages {} as restored, {} changed since the restore, {} restored untouched, "
+                       "{} not restored",
+                       same, changed, untouched, unknown);
 }
 } // namespace Common::Pulse
