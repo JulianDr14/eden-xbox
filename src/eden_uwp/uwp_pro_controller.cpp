@@ -163,7 +163,10 @@ winrt::fire_and_forget DiscoverPro(bool* busy) {
                  Hid::GetDeviceSelector(1, usage, 0x057e, 0x2009))) {
             const std::wstring id{info.Id().c_str()};
             const auto found = std::find_if(previous.begin(), previous.end(), [&](const auto& d) { return d.id == id; });
-            if (found != previous.end() && found->pro && found->pro->Ready()) { devices.push_back(*found); continue; }
+            // A pad still enumerated keeps its reader even when its reports are late (a loading
+            // game saturating the CPU): closing it while the HID runtime dispatches a report
+            // crashed the process inside Windows.Devices.HumanInterfaceDevice.dll.
+            if (found != previous.end() && found->pro) { devices.push_back(*found); continue; }
             const auto hid = co_await Hid::FromIdAsync(info.Id(), winrt::Windows::Storage::FileAccessMode::Read);
             if (!hid) continue;
             auto pro = std::make_shared<ProControllerReader>(hid);
