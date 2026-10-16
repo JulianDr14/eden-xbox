@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cstdio>
 #include <cstdlib>
-#include "eden_uwp/mods/mods_page.h"
+#include "jadyx/mods/mods_page.h"
 
 namespace {
-using namespace EdenXbox::Mods;
+using namespace Jadyx::Mods;
 using Kind = ModsCommand::Kind;
 using In = ModsInput;
 

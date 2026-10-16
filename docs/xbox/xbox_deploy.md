@@ -33,8 +33,8 @@ make resolves paths differently there and the compile fails):
 C:\devkitPro\msys2\usr\bin\make.exe
 ```
 
-It runs a loop, checks the result, and emits `EDEN_XBOX_JIT_ALIVE` only if the arithmetic came out
-right — a miscompiling JIT reports `EDEN_XBOX_JIT_MISCOMPILE` instead of silently passing the
+It runs a loop, checks the result, and emits `JADYX_JIT_ALIVE` only if the arithmetic came out
+right — a miscompiling JIT reports `JADYX_JIT_MISCOMPILE` instead of silently passing the
 gate. Observing the sentinel is what makes GATE 2 positive proof rather than "it didn't crash".
 
 ## Build, package, sign
@@ -44,7 +44,7 @@ env steps matter, and `echo %LIB% | findstr x64\store` must match):
 
 ```bat
 cmake --preset uwp-x64
-cmake --build --preset uwp-x64 --target eden-uwp
+cmake --build --preset uwp-x64 --target jadyx
 ```
 
 Then, from PowerShell at the repo root:
@@ -57,8 +57,8 @@ The script stages the layout, packs it, mints (or reuses) a self-signed code-sig
 whose subject matches the manifest's `Publisher`, signs the package, and exports the `.cer`:
 
 ```
-build-uwp\package\eden-xbox.appx
-build-uwp\package\eden-xbox.cer
+build-uwp\package\jadyx.appx
+build-uwp\package\jadyx.cer
 build-uwp\package\Microsoft.VCLibs.x64.14.00.appx
 ```
 
@@ -72,7 +72,7 @@ base C++ toolset alone links the app fine but does not ship this package.
 ## Deploy
 
 1. Open `https://<xbox-ip>:11443` and accept the self-signed certificate warning.
-2. **Add** → upload `eden-xbox.appx`, with `eden-xbox.cer` as the certificate and
+2. **Add** → upload `jadyx.appx`, with `jadyx.cer` as the certificate and
    `Microsoft.VCLibs.x64.14.00.appx` as a **dependency package**. The console must trust the signer
    and must have the framework package, or installation or activation fails with a generic error.
 3. Set the app to **Game mode**, not App mode. App mode caps a UWP app at roughly a gigabyte of
@@ -101,11 +101,11 @@ is lost, the game must continue at normal speed using the silent paced fallback.
 The boot writes two things into the app's **LocalFolder**, pullable through the Device Portal's file
 explorer:
 
-- **`eden_uwp_diag.txt`** — coarse startup breadcrumbs written before Eden's logging is up
+- **`jadyx_diag.txt`** — coarse startup breadcrumbs written before Eden's logging is up
   (`BootView::Run entered`, the resolved NRO path, `RunHeadlessBoot returned <rc>`, or the exception
   that killed it). This is the file to read when the app flashes and closes.
 - **`eden_log.txt`** — Eden's own log, once logging initialises. GATE 2 passes on:
-  `Headless boot: JIT liveness CONFIRMED ('EDEN_XBOX_JIT_ALIVE' observed).`
+  `Headless boot: JIT liveness CONFIRMED ('JADYX_JIT_ALIVE' observed).`
 
 Return codes from `RunHeadlessBoot`: `0` liveness confirmed · `2` the NRO failed to load ·
 `3` the app ran but the sentinel never appeared within the 30 s backstop.
@@ -122,8 +122,8 @@ in it are load-bearing:
 - **`Identity/@Publisher` must equal the signing certificate's subject** character for character.
   A mismatch is the most common sideload rejection; `package-appx.ps1` checks it before packing.
 
-`EntryPoint="eden-uwp.App"` is the conventional moniker for a plain C++/WinRT `CoreApplication` app
-(`wWinMain` + `IFrameworkView`, see [`src/eden_uwp/uwp_boot.cpp`](../../src/eden_uwp/uwp_boot.cpp));
+`EntryPoint="Jadyx.App"` is the conventional moniker for a plain C++/WinRT `CoreApplication` app
+(`wWinMain` + `IFrameworkView`, see [`src/jadyx/uwp_boot.cpp`](../../src/jadyx/uwp_boot.cpp));
 there is no activatable WinRT class to name.
 
 ## When it does not activate
@@ -131,10 +131,10 @@ there is no activatable WinRT class to name.
 A UWP app that fails **activation** dies before any of your code runs — no log, no dump, no diag
 file. The usual causes, in the order worth checking:
 
-- **A hard import on a DLL the Xbox sandbox does not provide.** `src/eden_uwp/CMakeLists.txt`
+- **A hard import on a DLL the Xbox sandbox does not provide.** `src/jadyx/CMakeLists.txt`
   already delay-loads the known set (WLAN API set, setupapi, hid, winmm, imm32, user32…). A new
   dependency that pulls a desktop-only DLL reintroduces this. Inspect with
-  `dumpbin /imports eden-uwp.exe`.
+  `dumpbin /imports jadyx.exe`.
 - **Missing `codeGeneration`**, which fails later, at the first JIT page protect.
 - **App mode instead of Game mode** — shows up as an out-of-memory death during DRAM reservation
   rather than at activation.

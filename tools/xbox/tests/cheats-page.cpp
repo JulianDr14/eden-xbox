@@ -3,12 +3,12 @@
 // Build with src/core/memory/cheat_text.cpp.
 #include <cstdio>
 #include <cstdlib>
-#include "eden_uwp/cheats/cheats_page.h"
-#include "eden_uwp/game_options_page.h"
+#include "jadyx/cheats/cheats_page.h"
+#include "jadyx/game_options_page.h"
 
 namespace {
-using namespace EdenXbox;
-using namespace EdenXbox::Cheats;
+using namespace Jadyx;
+using namespace Jadyx::Cheats;
 
 /// What CheatSession gives the page, over a plain catalog.
 struct Model {

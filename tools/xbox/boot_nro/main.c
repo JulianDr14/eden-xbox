@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// GATE-2/GATE-3 payload for the Xbox/UWP boot (src/eden_uwp).
+// GATE-2/GATE-3 payload for the Xbox/UWP boot (src/jadyx).
 //
 // This is ordinary Switch homebrew: unencrypted, built from source here, and it touches nothing
 // but kernel syscalls and the HLE display services. It needs NO keys, NO firmware and NO
@@ -9,16 +9,16 @@
 // everything it calls.
 //
 // 1. GATE 2 (JIT liveness): runs a small loop, checks the answer, and only then emits the
-//    sentinel that src/eden_uwp/uwp_boot.cpp watches for through Kernel::Svc::SetDebugStringObserver.
+//    sentinel that src/jadyx/uwp_boot.cpp watches for through Kernel::Svc::SetDebugStringObserver.
 // 2. GATE 3 (first pixels): draws an animated test pattern with the CPU into a libnx framebuffer
 //    for a few seconds - no GPU commands, so it only needs the renderer's present path - then
 //    emits the GFX_DONE sentinel so the frontend knows the loop ran to the end.
 
 #include <switch.h>
 
-#define SENTINEL   "EDEN_XBOX_JIT_ALIVE"
-#define MISCOMPILE "EDEN_XBOX_JIT_MISCOMPILE"
-#define GFX_DONE   "EDEN_XBOX_GFX_DONE"
+#define SENTINEL   "JADYX_JIT_ALIVE"
+#define MISCOMPILE "JADYX_JIT_MISCOMPILE"
+#define GFX_DONE   "JADYX_GFX_DONE"
 
 #define FB_WIDTH   1280
 #define FB_HEIGHT  720

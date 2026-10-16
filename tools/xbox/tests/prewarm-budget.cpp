@@ -5,10 +5,10 @@
 #undef NDEBUG
 #include <cassert>
 #include <iostream>
-#include "eden_uwp/prewarm_budget.h"
+#include "jadyx/prewarm_budget.h"
 
 namespace {
-using EdenXbox::PrewarmBudget;
+using Jadyx::PrewarmBudget;
 constexpr std::uint64_t M = PrewarmBudget::MiB;
 
 void TestDefaultsAndClamp() {

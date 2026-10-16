@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/eden_uwp/localization.cpp and src/eden_uwp/locales/*.cpp.
+// Build with src/jadyx/localization.cpp and src/jadyx/locales/*.cpp.
 #include <cstdio>
 #include <cstdlib>
 #include <set>
-#include "eden_uwp/system_page.h"
+#include "jadyx/system_page.h"
 
 int main() {
-    using namespace EdenXbox;
+    using namespace Jadyx;
     using L = Settings::Language;
     using R = Settings::Region;
     auto check = [](bool ok) { if (!ok) std::abort(); };

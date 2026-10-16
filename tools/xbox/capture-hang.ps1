@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Capture thread stacks/metadata of a live, stuck PC session. No full guest memory dump.
 param([int] $TargetProcessId = 0,
-      [string] $OutputDirectory = (Join-Path $env:LOCALAPPDATA 'EdenXbox/HangDumps'))
+      [string] $OutputDirectory = (Join-Path $env:LOCALAPPDATA 'Jadyx/HangDumps'))
 $ErrorActionPreference = 'Stop'
 if (-not $TargetProcessId) {
-    $hangTargets = @(Get-Process -Name eden-uwp -ErrorAction Stop)
+    $hangTargets = @(Get-Process -Name jadyx -ErrorAction Stop)
     if ($hangTargets.Count -ne 1) { throw 'Specify -TargetProcessId for the intended session' }
     $TargetProcessId = $hangTargets[0].Id
 }

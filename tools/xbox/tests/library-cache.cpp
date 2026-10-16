@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/eden_uwp/library_cache.cpp and /DEDEN_XBOX_NO_WINRT.
+// Build with src/jadyx/library_cache.cpp and /DJADYX_NO_WINRT.
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
-#include "eden_uwp/library_cache.h"
+#include "jadyx/library_cache.h"
 
 int main() {
-    using namespace EdenXbox;
+    using namespace Jadyx;
     auto check = [](bool ok) { if (!ok) std::abort(); };
     const auto root = std::filesystem::temp_directory_path() / "eden-library-cache-test";
     std::filesystem::remove_all(root);

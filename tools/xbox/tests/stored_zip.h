@@ -12,11 +12,11 @@
 #include <utility>
 #include <vector>
 
-#include "eden_uwp/mods/mod_archive.h"
+#include "jadyx/mods/mod_archive.h"
 
 namespace TestArchives {
 
-class MemorySource final : public EdenXbox::Mods::ArchiveSource {
+class MemorySource final : public Jadyx::Mods::ArchiveSource {
 public:
     explicit MemorySource(std::vector<std::uint8_t> bytes_) : bytes{std::move(bytes_)} {}
     std::uint64_t Size() const override { return bytes.size(); }
@@ -70,8 +70,8 @@ inline std::vector<std::uint8_t> StoredZip(const std::vector<std::pair<std::stri
     return out;
 }
 
-inline std::vector<std::unique_ptr<EdenXbox::Mods::ArchiveSource>> Volumes(std::vector<std::uint8_t> bytes) {
-    std::vector<std::unique_ptr<EdenXbox::Mods::ArchiveSource>> volumes;
+inline std::vector<std::unique_ptr<Jadyx::Mods::ArchiveSource>> Volumes(std::vector<std::uint8_t> bytes) {
+    std::vector<std::unique_ptr<Jadyx::Mods::ArchiveSource>> volumes;
     volumes.push_back(std::make_unique<MemorySource>(std::move(bytes)));
     return volumes;
 }

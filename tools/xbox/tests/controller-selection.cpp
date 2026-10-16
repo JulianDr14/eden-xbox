@@ -4,12 +4,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
-#include "eden_uwp/controller_selection.h"
+#include "jadyx/controller_selection.h"
 
 int main() {
     struct Device { std::wstring_view id; bool pad; explicit operator bool() const { return pad; } };
     std::vector<Device> devices{{L"flight-stick", false}, {L"usb-pad", true}, {L"wireless-pad", true}};
-    using EdenXbox::SelectControllerDevice;
+    using Jadyx::SelectControllerDevice;
     auto check = [](bool ok) { if (!ok) std::abort(); };
     check(SelectControllerDevice(devices, L"") == 1);
     check(SelectControllerDevice(devices, L"wireless-pad") == 2);
@@ -18,7 +18,7 @@ int main() {
     devices.erase(devices.begin());
     check(!SelectControllerDevice(devices, L"wireless-pad"));
     check(SelectControllerDevice(devices, L"") == 0);
-    check(!SelectControllerDevice(devices, EdenXbox::KeyboardControllerId));
+    check(!SelectControllerDevice(devices, Jadyx::KeyboardControllerId));
     check(!SelectControllerDevice(devices, L"flight-stick"));
     devices.insert(devices.begin(), {L"wireless-pad", true});
     check(SelectControllerDevice(devices, L"wireless-pad") == 0);

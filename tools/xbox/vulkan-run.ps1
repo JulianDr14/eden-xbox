@@ -6,10 +6,10 @@ $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $exe = Join-Path $repo 'build-vulkan-pc/bin/eden-cli.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Primero ejecuta tools\xbox\build-vulkan-pc.bat.' }
-if (Get-Process -Name eden-uwp,eden-cli,yuzu-cmd -ErrorAction SilentlyContinue) {
+if (Get-Process -Name jadyx,eden-cli,yuzu-cmd -ErrorAction SilentlyContinue) {
     throw 'Cierra la corrida actual antes de comparar; no se interrumpe automaticamente.'
 }
-$pkg = Get-AppxPackage -Name EdenEmuProject.EdenXbox
+$pkg = Get-AppxPackage -Name Jadyx
 if (-not $pkg) { throw 'No se encontro el paquete de Xbox instalado en PC.' }
 $local = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalState"
 $data = Join-Path $local 'eden'

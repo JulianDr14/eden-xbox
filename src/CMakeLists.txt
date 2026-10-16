@@ -288,7 +288,7 @@ endif()
 
 # Xbox/UWP headless boot frontend (Phase 2, toward GATE 2). Only for the WindowsStore target.
 if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
-    add_subdirectory(eden_uwp)
+    add_subdirectory(jadyx)
 endif()
 
 if (ENABLE_WEB_SERVICE)

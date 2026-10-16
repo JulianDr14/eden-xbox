@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/eden_uwp/mods/mod_archive.cpp, src/eden_uwp/mods/mod_layout.cpp and libarchive's
+// Build with src/jadyx/mods/mod_archive.cpp, src/jadyx/mods/mod_layout.cpp and libarchive's
 // reader (externals/libarchive) with zlib, zstd and liblzma. Run with a folder of libarchive's test
 // archives (libarchive/test/*.uu decoded): the 7z, rar and zip samples at its top, and the volumes
 // of test_rar_multivolume_single_file in multi4/ and of test_read_format_rar5_multiarchive_solid
@@ -12,11 +12,11 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#include "eden_uwp/mods/mod_archive.h"
+#include "jadyx/mods/mod_archive.h"
 #include "stored_zip.h"
 
 namespace {
-using namespace EdenXbox::Mods;
+using namespace Jadyx::Mods;
 using TestArchives::StoredZip;
 namespace fs = std::filesystem;
 

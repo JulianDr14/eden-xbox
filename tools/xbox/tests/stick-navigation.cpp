@@ -3,9 +3,9 @@
 #include <cstdlib>
 #include <cstdio>
 #include <limits>
-#include "eden_uwp/stick_navigation.h"
+#include "jadyx/stick_navigation.h"
 int main() {
-    using namespace EdenXbox;
+    using namespace Jadyx;
     using namespace std::chrono;
     StickNavigation input;
     const auto at = [](int ms) { return StickNavigation::Clock::time_point{milliseconds{ms}}; };

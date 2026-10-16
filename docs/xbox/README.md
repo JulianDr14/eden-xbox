@@ -5,7 +5,7 @@ La rama de trabajo es `xbox`; las reglas del proyecto están en [AGENTS.md](../.
 
 ## Arranque y despliegue
 
-El instalador vigente se entrega siempre en `build-uwp/package/eden-xbox.appx`.
+El instalador vigente se entrega siempre en `build-uwp/package/jadyx.appx`.
 No crear una carpeta de paquetes por compilación. Las rutas `package-*` citadas
 en documentación histórica ya no son carpetas de entrega vigentes.
 

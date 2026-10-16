@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cstdio>
 #include <cstdlib>
-#include "eden_uwp/keyboard_bindings.h"
+#include "jadyx/keyboard_bindings.h"
 int main() {
-    using namespace EdenXbox;
+    using namespace Jadyx;
     auto check = [](bool ok) { if (!ok) std::abort(); };
     auto bindings = DefaultKeyboardBindings;
     check(AssignKeyboardKey(bindings, 0, 'Q'));

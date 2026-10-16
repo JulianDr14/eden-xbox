@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Stages, packs and signs the Phase-2 headless boot appx (src/eden_uwp) for sideloading
+# Stages, packs and signs the Phase-2 headless boot appx (src/jadyx) for sideloading
 # onto an Xbox Series X|S in Dev Mode. See docs/xbox/xbox_deploy.md for the full flow.
 #
 #   .\tools\xbox\package-appx.ps1 -BootNro C:\path\to\boot.nro
 #
-# Produces build-uwp\package\eden-xbox.appx plus the .cer you must install on the console.
+# Produces build-uwp\package\jadyx.appx plus the .cer you must install on the console.
 
 [CmdletBinding()]
 param(
     # Directory the uwp-x64 preset built into (CMakePresets.json binaryDir).
     [string] $BuildDir = "build-uwp",
     # Homebrew NRO bundled as the GATE-2 payload. It must emit the JIT-liveness sentinel
-    # EDEN_XBOX_JIT_ALIVE via svcOutputDebugString. NO keys/firmware/commercial ROMs (house rule).
+    # JADYX_JIT_ALIVE via svcOutputDebugString. NO keys/firmware/commercial ROMs (house rule).
     [string] $BootNro,
     # For payloads without the sentinels (deko3d examples, ...): run the NRO this many seconds,
     # then shut down. 0 keeps the sentinel-driven boot. Written to boot.cfg in the package.
@@ -35,7 +35,7 @@ param(
     # Extra boot.cfg lines for diagnosis: "log_filter=*:Info HW.GPU:Debug", "renderer=null".
     [string[]] $BootCfg = @(),
     # Must match Identity/@Publisher in dist/uwp/AppxManifest.xml, character for character.
-    [string] $PublisherCN = "CN=EdenXboxDev",
+    [string] $PublisherCN = "CN=JadyxDev",
     # Mesa's SPIR-V -> DXIL translator for the D3D12 renderer, built by build-spirv-to-dxil.ps1.
     # Without it the renderer still presents, through its CPU fallback.
     [string] $SpirvToDxil = "..\mesa-build\build-uwp\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll",
@@ -73,13 +73,13 @@ function Find-SdkTool([string] $name) {
 }
 
 # --- 1. locate the built exe -------------------------------------------------------------
-$exe = Join-Path $repo "$BuildDir\bin\eden-uwp.exe"
+$exe = Join-Path $repo "$BuildDir\bin\jadyx.exe"
 if (-not (Test-Path $exe)) {
-    $found = Get-ChildItem (Join-Path $repo $BuildDir) -Recurse -Filter eden-uwp.exe -ErrorAction SilentlyContinue |
+    $found = Get-ChildItem (Join-Path $repo $BuildDir) -Recurse -Filter jadyx.exe -ErrorAction SilentlyContinue |
              Select-Object -First 1
     if (-not $found) {
-        throw "eden-uwp.exe not found under $BuildDir. Build it first from a 'vcvarsall.bat x64 uwp' shell:`n" +
-              "  cmake --preset uwp-x64`n  cmake --build --preset uwp-x64 --target eden-uwp"
+        throw "jadyx.exe not found under $BuildDir. Build it first from a 'vcvarsall.bat x64 uwp' shell:`n" +
+              "  cmake --preset uwp-x64`n  cmake --build --preset uwp-x64 --target jadyx"
     }
     $exe = $found.FullName
 }
@@ -176,7 +176,7 @@ if ($BootNro -or $gameName -or $BootCfg.Count -gt 0) {
         [IO.File]::WriteAllText((Join-Path $layout "boot.cfg"), $cfg)
     }
 } else {
-    Write-Warning "No -BootNro given. The app will activate, fail to load the NRO and log status 2 to eden_uwp_diag.txt."
+    Write-Warning "No -BootNro given. The app will activate, fail to load the NRO and log status 2 to jadyx_diag.txt."
 }
 
 # Publisher mismatch between manifest and cert is the #1 sideload rejection; fail loudly here.
@@ -187,7 +187,7 @@ if ($mf.Package.Identity.Publisher -ne $PublisherCN) {
 
 # --- 3. pack -----------------------------------------------------------------------------
 $makeappx = Find-SdkTool "MakeAppx.exe"
-$appx = Join-Path $repo "$OutDir\eden-xbox.appx"
+$appx = Join-Path $repo "$OutDir\jadyx.appx"
 if (Test-Path $appx) { Remove-Item $appx -Force }
 # A bundled game dump is gigabytes of encrypted data that does not compress: skip compression.
 $packArgs = @("pack", "/d", $layout, "/p", $appx, "/o")
@@ -203,7 +203,7 @@ $cert = Get-ChildItem Cert:\CurrentUser\My |
 if (-not $cert) {
     Write-Host "minting a self-signed code-signing cert for $PublisherCN"
     $cert = New-SelfSignedCertificate -Type Custom -Subject $PublisherCN `
-        -KeyUsage DigitalSignature -FriendlyName "Eden Xbox sideload" `
+        -KeyUsage DigitalSignature -FriendlyName "Jadyx sideload" `
         -CertStoreLocation "Cert:\CurrentUser\My" `
         -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
 }
@@ -213,7 +213,7 @@ $signtool = Find-SdkTool "SignTool.exe"
 if ($LASTEXITCODE -ne 0) { throw "SignTool failed ($LASTEXITCODE)." }
 
 # The console must trust the signer: upload this .cer alongside the appx in the Device Portal.
-$cer = Join-Path $repo "$OutDir\eden-xbox.cer"
+$cer = Join-Path $repo "$OutDir\jadyx.cer"
 Export-Certificate -Cert $cert -FilePath $cer -Type CERT | Out-Null
 
 # --- 5. the VCLibs framework package ------------------------------------------------------

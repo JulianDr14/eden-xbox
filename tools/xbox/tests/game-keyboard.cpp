@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/eden_uwp/localization.cpp and src/eden_uwp/locales/*.cpp.
+// Build with src/jadyx/localization.cpp and src/jadyx/locales/*.cpp.
 #include <cstdio>
 #include <cstdlib>
-#include "eden_uwp/game_keyboard.h"
+#include "jadyx/game_keyboard.h"
 
 int main() {
-    using namespace EdenXbox;
+    using namespace Jadyx;
     using Command = TextEntry::Command;
     using Kind = KeyboardReply::Kind;
     auto check = [](bool ok) { if (!ok) std::abort(); };

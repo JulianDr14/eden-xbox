@@ -1,4 +1,4 @@
-# AGENTS.md: guía para agentes de IA en eden-xbox (fork de JulianDr14)
+# AGENTS.md: guía para agentes de IA en Jadyx (fork de JulianDr14)
 
 Índice de documentación Xbox/UWP: [`docs/xbox/README.md`](docs/xbox/README.md).
 
@@ -87,13 +87,13 @@ No60 sostenidos ni mejora general demostrados; revisar seleccion/cobertura antes
 de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
 
 ## Reglas duras
-1. **Solo nuestro fork.** Los commits y pushes van únicamente a `origin` (`JulianDr14/eden-xbox`,
+1. **Solo nuestro fork.** Los commits y pushes van únicamente a `origin` (`JulianDr14/Jadyx`,
    fork de `eden-emulator/mirror`).
    - `eden` (el espejo oficial de Eden) y `upstream` (juanresendiz813/eden-xbox, el fork original, ya
      abandonado) son de **solo lectura**: tienen el push deshabilitado y así deben seguir.
    - `legacy` (`JulianDr14/eden-xbox-legacy`) es el repo anterior, que queda como archivo.
    - **Nunca abras PRs ni issues contra Eden.** En un fork, GitHub y `gh pr create` proponen por
-     defecto el repo padre: indica siempre `--repo JulianDr14/eden-xbox` y comprueba el destino.
+     defecto el repo padre: indica siempre `--repo JulianDr14/Jadyx` y comprueba el destino.
 2. **Commit solo cuando el usuario lo pida.** Nunca por iniciativa propia. Nunca añadir a Codex, OpenAI
    ni al asistente como autor/coautor o mediante un trailer `Co-Authored-By`.
    Los commits del usuario conservan únicamente su identidad; preferencia global explícita.
@@ -134,24 +134,24 @@ de PPTC host. Detalles en xbox_performance.md; Series pendiente, sin commit.
 ## Ciclo de prueba
 Entrega única (preferencia explícita del usuario, 14 oct 2026): todos los paquetes
 UWP se preparan en `build-uwp/package/`; el instalador vigente es
-`build-uwp/package/eden-xbox.appx`. No crear carpetas `package-*` ni otra carpeta
+`build-uwp/package/jadyx.appx`. No crear carpetas `package-*` ni otra carpeta
 de entrega por compilación. Los objetos siguen en el build incremental, los
 símbolos en `symbols/<versión>` y las evidencias en `test-results/`. Antes de
 reemplazar el layout, comprobar que ninguna instancia PC lo esté utilizando.
 
 1. **Compilar** (ver `docs/xbox/xbox_internal.md`):
-   `tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp`.
+   `tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target jadyx`.
    Para cazar errores rápido, compila objetos sueltos con `ninja -C build-uwp <ruta>.cpp.obj`.
 2. **Probar en el PC:** `powershell -ExecutionPolicy Bypass -File tools\xbox\local-run.ps1 -NoBuild`.
    - Imprime el diag.
-   - El log está en `%LOCALAPPDATA%\Packages\EdenEmuProject.EdenXbox_4qge6yz81zw0w\LocalState\eden\log\eden_log.txt`.
+   - El log está en `%LOCALAPPDATA%\Packages\Jadyx_s0hs1mdp2yrec\LocalState\eden\log\eden_log.txt`.
 3. **Preparar la prueba en consola:**
    - Sube `Version` en `dist/uwp/AppxManifest.xml` (sin BOM; el original no lo lleva).
    - Empaqueta con `tools\xbox\package-appx.ps1 -BootNro tools\xbox\boot_nro\boot.nro`.
-   - Archiva `eden-uwp.exe` y `eden-uwp.pdb` en `build-uwp\symbols\<versión>\`.
+   - Archiva `jadyx.exe` y `jadyx.pdb` en `build-uwp\symbols\<versión>\`.
 4. **El usuario instala en la Series:**
-   - Instala `build-uwp\package\eden-xbox.appx` por el Device Portal y pone la app en modo **Game**.
-   - Después deja `eden_log.txt` y `eden_uwp_diag.txt` en su carpeta **Descargas**
+   - Instala `build-uwp\package\jadyx.appx` por el Device Portal y pone la app en modo **Game**.
+   - Después deja `eden_log.txt` y `jadyx_diag.txt` en su carpeta **Descargas**
      (`C:\Users\julia\Downloads`) y te dice cómo se vio.
 5. **Tú revisas los archivos:**
    - En el diag: `RunHeadlessBoot returned 0`.
@@ -176,7 +176,7 @@ reemplazar el layout, comprobar que ninguna instancia PC lo esté utilizando.
   descriptores, más el renderer.
 - `src/audio_core/sink/xaudio2_sink.*`: salida PCM XAudio2 2.9 para Windows UWP/Xbox; diseño y
   gates en `docs/xbox/xbox_audio.md`.
-- `src/eden_uwp/`: frontend UWP (arranque headless y diagnóstico).
+- `src/jadyx/`: frontend UWP (arranque headless y diagnóstico).
 - `tools/xbox/`:
   - `build-env.bat`, `package-appx.ps1`, `local-run.ps1` y `build-spirv-to-dxil.ps1` (este último no
     se ha ejecutado nunca: revisa `tar` y los parches antes de usarlo).

@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/eden_uwp/mods/gamebanana.cpp, src/eden_uwp/mods/cnx_index.cpp and nlohmann_json's
+// Build with src/jadyx/mods/gamebanana.cpp, src/jadyx/mods/cnx_index.cpp and nlohmann_json's
 // include folder. The JSON below is real API answers, cut down to a few records.
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include "eden_uwp/mods/cnx_index.h"
-#include "eden_uwp/mods/gamebanana.h"
+#include "jadyx/mods/cnx_index.h"
+#include "jadyx/mods/gamebanana.h"
 
 namespace {
-using namespace EdenXbox::Mods;
+using namespace Jadyx::Mods;
 
 void Check(bool ok, const char* what) {
     if (!ok) {

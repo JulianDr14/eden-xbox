@@ -10,7 +10,7 @@ namespace Core {
 class System;
 
 /// Code each core may warm. Each MiB of warmed code costs about three of commit (dynarmic's
-/// block tables), so a frontend with a tight memory limit passes less (see EdenXbox's
+/// block tables), so a frontend with a tight memory limit passes less (see Jadyx's
 /// PrewarmBudget); the plan warms gameplay and shared blocks first.
 inline constexpr std::size_t DefaultPrewarmCodeBudget = 64 * 1024 * 1024;
 

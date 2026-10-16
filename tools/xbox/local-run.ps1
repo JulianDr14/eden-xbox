@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Local iteration loop on the PC (Developer Mode): build eden-uwp, restage the package layout,
+# Local iteration loop on the PC (Developer Mode): build jadyx, restage the package layout,
 # register it loose, launch it in its AppContainer, wait for the boot to finish and print the diag.
 # D3D12 behaves the same on desktop for everything tested so far, so each change is tried here
 # before going to the console.
@@ -37,12 +37,12 @@ $BootNro = (Resolve-Path $BootNro).Path
 $cmd = "$env:SystemRoot\System32\cmd.exe"
 
 if (-not $NoBuild) {
-    $out = & $cmd /c "`"$r\tools\xbox\build-env.bat`" cmake --build `"$r\build-uwp`" --target eden-uwp 2>&1"
+    $out = & $cmd /c "`"$r\tools\xbox\build-env.bat`" cmake --build `"$r\build-uwp`" --target jadyx 2>&1"
     $out | Where-Object { $_ -match 'error|warning C|\[\d+/\d+\]' } | Select-Object -Last 8
     if ($LASTEXITCODE -ne 0) { throw "build failed" }
 }
 
-Get-Process -Name eden-uwp -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name jadyx -ErrorAction SilentlyContinue | Stop-Process -Force
 Push-Location $r
 try {
     & "$r\tools\xbox\package-appx.ps1" -BootNro $BootNro -RunSeconds $RunSeconds `
@@ -56,9 +56,9 @@ try {
 Add-AppxPackage -Register "$r\build-uwp\package\layout\AppxManifest.xml" -ForceApplicationShutdown `
     -ForceUpdateFromAnyVersion:$AllowVersionDowngrade
 
-$pkg = Get-AppxPackage -Name EdenEmuProject.EdenXbox
+$pkg = Get-AppxPackage -Name Jadyx
 $local = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalState"
-$diag = Join-Path $local 'eden_uwp_diag.txt'
+$diag = Join-Path $local 'jadyx_diag.txt'
 Remove-Item -LiteralPath $diag -ErrorAction SilentlyContinue
 Start-Process "shell:AppsFolder\$($pkg.PackageFamilyName)!App"
 
@@ -68,7 +68,7 @@ while ((Get-Date) -lt $deadline) {
     if ((Test-Path $diag) -and (Select-String -Path $diag -Pattern 'exiting|CRASH' -Quiet)) { break }
     # The Pulse store gate ends the process on purpose and asks for a restart, which Windows refuses
     # to an app out of the foreground: launch it again once it is gone.
-    if ((Test-Path $diag) -and -not (Get-Process -Name eden-uwp -ErrorAction SilentlyContinue)) {
+    if ((Test-Path $diag) -and -not (Get-Process -Name jadyx -ErrorAction SilentlyContinue)) {
         $asked = @(Select-String -Path $diag -Pattern 'launch the app again').Count
         if ($asked -gt $relaunches) {
             $relaunches = $asked

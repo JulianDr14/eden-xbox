@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/eden_uwp/localization.cpp and src/eden_uwp/locales/*.cpp.
+// Build with src/jadyx/localization.cpp and src/jadyx/locales/*.cpp.
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
-#include "eden_uwp/localization.h"
+#include "jadyx/localization.h"
 
 int main() {
-    using namespace EdenXbox::I18n;
+    using namespace Jadyx::I18n;
     auto check = [](bool ok) { if (!ok) std::abort(); };
     const auto languages = UiLanguages();
     check(languages.size() >= 2 && languages.front().tag == L"en");

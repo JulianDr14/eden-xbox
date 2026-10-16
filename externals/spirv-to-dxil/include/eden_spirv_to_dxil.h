@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
  * SPDX-License-Identifier: MIT
  *
- * Linked-pipeline entry point the Eden Xbox port adds to Mesa's spirv_to_dxil.dll
+ * Linked-pipeline entry point Jadyx adds to Mesa's spirv_to_dxil.dll
  * (tools/xbox/mesa/eden_pipeline.c, built by tools/xbox/build-spirv-to-dxil.ps1).
  *
  * spirv_to_dxil() translates one stage in isolation, so each stage packs its varyings on its own

@@ -14,7 +14,7 @@ $testDir = New-Item -ItemType Directory -Force build-uwp/bc-block-copy-gate
 $testSource = Join-Path (Get-Location) 'tools/xbox/tests/bc-block-copy.cpp'
 $testCommands = @('@echo off', ('call "' + $testVs + '\VC\Auxiliary\Build\vcvarsall.bat" x64'),
     'if errorlevel 1 exit /b 1', ('cd /d "' + (Join-Path (Get-Location) 'build-uwp') + '"'),
-    ('cl /nologo /O2 /MD /Gy /std:c++20 /Zc:preprocessor /EHsc /utf-8 /DNOMINMAX /DBOOST_CONTAINER_NO_LIB /DBOOST_CONTAINER_STATIC_LINK ' + $testIncludes + ' "' + $testSource + '" src\eden_uwp\CMakeFiles\eden-uwp.dir\vma_impl.cpp.obj /Fo:bc-block-copy-gate\ /Fe:bc-block-copy-gate\bc-block-copy.exe /link /OPT:REF /NODEFAULTLIB:libcmt ' + $testLibs))
+    ('cl /nologo /O2 /MD /Gy /std:c++20 /Zc:preprocessor /EHsc /utf-8 /DNOMINMAX /DBOOST_CONTAINER_NO_LIB /DBOOST_CONTAINER_STATIC_LINK ' + $testIncludes + ' "' + $testSource + '" src\jadyx\CMakeFiles\jadyx.dir\vma_impl.cpp.obj /Fo:bc-block-copy-gate\ /Fe:bc-block-copy-gate\bc-block-copy.exe /link /OPT:REF /NODEFAULTLIB:libcmt ' + $testLibs))
 Set-Content "$($testDir.FullName)/build.cmd" $testCommands -Encoding ascii
 & "$env:SystemRoot\System32\cmd.exe" /d /c "$($testDir.FullName)\build.cmd"
 if ($LASTEXITCODE -ne 0) { throw 'BC block copy gate build failed' }

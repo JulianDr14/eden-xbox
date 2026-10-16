@@ -3,12 +3,12 @@
 
 # A nested job limits process commit; it does not emulate Xbox unified GPU memory.
 # No KILL_ON_JOB_CLOSE: the limit survives this launcher until the app exits itself.
-if (-not ('EdenXbox.ProcessMemoryLimit' -as [type])) {
+if (-not ('Jadyx.ProcessMemoryLimit' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
-namespace EdenXbox {
+namespace Jadyx {
     public static class ProcessMemoryLimit {
         [StructLayout(LayoutKind.Sequential)]
         struct Basic {
@@ -79,6 +79,6 @@ namespace EdenXbox {
 
 function Set-EdenProcessMemoryLimit {
     param([int] $ProcessId, [ValidateRange(1, 1048576)] [int] $LimitMiB)
-    [EdenXbox.ProcessMemoryLimit]::Apply($ProcessId, [uint64]$LimitMiB * 1MB)
+    [Jadyx.ProcessMemoryLimit]::Apply($ProcessId, [uint64]$LimitMiB * 1MB)
 }
 

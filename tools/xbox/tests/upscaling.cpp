@@ -1,16 +1,16 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/eden_uwp/localization.cpp and src/eden_uwp/locales/*.cpp.
+// Build with src/jadyx/localization.cpp and src/jadyx/locales/*.cpp.
 //
-// The image upscaling choice (eden_uwp/upscaling.h): what each choice sets in Eden's settings,
+// The image upscaling choice (jadyx/upscaling.h): what each choice sets in Eden's settings,
 // the way back from any settings, stored values, boot.cfg values and the menu texts.
 #include <cstdio>
 #include <cstdlib>
-#include "eden_uwp/upscaling.h"
+#include "jadyx/upscaling.h"
 #include "video_core/renderer_d3d12/d3d12_fsr_plan.h"
 
 int main() {
-    using namespace EdenXbox;
+    using namespace Jadyx;
     using Settings::ScalingFilter;
     auto check = [](bool ok) { if (!ok) std::abort(); };
 

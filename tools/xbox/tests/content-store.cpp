@@ -5,8 +5,8 @@
 #include <cstdio>
 #include <fstream>
 #include <windows.h>
-#include "eden_uwp/content/content_store.h"
-using namespace EdenXbox::Content;
+#include "jadyx/content/content_store.h"
+using namespace Jadyx::Content;
 void Check(bool value, const std::source_location at = std::source_location::current()) { if (!value) { std::fprintf(stderr, "FAIL line %u\n", at.line()); std::exit(1); } }
 Revision Item(char id, unsigned version, Kind kind = Kind::Update) {
     Revision r;

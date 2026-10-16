@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Resolves the eden-uwp.exe+0xRVA (or bare +0xRVA) frames of the diag (crash stacks, alloc watch) to functions and
+"""Resolves the jadyx.exe+0xRVA (or bare +0xRVA) frames of the diag (crash stacks, alloc watch) to functions and
 source lines with the build's PDB, through the Windows SDK's dbghelp.dll.
 
-    python tools/xbox/resolve-rva.py [--exe build-uwp/bin/eden-uwp.exe] [diag.txt | -]
+    python tools/xbox/resolve-rva.py [--exe build-uwp/bin/jadyx.exe] [diag.txt | -]
 
-Prints every input line, and under each eden-uwp.exe frame its function and file:line. The PDB must
+Prints every input line, and under each jadyx.exe frame its function and file:line. The PDB must
 be the one of the build that wrote the diag.
 """
 import argparse
@@ -16,13 +16,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pdb_symbols import Resolver  # noqa: E402
 
-# "eden-uwp.exe+0x..." (crash lines) or a bare "+0x..." frame (stack lists).
-FRAME = re.compile(r"(?:eden-uwp\.exe|(?<=\s))\+0x([0-9a-fA-F]+)")
+# "jadyx.exe+0x..." (crash lines) or a bare "+0x..." frame (stack lists).
+FRAME = re.compile(r"(?:jadyx\.exe|(?<=\s))\+0x([0-9a-fA-F]+)")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exe", default=os.path.join("build-uwp", "bin", "eden-uwp.exe"))
+    parser.add_argument("--exe", default=os.path.join("build-uwp", "bin", "jadyx.exe"))
     parser.add_argument("input", nargs="?", default="-")
     args = parser.parse_args()
 

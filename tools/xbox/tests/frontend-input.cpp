@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cassert>
 #include <stdexcept>
-#include "eden_uwp/controller_catalog.h"
-#include "eden_uwp/menu_input_capture.h"
-#include "eden_uwp/list_navigation.h"
-#include "eden_uwp/text_entry_input.h"
+#include "jadyx/controller_catalog.h"
+#include "jadyx/menu_input_capture.h"
+#include "jadyx/list_navigation.h"
+#include "jadyx/text_entry_input.h"
 
 struct Device {
     std::wstring id;
@@ -18,7 +18,7 @@ struct State {
     float left_x{}, left_y{}, right_x{}, right_y{};
 };
 int main() {
-    using namespace EdenXbox;
+    using namespace Jadyx;
     using namespace std::chrono_literals;
     ControllerCatalog<Device> catalog;
     auto now = ControllerCatalog<Device>::Clock::time_point{};

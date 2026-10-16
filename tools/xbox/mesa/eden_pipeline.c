@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
  * SPDX-License-Identifier: MIT
  *
- * Linked-pipeline variant of spirv_to_dxil() for the Eden Xbox port. build-spirv-to-dxil.ps1
+ * Linked-pipeline variant of spirv_to_dxil() for Jadyx. build-spirv-to-dxil.ps1
  * copies this file into Mesa's src/microsoft/spirv_to_dxil/ and exports its entry point.
  *
  * It follows spirv_to_dxil() (spirv_to_dxil.c) for each stage, and the link loop of spirv2dxil.c

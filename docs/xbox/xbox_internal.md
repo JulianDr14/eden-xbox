@@ -1,11 +1,11 @@
-# eden-xbox: notas internas
+# Jadyx: notas internas
 
 Cuaderno de trabajo del port: cómo compilar, en qué fase vamos y lo que hemos aprendido por las malas.
 Los docs "de verdad" son [`uwp_build.md`](uwp_build.md) (toolchain) y [`xbox_deploy.md`](xbox_deploy.md)
 (empaquetar y desplegar). Aquí va el resumen rápido y todo lo que no cabe en ellos.
 
 **Reglas de la casa**
-- Los commits van solo a nuestro fork: `origin` = `JulianDr14/eden-xbox`, fork de
+- Los commits van solo a nuestro fork: `origin` = `JulianDr14/Jadyx`, fork de
   `eden-emulator/mirror` (el espejo oficial de Eden en GitHub), rama `xbox`.
   - `eden` (espejo de Eden) y `upstream` (juanresendiz813/eden-xbox) son solo lectura, con el push
     deshabilitado.
@@ -22,7 +22,7 @@ Los docs "de verdad" son [`uwp_build.md`](uwp_build.md) (toolchain) y [`xbox_dep
 
 ```
 Documents\Programacion\Xbox\
-  eden-xbox\          # este repo
+  Jadyx\          # este repo
     build-uwp\        # build UWP (ninja), el paquete y los símbolos
   mesa-build\         # Mesa para spirv_to_dxil (fuera del repo)
     mesa-26.2.3\      #   fuentes con los 2 parches aplicados
@@ -38,13 +38,13 @@ fallan ahí.
 | Paso | Comando | Cuándo |
 |---|---|---|
 | Configurar | `tools\xbox\build-env.bat cmake --preset uwp-x64` | La primera vez o si cambia CMake |
-| Compilar Eden | `tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp` | Siempre; son ~580 pasos desde cero |
+| Compilar Eden | `tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target jadyx` | Siempre; son ~580 pasos desde cero |
 | Payload NRO | En `tools\xbox\boot_nro\`, con `TMP`/`TEMP`/`TMPDIR` apuntando a esa carpeta: `C:\devkitPro\msys2\usr\bin\make.exe` | Si cambia `main.c` |
 | Payloads deko3d | `powershell -ExecutionPolicy Bypass -File tools\xbox\build-deko3d-examples.ps1 [-Examples 2,4]` (necesita `switch-glm` y `deko3d`; el 10 y el 11 son nuestros: blits y clears con máscara, y dispatch/draw indirectos) | Para las pruebas de GPU de la fase 4 |
 | Mesa | `powershell -ExecutionPolicy Bypass -File tools\xbox\build-spirv-to-dxil.ps1` | Una vez, y cuando cambie `tools\xbox\mesa\`; con `-Reconfigure` si cambian opciones |
 | Empaquetar | `powershell -ExecutionPolicy Bypass -File tools\xbox\package-appx.ps1` | Para cada prueba |
 
-- **Salida del empaquetado:** `build-uwp\package\eden-xbox.appx`, `eden-xbox.cer` y
+- **Salida del empaquetado:** `build-uwp\package\jadyx.appx`, `jadyx.cer` y
   `Microsoft.VCLibs.x64.14.00.appx`. Incluye `dxil.dll` (del Windows SDK) y `spirv_to_dxil.dll`.
 - **Versión:** antes de cada prueba en consola se sube `Version` en `dist/uwp/AppxManifest.xml`. Así
   sabemos qué build generó cada log.
@@ -65,7 +65,7 @@ tools\xbox\build-env.bat ninja -C build-uwp src/video_core/CMakeFiles/video_core
     `eden_log.txt` como `D3D12 debug layer [id]: ...`. Necesita la función opcional "Herramientas
     de gráficos" de Windows y solo sirve en el PC.
 - **Dónde quedan los archivos en el PC:**
-  - El diag, en `%LOCALAPPDATA%\Packages\EdenEmuProject.EdenXbox_4qge6yz81zw0w\LocalState\`.
+  - El diag, en `%LOCALAPPDATA%\Packages\Jadyx_s0hs1mdp2yrec\LocalState\`.
   - El log **no** está ahí, sino en `LocalState\eden\log\eden_log.txt`.
 - Desde PowerShell, `cmd` puede resolver al `cmd` de devkitPro. Hay que usar
   `& "$env:SystemRoot\System32\cmd.exe" /c ...`, y lo mismo pasa con `tar`.
@@ -79,7 +79,7 @@ tools\xbox\build-env.bat ninja -C build-uwp src/video_core/CMakeFiles/video_core
 1. Abrir el Device Portal en `https://<ip-xbox>:11443`.
 2. Instalar el appx junto con la dependencia VCLibs.
 3. Poner la app en modo **Game**. Sin eso el límite de memoria es mucho menor.
-4. Ejecutarla y recoger `eden_uwp_diag.txt` y `eden_log.txt`. Los dejamos en `Descargas`.
+4. Ejecutarla y recoger `jadyx_diag.txt` y `eden_log.txt`. Los dejamos en `Descargas`.
 
 Qué buscar en esos archivos:
 - En el diag: `RunHeadlessBoot returned 0`.

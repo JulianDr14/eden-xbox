@@ -128,7 +128,7 @@ public:
                             winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path())) /
                         EDEN_DIR;
         } catch (...) {
-            OutputDebugStringW(L"[eden-uwp] path_util: ApplicationData.LocalFolder() threw; "
+            OutputDebugStringW(L"[jadyx] path_util: ApplicationData.LocalFolder() threw; "
                                L"falling back to exe dir\n");
             eden_path = GetExeDirectory() / PORTABLE_DIR;
         }

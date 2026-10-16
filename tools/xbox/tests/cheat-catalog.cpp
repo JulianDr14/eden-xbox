@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/core/memory/cheat_text.cpp and src/eden_uwp/cheats/cheat_db.cpp.
+// Build with src/core/memory/cheat_text.cpp and src/jadyx/cheats/cheat_db.cpp.
 #include <cstdio>
 #include <cstdlib>
-#include "eden_uwp/cheats/cheat_catalog.h"
-#include "eden_uwp/cheats/cheat_db.h"
+#include "jadyx/cheats/cheat_catalog.h"
+#include "jadyx/cheats/cheat_db.h"
 
 int main() {
-    using namespace EdenXbox::Cheats;
+    using namespace Jadyx::Cheats;
     auto check = [](bool ok) { if (!ok) std::abort(); };
     const Core::Memory::TextCheatParser parser;
     const auto set = [&](std::string mod, std::string_view text) {

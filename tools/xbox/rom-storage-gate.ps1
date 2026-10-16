@@ -6,9 +6,9 @@
 param()
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$pkg = Get-AppxPackage -Name EdenEmuProject.EdenXbox
+$pkg = Get-AppxPackage -Name Jadyx
 if (-not $pkg) { throw 'Register the local app with local-run.ps1 first.' }
-if (Get-Process eden-uwp -ErrorAction SilentlyContinue) { throw 'Close the app before running this gate.' }
+if (Get-Process jadyx -ErrorAction SilentlyContinue) { throw 'Close the app before running this gate.' }
 $gateDir = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalState\rom-storage-gate"
 New-Item -ItemType Directory -Path $gateDir -Force | Out-Null
 $fixture = Join-Path $gateDir 'fixture.bin'
@@ -64,7 +64,7 @@ foreach ($phase in @('record', 'restore')) {
     & (Join-Path $PSScriptRoot 'local-run.ps1') -NoBuild -TimeoutSec 75 -BootCfg "rom_storage_checks=$phase" |
         Tee-Object -FilePath (Join-Path $output "$phase-launcher.txt")
     $local = Split-Path -Parent $gateDir
-    $diag = Join-Path $local 'eden_uwp_diag.txt'
+    $diag = Join-Path $local 'jadyx_diag.txt'
     Copy-Item -LiteralPath $diag -Destination (Join-Path $output "$phase-diag.txt")
     $log = Join-Path $local 'eden\log\eden_log.txt'
     if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination (Join-Path $output "$phase-log.txt") }

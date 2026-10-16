@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# jadyx: the headless GATE-2 boot frontend for the Xbox/UWP AppContainer.
+# A CoreApplication IFrameworkView that brings up Core::System with the Null renderer and runs a
+# homebrew NRO through the JIT. Only built for the WindowsStore (UWP) target.
+
+add_executable(jadyx WIN32
+    headless_emu_window.h
+    uwp_boot.cpp
+    pulse_gate.cpp
+    pulse_gate.h
+    pulse_sessions.cpp
+    pulse_sessions.h
+    pulse_screen.cpp
+    pulse_screen.h
+    pulse_store_gate.cpp
+    pulse_store_gate.h
+    alloc_watch.cpp
+    alloc_watch.h
+    uwp_input.cpp
+    uwp_input.h
+    uwp_library.cpp
+    uwp_library_canvas.cpp
+    uwp_library_canvas.h
+    uwp_library.h
+    game_library.h
+    uwp_library_metadata.cpp
+    uwp_library_metadata.h
+    uwp_rom_storage.cpp
+    uwp_rom_storage.h
+    uwp_file_manager.cpp
+    uwp_file_manager.h
+    storage_path.h
+    uwp_pro_controller.cpp
+    uwp_controllers.cpp
+    uwp_controllers.h
+    vma_impl.cpp
+    # Interface languages: one catalog per language under locales/ (localization.h).
+    localization.cpp
+    localization.h
+    locales/catalogs.h
+    locales/registry.cpp
+    locales/en.cpp
+    locales/es.cpp
+    ui_text.h
+    # Settings > System and the library's on-disk metadata cache.
+    system_settings.h
+    system_page.h
+    upscaling.h
+    text_entry.h
+    text_entry_panel.cpp
+    text_entry_panel.h
+    # The keyboard games open to ask for text, over the running game.
+    game_keyboard.h
+    uwp_software_keyboard.cpp
+    uwp_software_keyboard.h
+    uwp_system_settings.cpp
+    uwp_system_settings.h
+    library_cache.cpp
+    library_cache.h
+    atomic_file.h
+    utf8.h
+    # Drawing shared by the library and the in-game menu (real text over the paused game).
+    ui_icon.h
+    ui_painter.cpp
+    ui_painter.h
+    game_menu_surface.cpp
+    game_menu_surface.h
+    # Per-game options and cheats: local files, the online database, hot changes in game.
+    content/content_model.h
+    content/content_inspector.cpp
+    content/content_store.cpp
+    content/content_service.cpp
+    content/content_session.cpp
+    content/content_view.cpp
+    game_options_page.h
+    cheats/cheat_catalog.h
+    cheats/cheat_db.cpp
+    cheats/cheat_db.h
+    cheats/cheat_fetcher.cpp
+    cheats/cheat_fetcher.h
+    cheats/cheat_session.cpp
+    cheats/cheat_session.h
+    cheats/cheat_store.cpp
+    cheats/cheat_store.h
+    cheats/cheats_page.h
+    cheats/cheats_view.cpp
+    cheats/cheats_view.h
+    # Per-game mods: archives (zip, 7z, rar) read through libarchive, installed into load/, with
+    # their order, conflicts and on/off state handed to the loader at boot; and the store
+    # (GameBanana, the CNX index) that downloads them, resuming and checking each file.
+    mods/archive_volumes.h
+    mods/cnx_index.cpp
+    mods/cnx_index.h
+    mods/game_romfs.cpp
+    mods/game_romfs.h
+    mods/gamebanana.cpp
+    mods/gamebanana.h
+    mods/mod_analysis.h
+    mods/mod_archive.cpp
+    mods/mod_archive.h
+    mods/mod_downloads.cpp
+    mods/mod_downloads.h
+    mods/mod_inspect.cpp
+    mods/mod_inspect.h
+    mods/mod_installer.cpp
+    mods/mod_installer.h
+    mods/mod_layout.cpp
+    mods/mod_layout.h
+    mods/mod_manifest.cpp
+    mods/mod_manifest.h
+    mods/mod_model.h
+    mods/mod_session.cpp
+    mods/mod_session.h
+    mods/mod_settings.cpp
+    mods/mod_settings.h
+    mods/mod_store.cpp
+    mods/mod_store.h
+    mods/mod_thumbnails.cpp
+    mods/mod_thumbnails.h
+    mods/mod_web.cpp
+    mods/mod_web.h
+    mods/mods_page.h
+    mods/mods_view.cpp
+    mods/mods_view.h
+    mods/work_queue.h
+)
+
+# core transitively pulls common/video_core/audio_core/hid_core/dynarmic etc.; name the ones we touch
+# directly so the dependency graph is explicit. frontend_common provides PlayTimeManager (pulled by
+# core's NS query service); input_common the virtual_gamepad engine that uwp_input.cpp feeds;
+# dynarmic the JIT's committed code size for the diag's memory split.
+target_link_libraries(jadyx PRIVATE common core video_core audio_core frontend_common hid_core
+                                        input_common SDL3::SDL3 dynarmic::dynarmic LibArchive::Read
+                                        OpenSSL::Crypto)
+
+# WinRT (CoreApplication, IFrameworkView, ApplicationData) comes from the Store umbrella import lib.
+target_link_libraries(jadyx PRIVATE WindowsApp.lib)
+target_link_libraries(jadyx PRIVATE d3d11 d2d1 dwrite dxgi windowscodecs)
+
+# Win32 networking used by core's network_interface (ConvertLengthToIpv4Mask etc.), plus crypt32 +
+# user32 which the from-source OpenSSL pulls (cert store + its fatal-error/service-detection code).
+target_link_libraries(jadyx PRIVATE iphlpapi ws2_32 crypt32 user32)
+
+# The HostMemory *FromApp path keys off this for the common headers it includes here too.
+target_compile_definitions(jadyx PRIVATE YUZU_UWP_APPCONTAINER=1)
+
+# C++/WinRT needs C++20 + exceptions.
+target_compile_features(jadyx PRIVATE cxx_std_20)
+if (MSVC)
+    target_compile_options(jadyx PRIVATE /EHsc)
+    # AppContainer executable: required for a sideloadable UWP package.
+    target_link_options(jadyx PRIVATE /APPCONTAINER)
+    # CRT bridge for the two bundled prebuilt deps that are /MT and have NO from-source path on Windows:
+    # ffmpeg (Eden disables YUZU_USE_EXTERNAL_FFMPEG on WIN32) and SDL3. They inject /DEFAULTLIB:LIBCMT,
+    # which the /MD Store-CRT app can't satisfy; ignoring it forces their CRT symbols onto the app's
+    # single /MD MSVCRT. OpenSSL + sirit are already proper from-source /MD (CMakeLists WindowsStore
+    # blocks), so this redirect now covers only ffmpeg/SDL3. PROPER FIX (DEVOPS hardening): a /MD ffmpeg
+    # for UWP (+ from-source /MD SDL3) so this line can be dropped.
+    target_link_options(jadyx PRIVATE /NODEFAULTLIB:LIBCMT)
+    # Delay-load the imports the Xbox AppContainer may not provide and that a HEADLESS boot never calls,
+    # so a missing one can't fail ACTIVATION (a hard import of an absent DLL = app won't launch, before
+    # any code/log). Covers the WiFi extension API set (wifi_scanner.cpp) + SDL3's desktop device/IME/
+    # timer DLLs (device enumeration is restricted in the Xbox sandbox). The loader binds each only on
+    # first call, which the headless NRO boot never makes; delay-loading present DLLs is harmless.
+    foreach(_dl
+            ext-ms-win-networking-wlanapi-l1-1-0.dll
+            setupapi.dll hid.dll winmm.dll imm32.dll
+            ws2_32.dll iphlpapi.dll crypt32.dll
+            user32.dll)  # user32: pulled by from-source OpenSSL's fatal-error MessageBox path,
+                         # never hit on a clean headless boot (per CORE PR #10 follow-up)
+        target_link_options(jadyx PRIVATE "/DELAYLOAD:${_dl}")
+    endforeach()
+    # delayimp.lib (the /DELAYLOAD helper) ships only in the desktop lib dir, not the Store-CRT LIB
+    # path the uwp env points at, so reference it by full path via vcvars' VCToolsInstallDir.
+    if (DEFINED ENV{VCToolsInstallDir})
+        target_link_libraries(jadyx PRIVATE "$ENV{VCToolsInstallDir}lib/x64/delayimp.lib")
+    else()
+        target_link_libraries(jadyx PRIVATE delayimp.lib)
+    endif()
+endif()

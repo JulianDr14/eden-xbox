@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cstdio>
 #include <cstdlib>
-#include "eden_uwp/mods/archive_volumes.h"
+#include "jadyx/mods/archive_volumes.h"
 
 namespace {
-using namespace EdenXbox::Mods;
+using namespace Jadyx::Mods;
 
 void Check(bool ok, const char* what) {
     if (!ok) {

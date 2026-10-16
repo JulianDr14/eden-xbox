@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2026 eden-xbox contributors
+// SPDX-FileCopyrightText: Copyright 2026 Jadyx contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>

@@ -6,7 +6,7 @@ $menuVs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.
 if (!$menuVs) { throw 'MSVC not found' }
 $menuCommands = @('@echo off', ('call "' + $menuVs + '\VC\Auxiliary\Build\vcvarsall.bat" x64'), 'if not "%errorlevel%"=="0" exit /b 1')
 foreach ($menuTest in @('game-menu', 'localization-catalogs')) {
-    $menuCommands += ('cl /nologo /O2 /MD /std:c++20 /EHsc /utf-8 /Zc:preprocessor /DEDEN_XBOX_NO_WINRT /I src tools\xbox\tests\' + $menuTest + '.cpp src\eden_uwp\localization.cpp src\eden_uwp\locales\en.cpp src\eden_uwp\locales\es.cpp src\eden_uwp\locales\registry.cpp /Fo:build-uwp\game-menu-gate\ /Fe:build-uwp\game-menu-gate\' + $menuTest + '.exe')
+    $menuCommands += ('cl /nologo /O2 /MD /std:c++20 /EHsc /utf-8 /Zc:preprocessor /DJADYX_NO_WINRT /I src tools\xbox\tests\' + $menuTest + '.cpp src\jadyx\localization.cpp src\jadyx\locales\en.cpp src\jadyx\locales\es.cpp src\jadyx\locales\registry.cpp /Fo:build-uwp\game-menu-gate\ /Fe:build-uwp\game-menu-gate\' + $menuTest + '.exe')
     $menuCommands += 'if not "%errorlevel%"=="0" exit /b 1'
     $menuCommands += ('build-uwp\game-menu-gate\' + $menuTest + '.exe')
     $menuCommands += 'if not "%errorlevel%"=="0" exit /b 1'

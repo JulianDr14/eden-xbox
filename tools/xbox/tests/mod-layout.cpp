@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/eden_uwp/mods/mod_layout.cpp.
+// Build with src/jadyx/mods/mod_layout.cpp.
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
-#include "eden_uwp/mods/mod_layout.h"
-#include "eden_uwp/mods/mod_model.h"
+#include "jadyx/mods/mod_layout.h"
+#include "jadyx/mods/mod_model.h"
 
 namespace {
-using namespace EdenXbox::Mods;
+using namespace Jadyx::Mods;
 
 constexpr const char* Game = "0100AAAABBBB0000";
 

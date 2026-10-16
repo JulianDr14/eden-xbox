@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cstdio>
 #include <cstdlib>
-#include "eden_uwp/controller_style.h"
+#include "jadyx/controller_style.h"
 
 int main() {
-    using namespace EdenXbox;
+    using namespace Jadyx;
     using S = ConsoleControllerStyle;
     auto check = [](bool ok) { if (!ok) std::abort(); };
     const auto bit = [](std::uint32_t b) { return 1U << b; };

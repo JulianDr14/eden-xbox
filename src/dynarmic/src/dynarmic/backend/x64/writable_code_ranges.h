@@ -1,5 +1,5 @@
 /* This file is part of the dynarmic project.
- * Copyright (c) 2026 eden-xbox contributors
+ * Copyright (c) 2026 Jadyx contributors
  * SPDX-License-Identifier: 0BSD
  */
 

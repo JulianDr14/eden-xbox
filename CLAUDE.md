@@ -1,4 +1,4 @@
-# CLAUDE.md — eden-xbox (repo pointer)
+# CLAUDE.md — Jadyx (repo pointer)
 
 > Slim by design. Coordination lives OUTSIDE this repo so it does not duplicate across every agent's
 > clone. This file points there and records the canonical layout, build/run, and architecture map.

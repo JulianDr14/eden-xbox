@@ -1,16 +1,16 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/eden_uwp/mods/{mod_installer,mod_archive,mod_layout,mod_manifest}.cpp, libarchive's
+// Build with src/jadyx/mods/{mod_installer,mod_archive,mod_layout,mod_manifest}.cpp, libarchive's
 // reader (externals/libarchive) and nlohmann_json's include folder.
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include "eden_uwp/mods/mod_installer.h"
+#include "jadyx/mods/mod_installer.h"
 #include "stored_zip.h"
 
 namespace {
-using namespace EdenXbox::Mods;
+using namespace Jadyx::Mods;
 namespace fs = std::filesystem;
 
 constexpr std::uint64_t Title = 0x0100AAAABBBB0000;

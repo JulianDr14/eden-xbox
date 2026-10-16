@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Resolves eden-uwp.exe RVAs to functions and source lines with the build's PDB, through the
+"""Resolves jadyx.exe RVAs to functions and source lines with the build's PDB, through the
 Windows SDK's dbghelp.dll. Shared by resolve-rva.py and profile-report.py."""
 import ctypes
 import ctypes.wintypes as wt

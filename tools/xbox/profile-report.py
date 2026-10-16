@@ -3,7 +3,7 @@
 """Turns the in-process sampling profile (boot.cfg "profile=1", LocalState/eden/log/eden_profile.txt)
 into a bottleneck report, with the build's PDB.
 
-    python tools/xbox/profile-report.py eden_profile.txt [--exe build-uwp/bin/eden-uwp.exe]
+    python tools/xbox/profile-report.py eden_profile.txt [--exe build-uwp/bin/jadyx.exe]
         [--window N[-M]] [--top 25] [--out report.md] [--folded profile.folded]
 
 The report starts with a verdict (which threads are saturated and what fills them), then per
@@ -29,7 +29,7 @@ from pdb_symbols import Resolver, pe_timestamp  # noqa: E402
 JIT = "[JIT guest code]"
 SATURATED = 0.85  # of one core
 
-# Subsystem of a sample: the first eden-uwp.exe frame from the leaf that matches a rule.
+# Subsystem of a sample: the first jadyx.exe frame from the leaf that matches a rule.
 SUBSYSTEMS = [
     (re.compile(r"TextureCache|ImageView|\bImage::|ImageBase|ASTC|Astc|Unswizzle|Swizzle"),
      "texture cache"),
@@ -124,7 +124,7 @@ class Symbolizer:
         self.cache = {}
 
     def frame(self, token, leaf):
-        """(display name, is it eden-uwp.exe code)."""
+        """(display name, is it jadyx.exe code)."""
         key = (token, leaf)
         cached = self.cache.get(key)
         if cached is not None:
@@ -178,7 +178,7 @@ def select_windows(profile, spec):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("profile")
-    parser.add_argument("--exe", default=os.path.join("build-uwp", "bin", "eden-uwp.exe"))
+    parser.add_argument("--exe", default=os.path.join("build-uwp", "bin", "jadyx.exe"))
     parser.add_argument("--window", help="window number or range (e.g. 3 or 2-5); all by default")
     parser.add_argument("--top", type=int, default=25)
     parser.add_argument("--out", help="write the report here instead of printing it")
@@ -197,7 +197,7 @@ def main():
 
     exe = args.exe if os.path.exists(args.exe) else None
     if exe is None:
-        emit(f"> {args.exe} not found: eden-uwp.exe frames stay as RVAs.")
+        emit(f"> {args.exe} not found: jadyx.exe frames stay as RVAs.")
     elif profile.timestamp is not None and pe_timestamp(exe) != profile.timestamp:
         emit(f"> WARNING: {exe} (time stamp 0x{pe_timestamp(exe):08x}) is not the build that "
              f"wrote the profile (0x{profile.timestamp:08x}): function names will be wrong.")

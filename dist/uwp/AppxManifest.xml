@@ -3,7 +3,7 @@
   SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
   SPDX-License-Identifier: GPL-3.0-or-later
 
-  Package manifest for the Phase-2 / GATE-2 headless boot appx (src/eden_uwp).
+  Package manifest for the Phase-2 / GATE-2 headless boot appx (src/jadyx).
   Sideloaded through the Xbox Device Portal in Dev Mode; see docs/xbox/xbox_deploy.md.
 
   Identity/Publisher must match the signing certificate's subject exactly, or the
@@ -14,14 +14,14 @@
     xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
     IgnorableNamespaces="uap">
 
-  <Identity Name="EdenEmuProject.EdenXbox"
-            Publisher="CN=EdenXboxDev"
+  <Identity Name="Jadyx"
+            Publisher="CN=JadyxDev"
             Version="0.2.92.1"
             ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>Eden Xbox (headless boot)</DisplayName>
-    <PublisherDisplayName>Eden Emulator Project</PublisherDisplayName>
+    <DisplayName>Jadyx</DisplayName>
+    <PublisherDisplayName>Jadyx</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 
@@ -49,10 +49,10 @@
   <Applications>
     <!-- EntryPoint for a plain C++/WinRT CoreApplication app (wWinMain + IFrameworkView, see
          uwp_boot.cpp) is the conventional "<exe>.App" moniker; there is no activatable class. -->
-    <Application Id="App" Executable="eden-uwp.exe" EntryPoint="eden-uwp.App">
+    <Application Id="App" Executable="jadyx.exe" EntryPoint="Jadyx.App">
       <uap:VisualElements
-          DisplayName="Eden Xbox"
-          Description="Headless GATE-2 boot: runs a bundled homebrew NRO through the dynarmic JIT."
+          DisplayName="Jadyx"
+          Description="Jadyx: a Nintendo Switch emulator for Xbox Series X|S Dev Mode, based on Eden."
           BackgroundColor="#1C1C1C"
           Square150x150Logo="Assets\Square150x150Logo.png"
           Square44x44Logo="Assets\Square44x44Logo.png">

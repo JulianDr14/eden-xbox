@@ -7,7 +7,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
   <img src="dist/qt_themes/default/icons/256x256/eden.png" alt="Eden logo" width="128">
 </p>
 
-<h1 align="center">eden-xbox</h1>
+<h1 align="center">Jadyx</h1>
 
 <p align="center">
   Eden, the Nintendo Switch emulator, rebuilt as a UWP app for <b>Xbox Series X|S in Developer Mode</b>,<br>
@@ -16,7 +16,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 </p>
 
 <p align="center">
-  <img src="docs/xbox/screenshots/library.jpg" alt="eden-xbox game library with four games" width="800">
+  <img src="docs/xbox/screenshots/library.jpg" alt="Jadyx game library with four games" width="800">
   <br>
   <sub>The game library, built for a controller on the TV.</sub>
 </p>
@@ -198,7 +198,7 @@ tried before it goes to the console.
 flowchart TB
     rom[/"Switch game<br/>.nsp · .xci · .nro"/]
 
-    subgraph front["eden_uwp · front end"]
+    subgraph front["jadyx · front end"]
         direction LR
         lib["Library<br/>cover art · USB and external folders"]
         menu["In-game menu<br/>configuration panel"]
@@ -259,10 +259,10 @@ Where things live:
 
 | Path | What |
 | --- | --- |
-| `src/eden_uwp/` | Front end: CoreWindow boot, library and its metadata cache, in-game menu, settings, interface languages (`locales/`), controllers and keyboard, file import, external storage, `eden_uwp_diag.txt` |
+| `src/jadyx/` | Front end: CoreWindow boot, library and its metadata cache, in-game menu, settings, interface languages (`locales/`), controllers and keyboard, file import, external storage, `jadyx_diag.txt` |
 | `src/dynarmic/` | The JIT, with W^X for the AppContainer, the warm-up profiles and compact block metadata |
 | `src/common/` | Shared pieces this port added to: the memory ledger, the spin-then-block core wait, fiber stacks that grow on demand, Pulse's archive format |
-| `src/core/pulse_*` | Pulse: capture and restore of the guest process (threads, memory, kernel objects) and of each HLE service's state; the sessions in the library live in `src/eden_uwp/pulse_sessions.*` |
+| `src/core/pulse_*` | Pulse: capture and restore of the guest process (threads, memory, kernel objects) and of each HLE service's state; the sessions in the library live in `src/jadyx/pulse_sessions.*` |
 | `src/video_core/renderer_d3d12/` | The D3D12 renderer: scheduler, buffer and texture caches, pipelines, root signatures, presentation (see [Inside the renderer](#inside-the-renderer)) |
 | `src/shader_recompiler/` | Eden's shader recompiler, with the adjustments the D3D12 profile needs |
 | `tools/xbox/mesa/` | Our additions to Mesa's `spirv_to_dxil` (pipeline linking, integer sampling) |
@@ -473,8 +473,8 @@ changes, or after **Settings > System > Clear library cache**. One background wo
 cache in priority order: the visible page and its neighbours first, then every title already
 cached, then the remaining games in short batches that give way as soon as the player changes page.
 
-**Languages.** Every visible string has an id (`src/eden_uwp/localization.h`), and each language is
-one catalog in `src/eden_uwp/locales/`. Catalogs are built at compile time: a missing, repeated or
+**Languages.** Every visible string has an id (`src/jadyx/localization.h`), and each language is
+one catalog in `src/jadyx/locales/`. Catalogs are built at compile time: a missing, repeated or
 empty translation stops the build, so a half-translated screen cannot ship. Placeholders are
 positional (`{0}`), plurals follow the language's CLDR rule, and the interface language is picked
 from Windows' preferred languages with BCP 47 fallback (`es-CO` → `es` → English). English and
@@ -550,7 +550,7 @@ moment, instead of booting it from the start. The library marks a game with a sa
   finishes. A session belongs to the build that saved it; after an update it is kept but
   not resumed. Sessions live in `LocalState\eden\pulse\sessions` with a 20 GiB quota, and can be
   turned off in **Settings > System > Pulse sessions** or discarded per game from its options.
-- **Its own log.** `LocalState\eden_pulse.txt` records every save, resume and refusal, and the frames
+- **Its own log.** `LocalState\jadyx_pulse.txt` records every save, resume and refusal, and the frames
   shown in each of the first 30 seconds after a resume.
 
 Design, phases and evidence: [docs/xbox/xbox_pulse.md](docs/xbox/xbox_pulse.md) (in Spanish).
@@ -561,14 +561,14 @@ Requirements: an Xbox Series X|S in Developer Mode, the package you built (see
 [Building](#building)), and your own `prod.keys`, `title.keys`, firmware and games.
 
 1. Open the Device Portal at `https://<console-ip>:11443`.
-2. Install `eden-xbox.appx` together with its `Microsoft.VCLibs.x64.14.00.appx` dependency.
+2. Install `jadyx.appx` together with its `Microsoft.VCLibs.x64.14.00.appx` dependency.
 3. In the app's settings on the console, set it to **Game** mode. Otherwise the memory limit is much
    lower than the 5120 MiB the emulator expects.
 4. Start the app. In the configuration panel, import keys and firmware from a folder.
 5. Add games: copy them to the app's `LocalState\games` folder with the Device Portal file explorer,
    or add an external folder from the library.
 
-If something fails, `eden_uwp_diag.txt` (in `LocalState`) and `eden\log\eden_log.txt` describe what
+If something fails, `jadyx_diag.txt` (in `LocalState`) and `eden\log\eden_log.txt` describe what
 happened. The diagnostic switches are listed in [docs/xbox/xbox_deploy.md](docs/xbox/xbox_deploy.md).
 
 ## Building
@@ -582,9 +582,9 @@ powershell -ExecutionPolicy Bypass -File tools\xbox\build-spirv-to-dxil.ps1
 
 # Configure and build the app
 tools\xbox\build-env.bat cmake --preset uwp-x64
-tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp
+tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target jadyx
 
-# Package for the console (build-uwp\package\eden-xbox.appx)
+# Package for the console (build-uwp\package\jadyx.appx)
 powershell -ExecutionPolicy Bypass -File tools\xbox\package-appx.ps1 -Library
 
 # Or build, register and launch it on this PC
@@ -613,7 +613,7 @@ This fork stands on other people's work:
 - yuzu, Ryujinx, Sudachi, Citron, Torzu, Suyu and Ryubing, and everyone who worked on the projects
   Eden comes from.
 
-eden-xbox is an independent fork. It is not affiliated with or endorsed by the Eden project,
+Jadyx is an independent fork. It is not affiliated with or endorsed by the Eden project,
 Nintendo or Microsoft. Please do not report problems from this fork to Eden.
 
 ## License

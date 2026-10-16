@@ -60,7 +60,7 @@ struct ThreadLocalData {
     std::optional<KThread> raw_thread;
     KThread* current_thread = nullptr;
     KThread* thread = nullptr;
-    u64 generation = 0; // eden-xbox: the KernelCore these fields belong to
+    u64 generation = 0; // Jadyx: the KernelCore these fields belong to
     u8 host_thread_id = UINT8_MAX;
     bool is_phantom_mode_for_singlecore = false;
     bool lock = false;
@@ -85,7 +85,7 @@ struct KernelCore::Impl {
     // so it will be statically given a TLS slot anyways.
     static inline thread_local ThreadLocalData tls_data = {};
 
-    // eden-xbox: tls_data outlives the kernel. A host thread that drives one System after another
+    // Jadyx: tls_data outlives the kernel. A host thread that drives one System after another
     // (the Pulse gate destroys and rebuilds it in place) kept the dummy KThread made for the first
     // kernel and used it in every later one, a thread of a destroyed kernel whose stale state could
     // fail the termination of the next application process (it then kept its JITs alive). Every
@@ -221,7 +221,7 @@ struct KernelCore::Impl {
             }
         }
 
-        // eden-xbox: a dangling thread keeps its 4 MiB host fiber (two stacks) alive. A frontend
+        // Jadyx: a dangling thread keeps its 4 MiB host fiber (two stacks) alive. A frontend
         // that returns to its game list without restarting (the Xbox one) lost ~300 MiB per game
         // that way. The cores and the CPU manager are stopped, so no fiber runs again: free the
         // stacks of every one still alive. Weak references, as the dangling objects themselves
@@ -265,7 +265,7 @@ struct KernelCore::Impl {
             manager->RequestStop();
         closing.clear();
 
-        // eden-xbox: let every service process finish its own teardown before the cores go down.
+        // Jadyx: let every service process finish its own teardown before the cores go down.
         // AM destroys its applets there; cut short, an applet keeps the application process (and
         // its JIT) alive past the kernel, and HID's timing events past the System.
         std::unique_lock lk{server_lock};

@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cassert>
 #include <string>
-#include "eden_uwp/storage_path.h"
+#include "jadyx/storage_path.h"
 
 int main() {
-    using namespace EdenXbox;
+    using namespace Jadyx;
     for (const auto* relative : {"", "game.nsp", "Games/Title.xci", "a/b/c.nro"}) {
         const auto parsed = ParseStoragePath(MakeStoragePath("eden-games-012345", relative));
         assert(parsed && parsed->token == "eden-games-012345" && parsed->relative == relative);

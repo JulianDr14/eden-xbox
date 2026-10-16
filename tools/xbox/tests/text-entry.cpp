@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cstdio>
 #include <cstdlib>
-#include "eden_uwp/text_entry.h"
+#include "jadyx/text_entry.h"
 
 int main() {
-    using namespace EdenXbox;
+    using namespace Jadyx;
     auto check = [](bool ok) { if (!ok) std::abort(); };
 
     // An empty name starts with a capital; Shift then releases itself.

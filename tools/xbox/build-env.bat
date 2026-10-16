@@ -6,7 +6,7 @@ REM Sets up a UWP/Store-CRT build environment for the uwp-x64 preset, then runs 
 REM (or leaves an interactive shell if you pass nothing). Run from cmd or PowerShell, NOT Git Bash.
 REM
 REM   tools\xbox\build-env.bat cmake --preset uwp-x64
-REM   tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target eden-uwp
+REM   tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target jadyx
 REM
 REM The three-step dance in docs/xbox/uwp_build.md is easy to get subtly wrong and fails SILENTLY (you
 REM get a desktop, non-Store-CRT build that compiles and then behaves oddly on-console), so this

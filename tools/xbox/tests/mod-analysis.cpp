@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2026 JulianDr14
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Build with src/eden_uwp/mods/mod_inspect.cpp.
+// Build with src/jadyx/mods/mod_inspect.cpp.
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include "eden_uwp/mods/mod_analysis.h"
-#include "eden_uwp/mods/mod_inspect.h"
+#include "jadyx/mods/mod_analysis.h"
+#include "jadyx/mods/mod_inspect.h"
 
 namespace {
-using namespace EdenXbox::Mods;
+using namespace Jadyx::Mods;
 namespace fs = std::filesystem;
 
 void Check(bool ok, const char* what) {
