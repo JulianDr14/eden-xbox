@@ -349,8 +349,10 @@ void RendererD3D12::ShowGameMenu(std::optional<MenuImage> menu) {
     try {
         FrameLease frame = present_manager.AcquireFrame();
         // The guest is paused: blit its last frame again (the menu is drawn with it), or show the
-        // menu on black when that frame is not a GPU image.
-        if (!blit_ready || !last_framebuffer || !CompositeAccelerated(*last_framebuffer, *frame)) {
+        // menu on black when that frame is not a GPU image. A screen of its own hides that frame.
+        const bool own_screen = game_menu && game_menu->fill_screen;
+        if (own_screen || !blit_ready || !last_framebuffer ||
+            !CompositeAccelerated(*last_framebuffer, *frame)) {
             CommandStream* const cmd = scheduler.CommandList();
             frame->Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
             constexpr float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -366,6 +368,15 @@ void RendererD3D12::ShowGameMenu(std::optional<MenuImage> menu) {
 void RendererD3D12::DrawGameMenu(CommandStream* cmd, PresentFrame& frame) {
     if (!game_menu || game_menu->width == 0 || game_menu->height == 0) {
         return;
+    }
+    if (game_menu->fill_screen) {
+        // Over the guest frame too, when the guest presents while the screen is up.
+        frame.Transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const u32 rgb = game_menu->fill;
+        const float color[4] = {static_cast<float>((rgb >> 16) & 0xFF) / 255.0f,
+                                static_cast<float>((rgb >> 8) & 0xFF) / 255.0f,
+                                static_cast<float>(rgb & 0xFF) / 255.0f, 1.0f};
+        cmd->ClearRenderTargetView(frame.rtv, color, 0, nullptr);
     }
     // Clipped to the screen; the frontend sizes the image to fit, this only guards a resize.
     const u32 width = std::min(game_menu->width, swapchain.Width());

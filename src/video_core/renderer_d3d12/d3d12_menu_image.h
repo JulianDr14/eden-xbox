@@ -23,6 +23,10 @@ struct MenuImage {
     u32 width{};
     u32 height{};
     std::vector<u8> pixels;
+    /// Whether the whole screen is filled with `fill` (0xRRGGBB) under the image instead of
+    /// showing the guest's frame: a screen of its own, not a menu over the game.
+    bool fill_screen{};
+    u32 fill{};
 };
 
 /// The screen the menu is shown on (the back buffer's size), {0, 0} unless the renderer is the
