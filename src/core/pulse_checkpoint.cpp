@@ -36,6 +36,7 @@
 #include "core/hle/kernel/pulse_wait_graph.h"
 #include "core/hle/service/hid/hid_server.h"
 #include "core/hle/service/hle_ipc.h"
+#include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/ns/platform_service_manager.h"
 #include "core/hle/service/nvdrv/core/container.h"
 #include "core/hle/service/nvdrv/core/nvmap.h"
@@ -208,7 +209,12 @@ private:
         if (const auto found = ids.find(event); found != ids.end()) {
             return {found->second, ids.at(readable)};
         }
-        const auto kind = event->GetOwner() == process ? ObjectKind::Event : ObjectKind::ServiceEvent;
+        // An event its service already closed has no signaller left: the guest's handle is all
+        // that keeps it, so it is stored and rebuilt as an application event.
+        const auto kind = event->GetOwner() == process ||
+                                  Service::KernelHelpers::IsClosedServiceEvent(event)
+                              ? ObjectKind::Event
+                              : ObjectKind::ServiceEvent;
         const auto event_id = Add(event, kind, 0);
         return {event_id, Add(readable, ObjectKind::ReadableEvent, event_id)};
     }
@@ -641,8 +647,15 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
         const auto* event = static_cast<const Kernel::KEvent*>(registry.Objects()[i]);
         const auto found = exported.find(event);
         if (found == exported.end()) {
-            const auto* owner = event->GetOwner();
-            unexported.insert(owner ? owner->GetName() : "no process");
+            auto name = Service::KernelHelpers::EventName(event);
+            if (name.empty()) {
+                const auto* owner = event->GetOwner();
+                name = !owner             ? std::string{"unnamed event without owner"}
+                       : owner->GetName()[0] ? std::string{owner->GetName()}
+                                             : fmt::format("unnamed event of process {}",
+                                                           owner->GetProcessId());
+            }
+            unexported.insert(std::move(name));
             continue;
         }
         record.parent = found->second.first;

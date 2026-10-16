@@ -7,6 +7,7 @@
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_synchronization_object.h"
+#include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/os/mutex.h"
 
 namespace Service {
@@ -17,11 +18,13 @@ Mutex::Mutex(Core::System& system) : m_system(system) {
 
     // Register the event.
     Kernel::KEvent::Register(system.Kernel(), m_event);
+    KernelHelpers::NameEvent(m_event, "Service::Mutex");
 
     ASSERT(R_SUCCEEDED(m_event->Signal(system.Kernel())));
 }
 
 Mutex::~Mutex() {
+    KernelHelpers::ForgetEvent(m_event);
     m_event->GetReadableEvent().Close(m_system.Kernel());
     m_event->Close(m_system.Kernel());
 }
