@@ -424,13 +424,13 @@ std::string RememberFolder(const StorageFolder& folder, std::string_view prefix)
     return token;
 }
 
-std::string RememberGameFolder(const StorageFolder& folder) { return RememberFolder(folder, "eden-games-"); }
-std::string RememberContentFolder(const StorageFolder& folder) { return RememberFolder(folder, "eden-content-"); }
+std::string RememberGameFolder(const StorageFolder& folder) { return RememberFolder(folder, GameTokenPrefix); }
+std::string RememberContentFolder(const StorageFolder& folder) { return RememberFolder(folder, ContentTokenPrefix); }
 std::vector<StorageBrowserEntry> ContentFolderSources() {
     EnsureStorageApartment(); std::vector<StorageBrowserEntry> result;
     for (const auto& entry : StorageApplicationPermissions::FutureAccessList().Entries()) {
         const auto token = winrt::to_string(entry.Token);
-        if (!token.starts_with("eden-games-") && !token.starts_with("eden-content-")) continue;
+        if (!IsSourceToken(token)) continue;
         const auto name = std::filesystem::path{std::wstring{entry.Metadata}}.filename().wstring();
         result.push_back({MakeStoragePath(token), name.empty() ? L"USB" : name, true});
     }
@@ -444,7 +444,7 @@ LibraryScan ScanExternalGameFolders(std::stop_token stop) {
     for (const auto& entry : list.Entries()) {
         if (stop.stop_requested()) break;
         const auto token = winrt::to_string(entry.Token);
-        if (!token.starts_with("eden-games-")) continue;
+        if (!IsGameToken(token)) continue;
         if (++sources > MaxSources) { result.limited = true; break; }
         try {
             auto folder = list.GetFolderAsync(entry.Token).get();
@@ -552,7 +552,7 @@ bool RunRomStorageGate(bool restore, const std::function<void(std::string)>& dia
         require(bool(virtual_file->GetContainingDirectory()->GetFile("fixture.bin")), "sibling open failed");
         require(!fs->OpenFile(path, FileSys::OpenMode::ReadWrite), "writable external open allowed");
         require(!fs->OpenFile(MakeStoragePath(token, "../fixture.bin"), FileSys::OpenMode::Read), "traversal allowed");
-        require(!fs->OpenFile(MakeStoragePath("eden-games-missing", "fixture.bin"), FileSys::OpenMode::Read), "missing token opened");
+        require(!fs->OpenFile(MakeStoragePath("jadyx-games-missing", "fixture.bin"), FileSys::OpenMode::Read), "missing token opened");
         require(CheckExternalGame(path).empty(), "preflight failed");
         const auto scan = ScanExternalGameFolders({});
         unsigned catalog_entries = 0;

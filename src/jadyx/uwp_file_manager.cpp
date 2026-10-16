@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "jadyx/uwp_file_manager.h"
 #include "jadyx/localization.h"
+#include "jadyx/storage_path.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -112,14 +113,14 @@ FileSetupStatus ReadFileSetupStatus() {
     }
     for (const auto& entry : StorageApplicationPermissions::FutureAccessList().Entries()) {
         const auto token = winrt::to_string(entry.Token);
-        if (!token.starts_with("eden-games-")) continue;
+        if (!Jadyx::IsGameToken(token)) continue;
         auto name = std::filesystem::path{std::wstring{entry.Metadata}}.filename().wstring();
         result.sources.push_back({token, name.empty() ? std::wstring{I18n::Tr(I18n::Text::UsbFolder)} : name});
     }
     return result;
 }
 void ForgetGameFolder(std::string_view token) {
-    if (!token.starts_with("eden-games-")) throw std::invalid_argument("not a game folder token");
+    if (!Jadyx::IsGameToken(token)) throw std::invalid_argument("not a game folder token");
     StorageApplicationPermissions::FutureAccessList().Remove(winrt::to_hstring(token));
 }
 

@@ -13,7 +13,7 @@ int main() {
     std::filesystem::remove_all(root);
     const LibraryCache cache{root / "cache"};
 
-    const std::string game = "eden-usb:/eden-games-abc/sub/Game.nsp";
+    const std::string game = "jadyx-usb:/jadyx-games-abc/sub/Game.nsp";
     LibraryCacheRecord record{L"Título ñ", L"Estudio", std::vector<unsigned char>(5000, 0x5A),
                               0x0100ABCD00010000ULL, {0x55, 0xEE, 0x1A, 0x69, 0x14, 0x5D, 0xE0, 0x4E}};
     record.display_version = L"1.0.0";

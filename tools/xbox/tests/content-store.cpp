@@ -13,7 +13,7 @@ Revision Item(char id, unsigned version, Kind kind = Kind::Update) {
     r.id = std::string(64, id); r.application = 0x0100123400000000ULL;
     r.title = r.application | (kind == Kind::Update ? 0x800 : 0x1001);
     r.version = version; r.kind = kind; r.verified = true;
-    r.source = "eden-usb:/eden-games-test/content.nsp";
+    r.source = "jadyx-usb:/jadyx-games-test/content.nsp";
     return r;
 }
 int main() {

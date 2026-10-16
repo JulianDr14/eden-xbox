@@ -7,11 +7,19 @@
 #include <string_view>
 
 namespace Jadyx {
-inline constexpr std::string_view StoragePrefix = "eden-usb:/";
+inline constexpr std::string_view StoragePrefix = "jadyx-usb:/";
+inline constexpr std::string_view GameTokenPrefix = "jadyx-games-";
+inline constexpr std::string_view ContentTokenPrefix = "jadyx-content-";
 struct StoragePath {
     std::string token;
     std::string relative;
 };
+inline bool IsGameToken(std::string_view token) {
+    return token.starts_with(GameTokenPrefix);
+}
+inline bool IsSourceToken(std::string_view token) {
+    return IsGameToken(token) || token.starts_with(ContentTokenPrefix);
+}
 inline bool IsStoragePath(std::string_view path) {
     return path.starts_with(StoragePrefix);
 }
@@ -35,7 +43,7 @@ inline std::optional<StoragePath> ParseStoragePath(std::string_view path) {
     path.remove_prefix(StoragePrefix.size());
     const auto slash = path.find('/');
     const auto token = path.substr(0, slash);
-    if ((!token.starts_with("eden-games-") && !token.starts_with("eden-content-")) || token.size() > 100) return {};
+    if (!IsSourceToken(token) || token.size() > 100) return {};
     for (const unsigned char c : token)
         if (!(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') &&
             !(c >= '0' && c <= '9') && c != '-') return {};
