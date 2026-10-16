@@ -34,6 +34,14 @@ constexpr std::uint64_t DecodedLimit = 5120ULL << 20;
 // Long enough for the calls already in the kernel to return; a game that never gets there is
 // left without a session rather than kept waiting at the menu.
 constexpr auto CaptureBudget = std::chrono::seconds{3};
+// The renderer never knowingly leaves less than this free (D3D12 HeadroomTracker::RESERVE); a save
+// that would take the app below it is abandoned before the platform ends the app.
+constexpr std::uint64_t MemoryFloor = 64ULL << 20;
+// What a save adds on top: one image's readback at a time (16 MiB at 1080p), the writer's
+// blocks and the heap it leaves behind (+30 MiB measured), with margin.
+constexpr std::uint64_t SavePeak = 64ULL << 20;
+// How often a save looks at the headroom again while it writes.
+constexpr std::uint64_t MemoryCheckStep = 64ULL << 20;
 
 std::array<std::uint8_t, 32> Sha256(std::span<const std::uint8_t> data) {
     std::array<std::uint8_t, 32> digest{};
@@ -123,14 +131,27 @@ void Resume(Core::System& system, const Common::Pulse::Identity& identity,
     restore.Finish();
 }
 
-std::string Save(Core::System& system, const Common::Pulse::Identity& identity) {
+std::string Save(Core::System& system, const Common::Pulse::Identity& identity,
+                 const std::function<std::uint64_t()>& headroom) {
     try {
+        const auto require = [&](std::uint64_t needed) {
+            if (headroom && headroom() < needed) {
+                throw std::runtime_error("Pulse: not enough free memory to keep the session");
+            }
+        };
+        require(MemoryFloor + SavePeak);
         std::uint32_t retries{};
         const auto checkpoint =
             Core::Pulse::ProcessCheckpoint::CaptureAtBarrier(system, CaptureBudget, retries);
+        std::uint64_t next_check = MemoryCheckStep;
         Sessions().Publish(Common::Pulse::StorageKey(identity), identity, checkpoint.MaxEncodedSize(),
                            checkpoint.DecodedSize(),
-                           [&](Common::Pulse::Writer& writer) { checkpoint.Write(writer); });
+                           [&](Common::Pulse::Writer& writer) { checkpoint.Write(writer); }, {},
+                           [&](std::uint64_t written) {
+                               if (written < next_check) return;
+                               next_check = written + MemoryCheckStep;
+                               require(MemoryFloor);
+                           });
         return {};
     } catch (const std::exception& e) {
         void(system.Pause());
