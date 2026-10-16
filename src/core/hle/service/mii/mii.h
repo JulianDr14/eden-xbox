@@ -19,6 +19,13 @@ public:
                             std::shared_ptr<MiiManager> mii_manager, bool is_system_);
     ~IStaticService() override;
 
+    // Pulse: stateless; the database sessions it hands out store their metadata.
+    std::string_view PulseKind() const override {
+        return is_system ? "mii:e" : "mii:u";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override;
+
     std::shared_ptr<MiiManager> GetMiiManager();
 
 private:

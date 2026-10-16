@@ -67,6 +67,26 @@ public:
         manager->Initialize(metadata);
     }
 
+    // Pulse: the session metadata. The database itself lives in the host system save, which a
+    // fresh boot loads again; a restored update counter that no longer matches only makes the
+    // guest's next IsUpdated report a change, and it reads the database again.
+    std::string_view PulseKind() const override {
+        return "mii:IDatabaseService";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override {
+        auto& out = capture.state;
+        out.U32(metadata.interface_version);
+        out.U32(metadata.magic);
+        out.U64(metadata.update_counter);
+    }
+    void PulseRestoreMetadata(Pulse::HandlerRestore& restore) {
+        auto& in = restore.state;
+        metadata.interface_version = in.U32();
+        metadata.magic = in.U32();
+        metadata.update_counter = in.U64();
+        in.End();
+    }
+
 private:
     Result IsUpdated(Out<bool> out_is_updated, SourceFlag source_flag) {
         LOG_DEBUG(Service_Mii, "called with source_flag={}", source_flag);
@@ -316,6 +336,20 @@ Result IStaticService::GetDatabaseService(
     *out_database_service = std::make_shared<IDatabaseService>(system, manager, is_system);
 
     R_SUCCEED();
+}
+
+SessionRequestHandlerPtr IStaticService::PulseRestore(std::string_view kind,
+                                                      Pulse::HandlerRestore& restore) {
+    if (kind == PulseKind()) {
+        restore.state.End();
+        return shared_from_this();
+    }
+    if (kind != "mii:IDatabaseService") {
+        return nullptr;
+    }
+    auto service = std::make_shared<IDatabaseService>(system, manager, is_system);
+    service->PulseRestoreMetadata(restore);
+    return service;
 }
 
 std::shared_ptr<MiiManager> IStaticService::GetMiiManager() {
