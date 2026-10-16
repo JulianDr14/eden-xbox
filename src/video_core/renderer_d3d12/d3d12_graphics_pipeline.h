@@ -24,6 +24,7 @@
 #include "video_core/renderer_d3d12/d3d12_buffer_cache.h"
 #include "video_core/renderer_d3d12/d3d12_device.h"
 #include "video_core/renderer_d3d12/d3d12_pso_cache.h"
+#include "video_core/renderer_d3d12/d3d12_pipeline_transition_order.h"
 #include "video_core/renderer_d3d12/d3d12_root_signature.h"
 #include "video_core/renderer_d3d12/d3d12_stage_bindings.h"
 #include "video_core/renderer_d3d12/d3d12_texture_cache.h"
@@ -169,19 +170,9 @@ public:
         if (key == current_key) {
             return this;
         }
-        for (size_t i = 0; i < transition_keys.size(); ++i) {
-            if (transition_keys[i] != current_key) {
-                continue;
-            }
-            GraphicsPipeline* const next = transitions[i];
-            if (i != 0) {
-                // One step forward per hit: the transitions a frame takes most end up first,
-                // where the search compares fewer whole keys before finding them.
-                std::swap(transition_keys[i], transition_keys[i - 1]);
-                std::swap(transitions[i], transitions[i - 1]);
-            }
-            return next;
-        }
+        const size_t index = FindPipelineTransition<GraphicsPipelineCacheKey>(
+            transition_keys, transition_order, current_key);
+        if (index < transitions.size()) return transitions[index];
         return nullptr;
     }
 
@@ -285,6 +276,7 @@ private:
 
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;
+    std::vector<u32> transition_order;
 
     ComPtr<ID3D12PipelineState> pipeline_state;
     GraphicsPsoCache* const pso_cache;

@@ -3712,3 +3712,61 @@ no p99, ni coste del dibujado, ni prueba de gameplay/Series). Objeto HUD UWP
 compila correctamente. Build completo eden-uwp sin trabajo pendiente; versión
 0.2.89.0 empaquetada y lanzada en PC, biblioteca esperando selección de juego.
 Validación visual del HUD durante gameplay y gate Series pendientes.
+
+## 14 octubre 2026: preparación CPU de draws
+
+Investigación Microsoft/Khronos/AMD/Dolphin/Xenia y Vulkan local; baseline actual
+Game D PC confirma~4082draw/frame,9,465us/draw, descriptors/bindings3,1us como
+fase mayor. Candidato: metadatos shader
+precalculados compartidos, claves sampler prestadas del nodo estable y uniform
+stream4KiB por submission (copias guest preservadas, CBV256B, fallback>4KiB).
+Gates diferenciales200000draws/512layouts, sampler rehash/reset yGPU3102800bytes
+exactos inline/worker pasan debug limpio; UWP incremental/link pasa. Histograma
+opt-in sin clocks/updates fuera gpu_profile. Primera manualQ93s/retorno0,
+imagen igual confirmada, RenderError/Critical/asserts0; última ventana8,862us/draw
+frente9,465, pero densidad de draws/caches diferente y baseline inicial parcialmente
+con builds de fondo: no mejora causal deFPS certificada. Segunda pareja A2/B2 sin
+compilar:8,216→7,333us/draw observado con3612/3573draw/frame, ambasQ/retorno0;
+no causalidad/estabilidad sostenida certificada. IA experimental retirada: solo~5%
+views ahorradas ypeorcaso más caro. Revisión final mueve reserva sampler antesde
+resource table/UBOs para evitar Finish con referencias al tick anterior; gateGPU
+conagotamiento realdelheap pasa inline/worker. FinalC Q76s/retorno0/RenderError-
+Critical-assert0:3612→3603draw/frame,8,216→7,664us/draw (6,72%menor observado),
+29,672→27,612msDraw/frame; FPS15,84→15,01, sin mejoraFPS sostenida ni causalidad
+demostrada (más churn/idle). Commit máximo muestreado4537→4534MiB. Cap5120 conservado;
+no asumir presupuestoJIT/staging históricos
+por encima de overrides por juego actuales. Sin commit/push; diseño, fuentes,
+evidencia y límites en [xbox_draw_preparation.md](xbox_draw_preparation.md).
+PaquetePC0.2.89.0 en entrega única, exe idéntico a C, config normal sinperfil/hotkeys;
+721bloques/ZIPCRC/CMS criptográfico pasan. verification.json anticuado .88 archivado
+y actualizado (Series=false). Símbolos/exe final privados en test-results; no mezclar
+PDB de otro PE con misma versión. Series/replay determinista/prolongada pendientes.
+
+14oct logsSeries .89 recibidos enDownloads: Game DUSB, SraKmd_arden/SM6.4/UMA,
+cuatroventanas300frames. Última19,23FPS,4354draw/frame,52ms/frame,maxgap222,53ms,
+GPU8,834ms/frame;1465recursosnuevos/894uploads. PerfilporDrawoff: no medir us/draw
+ni certificar mejora respectoPC/baseline. RenderError/Critical/assert/removed0,
+maxcommit4447/5120MiB. Inputengines/Networknoinit y11shaderfallbackwarnings presentes,
+sinfalloDXIL/PSO demostrado. Termina al abrirmenú109s, sinQ/retorno0: ejecución
+gameplay observada, no cierrelimpio ni visual/estabilidad/rendimiento certificados.
+Evidencia ylímites en xbox_draw_preparation.md; paquete/código intactos, sincommit.
+
+Game D30FPS/Series0.2.90: logs+perfil archivados, ventana densa17,435FPS/36,19ms draw preparation con instrumentos. CoreTiming espera activa casi1core; causalidad pendiente. Snapshot UBO exacto pasa GPU pero microbench peor: integración retirada, evidencia conservada. Investigación Microsoft/AMD/Khronos/Xenia/Dolphin y próximos gates en xbox_draw_preparation.md. Sin commit ni30FPS certificados.
+
+Continuación DrawPreparation14oct: usuario confirma PCtemplo/Seriescampoabierto. A/B PCnormal mismoexe, asyncopt-in no mejora global (3555/3548draws:19,716/18,860FPS; otra23,234conmenosdraws). AmbasQ/0/RenderError0. Candidato índices de transición elimina swaps1072B; diferencial+microbench pasa, gameplaypendiente. Estadística recorder porchunk y adquisición locks solo gpu_profile; timer_profile1 independiente preserva deadlines. Gates recorder/GPU32000draws/Event pasan, objetosUWPpasan, link pesado solicitado alusuario. Evidencia/diseno en xbox_draw_preparation.md; sincommit ni30FPS certificados.
+
+GateDrawPreparacionPC0.2.90.1 cerradoQ/0/RenderError0: lock acquisition70,64nsdraw, sin>=200us, no justificaquitarlocks. Timerwait94,57%elapsedenMWAITX, noCPUbusy; deadlinesintactos. PaqueteSeries0.2.90.2 listo biblioteca/gpu_profile+timer_profile/sin sampling, CRC721bloques/CMSmath/símboloscorrectos. Medir campoabierto; FPSnormal/ABy30pendientes. xbox_draw_preparation.md contiene evidencia, sincommit.
+
+Uploadcopy15oct: candidatoopt-in para<=512B mantienelecturasguest/invalidación; copiaSSE2regularsinleerUPLOAD. Gates5889/2,54MBGPUTambosrecorders+guardpages, buildUWP120+25 e integrado pasan. Trampa: harnessdesktopmemcpyVCRUNTIME140 noApp; benchmarkrepetidoconexportStoreCRT, verinforme. PC0.2.90.4 referenciamismoexeopciónoffmanual enprogreso; on/FPS/Seriespendiente. Sincommit.
+# Auditoría recursos/draw — 15 octubre 2026
+
+Candidato0.2.90.5: reutilización TSC solo durante GatherStageViews, cuatro entradas
+con índice completo, defaultoff draw_sampler_reuse1. No retener IDs de imágenes:
+FillImageViews puede borrar/recrear y reintentar. Uploadcopy sigue opt-in separado.
+Build10+4ops y gate lógico2560000consultas pasan; GPU slabs/samplers/async y copias
+guardpage pasan con debuglimpio. Profilingagregado tamañosUBO/reusosTSC y muestreo
+BindHostStageBuffers1/64draws, normal sin relojes adicionales porbinding. A/BPC y
+Series pendientes. Experimento CopyDescriptorsSimple descartado por resultados
+mixtos en RadeonPro5300M; no reemplazar batch por recomendación genérica.
+Parser ahora admite ventanas sinprofiling con Draw=null y fixtures pasan.
+Detalle/fuentes/evidencia en xbox_draw_preparation.md. Sincommit.

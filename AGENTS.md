@@ -1022,3 +1022,55 @@ Versión0.2.88.1 conservada, sin commit/push; docs/xbox/xbox_frontend_refactor.m
 Guardado frontend solicitado14oct: commits separados por catálogo, acciones,
 captura modal, listas, asignaciones y pruebas; documentación aparte. Autor
 JulianDr14, sin coautoría automática ni push. Hashes en xbox_frontend_refactor.md.
+
+14oct preparación CPUdraw: baselineGame DPC~3600--4080draw/frame. Candidato conserva
+metadata compartida precalculada, claves sampler sincopias y uniformstream4KiB por
+submission/CBV256B; siempre copia guest y conserva fences/ring/presupuestos. Sampler
+table se reserva antesde resource table/UBOs porque heaplleno haceFinish. ShadowIA
+ensayado retirado:~5%views ahorradas ypeorcaso máscaro. UWPincremental/link,512layouts,
+rehash/reset sampler yGPU3102800bytes exactos con13agotamientosheap inline/worker
+pasan debuglimpio. A2/B2 sinbuilds:8,216→7,333us/draw observado,3612/3573drawframe,
+Q/retorno0 ambas; no atribucióncausal ni60FPS/Series certificados. FinalC trasretirar
+IA ycorregirorden:Q76s/retorno0/RenderError-Critical-assert0;8,216→7,664us/draw,
+3612/3603drawframe,6,72%menor observado peroFPS15,84→15,01 (churn/idle distintos),
+sinmejoraFPS sostenida certificada. Commitmáximomuestreado4537→4534MiB. EntregaPC
+0.2.89.0 actualizada confignormal sinperfil/hotkeys,721blocks/ZIPCRC/CMS pasan,
+Seriespendiente yverification.json corregido; ejefinal/PDBprivados entest-results.
+gpu_profile opt-in, cap5120, sincommit/push.
+Detalles/fuentes/límites: docs/xbox/xbox_draw_preparation.md.
+
+14oct Series0.2.89.0 Game DUSB: última ventana300frames19,23FPS/4354drawframe,
+GPU8,834msframe, maxgap222,53ms. RenderError-Critical/assert/removed0; commitmáximo
+muestreado4447/5120MiB. PerfilporDrawoff, sin comparaciónus/draw ni mejoraFPS
+certificada. Diagtermina menú/pausa109s, sinQ/retorno0; gameplaySeriesobservado,
+cierrelimpio/visual/prolongada/A-B pendientes. No hashbinario enlogs, no certificar
+identidadsoloporversión. Evidencia en test-results/draw-preparation/series-0.2.89.0-20261014;
+detalle en docs/xbox/xbox_draw_preparation.md. Sin cambiosfuncionales ni commit.
+
+DrawPreparation14oct continuación: PCtemplo/Seriescampoabierto confirmados. Recorder A/B PCmismoexe sinperfil no mejora global(19,716->18,860FPS con3555/3548draws); mantiene opt-in/off. Candidato transición intercambia índices en vezde claves1072B; diferencial y microbench pasan, FPSpendiente. Diagnóstico adquisiciónlocks/recorder porchunk solo gpu_profile, timer_profile1 independiente soloHostTiming sin alterar deadlines. BuildcompletoUWP autorizado y pasa, gateGPUintegrado pasa. PCcandidato0.2.91.0 normal lanzado, Qmanualpendiente; símbolosarchivados. Sincommit/calidadcambiada/30FPScertificados. Detalle/evidencia xbox_draw_preparation.md.
+
+Preferencia versionado usuario14oct: siguientes versiones0.2.90.1 y0.2.90.2 (incrementar cuarto componente). Gate histórico0.2.91.0 queda con identidadreal; candidatoPCcerradoQ/0/RenderError0 yvisual/audioigual. FPS20,978/21,493vs19,716observado, causalidadnoestablecida porcalentamiento/tiempo distinto. Próximo.90.1 diagnóstico locks/timer; detalle xbox_draw_preparation.md.
+
+GatePC0.2.90.1 Q/0/RenderError0: denso6,594usdraw/23,375msframe con instrumentos; locks70,64nsdraw,0>=200us,max144us: no contenciónsignificativa demostrada. HostTiming94,57%waitelapsed enCpuWaitForBits(MWAITX), noCPUbusy ni atribuciónFPS. Políticaintacta. Entrega0.2.90.2 bibliotecaplay/gpu_profile1/timer_profile1/samplingoff/recorderoff paraSeriescampoabierto; APPXrutaúnica/721bloques/CMSmath/símboloscorrectos, gateSeriespendiente. Sincommit/30FPScertificados; detalle/evidencia xbox_draw_preparation.md.
+
+Series0.2.90.2 revisada15oct: campoabierto18,242FPS/8,034usdraw/34,367msframe coninstrumentos; antes17,435/7,971conmasdrawsyotroperfil, sinmejorapordrawdemostrada. Locks98nsdraw/1>=200us; HostTiming0sleepsenventanadensa,margen1,003ms,MWAITXelapsednoCPUbusy. Visual/audioigualusuario, shutdownBackLibrary10normal, RenderError0, playtimeerrorregistrado. Entrega0.2.90.3mismoexeSINinstrumentos paraSeriesbaselineFPSnormal; CRC721/CMSmathcorrectos. Evidencia/diseno xbox_draw_preparation.md; sincommit/30certificados.
+
+Series0.2.90.3 normal15oct revisada: denso19,497FPS/4255,577drawsframe,51,29msmedia/p99=81,27ms,GPU9,02msframe; DrawNsno disponible. Ligera370,7drawsframe30FPS no certificacampoabierto. Retorno10biblioteca/RenderError0/Critical0; BQabandoned yplaytimeerroralcierre. Commitmaxmuestreado4476MiB. Sin30sostenidos ni mejora causal; evidenciaydetalle xbox_draw_preparation.md.
+
+Candidato15oct upload_copy1(defaultoff): SSE2storesregularesenuniformsgraphics<=512B, sinreutilizarcontenido ni cambiarlecturas/paginas/invalidation/fences.5889casos/2542624bytesGPUexactos inline/async+guardpages pasan; StoreCRTPC256B17,49->6,27nsaislado, noFPS/Series. BuildUWP120+25ops ygateintegrado pasan. PC0.2.90.4 referenciaopciónoff lanzada, Qmanualpendiente; mismoexeonposterior, noFPS certificado. Símbolosarchivados, paqueteactualesPCnoSeries; detalle/evidencia xbox_draw_preparation.md.
+
+Recursos/draw15oct: referenciaPC.90.4 Q77s/retorno0 archivada; dosventanas19,801/
+20,407FPS sinDrawNs. Candidato.90.5 draw_sampler_reuse1(defaultoff) resuelveTSC
+duplicados soloenGather,4entradas/fullindex, sinretenerentre draws/dispatches.
+2560000consultasfixture ybuild10+4ops pasan; gatesGPUslab/samplers/async/uploadcopy
+guardpage pasan debuglimpio. Instrumentosopt-in tamañosUBO/reusos ybinding1/64draws.
+CopyDescriptorsSimple descartado porresultadosmixtosPC; no cambioenproducción.
+PaqueteactualPCreferenciacon gpu_profile1/flagsoptimizacionesoff, noentregaSeries.
+A/Bmismoexe yvisual/Seriespendientes; noFPSmejoradosni30certificados. Sincommit.
+
+GatePC.90.5 amboson: Q73s/retorno0/RenderError0, visual/audioigualusuario.
+Ventana7,556usdraw/26,566msframe/15,677FPS vsreferencia9,452/27,319/14,446,
+pero3516vs2890draws-frame ychurn2524->1025 impidenatribuirmejoraFPScausal.
+Confirmado1301596consultasTSCevitadas/3138836(41,467%), no41%deCPUdraw.
+Firstchance0x80010012 trasexitingregistrada. Opcionesdefaultoff, normalA/B,
+separacióncandidatos ySeriespendientes. Evidencia/informe draw_preparation.

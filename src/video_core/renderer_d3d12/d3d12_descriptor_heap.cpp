@@ -439,7 +439,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
             LOG_INFO(Render, "D3D12: sampler table deduplication active ({} samplers)", count);
             logged_reuse = true;
         }
-        last_keys.assign(keys.begin(), keys.end());
+        last_keys = it->first;
         last_first = it->second;
         return {gpu_base.ptr + static_cast<u64>(it->second) * stride};
     }
@@ -447,6 +447,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
         // Tables already recorded may still be read by the GPU: only reuse the heap once idle.
         LOG_INFO(Render, "D3D12: sampler heap full ({} tables), resetting", tables.size());
         scheduler.Finish();
+        last_keys = {};
         tables.clear();
         used = 0;
     }
@@ -459,8 +460,8 @@ D3D12_GPU_DESCRIPTOR_HANDLE SamplerHeap::GetTable(
         return fmt::format("copying {} sampler descriptors", samplers.size());
     });
     used += count;
-    tables.emplace(std::vector<u64>(keys.begin(), keys.end()), first);
-    last_keys.assign(keys.begin(), keys.end());
+    const auto entry = tables.emplace(std::vector<u64>(keys.begin(), keys.end()), first).first;
+    last_keys = entry->first;
     last_first = first;
     if (!logged_cache) {
         LOG_INFO(Render, "D3D12: sampler table cached ({} samplers, {} of {} slots used)", count,

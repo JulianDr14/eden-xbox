@@ -45,6 +45,7 @@
 #include "common/scm_rev.h"
 #include "common/settings.h"
 #include "common/thread.h"
+#include "common/windows/timed_wait_profile.h"
 #include "common/windows/sampling_profiler.h"
 #include "common/windows/timer_resolution.h"
 #include "core/arm/cpu_profile.h"
@@ -133,6 +134,8 @@ void SetDredEnabled(bool enabled);         // d3d12_device.h
 void SetGpuBreadcrumbsEnabled(bool enabled); // d3d12_device.h
 void SetPipelineEviction(bool enabled);      // d3d12_pipeline_cache.h
 void SetDescriptorRemovalChecks(bool enabled); // d3d12_device.h
+void SetUniformUploadCopy(bool enabled);
+void SetDrawSamplerReuse(bool enabled);
 void SetAsyncRecording(bool enabled);          // d3d12_scheduler.h
 using AppMemoryQuery = bool (*)(u64& used, u64& limit); // d3d12_device.h
 void SetAppMemoryQuery(AppMemoryQuery query);            // d3d12_device.h
@@ -313,9 +316,12 @@ struct BootConfig {
     /// Make the D3D12 command list calls on a thread of their own, so the GPU thread only records
     /// them ("async_record=1"). Off by default until it has been played through on the console.
     bool async_record{};
+    bool upload_copy{}; ///< Experimental short uniform copies; default off.
+    bool draw_sampler_reuse{}; ///< Experimental gather-local TSC resolution; default off.
     /// Host timing waits sleep on a high-resolution timer and wait only its lateness on the CPU
     /// ("timer_sleep=0" waits the last timer tick on the CPU, as before).
     bool timer_sleep{true};
+    bool timer_profile{}; ///< HostTiming waits only; opt-in, separate from draw profiling.
     /// File name of a game in LocalState\games to boot instead of boot.nro (package-appx.ps1 -Game).
     std::string game;
     /// Eden's log filter (e.g. "*:Info HW.GPU:Debug"); empty keeps the default.
@@ -420,6 +426,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     Kernel::PhysicalCore::SetIdleSpinPolicy(config.idle_spin);
     // Read by the host timing thread's first wait.
     Common::SetPreciseTimerSleeps(config.timer_sleep);
+    Common::Windows::TimedWaitProfile::enabled.store(config.timer_profile, std::memory_order_relaxed);
     // Read by HostMemory when Core::System builds the DRAM, so it has to be set before that.
     // The 384-MiB Series experiment covered only 388 of 2637 MiB requested by Game C (15%). The
     // resulting fastmem fault/recompile storm was markedly slower than the page table, so Auto
@@ -482,6 +489,8 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
     Settings::values.async_presentation.SetValue(config.async_present);
     if (config.upscaling) ApplyUpscaling(*config.upscaling); // before the renderer exists
     D3D12::SetAsyncRecording(config.async_record);
+    D3D12::SetUniformUploadCopy(config.upload_copy);
+    D3D12::SetDrawSamplerReuse(config.draw_sampler_reuse);
     if (config.debug_layer) {
         Settings::values.renderer_debug = true;
         D3D12::SetGpuBasedValidation(config.gpu_validation);
@@ -2245,6 +2254,15 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         } else if (line == "gpu_profile=1") {
                             config.gpu_profile = true;
                             WriteDiag("boot.cfg: detailed D3D12 GPU-thread profiling enabled");
+                        } else if (line == "upload_copy=1") {
+                            config.upload_copy = true;
+                            WriteDiag("boot.cfg: short uniform write-combined copy enabled");
+                        } else if (line == "draw_sampler_reuse=1") {
+                            config.draw_sampler_reuse = true;
+                            WriteDiag("boot.cfg: draw-local sampler resolution reuse enabled");
+                        } else if (line == "timer_profile=1") {
+                            config.timer_profile = true;
+                            WriteDiag("boot.cfg: HostTiming requested waits/sleeps/spin elapsed profiling enabled");
                         } else if (line == "cpu_profile=1") {
                             config.cpu_profile = true;
                         } else if (line == "profile=1") {

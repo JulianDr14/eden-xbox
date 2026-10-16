@@ -20,6 +20,7 @@
 #include "common/div_ceil.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "common/write_combined_copy.h"
 #include "core/device_memory.h"
 #include "core/device_memory_manager.h"
 #include "core/memory.h"
@@ -475,10 +476,23 @@ void DeviceMemoryManager<Traits>::WriteBlock(DAddr address, const void* src_poin
 
 template <typename Traits>
 void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size) {
+    ReadBlockUnsafeCopy(address, dest_pointer, size,
+        [](void* dst, const void* src, size_t n) { std::memcpy(dst, src, n); });
+}
+
+template <typename Traits>
+void DeviceMemoryManager<Traits>::ReadBlockUnsafeToWriteCombined(DAddr address, void* dest_pointer, size_t size) {
+    ReadBlockUnsafeCopy(address, dest_pointer, size,
+        [](void* dst, const void* src, size_t n) { Common::CopyToWriteCombined(dst, src, n); });
+}
+
+template <typename Traits>
+template <typename Copy>
+void DeviceMemoryManager<Traits>::ReadBlockUnsafeCopy(DAddr address, void* dest_pointer, size_t size, Copy&& copy) {
     const std::size_t page_offset = address & Memory::YUZU_PAGEMASK;
     if (size <= Memory::YUZU_PAGESIZE - page_offset) {
         if (const u8* const page = CachedPagePointer(address)) {
-            std::memcpy(dest_pointer, page + page_offset, size);
+            copy(dest_pointer, page + page_offset, size);
             return;
         }
     }
@@ -492,7 +506,7 @@ void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_poin
             std::memset(dest_pointer, 0, copy_amount);
         },
         [&](size_t copy_amount, const u8* const src_ptr) {
-            std::memcpy(dest_pointer, src_ptr, copy_amount);
+            copy(dest_pointer, src_ptr, copy_amount);
         },
         [&](const std::size_t copy_amount) {
             dest_pointer = static_cast<u8*>(dest_pointer) + copy_amount;

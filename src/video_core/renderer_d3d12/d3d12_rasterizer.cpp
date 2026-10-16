@@ -20,6 +20,7 @@
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/perf_counters.h"
+#include "video_core/renderer_d3d12/d3d12_draw_metrics.h"
 #include "video_core/renderer_d3d12/d3d12_rasterizer.h"
 #include "video_core/renderer_d3d12/d3d12_scheduler.h"
 
@@ -117,7 +118,7 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     if (conditional_rendering.SkipsDraws()) {
         return;
     }
-    VideoCore::Perf::ScopedNsTimer draw_timer{VideoCore::Perf::Counter::DrawNs};
+    DrawMetrics::ScopedDrawTimer draw_timer;
     SCOPE_EXIT {
         FlushIfUploadHeavy();
         gpu.TickWork();
@@ -138,7 +139,9 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         }
         return;
     }
+    const DrawMetrics::CacheLockTimer lock_timer;
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+    lock_timer.Locked();
 
     const bool trace_this_draw = trace_draws ||
         material_trace.Select(pipeline->Key().unique_hashes[5]);
