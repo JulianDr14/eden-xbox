@@ -391,6 +391,32 @@ void NvMap::PulseRestoreHandle(const PulseHandle& state, NvCore::SessionId sessi
     PulseRaiseNextId(state.id + HandleIdIncrement);
 }
 
+u32 NvMap::PulseEnginePin(Handle::Id handle) {
+    const auto handle_description = GetHandle(handle);
+    if (!handle_description) return 0;
+    std::scoped_lock lock(handle_description->mutex);
+    return handle_description->pins > 0 ? handle_description->pin_virt_address : 0;
+}
+
+void NvMap::PulsePinEngine(Handle::Id handle, u32 pin_address, u32 count) {
+    const auto handle_description = GetHandle(handle);
+    if (!handle_description || !pin_address || !count) {
+        throw std::invalid_argument("Pulse: video engine pin of a missing nvmap handle");
+    }
+    // The SMMU mapping comes from a regular pin; the low area one is placed by hand.
+    PinHandle(handle, false);
+    std::scoped_lock lock(handle_description->mutex);
+    if (handle_description->pin_virt_address == 0) {
+        const auto size = static_cast<u32>(handle_description->aligned_size);
+        host1x.Allocator().AllocateFixed(pin_address, size);
+        host1x.gmmu_manager.Map(GPUVAddr(pin_address), handle_description->d_address, size);
+        handle_description->pin_virt_address = pin_address;
+    } else if (handle_description->pin_virt_address != pin_address) {
+        throw std::invalid_argument("Pulse: one nvmap handle pinned at two video addresses");
+    }
+    handle_description->pins += count - 1;
+}
+
 void NvMap::PulseRaiseNextId(u32 id) {
     u32 current = next_handle_id.load(std::memory_order_relaxed);
     while (current < id && !next_handle_id.compare_exchange_weak(current, id)) {
