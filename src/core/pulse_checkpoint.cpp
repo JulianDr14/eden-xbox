@@ -405,7 +405,9 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
         for (auto& thread : process->GetThreadList()) {
             if (threads.size() == MaxGuestThreads) Reject(false, "too many guest threads");
             const auto state = thread.GetState();
-            if (state == ThreadState::Terminated || thread.IsTerminationRequested()) {
+            // Exited and signaled is final; still unwinding (or asked to exit) settles soon.
+            const bool exited = state == ThreadState::Terminated && thread.IsSignaled(kernel);
+            if (!exited && (state == ThreadState::Terminated || thread.IsTerminationRequested())) {
                 Reject(true, "a guest thread is exiting");
             }
             // IsInExceptionHandler() is not checked: Eden sets it on every thread at creation and
@@ -428,6 +430,9 @@ ProcessCheckpoint ProcessCheckpoint::Capture(Core::System& system) {
                                      std::addressof(record.affinity)),
                   "Pulse: thread core mask");
             switch (state) {
+            case ThreadState::Terminated:
+                record.run = ThreadRun::Terminated;
+                break;
             case ThreadState::Initialized:
                 record.run = ThreadRun::Initialized;
                 break;
@@ -1455,11 +1460,18 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
             reservation.Commit();
             KThread::Register(kernel, thread);
             thread->GetContext() = context;
-            // Stopped until the caller runs the system, like every captured thread.
-            thread->RequestSuspend(kernel, Kernel::SuspendType::System);
-            if (record.flags & 1) thread->RequestSuspend(kernel, Kernel::SuspendType::Thread);
+            const bool terminated = record.run == ThreadRun::Terminated;
+            if (!terminated) {
+                // Stopped until the caller runs the system, like every captured thread.
+                thread->RequestSuspend(kernel, Kernel::SuspendType::System);
+                if (record.flags & 1) thread->RequestSuspend(kernel, Kernel::SuspendType::Thread);
+            }
             Check(thread->SetCoreMask(kernel, record.ideal_core, record.affinity),
                   "Pulse: thread core mask rebuild failed");
+            if (terminated) {
+                Kernel::KScopedSchedulerLock lock{kernel};
+                thread->RestoreTerminated(kernel);
+            }
             bind(record.id, thread);
             state->threads.emplace_back(thread, record.run);
         }

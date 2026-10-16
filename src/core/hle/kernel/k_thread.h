@@ -276,6 +276,10 @@ public:
     /// Pulse restore: what Run does for a thread whose wait was rebuilt (it never passes through
     /// Initialized -> Runnable): count it as running and take its running reference.
     void ActivateRestoredWaiter(KernelCore& kernel);
+    /// Pulse restore: leaves a fresh thread where Exit and FinishTermination left the captured
+    /// one: terminated and signaled, its resource hint released, never run. It lives until the
+    /// guest closes its last handle.
+    void RestoreTerminated(KernelCore& kernel);
     bool IsFreshCheckpointThread() const noexcept {
         return m_thread_type == ThreadType::User && GetState() == ThreadState::Initialized &&
                !m_wait_queue && !m_checkpoint_wait_queue && GetTime() == 0;
