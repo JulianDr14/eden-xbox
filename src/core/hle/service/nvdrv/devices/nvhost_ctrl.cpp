@@ -206,6 +206,16 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
 
     const auto check_failing = [&]() {
         if (events[slot].fails > 2) {
+            // The wait below blocks nvservices until the GPU reaches the value; one it never
+            // reaches stalls the guest, so the values are kept in the log.
+            LOG_WARNING(Service_NVDRV,
+                        "blocking on syncpt_id={} threshold={} (event {}): host {}, guest {}, "
+                        "min {}, max {}",
+                        fence_id, target_value, slot,
+                        host1x_syncpoint_manager.GetHostSyncpointValue(fence_id),
+                        host1x_syncpoint_manager.GetGuestSyncpointValue(fence_id),
+                        syncpoint_manager.ReadSyncpointMinValue(fence_id),
+                        syncpoint_manager.GetSyncpointFence(fence_id).value);
             {
                 auto lk = system.StallApplication();
                 host1x_syncpoint_manager.WaitHost(fence_id, target_value);
