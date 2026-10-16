@@ -180,6 +180,12 @@ public:
     // Recreates a handle under its captured id; throws std::invalid_argument when it is taken.
     void PulseRestoreHandle(const PulseHandle& handle, NvCore::SessionId session_id);
     void PulseRaiseNextId(u32 id);
+    // The host1x address of a handle pinned for a video engine (0: none). The guest keeps it in
+    // its command buffers, so a restore pins the handle back at that very address.
+    u32 PulseEnginePin(Handle::Id handle);
+    // Pins a restored handle count times for a video engine at the captured host1x address;
+    // throws std::invalid_argument when it cannot be placed there.
+    void PulsePinEngine(Handle::Id handle, u32 pin_address, u32 count);
     // The device ranges of the pinned handles: where the GPU may have written guest memory.
     std::vector<std::pair<DAddr, u64>> PulsePinnedRanges();
 
