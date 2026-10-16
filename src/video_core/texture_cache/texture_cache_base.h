@@ -157,6 +157,16 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
 public:
     explicit TextureCache(Runtime&, Tegra::MaxwellDeviceMemoryManager&);
 
+    /// What the Pulse capture downloads (DownloadMemory with modified_only), for its memory log.
+    struct CheckpointDownloads {
+        size_t images{};
+        u64 largest{};
+        u64 pooled{}; ///< the most the copies' transfer buffers held at once
+    } checkpoint_downloads;
+    [[nodiscard]] size_t SwizzleScratchBytes() const {
+        return swizzle_data_buffer.capacity();
+    }
+
     /// Notify the cache that a new frame has been queued
     void TickFrame();
 

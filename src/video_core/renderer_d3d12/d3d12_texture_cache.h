@@ -84,7 +84,14 @@ public:
     void SetBlitHelper(BlitImageHelper* helper) noexcept { blit_helper = helper; }
     StagingBufferRef UploadStagingBuffer(size_t size, bool deferred = false);
     StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
-    void ReleaseCheckpointStaging() { staging.ReleaseRetiredDownloads(); }
+    void ReleaseCheckpointStaging() {
+        TrimCheckpointTransfers(0);
+        staging.ReleaseRetiredDownloads();
+    }
+    /// Frees the transfer buffers a capture's image copies went through once they pool more than
+    /// `keep` bytes; below that they are reused by the next image, which saves recreating them.
+    void TrimCheckpointTransfers(u64 keep = u64{16} << 20);
+    [[nodiscard]] u64 TransferPoolBytes() const { return transfer_buffers.PooledBytes(); }
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
     [[nodiscard]] bool CanCheckpointImage(
         const Image& image, std::span<const VideoCommon::BufferImageCopy> copies) const;

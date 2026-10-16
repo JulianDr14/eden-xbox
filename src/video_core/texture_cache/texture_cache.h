@@ -693,6 +693,33 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size, bool modified_
     std::ranges::sort(images, [this](ImageId lhs, ImageId rhs) {
         return slot_images[lhs].modification_tick < slot_images[rhs].modification_tick;
     });
+    if constexpr (requires { runtime.ReleaseCheckpointStaging(); }) {
+        if (modified_only) {
+            // A Pulse capture: one readback, the size of the largest image, serves every image in
+            // turn (each is finished before the next), and what the copies left behind is freed
+            // after each one, so the capture holds one image's worth instead of all of them.
+            u64 largest{};
+            for (const ImageId image_id : images) {
+                largest = (std::max)(largest, u64{slot_images[image_id].unswizzled_size_bytes});
+            }
+            checkpoint_downloads.images += images.size();
+            checkpoint_downloads.largest = (std::max)(checkpoint_downloads.largest, largest);
+            auto map = runtime.DownloadStagingBuffer(largest);
+            for (const ImageId image_id : images) {
+                Image& image = slot_images[image_id];
+                const auto copies = FixSmallVectorADL(FullDownloadCopies(image.info));
+                image.DownloadMemory(map, copies);
+                runtime.Finish();
+                SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies,
+                             map.mapped_span.first(image.unswizzled_size_bytes), swizzle_data_buffer);
+                checkpoint_downloads.pooled =
+                    (std::max)(checkpoint_downloads.pooled, runtime.TransferPoolBytes());
+                runtime.TrimCheckpointTransfers();
+            }
+            runtime.ReleaseCheckpointStaging();
+            return;
+        }
+    }
     for (const ImageId image_id : images) {
         Image& image = slot_images[image_id];
         auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
@@ -701,10 +728,6 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size, bool modified_
         runtime.Finish();
         SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span,
                      swizzle_data_buffer);
-        // A Pulse capture holds one image's readback at a time instead of all of them.
-        if constexpr (requires { runtime.ReleaseCheckpointStaging(); }) {
-            if (modified_only) runtime.ReleaseCheckpointStaging();
-        }
     }
 }
 

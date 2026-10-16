@@ -141,6 +141,11 @@ TextureCacheRuntime::~TextureCacheRuntime() {
 
 FormatInfo TextureCacheRuntime::Format(PixelFormat format) const { return NativeFormat(format); }
 void TextureCacheRuntime::Finish() { scheduler.Finish(); }
+void TextureCacheRuntime::TrimCheckpointTransfers(u64 keep) {
+    if (transfer_buffers.PooledBytes() <= keep) return;
+    transfer_buffers.Trim(true);
+    scheduler.Finish(); // the trimmed buffers are released after the work recorded so far
+}
 bool TextureCacheRuntime::CanAccelerateImageUpload(Image& image) const noexcept {
     return image.IsGpuDecoded() && blit_helper && blit_helper->CanDecodeAstc() &&
            (image.TransferFormat().copy_format == PixelFormat::A8B8G8R8_UNORM ||
