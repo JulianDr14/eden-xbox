@@ -3,6 +3,7 @@
 #include "common/pulse_store.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <streambuf>
 #include <string>
@@ -15,8 +16,16 @@
 #include <unistd.h>
 #endif
 
+#include "common/logging.h"
+
 namespace Common::Pulse {
 namespace {
+long long MillisecondsSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                 start)
+        .count();
+}
+
 class LimitedBuffer final : public std::streambuf {
 public:
     LimitedBuffer(std::streambuf* target_, std::uint64_t limit_) : target{target_}, remaining{limit_} {}
@@ -131,6 +140,8 @@ void Store::Publish(std::string_view key, const Identity& identity, std::uint64_
     if (!Fits(Used(), max_encoded, quota, std::filesystem::space(root).available))
         throw Failure{Error::Limit, "Pulse storage quota or free reserve exceeded"};
     try {
+        auto phase = std::chrono::steady_clock::now();
+        long long write_ms{}, verify_ms{};
         if (fault) fault(PublishStep::Write);
         {
             std::ofstream file{next, std::ios::binary | std::ios::trunc};
@@ -143,13 +154,20 @@ void Store::Publish(std::string_view key, const Identity& identity, std::uint64_
             file.close();
             if (!file) throw Failure{Error::Io, "Pulse temporary close failed"};
         }
+        write_ms = MillisecondsSince(phase);
+        phase = std::chrono::steady_clock::now();
         if (fault) fault(PublishStep::Verify);
         {
             std::ifstream input{next, std::ios::binary};
             Read(input, identity, max_decoded, {}, stop);
         }
+        verify_ms = MillisecondsSince(phase);
+        phase = std::chrono::steady_clock::now();
         if (fault) fault(PublishStep::Sync);
         if (!SyncFile(next)) throw Failure{Error::Io, "Pulse durable flush failed"};
+        LOG_INFO(Common, "Pulse: session written in {} ms, verified in {} ms, synced in {} ms ({} MiB)",
+                 write_ms, verify_ms, MillisecondsSince(phase),
+                 std::filesystem::file_size(next) >> 20);
         if (stop.stop_requested()) throw Failure{Error::Cancelled, "Pulse operation cancelled"};
         if (std::filesystem::space(root).available < FreeReserve)
             throw Failure{Error::Limit, "Pulse free reserve exhausted"};
