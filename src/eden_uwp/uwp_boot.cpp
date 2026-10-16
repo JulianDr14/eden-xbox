@@ -155,6 +155,7 @@ std::atomic<bool> g_can_fullscreen{};
 std::atomic<bool> g_fullscreen{};
 std::atomic<int> g_fullscreen_request{-1};
 void WriteDiag(const std::string& msg); // defined with the UWP entry point below
+void WritePulseLog(const std::string& msg); // eden_pulse.txt, defined next to WriteDiag
 std::string MemoryReport();             // likewise
 std::string MemoryOwners();             // likewise
 std::string GuestMemoryReport(Core::System& system); // likewise
@@ -617,13 +618,13 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                                                             content.build_id);
             }
         } catch (const std::exception& e) {
-            WriteDiag(std::string("pulse: no identity: ") + e.what());
+            WritePulseLog(std::string("no identity: ") + e.what());
         }
     }
     Core::SystemResultStatus load_result{Core::SystemResultStatus::ErrorNotInitialized};
     bool gpu_started = false, resumed = false;
     if (pulse_identity && config.pulse_resume && PulseSessions::CanResume(*pulse_identity)) {
-        WriteDiag("pulse: resuming the kept session | " + MemoryReport());
+        WritePulseLog("resuming the kept session | " + MemoryReport());
         const auto resume_start = std::chrono::steady_clock::now();
         bool loaded = false;
         try {
@@ -642,13 +643,13 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 gpu_started = true;
             });
             resumed = true;
-            WriteDiag("pulse: session resumed in " +
+            WritePulseLog("session resumed in " +
                       std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
                                          std::chrono::steady_clock::now() - resume_start)
                                          .count()) +
                       " ms | " + MemoryReport());
         } catch (const std::exception& e) {
-            WriteDiag(std::string("pulse: resume failed: ") + e.what());
+            WritePulseLog(std::string("resume failed: ") + e.what());
             if (loaded) {
                 // This System holds a half-rebuilt process and is never run: a fresh one boots.
                 shutdown();
@@ -995,17 +996,17 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     result == GameMenuResult::LibraryWithoutSession) {
                     if (result == GameMenuResult::Library && pulse_identity) {
                         // The only capture: when the player leaves, never while playing.
-                        WriteDiag("pulse: saving the session | " + MemoryReport());
+                        WritePulseLog("saving the session | " + MemoryReport());
                         const auto save_start = std::chrono::steady_clock::now();
                         const std::string reason = PulseSessions::Save(system, *pulse_identity);
                         const auto save_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                                  std::chrono::steady_clock::now() - save_start)
                                                  .count();
                         if (reason.empty()) {
-                            WriteDiag("pulse: session saved in " + std::to_string(save_ms) + " ms");
+                            WritePulseLog("session saved in " + std::to_string(save_ms) + " ms");
                             PulseSessions::SetNotice(I18n::ToUtf8(I18n::Tr(I18n::Text::PulseKept)));
                         } else {
-                            WriteDiag("pulse: no session (" + reason + ") after " +
+                            WritePulseLog("no session (" + reason + ") after " +
                                       std::to_string(save_ms) + " ms");
                             PulseSessions::SetNotice(I18n::ToUtf8(
                                 I18n::Format(I18n::Text::PulseNotKept, {Utf8ToUtf16(reason)})));
@@ -1218,6 +1219,24 @@ namespace {
 // crash handlers below must not call into WinRT from a dying process.
 std::string g_diag_path;
 std::mutex g_diag_mutex;
+// Pulse's own log (eden_pulse.txt): saves, resumes and every rejection, apart from the diag.
+std::string g_pulse_path;
+std::mutex g_pulse_mutex;
+// A save retries for up to 3 s and throws the same rejection on every attempt: identical
+// consecutive rejections are counted under g_pulse_mutex and written as one line.
+std::string g_pulse_last_rejection;
+unsigned g_pulse_rejection_repeats = 0;
+
+// Under g_pulse_mutex: the line closing a run of repeated rejections (empty when there is none).
+std::string TakePulseRepeats() {
+    std::string line;
+    if (g_pulse_rejection_repeats != 0) {
+        line = "[pulse]   (repeated " + std::to_string(g_pulse_rejection_repeats) + " more times)\n";
+    }
+    g_pulse_last_rejection.clear();
+    g_pulse_rejection_repeats = 0;
+    return line;
+}
 
 unsigned long long ElapsedMs() {
     static const ULONGLONG start = GetTickCount64();
@@ -1238,6 +1257,23 @@ void WriteDiag(const std::string& msg) {
         f << line;
     } catch (...) {
         OutputDebugStringW(L"[eden-uwp] WriteDiag: could not write diag file\n");
+    }
+}
+
+void WritePulseLog(const std::string& msg) {
+    const std::string line = "[pulse] [+" + std::to_string(ElapsedMs()) + "ms] " + msg + "\n";
+    OutputDebugStringA(line.c_str());
+    try {
+        std::scoped_lock lock{g_pulse_mutex};
+        if (g_pulse_path.empty()) {
+            g_pulse_path =
+                winrt::to_string(Windows::Storage::ApplicationData::Current().LocalFolder().Path()) +
+                "\\eden_pulse.txt";
+        }
+        std::ofstream f(g_pulse_path, std::ios::app);
+        f << TakePulseRepeats() << line;
+    } catch (...) {
+        OutputDebugStringW(L"[eden-uwp] WritePulseLog: could not write pulse log\n");
     }
 }
 
@@ -1827,6 +1863,27 @@ void LogCxxThrow(const EXCEPTION_RECORD* rec) {
         if (std::string_view{name} == ".?AVexception@std@@" && object != 0) {
             what = reinterpret_cast<const std::exception*>(object + type[2])->what();
         }
+    }
+    // Pulse rejects by throwing and retries for up to 3 s: each attempt is one line of its own log
+    // (the reason it waited on), never the diag's budget or a stack.
+    if (std::string_view{first_name}.find("@Pulse@") != std::string_view::npos) {
+        std::scoped_lock lock{g_pulse_mutex};
+        if (g_pulse_path.empty()) return;
+        if (g_pulse_last_rejection == what) {
+            ++g_pulse_rejection_repeats;
+            return;
+        }
+        const std::string repeats = TakePulseRepeats();
+        g_pulse_last_rejection = what;
+        char line[512];
+        std::snprintf(line, sizeof(line), "[pulse] [+%llums] rejected: %s | thread %lu\n",
+                      ElapsedMs(), what, GetCurrentThreadId());
+        if (std::FILE* const f = _fsopen(g_pulse_path.c_str(), "a", _SH_DENYNO)) {
+            std::fputs(repeats.c_str(), f);
+            std::fputs(line, f);
+            std::fclose(f);
+        }
+        return;
     }
     // The platform throws dozens of _com_error at startup and handles them itself; they used up
     // the budget before anything interesting was thrown.
@@ -2483,7 +2540,7 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                     if (rc == EdenXbox::PULSE_RESUME_FAILED) {
                         EdenXbox::PulseSessions::SetNotice(EdenXbox::I18n::ToUtf8(
                             EdenXbox::I18n::Tr(EdenXbox::I18n::Text::PulseNotResumed)));
-                        WriteDiag("pulse: booting the game fresh after a failed resume");
+                        WritePulseLog("booting the game fresh after a failed resume");
                         config.pulse_resume = false;
                         rc = EdenXbox::RunHeadlessBoot(nro_path, surface, config);
                     }
