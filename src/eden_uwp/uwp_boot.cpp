@@ -52,6 +52,7 @@
 #include "dynarmic/interface/code_memory.h"
 #include "core/arm/jit_prewarm.h"
 #include "core/core.h"
+#include "core/perf_stats.h"
 #include "core/cpu_manager.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
@@ -870,6 +871,9 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
         constexpr u64 LOW_HEADROOM_STEP = 50ULL << 20;
         u64 low_snapshot_headroom = ~u64{};
         u32 low_snapshot_tick = 0;
+        // Pulse: after a resume the presented frames are logged each second for 30 s, so a guest
+        // that freezes shows when it stopped.
+        u64 resume_frames = 0;
         for (u32 tick = 1;; ++tick) {
             std::this_thread::sleep_for(TICK);
             if (u64 used{}, limit{}; config.memory_audit && tick % 10 == 0 &&
@@ -903,6 +907,14 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                 WriteDiag("GPU command failed; shutting down game for library recovery | " + MemoryReport());
                 shutdown();
                 return 15;
+            }
+            if (resumed && tick % TICKS_PER_SECOND == 0 && tick <= 30 * TICKS_PER_SECOND) {
+                const u32 second = tick / TICKS_PER_SECOND;
+                const u64 frames = system.GetPerfStats().TotalGameFrames();
+                WritePulseLog("resumed +" + std::to_string(second) + " s: " +
+                              std::to_string(frames - resume_frames) + " frames" +
+                              (menu ? " (menu)" : ""));
+                resume_frames = frames;
             }
             if (EdenXbox::QuitRequested()) {
                 WriteDiag("step: Q pressed after " + std::to_string(tick / 50) +
