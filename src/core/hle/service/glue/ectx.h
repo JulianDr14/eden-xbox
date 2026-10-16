@@ -31,6 +31,13 @@ public:
     explicit ECTX_AW(Core::System& system_);
     ~ECTX_AW() override;
 
+    // Pulse: stateless, as are the registrars it hands out (Complete keeps nothing).
+    std::string_view PulseKind() const override {
+        return "ectx:aw";
+    }
+    SessionRequestHandlerPtr PulseRestore(std::string_view kind,
+                                          Pulse::HandlerRestore& restore) override;
+
 private:
     void CreateContextRegistrar(HLERequestContext& ctx);
 };

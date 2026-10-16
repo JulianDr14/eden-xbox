@@ -22,6 +22,16 @@ public:
     explicit ISystemDisplayService(Core::System& system_, std::shared_ptr<Container> container);
     ~ISystemDisplayService() override;
 
+    // Pulse: no state of its own; the shared layers (applet-only) live in the shared buffer
+    // manager, which is not captured, so a guest that used them cannot be saved.
+    std::string_view PulseKind() const override {
+        return "ISystemDisplayService";
+    }
+    void PulseCapture(Pulse::HandlerCapture& capture) const override;
+    static SessionRequestHandlerPtr PulseRestoreFrom(Core::System& system,
+                                                     std::shared_ptr<Container> container,
+                                                     Pulse::HandlerRestore& restore);
+
 private:
     Result GetLayerZ(Out<u64> out_z_value, u64 layer_id);
     Result SetLayerZ(u64 layer_id, u64 z_value);
@@ -48,6 +58,7 @@ private:
 
 private:
     const std::shared_ptr<Container> m_container;
+    bool m_shared_buffer_used{};
 };
 
 } // namespace Service::VI

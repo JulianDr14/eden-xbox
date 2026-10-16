@@ -71,6 +71,16 @@ ISystemDisplayService::ISystemDisplayService(Core::System& system_,
 
 ISystemDisplayService::~ISystemDisplayService() = default;
 
+void ISystemDisplayService::PulseCapture(Pulse::HandlerCapture& capture) const {
+    if (m_shared_buffer_used) throw Pulse::ServiceRejected(false, "vi shared layers in use");
+}
+
+SessionRequestHandlerPtr ISystemDisplayService::PulseRestoreFrom(
+    Core::System& system, std::shared_ptr<Container> container, Pulse::HandlerRestore& restore) {
+    restore.state.End();
+    return std::make_shared<ISystemDisplayService>(system, std::move(container));
+}
+
 Result ISystemDisplayService::GetLayerZ(Out<u64> out_z_value, u64 layer_id) {
     LOG_DEBUG(Service_VI, "called. layer_id={}", layer_id);
     s32 z{};
@@ -134,6 +144,7 @@ Result ISystemDisplayService::GetSharedBufferMemoryHandleId(
     Out<s32> out_nvmap_handle, Out<u64> out_size,
     OutLargeData<SharedMemoryPoolLayout, BufferAttr_HipcMapAlias> out_pool_layout, u64 buffer_id,
     ClientAppletResourceUserId aruid) {
+    m_shared_buffer_used = true;
     LOG_INFO(Service_VI, "called. buffer_id={}, aruid={:#x}", buffer_id, aruid.pid);
 
     R_RETURN(m_container->GetSharedBufferManager()->GetSharedBufferMemoryHandleId(
@@ -141,11 +152,13 @@ Result ISystemDisplayService::GetSharedBufferMemoryHandleId(
 }
 
 Result ISystemDisplayService::OpenSharedLayer(u64 layer_id) {
+    m_shared_buffer_used = true;
     LOG_INFO(Service_VI, "(STUBBED) called. layer_id={}", layer_id);
     R_SUCCEED();
 }
 
 Result ISystemDisplayService::ConnectSharedLayer(u64 layer_id) {
+    m_shared_buffer_used = true;
     LOG_INFO(Service_VI, "(STUBBED) called. layer_id={}", layer_id);
     R_SUCCEED();
 }
@@ -153,6 +166,7 @@ Result ISystemDisplayService::ConnectSharedLayer(u64 layer_id) {
 Result ISystemDisplayService::AcquireSharedFrameBuffer(Out<android::Fence> out_fence,
                                                        Out<std::array<s32, 4>> out_slots,
                                                        Out<s64> out_target_slot, u64 layer_id) {
+    m_shared_buffer_used = true;
     LOG_DEBUG(Service_VI, "called");
     R_RETURN(m_container->GetSharedBufferManager()->AcquireSharedFrameBuffer(
         out_fence, *out_slots, out_target_slot, layer_id));
@@ -162,6 +176,7 @@ Result ISystemDisplayService::PresentSharedFrameBuffer(android::Fence fence,
                                                        Common::Rectangle<s32> crop_region,
                                                        u32 window_transform, s32 swap_interval,
                                                        u64 layer_id, s64 surface_id) {
+    m_shared_buffer_used = true;
     LOG_DEBUG(Service_VI, "called");
     R_RETURN(m_container->GetSharedBufferManager()->PresentSharedFrameBuffer(
         fence, crop_region, window_transform, swap_interval, layer_id, surface_id));
@@ -169,12 +184,14 @@ Result ISystemDisplayService::PresentSharedFrameBuffer(android::Fence fence,
 
 Result ISystemDisplayService::GetSharedFrameBufferAcquirableEvent(
     OutCopyHandle<Kernel::KReadableEvent> out_event, u64 layer_id) {
+    m_shared_buffer_used = true;
     LOG_DEBUG(Service_VI, "called");
     R_RETURN(m_container->GetSharedBufferManager()->GetSharedFrameBufferAcquirableEvent(out_event,
                                                                                         layer_id));
 }
 
 Result ISystemDisplayService::CancelSharedFrameBuffer(u64 layer_id, s64 slot) {
+    m_shared_buffer_used = true;
     LOG_DEBUG(Service_VI, "called");
     R_RETURN(m_container->GetSharedBufferManager()->CancelSharedFrameBuffer(layer_id, slot));
 }

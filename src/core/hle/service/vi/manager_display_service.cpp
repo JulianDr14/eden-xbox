@@ -104,6 +104,18 @@ IManagerDisplayService::IManagerDisplayService(Core::System& system_,
 
 IManagerDisplayService::~IManagerDisplayService() = default;
 
+void IManagerDisplayService::PulseCapture(Pulse::HandlerCapture& capture) const {
+    if (!m_managed_layer_ids.empty()) {
+        throw Pulse::ServiceRejected(false, "a vi managed layer created by the guest");
+    }
+}
+
+SessionRequestHandlerPtr IManagerDisplayService::PulseRestoreFrom(
+    Core::System& system, std::shared_ptr<Container> container, Pulse::HandlerRestore& restore) {
+    restore.state.End();
+    return std::make_shared<IManagerDisplayService>(system, std::move(container));
+}
+
 Result IManagerDisplayService::CreateSharedLayerSession(Kernel::KProcess* owner_process,
                                                         u64* out_buffer_id, u64* out_layer_handle,
                                                         u64 display_id, bool enable_blending) {
@@ -126,12 +138,16 @@ Result IManagerDisplayService::SetLayerZIndex(s32 z_index, u64 layer_id) {
 Result IManagerDisplayService::CreateManagedLayer(Out<u64> out_layer_id, u32 flags, u64 display_id,
                                                   AppletResourceUserId aruid) {
     LOG_DEBUG(Service_VI, "called. flags={}, display={}, aruid={}", flags, display_id, aruid.pid);
-    R_RETURN(m_container->CreateManagedLayer(out_layer_id, display_id, aruid.pid));
+    R_TRY(m_container->CreateManagedLayer(out_layer_id, display_id, aruid.pid));
+    m_managed_layer_ids.insert(*out_layer_id);
+    R_SUCCEED();
 }
 
 Result IManagerDisplayService::DestroyManagedLayer(u64 layer_id) {
     LOG_DEBUG(Service_VI, "called. layer_id={}", layer_id);
-    R_RETURN(m_container->DestroyManagedLayer(layer_id));
+    R_TRY(m_container->DestroyManagedLayer(layer_id));
+    m_managed_layer_ids.erase(layer_id);
+    R_SUCCEED();
 }
 
 Result IManagerDisplayService::AddToLayerStack(u32 stack_id, u64 layer_id) {

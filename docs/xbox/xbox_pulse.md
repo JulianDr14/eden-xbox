@@ -478,14 +478,111 @@ resto. Compila para UWP; **no está probado en la Series**.
     rechaza con reintento.
   - ssl: `ISslContext` guarda su versión; una conexión TLS abierta rechaza con
     reintento.
+  - vi: `ISystemDisplayService` e `IManagerDisplayService` sin estado propio.
+    Rechazan sin reintento si el juego usó capas compartidas o creó una capa
+    gestionada que sigue viva (ese estado no se captura).
+  - ectx:aw y sus `IContextRegistrar`, ngc:u y ngct:u: sin estado.
+  - mm:u: sesiones de reloj por módulo con su rango pedido y el siguiente id.
   - Rechazos reintentables nuevos: `IDirectory`, `ISaveDataInfoReader` e
     `IMultiCommitManager` de fs, y `nvhost-nvdec`, `nvhost-vic` y `nvhost-nvjpg`
     (solo están abiertos mientras el juego decodifica).
 
 ### Límites honestos (fase 5)
 
+- Un juego comercial aún puede rechazarse al volver al inicio si usa un servicio
+  sin serializador (bcat, mii, caps, ldn…; ver fase 5). El motivo se
+  muestra y se sale sin sesión; el juego no se pierde porque las partidas normales
+  no se tocan.
+- La reanudación tarda lo que la restauración (≈3 s en la Series) más la carga.
+- El cierre forzado durante el juego no deja sesión: la garantía empieza al
+  completar la vuelta al inicio.
+
+## Fase 5: servicios de juegos (12 oct 2026)
+
+Misma política que la fase 3: guardar solo lo que el juego observa y regenerar el
+resto. Compila para UWP; **no está probado en la Series**.
+
+- **Memoria compartida (kind 7)**: nunca se guarda su contenido; se nombra al
+  dueño (fuente de `pl:u`, IRS, time, hidbus, HID por aruid) y la restauración
+  mapea la memoria del System nuevo en las mismas direcciones. La fuente se vuelve
+  a rellenar. Un dueño desconocido se rechaza.
+- **Memoria de transferencia (kind 8)**: heap del juego prestado con
+  `svcCreateTransferMemory`; se guardan dirección, tamaño y permiso, y el contenido
+  viaja con el heap.
+- **GPU**: antes de capturar se vacía la GPU y se vuelcan sus escrituras a la
+  memoria del guest. Se guardan el espacio de direcciones de `nvhost-as-gpu`
+  (reservas, mapeos y remapeos por handle nvmap), los canales con su syncpoint y
+  el estado de motores que dejó el juego, y los valores de syncpoint de host1x.
+  Las cachés del host (texturas, shaders, buffers) no se guardan: se reconstruyen.
+- **audren**: solo el estado lógico del renderer (parámetros, voces, mezclas,
+  efectos, splitters); los buffers del backend se regeneran.
+- **HID**: estilos de npad soportados, asignaciones que fijó el juego (modo de
+  mano, sujeción, modo de asignación por mando) y los eventos de cambio de estilo.
+  La memoria compartida de HID es la del System nuevo para el mismo aruid.
+- **AM**: la raíz `appletOE` guarda el estado del applet de la aplicación: cola de
+  mensajes, foco y estado de actividad, flags de notificación, canales de
+  parámetros, pila de contexto, bloqueo de salida, permisos de captura, volúmenes,
+  etc., y exporta los eventos que entregan sus interfaces. Las interfaces hijas no
+  tienen estado propio: referencian la raíz, que las reconstruye. El idioma se
+  calcula de nuevo; si el modo de operación o de rendimiento cambió desde la
+  captura, el juego recibe la notificación de cambio.
+- **Capas gestionadas**: AM guarda cada capa gestionada (ids, propiedades, refcounts
+  y cola del productor) y la recrea cerrada; vi referencia AM y vuelve a abrir las
+  que el juego tenía abiertas.
+- **Rechazos reintentables**: un applet de biblioteca abierto (teclado, selector de
+  usuario…), un accesor de `IStorage` abierto o el applet ocupado. El motivo se
+  muestra y se puede volver a intentar al cerrarlo.
+- **Servicios de sistema (15 oct 2026)**, casi sin estado propio:
+  - `IStorage` de fs (RomFS): guarda cómo se abrió (proceso actual, data id o
+    índice de programa) y referencia el `fsp-srv` que lo abrió, que lo vuelve a
+    abrir. El RomFS abierto como sistema de archivos también se reabre.
+  - time: relojes de sistema (usuario, red, local, efímero) por su origen, reloj
+    estable y zona horaria; se exportan sus eventos de operación.
+  - set y set:sys: raíces sin estado.
+  - apm: las configuraciones de rendimiento de los modos normal y boost.
+  - lm: el destino del logger; los paquetes de log a medias se descartan.
+  - acc: `IProfile`/`IProfileEditor` (id de usuario), `IManagerForApplication` y
+    su contexto asíncrono (siempre completo; se exporta su evento).
+  - pctl: estados, ajustes, restricciones, pin y temporizador de juego de
+    `IParentalControlService`, con sus tres eventos.
+  - ns (`ns:am2` y sus interfaces hijas, salvo `IApplicationManagerInterface`),
+    prepo y spl/csrng: sin estado.
+  - aoc: la lista de DLC es del System; se exportan los eventos de cambio y de
+    compra.
+  - nfc/nfp: inicialización y detección por mando (se reinicia al restaurar) y
+    sus eventos. Un amiibo leído o montado rechaza con reintento.
+  - nifm: `IRequest` (estado de la solicitud; la conexión se vuelve a evaluar) e
+    `IScanRequest` (resultado del último escaneo), con sus eventos. Un escaneo en
+    curso rechaza con reintento.
+  - friends: `IFriendService` (su evento) e `INotificationService` (usuario,
+    notificaciones pendientes y evento).
+  - hwopus: cada decodificador se reabre con sus parámetros; el historial de Opus
+    empieza de cero, como un paquete con reset.
+  - bsd, sfdnsres, nsd: sin estado mientras no haya sockets. Un socket abierto
+    rechaza con reintento.
+  - ssl: `ISslContext` guarda su versión; una conexión TLS abierta rechaza con
+    reintento.
+  - vi: `ISystemDisplayService` e `IManagerDisplayService` sin estado propio.
+    Rechazan sin reintento si el juego usó capas compartidas o creó una capa
+    gestionada que sigue viva (ese estado no se captura).
+  - ectx:aw y sus `IContextRegistrar`, ngc:u y ngct:u: sin estado.
+  - mm:u: sesiones de reloj por módulo con su rango pedido y el siguiente id.
+  - Rechazos reintentables nuevos: `IDirectory`, `ISaveDataInfoReader` e
+    `IMultiCommitManager` de fs, y `nvhost-nvdec`, `nvhost-vic` y `nvhost-nvjpg`
+    (solo están abiertos mientras el juego decodifica).
+
+### Log propio
+
+Pulse escribe en `LocalState\eden_pulse.txt`, aparte de `eden_uwp_diag.txt`:
+guardado, reanudación, el motivo final de cada sesión no guardada y una línea
+`rejected:` por cada intento rechazado mientras reintenta (sin pila ni consumir
+el cupo de excepciones del diag). Un evento de servicio que ninguna interfaz
+exporta aparece con el nombre que le dio su servicio.
+
+### Límites honestos (fase 5)
+
 - Sin evidencia en consola todavía: todo lo anterior compila, nada más.
-- Servicios sin serializador (bcat, mii, caps, ngc, ldn, npns, audin, psm,
+- Servicios sin serializador (bcat, mii, caps, ldn, npns, audin, psm,
   `IApplicationManagerInterface` de ns…) siguen rechazando sin reintento. Es
   probable que el siguiente rechazo de un juego real venga de ahí.
 - Un juego que mantiene un socket o una conexión TLS abiertos todo el tiempo no

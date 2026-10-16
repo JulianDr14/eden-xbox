@@ -5,8 +5,10 @@
 #include "core/hle/service/nvnflinger/hos_binder_driver.h"
 #include "core/hle/service/vi/application_display_service.h"
 #include "core/hle/service/vi/container.h"
+#include "core/hle/service/vi/manager_display_service.h"
 #include "core/hle/service/vi/manager_root_service.h"
 #include "core/hle/service/vi/service_creator.h"
+#include "core/hle/service/vi/system_display_service.h"
 #include "core/hle/service/vi/vi.h"
 #include "core/hle/service/vi/vi_types.h"
 
@@ -32,6 +34,12 @@ SessionRequestHandlerPtr IManagerRootService::PulseRestore(std::string_view kind
                                                 Pulse::HandlerRestore& restore) {
     if (kind == "IApplicationDisplayService") {
         return IApplicationDisplayService::PulseRestoreFrom(system, m_container, restore);
+    }
+    if (kind == "ISystemDisplayService") {
+        return ISystemDisplayService::PulseRestoreFrom(system, m_container, restore);
+    }
+    if (kind == "IManagerDisplayService") {
+        return IManagerDisplayService::PulseRestoreFrom(system, m_container, restore);
     }
     if (kind == "IHOSBinderDriver") {
         std::shared_ptr<Nvnflinger::IHOSBinderDriver> driver;
