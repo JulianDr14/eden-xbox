@@ -12,6 +12,7 @@
 #include <unordered_set>
 #include <fmt/format.h>
 
+#include "common/host_memory.h"
 #include "common/logging.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
@@ -76,6 +77,40 @@ constexpr auto ServiceStartTimeout = std::chrono::seconds{5};
 
 [[noreturn]] void Invalid(const char* reason) {
     throw Failure{Error::Invalid, reason};
+}
+
+// The emulated DRAM commits a page on its first touch, and the kernel decommits the pages it
+// clears, so a game's mapped but unused memory costs the host nothing. Reading it would commit
+// it: the memory section stores those pages as zero without touching them, and a restore leaves
+// the zero pages it gets alone where the fresh boot never committed them either.
+class UntouchedPages {
+public:
+    bool Contains(const u8* host) {
+        if (!host) return false;
+        if (!region || host < region->begin || host >= region->end) {
+            region = Common::QueryDramRegion(host);
+        }
+        return region && region->untouched;
+    }
+    // A write commits the pages it lands on.
+    void Wrote() {
+        if (region && region->untouched) region.reset();
+    }
+
+private:
+    std::optional<Common::DramRegion> region;
+};
+
+bool IsZero(const u8* data, size_t size) {
+    for (size_t i = 0; i + sizeof(u64) <= size; i += sizeof(u64)) {
+        u64 word;
+        std::memcpy(&word, data + i, sizeof(word));
+        if (word) return false;
+    }
+    for (size_t i = size & ~(sizeof(u64) - 1); i < size; ++i) {
+        if (data[i]) return false;
+    }
+    return true;
 }
 [[noreturn]] void Incompatible(const std::string& reason) {
     throw Failure{Error::Incompatible, reason.c_str()};
@@ -908,6 +943,21 @@ u64 ProcessCheckpoint::MaxEncodedSize() const {
 
 void ProcessCheckpoint::Write(Common::Pulse::Writer& writer) const {
     auto& memory = process->GetMemory();
+    UntouchedPages untouched;
+    u64 untouched_bytes{};
+    const auto read_guest = [&](u64 address, u8* out, size_t size) {
+        for (size_t done = 0; done < size;) {
+            const auto count = static_cast<size_t>(
+                std::min<u64>(size - done, PageSize - ((address + done) & (PageSize - 1))));
+            if (untouched.Contains(memory.GetPointerSilent(address + done))) {
+                std::memset(out + done, 0, count);
+                untouched_bytes += count;
+            } else if (!memory.ReadBlockUnsafe(address + done, out + done, count)) {
+                Invalid("Pulse: guest memory read failed");
+            }
+            done += count;
+        }
+    };
     const auto write_bytes = [&](const SectionBytes& entry) {
         writer.Add({static_cast<u32>(entry.id), ProcessSectionVersion, entry.bytes.size()},
                    [&](u64 offset, std::span<u8> block) {
@@ -926,10 +976,8 @@ void ProcessCheckpoint::Write(Common::Pulse::Writer& writer) const {
                                const u64 within = offset - start;
                                const auto count = static_cast<size_t>(std::min<u64>(
                                    block.size() - position, runs[index].pages * PageSize - within));
-                               if (!memory.ReadBlockUnsafe(runs[index].address + within,
-                                                           block.data() + position, count)) {
-                                   Invalid("Pulse: guest memory read failed");
-                               }
+                               read_guest(runs[index].address + within, block.data() + position,
+                                          count);
                                position += count;
                                offset += count;
                                ++index;
@@ -938,6 +986,8 @@ void ProcessCheckpoint::Write(Common::Pulse::Writer& writer) const {
         }
         write_bytes(entry);
     }
+    LOG_INFO(Core, "Pulse: {} of {} MiB of guest memory never committed, stored as zero",
+             untouched_bytes >> 20, memory_size >> 20);
 }
 
 // ---------------------------------------------------------------------------------- restore
@@ -983,6 +1033,21 @@ void ProcessRestore::Consume(Common::Pulse::Section section, u64 offset, std::sp
     }
     if (id == ProcessSection::Memory) {
         auto& memory = process->GetMemory();
+        UntouchedPages untouched;
+        const auto write_guest = [&](u64 address, const u8* in, size_t size) {
+            for (size_t done = 0; done < size;) {
+                const auto count = static_cast<size_t>(
+                    std::min<u64>(size - done, PageSize - ((address + done) & (PageSize - 1))));
+                if (!IsZero(in + done, count) ||
+                    !untouched.Contains(memory.GetPointerSilent(address + done))) {
+                    if (!memory.WriteBlockUnsafe(address + done, in + done, count)) {
+                        Invalid("Pulse: guest memory write failed");
+                    }
+                    untouched.Wrote();
+                }
+                done += count;
+            }
+        };
         const auto& ends = state->run_ends;
         size_t index = std::upper_bound(ends.begin(), ends.end(), offset) - ends.begin();
         size_t position{};
@@ -992,10 +1057,7 @@ void ProcessRestore::Consume(Common::Pulse::Section section, u64 offset, std::sp
             const u64 within = cursor - start;
             const auto count = static_cast<size_t>(
                 std::min<u64>(data.size() - position, state->layout.runs[index].pages * PageSize - within));
-            if (!memory.WriteBlockUnsafe(state->layout.runs[index].address + within, data.data() + position,
-                                         count)) {
-                Invalid("Pulse: guest memory write failed");
-            }
+            write_guest(state->layout.runs[index].address + within, data.data() + position, count);
             position += count;
             cursor += count;
             ++index;
