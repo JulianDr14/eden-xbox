@@ -25,6 +25,10 @@ public:
     void OnOpen(NvCore::SessionId session_id, DeviceFD fd) override;
     void OnClose(DeviceFD fd) override;
 
+    // Pulse: the device holds only its nvmap fd (the JPEG engine is not emulated).
+    bool PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const override;
+    void PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) override;
+
 private:
     struct IoctlSetNvmapFD {
         s32_le nvmap_fd{};

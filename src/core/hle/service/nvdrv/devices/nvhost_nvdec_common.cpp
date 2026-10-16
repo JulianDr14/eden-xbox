@@ -16,6 +16,7 @@
 #include "core/hle/service/nvdrv/core/nvmap.h"
 #include "core/hle/service/nvdrv/core/syncpoint_manager.h"
 #include "core/hle/service/nvdrv/devices/nvhost_nvdec_common.h"
+#include "core/hle/service/pulse_service.h"
 #include "core/memory.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/memory_manager.h"
@@ -146,6 +147,7 @@ NvResult nvhost_nvdec_common::MapBuffer(IoctlMapBuffer& params, std::span<MapBuf
     for (size_t i = 0; i < num_entries; i++) {
         DAddr pin_address = nvmap.PinHandle(entries[i].map_handle, true);
         entries[i].map_address = static_cast<u32>(pin_address);
+        if (pin_address) ++pulse_pins[entries[i].map_handle];
     }
 
     return NvResult::Success;
@@ -156,6 +158,10 @@ NvResult nvhost_nvdec_common::UnmapBuffer(IoctlMapBuffer& params,
     const size_t num_entries = (std::min)(params.num_entries, static_cast<u32>(entries.size()));
     for (size_t i = 0; i < num_entries; i++) {
         nvmap.UnpinHandle(entries[i].map_handle);
+        if (const auto pin = pulse_pins.find(entries[i].map_handle);
+            pin != pulse_pins.end() && --pin->second == 0) {
+            pulse_pins.erase(pin);
+        }
         entries[i] = {};
     }
 
@@ -178,6 +184,46 @@ NvResult nvhost_nvdec_common::GetClkRate(IoctlGetClkRate& params) {
 Kernel::KEvent* nvhost_nvdec_common::QueryEvent(u32 event_id) {
     LOG_CRITICAL(Service_NVDRV, "Unknown HOSTX1 Event {}", event_id);
     return nullptr;
+}
+
+bool nvhost_nvdec_common::PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const {
+    if (!host1x.DeviceIdle(fd)) {
+        throw Service::Pulse::ServiceRejected(true, "video work in flight");
+    }
+    out.S32(nvmap_fd);
+    out.U32(submit_timeout);
+    out.U32(channel_syncpoint);
+    out.U32(static_cast<u32>(pulse_pins.size()));
+    for (const auto& [handle, count] : pulse_pins) {
+        const u32 address = nvmap.PulseEnginePin(handle);
+        if (!address) {
+            throw Service::Pulse::ServiceRejected(false, "video buffer pinned without an address");
+        }
+        out.U32(handle);
+        out.U32(count);
+        out.U32(address);
+    }
+    return true;
+}
+
+void nvhost_nvdec_common::PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) {
+    nvmap_fd = in.S32();
+    submit_timeout = in.U32();
+    // The constructor reserved a fresh syncpoint and OnOpen started the engine on it; the
+    // guest's fences name the captured one, so the engine restarts there.
+    const u32 adopted = syncpoint_manager.PulseAdopt(channel_syncpoint, in.U32());
+    if (adopted != channel_syncpoint) {
+        channel_syncpoint = adopted;
+        host1x.StartDevice(fd, static_cast<Tegra::Host1x::ChannelType>(channel_type),
+                           channel_syncpoint);
+    }
+    pulse_pins.clear();
+    for (u32 count = in.Count(12); count > 0; --count) {
+        const u32 handle = in.U32();
+        const u32 pins = in.U32();
+        nvmap.PulsePinEngine(handle, in.U32(), pins);
+        pulse_pins[handle] = pins;
+    }
 }
 
 } // namespace Service::Nvidia::Devices

@@ -10,6 +10,7 @@
 #include "common/logging.h"
 #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
 #include "core/hle/service/nvdrv/devices/nvhost_nvjpg.h"
+#include "core/hle/service/pulse_service.h"
 
 namespace Service::Nvidia::Devices {
 
@@ -49,6 +50,15 @@ NvResult nvhost_nvjpg::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> in
 
 void nvhost_nvjpg::OnOpen(NvCore::SessionId session_id, DeviceFD fd) {}
 void nvhost_nvjpg::OnClose(DeviceFD fd) {}
+
+bool nvhost_nvjpg::PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const {
+    out.S32(nvmap_fd);
+    return true;
+}
+
+void nvhost_nvjpg::PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) {
+    nvmap_fd = in.S32();
+}
 
 NvResult nvhost_nvjpg::SetNVMAPfd(IoctlSetNvmapFD& params) {
     LOG_DEBUG(Service_NVDRV, "called, fd={}", params.nvmap_fd);

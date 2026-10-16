@@ -315,6 +315,12 @@ handlers y se señalan según el flag capturado.
 - **nvdrv**: nvmap y `nvhost-ctrl`. Este último guarda solo los eventos registrados
   y rechaza (reintentable) uno en uso. Los eventos se exportan con slot
   `fd << 8 | índice`.
+- **nvdec/vic/nvjpg**: nvmap fd, timeout, syncpoint del canal (el motor host1x se
+  reinicia sobre el capturado) y los búferes fijados por `MapBuffer`, que se vuelven a
+  fijar en su misma dirección host1x porque el guest la tiene en sus listas de
+  comandos. Con trabajo de vídeo en curso se rechaza (reintentable). Las referencias
+  del decodificador no se guardan: un vídeo reanudado a mitad puede verse con
+  artefactos hasta el siguiente fotograma clave.
 - **audout** (XAudio2 nativo) y **fs** (archivos abiertos, posición) por componente.
 
 Homebrew `tools/xbox/pulse_av` (libnx): capa stray con framebuffer y contador de

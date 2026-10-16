@@ -7,6 +7,7 @@
 #pragma once
 
 #include <deque>
+#include <map>
 #include "common/container/unordered_map.h"
 #include <vector>
 
@@ -29,6 +30,12 @@ public:
     explicit nvhost_nvdec_common(Core::System& system_, NvCore::Container& core,
                                  NvCore::ChannelType channel_type);
     ~nvhost_nvdec_common() override;
+
+    // Pulse: the channel setup and the buffers pinned for the engine, at their host1x addresses
+    // (the guest's command lists name them). Taken with the engine idle; decoder references are
+    // not stored, so a stream resumed mid-GOP may show artifacts until its next keyframe.
+    bool PulseCapture(DeviceFD fd, Service::Pulse::StateWriter& out) const override;
+    void PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) override;
 
 protected:
     struct IoctlSetNvmapFD {
@@ -139,6 +146,7 @@ protected:
     NvCore::ChannelType channel_type;
     std::array<u32, MaxSyncPoints> device_syncpoints{};
     ::Common::unordered_map<DeviceFD, NvCore::SessionId> sessions;
+    std::map<u32, u32> pulse_pins; ///< Pins MapBuffer holds per nvmap handle, for Pulse
 };
 }; // namespace Devices
 } // namespace Service::Nvidia
