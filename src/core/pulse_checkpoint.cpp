@@ -1283,6 +1283,22 @@ void ProcessRestore::Complete(ProcessSection id, std::span<const u8> bytes) {
                     }
                 } else {
                     rebuilt = context.root->PulseRestore(handler.kind, restore);
+                    // One server hosts several ports (audio...) and the capture names the first
+                    // it saw, not the one that made this interface: try the server's other ports,
+                    // those already open first.
+                    if (!rebuilt && context.server) {
+                        auto names = context.server->PulsePortNames();
+                        std::ranges::stable_partition(
+                            names, [&](const std::string& name) { return ports.contains(name); });
+                        for (const auto& name : names) {
+                            if (name == handler.port) continue;
+                            if (!ports.contains(name)) open_port(name);
+                            Service::Pulse::HandlerRestore retry{system, process, handler.state,
+                                                                 restore_handler};
+                            rebuilt = ports.at(name).root->PulseRestore(handler.kind, retry);
+                            if (rebuilt) break;
+                        }
+                    }
                 }
             } catch (const std::invalid_argument& error) {
                 Incompatible(error.what());
