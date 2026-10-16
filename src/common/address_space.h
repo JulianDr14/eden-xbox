@@ -130,6 +130,12 @@ public:
     void AllocateFixed(VaType virt, VaType size);
 
     /**
+     * @brief Moves the linear allocation pass past the given address, so regions marked allocated
+     * below it (e.g. when restoring a saved AS) are never handed out again by Allocate
+     */
+    void SkipLinearPast(VaType end);
+
+    /**
      * @brief Frees an AS region so it can be used again
      */
     void Free(VaType virt, VaType size);

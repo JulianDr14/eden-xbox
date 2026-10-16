@@ -554,6 +554,8 @@ void nvhost_as_gpu::PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) {
         const bool big = allocation.page_size != VM::YUZU_PAGESIZE;
         allocator(big).AllocateFixed(static_cast<u32>(offset >> page_bits(big)),
                                      static_cast<u32>(allocation.size >> page_bits(big)));
+        allocator(big).SkipLinearPast(
+            static_cast<u32>((offset + allocation.size) >> page_bits(big)));
         if (allocation.sparse) gmmu->MapSparse(offset, allocation.size);
         allocation.mappings.resize(in.Count(8));
         for (auto& mapping : allocation.mappings) mapping = in.U64();
@@ -577,6 +579,16 @@ void nvhost_as_gpu::PulseRestore(DeviceFD fd, Service::Pulse::StateReader& in) {
             const u64 aligned = Common::AlignUp(size, big_page ? vm.big_page_size : VM::YUZU_PAGESIZE);
             allocator(big_page).AllocateFixed(static_cast<u32>(offset >> page_bits(big_page)),
                                               static_cast<u32>(aligned >> page_bits(big_page)));
+            // AllocateFixed leaves the fresh allocator's linear pass at the start of the AS, so
+            // without this the next non-fixed MapBufferEx after a resume is handed a VA that is
+            // already mapped, and silently replaces it. Found when a title's shader program
+            // region (GPU 0x400000000) was remapped to another buffer a while after resuming:
+            // shader code then read as zeros, every pipeline failed and the game ran at 0 fps.
+            // The saved and restored guest memory matched, no host write touched the code pages,
+            // and the caches held nothing unflushed; logging each change of the GPU->device
+            // translation of that VA is what showed the remap by MapBufferEx.
+            allocator(big_page).SkipLinearPast(
+                static_cast<u32>((offset + aligned) >> page_bits(big_page)));
             gmmu->Map(offset, ptr, aligned, static_cast<Tegra::PTEKind>(kind), big_page);
         }
         Mapping mapping(handle, ptr, offset, size, fixed, big_page, sparse_alloc);

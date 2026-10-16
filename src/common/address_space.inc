@@ -363,6 +363,11 @@ ALLOC_MEMBER(void)::AllocateFixed(VaType virt, VaType size) {
     this->Map(virt, true, size);
 }
 
+ALLOC_MEMBER(void)::SkipLinearPast(VaType end) {
+    std::scoped_lock lock(this->block_mutex);
+    current_linear_alloc_end = std::max(current_linear_alloc_end, end);
+}
+
 ALLOC_MEMBER(void)::Free(VaType virt, VaType size) {
     this->Unmap(virt, size);
 }
