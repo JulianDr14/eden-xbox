@@ -149,6 +149,9 @@ using Snapshot = std::array<u64, NUM_COUNTERS>;
 inline std::array<std::atomic<u64>, NUM_COUNTERS> counters{};
 inline std::atomic<bool> detailed_gpu_profile{};
 inline std::atomic<bool> force_swap_interval_one{};
+/// Guest macro method running on this thread (the GPU thread), 0 outside macros. The
+/// bottleneck hunt tags each draw with the macro that issued it.
+inline thread_local u32 current_macro{};
 
 constexpr size_t NUM_GUEST_SYNCPOINTS = 256;
 struct GuestWaitSiteCounters {

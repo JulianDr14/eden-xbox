@@ -1358,6 +1358,10 @@ static void Dump(u64 hash, std::span<const u32> code, bool decompiled = false) {
 
 void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u32 method,
                           std::span<const u32> parameters) {
+    const u32 outer_macro = std::exchange(VideoCore::Perf::current_macro, method);
+    SCOPE_EXIT {
+        VideoCore::Perf::current_macro = outer_macro;
+    };
     const bool profile = VideoCore::Perf::DetailedGpuProfileEnabled();
     const auto profile_start = profile ? std::chrono::steady_clock::now()
                                        : std::chrono::steady_clock::time_point{};
