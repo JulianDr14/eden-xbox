@@ -224,6 +224,16 @@ if (MSVC OR ANDROID)
     set(EXT_DEFAULT ON)
 endif()
 
+# Xbox/UWP: the bundled ffmpeg-ci + SDL3 prebuilts are /MT desktop builds that inject LIBCMT,
+# colliding with the /MD Store-CRT app at exe link (src/eden_uwp papers over it with
+# /NODEFAULTLIB:LIBCMT). No from-source /MD path exists for them on Windows yet, so pin the
+# same recipe here that build-env.bat users get implicitly - this makes `cmake --preset uwp-x64`
+# self-sufficient in CI. PROPER FIX (DEVOPS hardening): a /MD UWP ffmpeg (+ from-source SDL3).
+if (CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    set(YUZU_USE_BUNDLED_SDL3 ON)
+    set(YUZU_USE_BUNDLED_FFMPEG ON)
+endif()
+
 option(YUZU_USE_BUNDLED_SDL3 "Download bundled SDL3 build" ${EXT_DEFAULT})
 
 # ffmpeg
