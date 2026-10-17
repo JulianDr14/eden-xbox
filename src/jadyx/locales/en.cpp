@@ -122,6 +122,7 @@ const Catalog EnglishCatalog = MakeCatalog({
     {Text::MenuTitle, L"Menu"},
     {Text::MenuResume, L"Resume"},
     {Text::MenuCaptureGraphics, L"Capture graphics and resume"},
+    {Text::MenuCapturePerformance, L"Capture performance and resume"},
     {Text::MenuFullScreen, L"Full screen"},
     {Text::MenuBackToHome, L"Back to home"},
     {Text::Options, L"Options"},

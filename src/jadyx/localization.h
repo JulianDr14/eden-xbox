@@ -141,6 +141,7 @@ enum class Text : std::uint16_t {
     MenuTitle,
     MenuResume,
     MenuCaptureGraphics,
+    MenuCapturePerformance,
     MenuFullScreen,
     MenuBackToHome,
 

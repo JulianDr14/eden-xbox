@@ -113,6 +113,7 @@ namespace D3D12 {
 void SetTracedFrame(u32 frame, u32 count);
 void TraceNextFrames(u32 count);
 void TraceNextMaterialFrame(u64 pixel_shader = 0);
+void HuntNextFrames(u32 frames = 8);     // diagnostics/d3d12_draw_hunt.h
 void SetMaterialProbe(s32 x, s32 y);
 void SetMaterialCaptureFrame(u32 frame);
 void SetMaterialSnapshotShaders(u64 first, u64 second);
@@ -288,6 +289,9 @@ struct BootConfig {
     bool descriptor_checks{};
     /// Controller-accessible bounded F7 equivalent, shown only in diagnostic packages.
     bool material_capture_menu{};
+    /// Controller bottleneck capture ("hunt=1"): LocalState/jadyx/log/jadyx_hunt.txt, read by
+    /// tools/xbox/hunt-report.py. Shown only in diagnostic packages (package-appx.ps1 -Hunt).
+    bool hunt_menu{};
     /// Fine per-draw D3D12 CPU timers ("gpu_profile=1"). Off because clock reads are measurable.
     bool gpu_profile{};
     /// Per-core JIT elapsed time and slow callback counts ("cpu_profile=1"). Diagnostic only.
@@ -980,7 +984,7 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                                                   pulse_identity.has_value(),
                                                   FromSettings(Settings::values.scaling_filter.GetValue(),
                                                                Settings::values.fsr_sharpening_slider.GetValue()),
-                                                  config.material_capture_menu},
+                                                  config.material_capture_menu, config.hunt_menu},
                                  program_id != 0);
                     if (game_title.empty()) {
                         std::string title;
@@ -1110,7 +1114,8 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     Cheats::ClampCheatsPage(cheats_page, cheats->Catalog(), Cheats::CheatsLayout::VisibleRows);
                     cheats_notice.clear();
                 }
-                if (result == GameMenuResult::Resume || result == GameMenuResult::CaptureGraphics) {
+                if (result == GameMenuResult::Resume || result == GameMenuResult::CaptureGraphics ||
+                    result == GameMenuResult::CapturePerformance) {
                     menu.reset();
                     cheats.reset();
                     if (game_keyboard.IsOpen() && menu_surface) {
@@ -1128,6 +1133,10 @@ int RunHeadlessBoot(const std::string& nro_path, const BootSurface& surface,
                     if (result == GameMenuResult::CaptureGraphics) {
                         D3D12::TraceNextMaterialFrame();
                         WriteDiag("menu: bounded graphics capture requested for next guest frames");
+                    }
+                    if (result == GameMenuResult::CapturePerformance) {
+                        D3D12::HuntNextFrames();
+                        WriteDiag("menu: bottleneck capture requested for next guest frames");
                     }
                     void(system.Run());
                     WriteDiag("menu: closed, guest running");
@@ -2198,6 +2207,10 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                 if (pressed) D3D12::TraceNextMaterialFrame();
                 return;
             }
+            if (developer_hotkeys && key == VirtualKey::F8) {
+                if (pressed) D3D12::HuntNextFrames();
+                return;
+            }
             if (key == VirtualKey::Escape) {
                 if (pressed) Jadyx::RequestGameMenu();
                 return;
@@ -2450,6 +2463,9 @@ struct BootView : implements<BootView, IFrameworkViewSource, IFrameworkView> {
                         } else if (line == "material_gpu_probe=1") {
                             config.material_gpu_probe = true;
                             WriteDiag("boot.cfg: isolated material GPU intermediate probe enabled");
+                        } else if (line == "hunt=1") {
+                            config.hunt_menu = true;
+                            WriteDiag("boot.cfg: controller bottleneck capture menu enabled");
                         } else if (line == "material_capture_menu=1") {
                             config.material_capture_menu = true;
                             WriteDiag("boot.cfg: controller graphics capture menu enabled");

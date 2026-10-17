@@ -177,5 +177,16 @@ int main() {
     I18n::SetUiLanguage(*I18n::FindUiLanguage(L"es"));
     check(diagnostic.Rows()[diagnostic.Selected()].label == L"Capturar gráficos y continuar");
     for (const auto& row : normal_rows) check(row.label != L"Capture graphics and resume");
+    GameMenuSettings hunt_settings{};
+    hunt_settings.performance_capture = true;
+    GameMenu hunt{hunt_settings};
+    check(hunt.Rows().size() == normal_rows.size() + 1);
+    while (hunt.SelectedItem() != GameMenu::CapturePerformance) hunt.Apply(MenuAction::Down);
+    check(hunt.Rows()[hunt.Selected()].label == L"Capturar rendimiento y continuar");
+    check(hunt.Apply(MenuAction::Left) == GameMenuResult::None);
+    check(hunt.Apply(MenuAction::Confirm) == GameMenuResult::CapturePerformance);
+    I18n::SetUiLanguage(*I18n::FindUiLanguage(L"en"));
+    check(hunt.Rows()[hunt.Selected()].label == L"Capture performance and resume");
+    for (const auto& row : normal_rows) check(row.label != L"Capture performance and resume");
     std::puts("game menu: controller combo, navigation, settings, upscaling, cheats and opt-in capture PASS");
 }

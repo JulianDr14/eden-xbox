@@ -122,6 +122,7 @@ const Catalog SpanishCatalog = MakeCatalog({
     {Text::MenuTitle, L"Menú"},
     {Text::MenuResume, L"Continuar"},
     {Text::MenuCaptureGraphics, L"Capturar gráficos y continuar"},
+    {Text::MenuCapturePerformance, L"Capturar rendimiento y continuar"},
     {Text::MenuFullScreen, L"Pantalla completa"},
     {Text::MenuBackToHome, L"Volver al inicio"},
     {Text::Options, L"Opciones"},

@@ -35,6 +35,9 @@ param(
     # the per-draw GPU and per-core CPU timers, which slow the GPU thread. Never for a release.
     [ValidateSet("", "on", "full")]
     [string] $Profile = "",
+    # Diagnostic builds: "Capture performance" in the game menu (boot.cfg hunt=1), for
+    # tools/xbox/hunt-report.py. Costs nothing until a capture is asked for.
+    [switch] $Hunt,
     # Extra boot.cfg lines for diagnosis: "log_filter=*:Info HW.GPU:Debug", "renderer=null".
     [string[]] $BootCfg = @(),
     # Must match Identity/@Publisher in dist/uwp/AppxManifest.xml, character for character.
@@ -62,6 +65,7 @@ if ($MaterialProbeBranchControls -and !$MaterialProbeOriginalCfg) {
 if ($Library) { $BootCfg += 'library=1'; $BootCfg += 'play=1' }
 if ($Profile -eq "on") { $BootCfg += 'profile=1' }
 if ($Profile -eq "full") { $BootCfg += 'profile=full' }
+if ($Hunt) { $BootCfg += 'hunt=1' }
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $repo
 
