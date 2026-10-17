@@ -19,6 +19,7 @@ namespace D3D12 {
 
 void RasterizerD3D12::DrawTexture() {
     ++draw_counter;
+    HuntScope hunt{draw_hunt, Hunt::Kind::DrawTexture};
     SCOPE_EXIT {
         gpu.TickWork();
     };
@@ -32,6 +33,7 @@ void RasterizerD3D12::DrawTexture() {
     const ImageView& texture = texture_cache.GetImageView(state.src_texture);
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
     if (!framebuffer->HasColor(0)) {
+        hunt.Outcome(Hunt::Outcome::NoTarget);
         return;
     }
     using namespace VideoCore::Surface;
@@ -50,6 +52,8 @@ void RasterizerD3D12::DrawTexture() {
         {static_cast<s32>(state.src_x0), static_cast<s32>(state.src_y0)},
         {static_cast<s32>(state.src_x1), static_cast<s32>(state.src_y1)}};
     framebuffer->PrepareAttachments(scheduler);
+    hunt.Target(framebuffer);
+    hunt.Geometry(4, 1, 0);
     if (trace_draws) {
         TraceDraw(fmt::format("draw texture from {} {}x{}", texture.format, texture.size.width,
                               texture.size.height),
@@ -61,11 +65,13 @@ void RasterizerD3D12::DrawTexture() {
         {framebuffer->ColorTargets()[0], framebuffer->ColorFormat(0), framebuffer->Samples()},
         texture.Handle(Shader::TextureType::Color2D), {sampler.Handle(), sampler.Key()},
         dst_region, src_region, {texture.size.width, texture.size.height});
+    hunt.Recorded();
     InvalidateGraphicsState();
 }
 
 void RasterizerD3D12::Clear(u32 layer_count) {
     ++draw_counter;
+    HuntScope hunt{draw_hunt, Hunt::Kind::Clear};
     VideoCore::Perf::ScopedNsTimer clear_timer{VideoCore::Perf::Counter::ClearNs};
     ApplyPendingStateInvalidation();
     gpu_memory->FlushCaching();
@@ -74,7 +80,11 @@ void RasterizerD3D12::Clear(u32 layer_count) {
                            regs.clear_surface.A;
     const bool use_depth = regs.clear_surface.Z;
     const bool use_stencil = regs.clear_surface.S;
-    if ((!use_color && !use_depth && !use_stencil) || conditional_rendering.SkipsDraws()) {
+    if (!use_color && !use_depth && !use_stencil) {
+        return;
+    }
+    if (conditional_rendering.SkipsDraws()) {
+        hunt.Outcome(Hunt::Outcome::Conditional);
         return;
     }
     std::scoped_lock lock{texture_cache.mutex};
@@ -138,8 +148,12 @@ void RasterizerD3D12::Clear(u32 layer_count) {
                   nullptr, framebuffer, {}, 0, 0);
     }
     if (rect.right <= rect.left || rect.bottom <= rect.top) {
+        hunt.Outcome(Hunt::Outcome::Empty);
         return;
     }
+    hunt.Target(framebuffer);
+    hunt.Geometry(static_cast<u32>(rect.right - rect.left) * static_cast<u32>(rect.bottom - rect.top),
+                  layer_count, 0);
     CommandStream* const cmd = scheduler.CommandList();
     const ConditionalRendering::Scope predicate{conditional_rendering, cmd};
 
@@ -213,6 +227,7 @@ void RasterizerD3D12::Clear(u32 layer_count) {
                                        static_cast<u8>(regs.clear_stencil), 1, &rect);
         }
     }
+    hunt.Recorded();
 }
 
 } // namespace D3D12

@@ -92,7 +92,8 @@ RasterizerD3D12::RasterizerD3D12(Tegra::GPU& gpu_,
       query_cache{*this, device_memory_, device, scheduler_},
       conditional_rendering{device, scheduler_, query_cache},
       accelerate_dma{buffer_cache, texture_cache},
-      fence_manager{*this, gpu_, texture_cache, buffer_cache, query_cache, scheduler_} {
+      fence_manager{*this, gpu_, texture_cache, buffer_cache, query_cache, scheduler_},
+      draw_hunt{device, scheduler_} {
     buffer_runtime.SetDescriptorQueue(&descriptor_queue);
     scheduler.RegisterOnReset([this] { InvalidateCommandListState(); });
     LOG_INFO(Render, "D3D12: rasterizer active (draws, clears, caches, DMA and pipelines)");
@@ -115,7 +116,9 @@ RasterizerD3D12::~RasterizerD3D12() {
 
 void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     ++draw_counter;
+    HuntScope hunt{draw_hunt, is_indexed ? Hunt::Kind::DrawIndexed : Hunt::Kind::Draw};
     if (conditional_rendering.SkipsDraws()) {
+        hunt.Outcome(Hunt::Outcome::Conditional);
         return;
     }
     DrawMetrics::ScopedDrawTimer draw_timer;
@@ -126,19 +129,24 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
     gpu_memory->FlushCaching();
     ApplyPendingStateInvalidation();
     if (CullsEveryPrimitive()) {
+        hunt.Outcome(Hunt::Outcome::Culled);
         if (trace_draws) {
             TraceDraw("draw skipped (both faces culled)", nullptr, nullptr, {}, 0, 0);
         }
         return;
     }
 
+    hunt.PipelineStart();
     GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
+    hunt.PipelineEnd();
     if (!pipeline) {
+        hunt.Outcome(Hunt::Outcome::NoPipeline);
         if (trace_draws) {
             TraceDraw("draw skipped (no pipeline)", nullptr, nullptr, {}, 0, 0);
         }
         return;
     }
+    hunt.Shaders(pipeline->Key().unique_hashes[1], pipeline->Key().unique_hashes[5]);
     const DrawMetrics::CacheLockTimer lock_timer;
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     lock_timer.Locked();
@@ -178,17 +186,20 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         BUG_TRACK_KEY(DrawSkipped, reinterpret_cast<std::uintptr_t>(pipeline),
                       "draw skipped: the pipeline was rejected (VS {:016x} PS {:016x})",
                       pipeline->Key().unique_hashes[1], pipeline->Key().unique_hashes[5]);
+        hunt.Outcome(Hunt::Outcome::PsoRejected);
         if (trace_this_draw) {
             TraceDraw("draw skipped (PSO rejected)", pipeline, nullptr, traced_views, 0, 0);
         }
         return; // D3D12 rejected the PSO (logged when it was built)
     }
     if (UsesSkippedShader(pipeline->Key().unique_hashes)) [[unlikely]] {
+        hunt.Outcome(Hunt::Outcome::SkippedShader);
         return; // skip_shader
     }
     VideoCore::Perf::ScopedNsTimer record_timer{VideoCore::Perf::Counter::DrawRecordNs};
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
     framebuffer->PrepareAttachments(scheduler, bindings.depth_sampled);
+    hunt.Target(framebuffer);
 
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     DrawParams params{
@@ -200,7 +211,12 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         .is_indexed = is_indexed,
         .runtime_first_vertex = is_indexed ? draw_state.base_index : draw_state.vertex_buffer.first,
     };
-    if (!is_indexed && BufferCacheRuntime::IsEmulatedTopology(draw_state.topology)) {
+    const bool emulated_topology =
+        !is_indexed && BufferCacheRuntime::IsEmulatedTopology(draw_state.topology);
+    hunt.Geometry(params.num_vertices, params.num_instances,
+                  static_cast<u32>(draw_state.topology),
+                  emulated_topology ? Hunt::EmulatedTopology : 0);
+    if (emulated_topology) {
         buffer_runtime.EmulateTopology(draw_state.topology, draw_state.vertex_buffer.first,
                                        draw_state.vertex_buffer.count);
     }
@@ -214,6 +230,7 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         params.is_indexed = true;
     }
     if (params.num_vertices == 0 || params.num_instances == 0) {
+        hunt.Outcome(Hunt::Outcome::Empty);
         buffer_runtime.ApplyGeometry(scheduler.CommandList());
         if (trace_this_draw) {
             TraceDraw("draw skipped (empty)", pipeline, framebuffer, traced_views,
@@ -229,6 +246,7 @@ void RasterizerD3D12::Draw(bool is_indexed, u32 instance_count) {
         }
     }
     RecordDraw(*pipeline, bindings, *framebuffer, params, draw_state.topology);
+    hunt.Recorded();
     if (material_trace.Active() && trace_this_draw) {
         try {
             ProbeMaterialIntermediates(*pipeline, bindings, *framebuffer, params, draw_state.topology);
@@ -284,6 +302,7 @@ void RasterizerD3D12::RecordDraw(const GraphicsPipeline& pipeline,
 
 void RasterizerD3D12::DispatchCompute() {
     ++draw_counter;
+    HuntScope hunt{draw_hunt, Hunt::Kind::Dispatch};
     VideoCore::Perf::ScopedNsTimer dispatch_timer{VideoCore::Perf::Counter::DispatchNs};
     SCOPE_EXIT {
         FlushIfUploadHeavy();
@@ -293,18 +312,24 @@ void RasterizerD3D12::DispatchCompute() {
     gpu_memory->FlushCaching();
     ApplyPendingStateInvalidation();
 
+    hunt.PipelineStart();
     ComputePipeline* const pipeline = pipeline_cache.CurrentComputePipeline();
+    hunt.PipelineEnd();
     if (!pipeline) {
+        hunt.Outcome(Hunt::Outcome::NoPipeline);
         return;
     }
+    hunt.Shaders(0, pipeline->UniqueHash());
     std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
     PipelineBindings bindings;
     pipeline->Configure({*kepler_compute, *gpu_memory, buffer_cache, texture_cache,
                          descriptor_queue, sampler_heap, scheduler},
                         bindings);
     if (!pipeline->Handle()) {
+        hunt.Outcome(Hunt::Outcome::PsoRejected);
         return; // D3D12 rejected the PSO (logged when it was built)
     }
+    hunt.Target(nullptr);
 
     const auto& qmd = kepler_compute->launch_description;
     const PipelineLayout& layout = pipeline->Layout();
@@ -385,6 +410,8 @@ void RasterizerD3D12::DispatchCompute() {
     if (indirect_range) {
         cmd->ExecuteIndirect(layout.DispatchSignature(), 1, indirect_range->buffer,
                              indirect_range->offset, nullptr, 0);
+        hunt.Geometry(0, 1, 0); // the group count is on the GPU
+        hunt.Recorded();
         if (!logged_indirect_dispatch) {
             LOG_INFO(Render, "D3D12: first indirect dispatch recorded (groups of {}x{}x{})",
                      qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z);
@@ -393,6 +420,8 @@ void RasterizerD3D12::DispatchCompute() {
         return;
     }
     cmd->Dispatch(dim[0], dim[1], dim[2]);
+    hunt.Geometry(dim[0] * dim[1] * dim[2], 1, 0);
+    hunt.Recorded();
     if (!logged_first_dispatch) {
         LOG_INFO(Render, "D3D12: first guest dispatch recorded ({}x{}x{} groups of {}x{}x{})",
                  dim[0], dim[1], dim[2], qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z);

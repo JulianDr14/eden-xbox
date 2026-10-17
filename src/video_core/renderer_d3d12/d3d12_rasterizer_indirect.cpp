@@ -22,6 +22,7 @@ namespace D3D12 {
 
 void RasterizerD3D12::DrawIndirect() {
     ++draw_counter;
+    HuntScope hunt{draw_hunt, Hunt::Kind::DrawIndirect};
     const IndirectParams& params = maxwell3d->draw_manager.indirect_state;
     if (params.is_byte_count) {
         // Transform feedback draws; HasDrawTransformFeedback() is false, so the macro should
@@ -30,11 +31,27 @@ void RasterizerD3D12::DrawIndirect() {
         WarnOnceLog(logged_byte_count_draw, "byte-count indirect draws are skipped");
         return;
     }
-    if (params.max_draw_counts == 0 || conditional_rendering.SkipsDraws() ||
-        CullsEveryPrimitive()) {
+    if (params.max_draw_counts == 0) {
+        hunt.Outcome(Hunt::Outcome::Empty);
+        return;
+    }
+    if (conditional_rendering.SkipsDraws()) {
+        hunt.Outcome(Hunt::Outcome::Conditional);
+        return;
+    }
+    if (CullsEveryPrimitive()) {
+        hunt.Outcome(Hunt::Outcome::Culled);
         return;
     }
     if (BufferCacheRuntime::IsEmulatedTopology(maxwell3d->draw_manager.draw_state.topology)) {
+        hunt.Outcome(Hunt::Outcome::Expanded);
+        hunt.Geometry(static_cast<u32>(params.max_draw_counts), 0,
+                      static_cast<u32>(maxwell3d->draw_manager.draw_state.topology),
+                      Hunt::EmulatedTopology);
+        draw_hunt.cpu_indirect = true;
+        SCOPE_EXIT {
+            draw_hunt.cpu_indirect = false;
+        };
         DrawIndirectOnCpu(params);
         return;
     }
@@ -46,10 +63,14 @@ void RasterizerD3D12::DrawIndirect() {
     gpu_memory->FlushCaching();
     ApplyPendingStateInvalidation();
 
+    hunt.PipelineStart();
     GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
+    hunt.PipelineEnd();
     if (!pipeline) {
+        hunt.Outcome(Hunt::Outcome::NoPipeline);
         return;
     }
+    hunt.Shaders(pipeline->Key().unique_hashes[1], pipeline->Key().unique_hashes[5]);
     const DrawMetrics::CacheLockTimer lock_timer;
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     lock_timer.Locked();
@@ -62,9 +83,11 @@ void RasterizerD3D12::DrawIndirect() {
                         bindings);
     buffer_cache.SetDrawIndirect(nullptr);
     if (!pipeline->Handle()) {
+        hunt.Outcome(Hunt::Outcome::PsoRejected);
         return; // D3D12 rejected the PSO (logged when it was built)
     }
     if (UsesSkippedShader(pipeline->Key().unique_hashes)) [[unlikely]] {
+        hunt.Outcome(Hunt::Outcome::SkippedShader);
         return; // skip_shader
     }
     ID3D12CommandSignature* const signature = pipeline->Layout().DrawSignature(params.is_indexed);
@@ -76,6 +99,10 @@ void RasterizerD3D12::DrawIndirect() {
     }
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
     framebuffer->PrepareAttachments(scheduler, bindings.depth_sampled);
+    // The GPU time includes the argument copies below: two per draw.
+    hunt.Target(framebuffer);
+    hunt.Geometry(static_cast<u32>(params.max_draw_counts), 0,
+                  static_cast<u32>(maxwell3d->draw_manager.draw_state.topology));
 
     // Records of INDIRECT_DRAW(_INDEXED)_WORDS: the CPU writes is_indexed_draw, the y/z flips and
     // the draw index; GPU copies add the guest's arguments and, as the first two runtime-data
@@ -134,6 +161,7 @@ void RasterizerD3D12::DrawIndirect() {
                              params.include_count ? range.buffer : nullptr,
                              params.include_count ? count_offset : 0);
     }
+    hunt.Recorded();
     // The command signature wrote the runtime data constants: the next draw sets them again.
     command_state.root_args.valid = false;
     if (!logged_indirect_draw) {
