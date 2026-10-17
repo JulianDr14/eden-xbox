@@ -40,6 +40,10 @@ param(
     [string[]] $BootCfg = @(),
     # Must match Identity/@Publisher in dist/uwp/AppxManifest.xml, character for character.
     [string] $PublisherCN = "CN=EdenXboxDev",
+    # CI builds append a suffix (e.g. "-ci") to the package Identity/@Name so an artifact
+    # package never collides with a developer's own build on the same console. The manifest
+    # on disk is left untouched; only the staged copy is rewritten.
+    [string] $PackageNameSuffix = "",
     # Mesa's SPIR-V -> DXIL translator for the D3D12 renderer, built by build-spirv-to-dxil.ps1.
     # Without it the renderer still presents, through its CPU fallback.
     [string] $SpirvToDxil = "..\mesa-build\build-uwp\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll",
@@ -203,6 +207,13 @@ if ($BootNro -or $gameName -or $BootCfg.Count -gt 0) {
 [xml]$mf = Get-Content (Join-Path $layout "AppxManifest.xml") -Raw
 if ($mf.Package.Identity.Publisher -ne $PublisherCN) {
     throw "Publisher mismatch: manifest has '$($mf.Package.Identity.Publisher)' but signing with '$PublisherCN'."
+}
+if ($PackageNameSuffix) {
+    # CI artifact builds get their own package identity so they never collide with a
+    # developer's local package on the same console (see the -PackageNameSuffix param).
+    $mf.Package.Identity.Name += $PackageNameSuffix
+    $mf.Save((Join-Path $layout "AppxManifest.xml"))
+    Write-Host "identity : $($mf.Package.Identity.Name)"
 }
 
 # --- 3. pack -----------------------------------------------------------------------------

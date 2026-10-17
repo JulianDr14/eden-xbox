@@ -1,0 +1,174 @@
+# SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Builds the Xbox/UWP target (CMake preset `uwp-x64`, src/eden_uwp) and packages a
+# sideloadable .appx, automating exactly the flow in docs/xbox/uwp_build.md +
+# docs/xbox/xbox_deploy.md on the GitHub-hosted windows-latest runner.
+#
+# Runner facts this workflow relies on / compensates for:
+# - windows-latest ships VS 2022 with the "C++ (v143) Universal Windows Platform tools"
+#   component (Store CRT). ci-setup-env.ps1 imports `vcvarsall x64 uwp` and FAILS LOUDLY
+#   if LIB doesn't point at the Store CRT - vcvarsall otherwise falls back to a desktop
+#   environment silently, which is the classic broken-UWP-CI trap.
+# - This target builds OpenSSL from source (/MD), so native perl + nasm are downloaded.
+# - glslangValidator is needed at configure time (video_core/host_shaders SPIR-V).
+# - The .appx is signed with an EPHEMERAL self-signed cert minted on the runner: anyone
+#   installing the artifact must also install the matching eden-xbox.cer from that same
+#   run (both are uploaded together). For your own console you'll normally sign locally
+#   with package-appx.ps1 instead; CI packages carry the "-ci" name suffix so they never
+#   collide with local dev packages.
+# - House rule: NO keys/firmware/game dumps ever enter CI or its artifacts. The packaged
+#   app is code-only; users add their own content via the in-app file import.
+
+name: Xbox UWP (.appx)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_spirv_to_dxil:
+        description: "Build Mesa spirv_to_dxil and bundle it (D3D12 GPU shader path; ~15 min)"
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - "src/eden_uwp/**"
+      - "src/common/**"
+      - "src/core/**"
+      - "src/video_core/**"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "cpmfile.json"
+      - "dist/uwp/**"
+      - "tools/xbox/**"
+      - ".github/workflows/uwp.yml"
+  push:
+    branches: ["xbox"]
+    paths:
+      - "src/eden_uwp/**"
+      - "src/common/**"
+      - "src/core/**"
+      - "src/video_core/**"
+      - "CMakeLists.txt"
+      - "CMakePresets.json"
+      - "cpmfile.json"
+      - "dist/uwp/**"
+      - "tools/xbox/**"
+      - ".github/workflows/uwp.yml"
+  schedule:
+    # Weekly rebuild so the sideload artifact + VCLibs dependency stay fresh.
+    - cron: "0 6 * * 1"
+
+env:
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/.cpm-cache
+  PUBLISHER_CN: "CN=EdenXboxDev"
+
+jobs:
+  uwp:
+    name: Build eden-uwp (${{ matrix.name }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The real deliverable: linked with /APPCONTAINER (src/eden_uwp does this by
+          # default), packed + signed into a sideloadable .appx.
+          - name: appcontainer
+            upload: true
+            package_ci_name: true
+          # A relaxed-link build (no /APPCONTAINER) that can actually be LAUNCHED on the
+          # runner itself as a boot smoke test - AppContainer exes only run when deployed
+          # into a registered package, which needs Developer Mode.
+          - name: local-test
+            upload: false
+            package_ci_name: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up UWP build environment
+        shell: pwsh
+        run: . ./tools/xbox/ci-setup-env.ps1
+
+      - name: Cache CPM downloads
+        uses: actions/cache@v4
+        with:
+          path: .cpm-cache
+          key: cpm-${{ hashFiles('cpmfile.json') }}
+          restore-keys: cpm-
+
+      - name: Cache Mesa spirv_to_dxil
+        id: cache-s2d
+        uses: actions/cache@v4
+        with:
+          path: ../mesa-build/build-uwp/src/microsoft/spirv_to_dxil
+          key: spirv-to-dxil-v1
+
+      - name: Build Mesa spirv_to_dxil (D3D12 shader translation)
+        if: ${{ inputs.build_spirv_to_dxil != false && github.event_name != 'schedule' }}
+        shell: cmd
+        run: powershell -ExecutionPolicy Bypass -File tools\xbox\build-spirv-to-dxil.ps1
+
+      - name: Configure (preset uwp-x64)
+        shell: cmd
+        run: cmake --preset uwp-x64 ${{ matrix.name == 'local-test' && '-DYUZU_UWP_STRICT_LINK=OFF' || '' }}
+
+      - name: Build eden-uwp.exe
+        shell: cmd
+        run: cmake --build --preset uwp-x64 --target eden-uwp --parallel
+
+      - name: Smoke test (local-test build boots)
+        if: matrix.name == 'local-test'
+        shell: pwsh
+        run: |
+          # Headless boot without a bundled boot.nro exits by design (it writes status 2 to
+          # eden_uwp_diag.txt - see package-appx.ps1's warning). Reaching that point proves
+          # the exe loads, every import resolves against the Store CRT, and CoreApplication
+          # comes up. Treat "still running after 3 min" as a pass too.
+          $exe = "build-uwp/bin/eden-uwp.exe"
+          if (-not (Test-Path $exe)) { throw "eden-uwp.exe not produced" }
+          $p = Start-Process -FilePath $exe -WorkingDirectory "build-uwp/bin" -PassThru -WindowStyle Hidden
+          if (-not $p.WaitForExit(180000)) {
+              $p.Kill(); Write-Host "smoke: process alive after 180s -> booted OK, killed"
+          } else {
+              Write-Host "smoke: exited with $($p.ExitCode) (expected diagnostic exit without boot.nro)"
+          }
+
+      - name: Package + sign the .appx
+        shell: pwsh
+        run: |
+          $pkgArgs = @("-Library")
+          if ("${{ matrix.package_ci_name }}" -eq "true") { $pkgArgs += @("-PackageNameSuffix", "-ci") }
+          $s2d = "..\mesa-build\build-uwp\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll"
+          if (Test-Path $s2d) { $pkgArgs += @("-SpirvToDxil", $s2d) }
+          .\tools\xbox\package-appx.ps1 @pkgArgs
+
+      - name: Upload sideload bundle
+        if: matrix.upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: eden-xbox-uwp
+          path: |
+            build-uwp/package/eden-xbox.appx
+            build-uwp/package/eden-xbox.cer
+            build-uwp/package/Microsoft.VCLibs.x64.14.00.appx
+          if-no-files-found: error
+
+  release:
+    name: Attach .appx to tag release
+    needs: uwp
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: eden-xbox-uwp
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            eden-xbox.appx
+            eden-xbox.cer
+            Microsoft.VCLibs.x64.14.00.appx

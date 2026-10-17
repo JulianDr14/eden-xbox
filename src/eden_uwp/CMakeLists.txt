@@ -148,8 +148,13 @@ target_compile_definitions(eden-uwp PRIVATE YUZU_UWP_APPCONTAINER=1)
 target_compile_features(eden-uwp PRIVATE cxx_std_20)
 if (MSVC)
     target_compile_options(eden-uwp PRIVATE /EHsc)
-    # AppContainer executable: required for a sideloadable UWP package.
-    target_link_options(eden-uwp PRIVATE /APPCONTAINER)
+    # AppContainer executable: required for a sideloadable UWP package. CI's "local-test"
+    # matrix leg turns this OFF so the exe can be launched directly on a runner as a boot
+    # smoke test (/APPCONTAINER exes refuse to start outside a registered package).
+    option(YUZU_UWP_STRICT_LINK "Link eden-uwp with /APPCONTAINER (required for real packages)" ON)
+    if (YUZU_UWP_STRICT_LINK)
+        target_link_options(eden-uwp PRIVATE /APPCONTAINER)
+    endif()
     # CRT bridge for the two bundled prebuilt deps that are /MT and have NO from-source path on Windows:
     # ffmpeg (Eden disables YUZU_USE_EXTERNAL_FFMPEG on WIN32) and SDL3. They inject /DEFAULTLIB:LIBCMT,
     # which the /MD Store-CRT app can't satisfy; ignoring it forces their CRT symbols onto the app's
